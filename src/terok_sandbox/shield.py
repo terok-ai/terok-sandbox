@@ -28,9 +28,6 @@ from terok_shield import (
 
 from .config import SandboxConfig
 
-# Short hint appended to CLI/TUI messages when the shield is weakened.
-SHIELD_SECURITY_HINT = "See: https://terok-ai.github.io/terok/shield-security/"
-
 # DANGEROUS TRANSITIONAL OVERRIDE — will be removed once terok-shield
 # supports all target podman versions (see terok-shield#71, #101).
 _BYPASS_WARNING = (
