@@ -13,7 +13,6 @@ lives in the caller.
 
 import subprocess
 from collections.abc import Callable
-from pathlib import Path
 
 from ._util import log_debug
 
@@ -100,25 +99,13 @@ def stop_task_containers(container_names: list[str]) -> None:
             pass
 
 
-def gpu_run_args(project_root: Path) -> list[str]:
-    """Return additional ``podman run`` args to enable NVIDIA GPU if configured.
+def gpu_run_args(*, enabled: bool = False) -> list[str]:
+    """Return additional ``podman run`` args to enable NVIDIA GPU passthrough.
 
-    Reads ``run.gpus`` from ``project.yml`` in *project_root*.
+    The caller is responsible for determining whether GPUs are enabled
+    (e.g. by reading project configuration).  This function only maps
+    the boolean flag to the appropriate podman CLI arguments.
     """
-    from ._util import load as _yaml_load
-
-    enabled = False
-    try:
-        proj_cfg = _yaml_load((project_root / "project.yml").read_text()) or {}
-        run_cfg = proj_cfg.get("run", {}) or {}
-        gpus = run_cfg.get("gpus")
-        if isinstance(gpus, str):
-            enabled = gpus.lower() == "all"
-        elif isinstance(gpus, bool):
-            enabled = gpus
-    except Exception:
-        enabled = False
-
     if not enabled:
         return []
 

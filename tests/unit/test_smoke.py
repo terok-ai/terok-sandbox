@@ -17,12 +17,10 @@ def test_import_package():
 
 def test_import_util():
     """Vendored _util subpackage is importable."""
-    from terok_sandbox._util import dump, ensure_dir, ensure_dir_writable, load, render_template
+    from terok_sandbox._util import ensure_dir, ensure_dir_writable, render_template
 
     assert callable(ensure_dir)
     assert callable(ensure_dir_writable)
-    assert callable(load)
-    assert callable(dump)
     assert callable(render_template)
 
 
