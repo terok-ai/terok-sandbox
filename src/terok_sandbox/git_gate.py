@@ -26,6 +26,7 @@ import os
 import shlex
 import shutil
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -247,7 +248,7 @@ class GitGate:
         ssh_host_dir: Path | str | None = None,
         ssh_key_name: str | None = None,
         envs_base_dir: Path | str | None = None,
-        validate_gate_fn: "callable | None" = None,
+        validate_gate_fn: Callable[[str], None] | None = None,
     ) -> None:
         """Initialise with plain parameters.
 

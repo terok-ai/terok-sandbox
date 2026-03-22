@@ -46,9 +46,9 @@ def create_token(project_id: str, task_id: str, cfg: SandboxConfig | None = None
     return token
 
 
-def revoke_token_for_task(project_id: str, task_id: str) -> None:
+def revoke_token_for_task(project_id: str, task_id: str, cfg: SandboxConfig | None = None) -> None:
     """Remove all tokens for the given project+task pair.  Idempotent."""
-    path = token_file_path()
+    path = token_file_path(cfg)
     with _token_lock(path):
         tokens = _read_tokens(path)
         to_remove = [
