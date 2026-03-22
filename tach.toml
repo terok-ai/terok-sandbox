@@ -14,9 +14,12 @@ ignore_type_checking_imports = true
 
 # ── Module Boundaries ───────────────────────────────────────────────
 #
-# Flat package with vendored utilities at the bottom and public API at the top.
-# _util has no internal deps; all other modules may depend on _util.
-# gate is self-contained (zero internal imports).
+# Dependency flow:
+#   _util (standalone) ← paths ← config ← {all sandbox modules}
+#   gate (standalone HTTP server, zero internal imports)
+#
+# ssh depends on _util + config; git_gate depends on ssh + config.
+# shield, gate_server, gate_tokens, runtime depend on config and/or _util.
 
 # Vendored utilities — standalone, no internal deps
 [[modules]]
@@ -28,7 +31,70 @@ depends_on = []
 path = "terok_sandbox.gate"
 depends_on = []
 
-# Package root — public API placeholder
+# Platform-aware path resolution — standalone, no internal deps
+[[modules]]
+path = "terok_sandbox.paths"
+depends_on = []
+
+# Configuration dataclass — depends on paths for defaults
+[[modules]]
+path = "terok_sandbox.config"
+depends_on = [
+    "terok_sandbox.paths",
+]
+
+# Container runtime — depends on _util for logging/YAML
+[[modules]]
+path = "terok_sandbox.runtime"
+depends_on = [
+    "terok_sandbox._util",
+]
+
+# Shield adapter — depends on config
+[[modules]]
+path = "terok_sandbox.shield"
+depends_on = [
+    "terok_sandbox.config",
+]
+
+# Gate token CRUD — depends on config
+[[modules]]
+path = "terok_sandbox.gate_tokens"
+depends_on = [
+    "terok_sandbox.config",
+]
+
+# Gate server lifecycle — depends on config, _util, gate_tokens, gate
+[[modules]]
+path = "terok_sandbox.gate_server"
+depends_on = [
+    "terok_sandbox._util",
+    "terok_sandbox.config",
+    "terok_sandbox.gate",
+    "terok_sandbox.gate_tokens",
+]
+
+# SSH key management — depends on _util, config
+[[modules]]
+path = "terok_sandbox.ssh"
+depends_on = [
+    "terok_sandbox._util",
+    "terok_sandbox.config",
+]
+
+# Git gate mirror management — depends on ssh, config
+[[modules]]
+path = "terok_sandbox.git_gate"
+depends_on = [
+    "terok_sandbox.config",
+    "terok_sandbox.ssh",
+]
+
+# Package root — public API re-exports
 [[modules]]
 path = "terok_sandbox"
-depends_on = []
+depends_on = [
+    "terok_sandbox.config",
+    "terok_sandbox.git_gate",
+    "terok_sandbox.ssh",
+]
