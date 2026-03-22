@@ -1,0 +1,16 @@
+# Default SSH config template used by terok-sandbox for container SSH setup.
+# Supported tokens:
+#   {{KEY_NAME}}       → key filename (without .pub), expected to live in ~/.ssh
+
+Host *
+  IdentitiesOnly yes
+  StrictHostKeyChecking no
+  IdentityFile ~/.ssh/{{KEY_NAME}}
+
+# Common Git host (kept explicit; inherits Host * defaults)
+Host github.com
+  HostName github.com
+  User git
+  IdentitiesOnly yes
+  StrictHostKeyChecking no
+  IdentityFile ~/.ssh/{{KEY_NAME}}

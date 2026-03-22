@@ -1,0 +1,34 @@
+exclude = [
+    "**/__pycache__",
+    "**/tests/**",
+    "build",
+    "dist",
+    ".venv",
+    "docs",
+]
+
+source_roots = ["src"]
+exact = true
+forbid_circular_dependencies = true
+ignore_type_checking_imports = true
+
+# ── Module Boundaries ───────────────────────────────────────────────
+#
+# Flat package with vendored utilities at the bottom and public API at the top.
+# _util has no internal deps; all other modules may depend on _util.
+# gate is self-contained (zero internal imports).
+
+# Vendored utilities — standalone, no internal deps
+[[modules]]
+path = "terok_sandbox._util"
+depends_on = []
+
+# Gate server — standalone HTTP server, zero internal imports
+[[modules]]
+path = "terok_sandbox.gate"
+depends_on = []
+
+# Package root — public API placeholder
+[[modules]]
+path = "terok_sandbox"
+depends_on = []
