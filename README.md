@@ -14,7 +14,15 @@ terok-sandbox provides a generic, security-hardened Podman container runtime wit
 ## Installation
 
 ```bash
-pip install terok-sandbox
+pip install git+https://github.com/terok-ai/terok-sandbox.git
+```
+
+Or from source:
+
+```bash
+git clone https://github.com/terok-ai/terok-sandbox.git
+cd terok-sandbox
+pip install .
 ```
 
 ## License

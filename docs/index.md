@@ -20,7 +20,7 @@ server for controlled repository access.
 ## Installation
 
 ```bash
-pip install terok-sandbox
+pip install git+https://github.com/terok-ai/terok-sandbox.git
 ```
 
 ## Quick start
