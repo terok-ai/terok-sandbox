@@ -95,6 +95,10 @@ depends_on = [
 path = "terok_sandbox"
 depends_on = [
     "terok_sandbox.config",
+    "terok_sandbox.gate_server",
+    "terok_sandbox.gate_tokens",
     "terok_sandbox.git_gate",
+    "terok_sandbox.runtime",
+    "terok_sandbox.shield",
     "terok_sandbox.ssh",
 ]

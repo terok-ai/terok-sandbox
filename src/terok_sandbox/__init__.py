@@ -20,13 +20,108 @@ try:
 except PackageNotFoundError:
     pass  # editable install or running from source without metadata
 
+# -- Config ------------------------------------------------------------------
 from .config import SandboxConfig
-from .git_gate import GitGate
+
+# -- Gate server -------------------------------------------------------------
+from .gate_server import (
+    GateServerStatus,
+    check_units_outdated,
+    ensure_server_reachable,
+    get_gate_base_path,
+    get_gate_server_port,
+    get_server_status,
+    install_systemd_units,
+    is_daemon_running,
+    is_systemd_available,
+    start_daemon,
+    stop_daemon,
+    uninstall_systemd_units,
+)
+
+# -- Gate tokens -------------------------------------------------------------
+from .gate_tokens import create_token, revoke_token_for_task
+
+# -- Git gate ----------------------------------------------------------------
+from .git_gate import GateStalenessInfo, GitGate
+
+# -- Runtime -----------------------------------------------------------------
+from .runtime import (
+    get_container_state,
+    get_project_container_states,
+    gpu_run_args,
+    is_container_running,
+    stop_task_containers,
+    stream_initial_logs,
+    wait_for_exit,
+)
+
+# -- Shield ------------------------------------------------------------------
+from .shield import (
+    EnvironmentCheck,
+    NftNotFoundError,
+    ShieldNeedsSetup,
+    ShieldState,
+    check_environment,
+    down,
+    make_shield,
+    pre_start,
+    run_setup,
+    setup_hooks_direct,
+    state,
+    status,
+    up,
+)
+
+# -- SSH ---------------------------------------------------------------------
 from .ssh import SSHManager
 
 __all__ = [
-    "GitGate",
-    "SSHManager",
+    # Config
     "SandboxConfig",
+    # Runtime
+    "get_container_state",
+    "get_project_container_states",
+    "gpu_run_args",
+    "is_container_running",
+    "stop_task_containers",
+    "stream_initial_logs",
+    "wait_for_exit",
+    # Gate server
+    "GateServerStatus",
+    "check_units_outdated",
+    "ensure_server_reachable",
+    "get_gate_base_path",
+    "get_gate_server_port",
+    "get_server_status",
+    "install_systemd_units",
+    "is_daemon_running",
+    "is_systemd_available",
+    "start_daemon",
+    "stop_daemon",
+    "uninstall_systemd_units",
+    # Gate tokens
+    "create_token",
+    "revoke_token_for_task",
+    # Shield
+    "EnvironmentCheck",
+    "NftNotFoundError",
+    "ShieldNeedsSetup",
+    "ShieldState",
+    "check_environment",
+    "down",
+    "make_shield",
+    "pre_start",
+    "run_setup",
+    "setup_hooks_direct",
+    "state",
+    "status",
+    "up",
+    # Git gate
+    "GateStalenessInfo",
+    "GitGate",
+    # SSH
+    "SSHManager",
+    # Meta
     "__version__",
 ]
