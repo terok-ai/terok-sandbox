@@ -56,6 +56,9 @@ from .runtime import (
     wait_for_exit,
 )
 
+# -- Facade ------------------------------------------------------------------
+from .sandbox import READY_MARKER, RunSpec, Sandbox
+
 # -- Shield ------------------------------------------------------------------
 from .shield import (
     EnvironmentCheck,
@@ -120,6 +123,10 @@ __all__ = [
     # Git gate
     "GateStalenessInfo",
     "GitGate",
+    # Facade
+    "READY_MARKER",
+    "RunSpec",
+    "Sandbox",
     # SSH
     "SSHManager",
     # Meta

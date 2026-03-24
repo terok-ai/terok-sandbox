@@ -90,6 +90,26 @@ depends_on = [
     "terok_sandbox.ssh",
 ]
 
+# Sandbox facade — composes shield, gate, runtime, SSH
+[[modules]]
+path = "terok_sandbox.sandbox"
+depends_on = [
+    "terok_sandbox.config",
+    "terok_sandbox.gate_server",
+    "terok_sandbox.gate_tokens",
+    "terok_sandbox.runtime",
+    "terok_sandbox.shield",
+    "terok_sandbox.ssh",
+]
+
+# CLI entry point
+[[modules]]
+path = "terok_sandbox.cli"
+depends_on = [
+    "terok_sandbox.gate_server",
+    "terok_sandbox.shield",
+]
+
 # Package root — public API re-exports
 [[modules]]
 path = "terok_sandbox"
@@ -99,6 +119,7 @@ depends_on = [
     "terok_sandbox.gate_tokens",
     "terok_sandbox.git_gate",
     "terok_sandbox.runtime",
+    "terok_sandbox.sandbox",
     "terok_sandbox.shield",
     "terok_sandbox.ssh",
 ]
