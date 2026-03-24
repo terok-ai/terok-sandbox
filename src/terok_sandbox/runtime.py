@@ -4,13 +4,14 @@
 """Container runtime gateway wrapping the Podman CLI.
 
 Provides module-level functions for container lifecycle operations
-(state queries, GPU args, log streaming, etc.).
+(state queries, GPU args, log streaming, port allocation, etc.).
 
 All functions accept plain parameters (strings, paths) — no terok-specific
 types like ``ProjectConfig``.  Container naming is orchestration policy and
 lives in the caller.
 """
 
+import socket
 import subprocess
 from collections.abc import Callable
 
@@ -224,3 +225,15 @@ def wait_for_exit(cname: str, timeout_sec: float | None = None) -> int:
         return 124
     except (FileNotFoundError, ValueError):
         return 1
+
+
+def find_free_port(host: str = "127.0.0.1") -> int:
+    """Find and return a free TCP port on *host*.
+
+    Binds to port 0, reads the assigned port, then closes the socket.
+    There is a small race window between close and actual use, but this
+    is the standard approach for ephemeral port allocation.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind((host, 0))
+        return s.getsockname()[1]

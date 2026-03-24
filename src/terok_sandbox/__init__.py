@@ -49,6 +49,7 @@ from .git_gate import GateStalenessInfo, GitGate
 
 # -- Runtime -----------------------------------------------------------------
 from .runtime import (
+    find_free_port,
     get_container_state,
     get_project_container_states,
     gpu_run_args,
@@ -85,6 +86,7 @@ __all__ = [
     # Config
     "SandboxConfig",
     # Runtime
+    "find_free_port",
     "get_container_state",
     "get_project_container_states",
     "gpu_run_args",

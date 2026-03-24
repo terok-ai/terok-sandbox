@@ -116,3 +116,19 @@ def test_cli_main_shows_help_without_args():
     with patch("sys.argv", ["terok-sandbox"]), pytest.raises(SystemExit) as exc_info:
         main()
     assert exc_info.value.code == 1
+
+
+def test_find_free_port_returns_valid_port():
+    """find_free_port returns a port in the valid range."""
+    from terok_sandbox.runtime import find_free_port
+
+    port = find_free_port()
+    assert 1024 <= port <= 65535
+
+
+def test_find_free_port_unique():
+    """Two consecutive calls return different ports."""
+    from terok_sandbox.runtime import find_free_port
+
+    ports = {find_free_port() for _ in range(10)}
+    assert len(ports) >= 2  # at least some diversity
