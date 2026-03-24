@@ -227,13 +227,25 @@ def wait_for_exit(cname: str, timeout_sec: float | None = None) -> int:
         return 1
 
 
+def reserve_free_port(host: str = "127.0.0.1") -> tuple[socket.socket, int]:
+    """Reserve a TCP port on *host* and return ``(socket, port)``.
+
+    The socket stays open — the caller holds the reservation until they
+    close it (typically right before binding the actual service).  Useful
+    for Python-native servers that can accept a pre-bound socket.
+    """
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind((host, 0))
+    return s, s.getsockname()[1]
+
+
 def find_free_port(host: str = "127.0.0.1") -> int:
     """Find and return a free TCP port on *host*.
 
-    Binds to port 0, reads the assigned port, then closes the socket.
-    There is a small race window between close and actual use, but this
-    is the standard approach for ephemeral port allocation.
+    Releases the socket immediately — there is a small race window before
+    the caller binds the port.  This is the standard approach when passing
+    a port number to an external process (e.g. ``podman run -p``).
     """
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind((host, 0))
-        return s.getsockname()[1]
+    s, port = reserve_free_port(host)
+    s.close()
+    return port
