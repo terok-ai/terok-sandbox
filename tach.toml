@@ -102,18 +102,26 @@ depends_on = [
     "terok_sandbox.ssh",
 ]
 
-# CLI entry point
+# Command registry — defines all sandbox CLI commands
 [[modules]]
-path = "terok_sandbox.cli"
+path = "terok_sandbox.commands"
 depends_on = [
     "terok_sandbox.gate_server",
     "terok_sandbox.shield",
+]
+
+# CLI entry point — wires command registry to argparse
+[[modules]]
+path = "terok_sandbox.cli"
+depends_on = [
+    "terok_sandbox.commands",
 ]
 
 # Package root — public API re-exports
 [[modules]]
 path = "terok_sandbox"
 depends_on = [
+    "terok_sandbox.commands",
     "terok_sandbox.config",
     "terok_sandbox.gate_server",
     "terok_sandbox.gate_tokens",

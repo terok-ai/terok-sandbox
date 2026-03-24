@@ -21,6 +21,8 @@ except PackageNotFoundError:
     pass  # editable install or running from source without metadata
 
 # -- Config ------------------------------------------------------------------
+# -- Command registry --------------------------------------------------------
+from .commands import COMMANDS as SANDBOX_COMMANDS, GATE_COMMANDS, SHIELD_COMMANDS, CommandDef
 from .config import SandboxConfig
 
 # -- Gate server -------------------------------------------------------------
@@ -123,6 +125,11 @@ __all__ = [
     # Git gate
     "GateStalenessInfo",
     "GitGate",
+    # Command registry
+    "CommandDef",
+    "GATE_COMMANDS",
+    "SANDBOX_COMMANDS",
+    "SHIELD_COMMANDS",
     # Facade
     "READY_MARKER",
     "RunSpec",

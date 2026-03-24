@@ -151,8 +151,8 @@ class Sandbox:
 
     # -- SSH ----------------------------------------------------------------
 
-    def init_ssh(self, label: str) -> SSHManager:
-        """Create an SSH manager for *label* (e.g. a project ID)."""
+    def init_ssh(self, project_id: str) -> SSHManager:
+        """Create an SSH manager for *project_id*."""
         from .ssh import SSHManager
 
-        return SSHManager(label, envs_dir=self._cfg.effective_envs_dir)
+        return SSHManager(project_id=project_id, envs_base_dir=self._cfg.effective_envs_dir)
