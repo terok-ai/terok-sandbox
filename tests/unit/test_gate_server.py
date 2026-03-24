@@ -702,20 +702,24 @@ class TestEnsureReachableBasePath:
 class TestPublicApi:
     """Tests for the thin public API wrappers."""
 
-    def test_get_gate_base_path_delegates(self) -> None:
+    def test_get_gate_base_path_forwards_cfg(self) -> None:
         from terok_sandbox.gate_server import get_gate_base_path
 
+        cfg = unittest.mock.sentinel.cfg
         with unittest.mock.patch(
             "terok_sandbox.gate_server._get_gate_base_path",
             return_value=GATE_BASE_PATH,
-        ):
-            assert get_gate_base_path() == GATE_BASE_PATH
+        ) as mock:
+            assert get_gate_base_path(cfg) == GATE_BASE_PATH
+        mock.assert_called_once_with(cfg)
 
-    def test_get_gate_server_port_delegates(self) -> None:
+    def test_get_gate_server_port_forwards_cfg(self) -> None:
         from terok_sandbox.gate_server import get_gate_server_port
 
+        cfg = unittest.mock.sentinel.cfg
         with unittest.mock.patch(
             "terok_sandbox.gate_server._get_port",
             return_value=GATE_PORT,
-        ):
-            assert get_gate_server_port() == GATE_PORT
+        ) as mock:
+            assert get_gate_server_port(cfg) == GATE_PORT
+        mock.assert_called_once_with(cfg)
