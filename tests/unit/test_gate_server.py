@@ -529,8 +529,8 @@ class TestEnsureServerReachable:
         ("status", "systemd_available", "unit_version", "error_match"),
         [
             (make_status("daemon", running=True), True, _UNIT_VERSION, None),
-            (make_status("none", running=False), True, _UNIT_VERSION, "gate-server install"),
-            (make_status("none", running=False), False, _UNIT_VERSION, "gate-server start"),
+            (make_status("none", running=False), True, _UNIT_VERSION, "gate start"),
+            (make_status("none", running=False), False, _UNIT_VERSION, "gate start --daemon"),
             (make_status("systemd", running=True), True, 0, "outdated"),
             (make_status("systemd", running=True), True, None, "unversioned"),
             (make_status("systemd", running=True), True, _UNIT_VERSION, None),
@@ -630,7 +630,7 @@ class TestCheckUnitsOutdated:
         else:
             assert result is not None
             assert expected in result
-            assert "gate-server install" in result
+            assert "gate start" in result
 
     def test_base_path_divergence_warning(self) -> None:
         """Current units + divergent base path → warning string."""

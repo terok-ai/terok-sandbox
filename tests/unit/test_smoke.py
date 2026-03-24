@@ -105,11 +105,14 @@ def test_import_git_gate():
     assert callable(GitGate)
 
 
-def test_cli_main_exits_cleanly():
-    """CLI entry point prints version and exits cleanly."""
+def test_cli_main_shows_help_without_args():
+    """CLI entry point shows help and exits with code 1 when no subcommand given."""
+    from unittest.mock import patch
+
     import pytest
 
     from terok_sandbox.cli import main
 
-    with pytest.raises(SystemExit, match="0"):
+    with patch("sys.argv", ["terok-sandbox"]), pytest.raises(SystemExit) as exc_info:
         main()
+    assert exc_info.value.code == 1
