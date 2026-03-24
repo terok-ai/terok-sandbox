@@ -50,11 +50,11 @@ from .git_gate import GateStalenessInfo, GitGate
 # -- Runtime -----------------------------------------------------------------
 from .runtime import (
     find_free_port,
-    reserve_free_port,
     get_container_state,
     get_project_container_states,
     gpu_run_args,
     is_container_running,
+    reserve_free_port,
     stop_task_containers,
     stream_initial_logs,
     wait_for_exit,
