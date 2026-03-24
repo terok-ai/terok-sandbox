@@ -235,8 +235,12 @@ def reserve_free_port(host: str = "127.0.0.1") -> tuple[socket.socket, int]:
     for Python-native servers that can accept a pre-bound socket.
     """
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.bind((host, 0))
-    return s, s.getsockname()[1]
+    try:
+        s.bind((host, 0))
+        return s, s.getsockname()[1]
+    except BaseException:
+        s.close()
+        raise
 
 
 def find_free_port(host: str = "127.0.0.1") -> int:
