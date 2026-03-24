@@ -631,3 +631,91 @@ class TestCheckUnitsOutdated:
             assert result is not None
             assert expected in result
             assert "gate-server install" in result
+
+    def test_base_path_divergence_warning(self) -> None:
+        """Current units + divergent base path → warning string."""
+        with (
+            unittest.mock.patch(
+                "terok_sandbox.gate_server.is_socket_installed",
+                return_value=True,
+            ),
+            unittest.mock.patch(
+                "terok_sandbox.gate_server._installed_unit_version",
+                return_value=_UNIT_VERSION,
+            ),
+            unittest.mock.patch(
+                "terok_sandbox.gate_server._base_path_diverged",
+                return_value="paths diverge",
+            ),
+        ):
+            assert check_units_outdated() == "paths diverge"
+
+
+class TestDaemonEnvVars:
+    """Tests for start_daemon env var forwarding."""
+
+    @unittest.mock.patch("subprocess.run")
+    def test_admin_token_forwarded(self, mock_run: unittest.mock.Mock) -> None:
+        mock_run.return_value = make_run_result(returncode=0)
+        with tempfile.TemporaryDirectory() as td:
+            with patched_daemon_paths(Path(td)):
+                with unittest.mock.patch.dict(os.environ, {"TEROK_GATE_ADMIN_TOKEN": "secret42"}):
+                    start_daemon(port=GATE_PORT)
+
+        cmd = mock_run.call_args[0][0]
+        assert "--admin-token=secret42" in cmd
+
+    @unittest.mock.patch("subprocess.run")
+    def test_bind_addr_forwarded(self, mock_run: unittest.mock.Mock) -> None:
+        mock_run.return_value = make_run_result(returncode=0)
+        with tempfile.TemporaryDirectory() as td:
+            with patched_daemon_paths(Path(td)):
+                with unittest.mock.patch.dict(os.environ, {"TEROK_GATE_BIND": "0.0.0.0"}):
+                    start_daemon(port=GATE_PORT)
+
+        cmd = mock_run.call_args[0][0]
+        assert "--bind=0.0.0.0" in cmd
+
+
+class TestEnsureReachableBasePath:
+    """Tests for base path divergence blocking in ensure_server_reachable."""
+
+    def test_base_path_divergence_blocks(self) -> None:
+        with (
+            unittest.mock.patch(
+                "terok_sandbox.gate_server.get_server_status",
+                return_value=make_status("systemd", running=True),
+            ),
+            unittest.mock.patch(
+                "terok_sandbox.gate_server._installed_unit_version",
+                return_value=_UNIT_VERSION,
+            ),
+            unittest.mock.patch(
+                "terok_sandbox.gate_server._base_path_diverged",
+                return_value="Installed: /old\n  Expected: /new",
+            ),
+        ):
+            with pytest.raises(SystemExit, match="Installed"):
+                ensure_server_reachable()
+
+
+class TestPublicApi:
+    """Tests for the thin public API wrappers."""
+
+    def test_get_gate_base_path_delegates(self) -> None:
+        from terok_sandbox.gate_server import get_gate_base_path
+
+        with unittest.mock.patch(
+            "terok_sandbox.gate_server._get_gate_base_path",
+            return_value=GATE_BASE_PATH,
+        ):
+            assert get_gate_base_path() == GATE_BASE_PATH
+
+    def test_get_gate_server_port_delegates(self) -> None:
+        from terok_sandbox.gate_server import get_gate_server_port
+
+        with unittest.mock.patch(
+            "terok_sandbox.gate_server._get_port",
+            return_value=GATE_PORT,
+        ):
+            assert get_gate_server_port() == GATE_PORT
