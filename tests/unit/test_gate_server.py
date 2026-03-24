@@ -19,6 +19,8 @@ import pytest
 from terok_sandbox.gate_server import (
     _UNIT_VERSION,
     GateServerStatus,
+    _base_path_diverged,
+    _installed_base_path,
     _installed_unit_version,
     _is_managed_server,
     check_units_outdated,
@@ -124,12 +126,17 @@ def write_pid_file(base: Path, pid: int | str = 99999) -> Path:
     return pid_file
 
 
-def unit_file_contents(version: int | None = _UNIT_VERSION) -> dict[str, str]:
+def unit_file_contents(
+    version: int | None = _UNIT_VERSION, base_path: Path = GATE_BASE_PATH
+) -> dict[str, str]:
     """Build socket/service contents with an optional version stamp."""
     prefix = "" if version is None else f"# terok-gate-version: {version}\n"
     return {
         SYSTEMD_SOCKET: f"{prefix}[Socket]\nListenStream={LOCALHOST}:{GATE_PORT}\n",
-        SYSTEMD_SERVICE: f"{prefix}[Service]\nExecStart=/usr/local/bin/terok-gate\n",
+        SYSTEMD_SERVICE: (
+            f"{prefix}[Service]\n"
+            f"ExecStart=/usr/local/bin/terok-gate --inetd --base-path={base_path} --token-file=/tmp/tokens.json\n"
+        ),
     }
 
 
@@ -142,8 +149,57 @@ def assert_contains_all(text: str, expected: tuple[str, ...]) -> None:
 class TestUnitVersion:
     """Tests for _UNIT_VERSION."""
 
-    def test_unit_version_is_3(self) -> None:
-        assert _UNIT_VERSION == 3
+    def test_unit_version_is_current(self) -> None:
+        assert _UNIT_VERSION == 4
+
+
+class TestInstalledBasePath:
+    """Tests for _installed_base_path — parsing --base-path from installed service unit."""
+
+    def test_parses_base_path_from_service(self) -> None:
+        files = unit_file_contents(base_path=Path("/custom/gate"))
+        with patched_unit_dir(files):
+            assert _installed_base_path() == Path("/custom/gate")
+
+    def test_returns_none_when_no_service(self) -> None:
+        with patched_unit_dir({}):
+            assert _installed_base_path() is None
+
+    def test_returns_none_when_no_base_path_flag(self) -> None:
+        files = {
+            SYSTEMD_SERVICE: "[Service]\nExecStart=/usr/local/bin/terok-gate --inetd\n",
+        }
+        with patched_unit_dir(files):
+            assert _installed_base_path() is None
+
+
+class TestBasePathDiverged:
+    """Tests for _base_path_diverged — comparing installed vs expected base path."""
+
+    def test_returns_none_when_paths_match(self) -> None:
+        files = unit_file_contents(base_path=GATE_BASE_PATH)
+        with patched_unit_dir(files):
+            with unittest.mock.patch(
+                "terok_sandbox.gate_server._get_gate_base_path",
+                return_value=GATE_BASE_PATH,
+            ):
+                assert _base_path_diverged() is None
+
+    def test_returns_warning_when_paths_diverge(self) -> None:
+        files = unit_file_contents(base_path=Path("/old/gate"))
+        with patched_unit_dir(files):
+            with unittest.mock.patch(
+                "terok_sandbox.gate_server._get_gate_base_path",
+                return_value=Path("/new/gate"),
+            ):
+                warning = _base_path_diverged()
+                assert warning is not None
+                assert "/old/gate" in warning
+                assert "/new/gate" in warning
+
+    def test_returns_none_when_no_units(self) -> None:
+        with patched_unit_dir({}):
+            assert _base_path_diverged() is None
 
 
 class TestSystemdDetection:
