@@ -10,6 +10,8 @@ simply groups them behind a shared :class:`SandboxConfig`.
 
 from __future__ import annotations
 
+import shlex
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -28,6 +30,29 @@ if TYPE_CHECKING:
 
 READY_MARKER = ">> init complete"
 """Default log line emitted by init-ssh-and-repo.sh when the container is ready."""
+
+
+@dataclass(frozen=True)
+class LifecycleHooks:
+    """Optional callbacks fired at container lifecycle transitions.
+
+    All slots are ``None`` by default.  ``Sandbox.run()`` fires ``pre_start``
+    before ``podman run`` and ``post_start`` after a successful launch.
+    ``post_ready`` and ``post_stop`` are available for callers to invoke at
+    the appropriate time (e.g. after log streaming or container exit).
+    """
+
+    pre_start: Callable[[], None] | None = None
+    """Fired before ``podman run``."""
+
+    post_start: Callable[[], None] | None = None
+    """Fired after a successful ``podman run``."""
+
+    post_ready: Callable[[], None] | None = None
+    """Fired when the container reports ready (caller responsibility)."""
+
+    post_stop: Callable[[], None] | None = None
+    """Fired after the container exits (caller responsibility)."""
 
 
 @dataclass(frozen=True)
@@ -57,6 +82,12 @@ class RunSpec:
 
     extra_args: tuple[str, ...] = ()
     """Additional podman run arguments (e.g. port publishing)."""
+
+    unrestricted: bool = True
+    """When False, adds ``--security-opt no-new-privileges``."""
+
+    bypass_shield: bool = False
+    """Skip the egress firewall entirely — dangerous fallback."""
 
 
 # ---------------------------------------------------------------------------
@@ -121,6 +152,75 @@ class Sandbox:
         from .shield import down
 
         down(container, task_dir, cfg=self._cfg)
+
+    # -- Container launch ---------------------------------------------------
+
+    def run(self, spec: RunSpec, *, hooks: LifecycleHooks | None = None) -> None:
+        """Launch a detached container from *spec*.
+
+        Assembles and executes the ``podman run`` command, handling user
+        namespace mapping, shield or bypass networking, GPU device args,
+        environment and volume injection, CDI error detection, and lifecycle
+        hook callbacks.
+
+        Fires *hooks.pre_start* before ``podman run`` and *hooks.post_start*
+        after a successful launch.  Raises :class:`~.runtime.GpuConfigError`
+        when the launch fails due to NVIDIA CDI misconfiguration.
+        """
+        from .runtime import (
+            bypass_network_args,
+            check_gpu_error,
+            gpu_run_args,
+            podman_userns_args,
+            redact_env_args,
+        )
+
+        cmd: list[str] = ["podman", "run", "-d"]
+        cmd += podman_userns_args()
+
+        if not spec.unrestricted:
+            cmd += ["--security-opt", "no-new-privileges"]
+
+        if spec.bypass_shield:
+            print("\n!! SHIELD BYPASSED — egress firewall DISABLED (bypass_shield is set) !!\n")
+            cmd += bypass_network_args(self._cfg.gate_port)
+        else:
+            try:
+                from .shield import pre_start
+
+                cmd += pre_start(spec.container_name, spec.task_dir, self._cfg)
+            except (OSError, FileNotFoundError, SystemExit):
+                pass
+
+        cmd += gpu_run_args(enabled=spec.gpu_enabled)
+
+        if spec.extra_args:
+            cmd += list(spec.extra_args)
+        for vol in spec.volumes:
+            cmd += ["-v", vol]
+        for k, v in spec.env.items():
+            cmd += ["-e", f"{k}={v}"]
+
+        cmd += ["--name", spec.container_name, "-w", "/workspace", spec.image]
+        cmd += list(spec.command)
+
+        print("$", shlex.join(redact_env_args(cmd)))
+
+        if hooks and hooks.pre_start:
+            hooks.pre_start()
+
+        try:
+            subprocess.run(cmd, check=True, capture_output=True)
+        except FileNotFoundError:
+            raise SystemExit("podman not found; please install podman")
+        except subprocess.CalledProcessError as exc:
+            check_gpu_error(exc)
+            stderr = (exc.stderr or b"").decode(errors="replace")
+            msg = f"Container launch failed:\n{stderr.strip()}" if stderr else str(exc)
+            raise SystemExit(msg) from exc
+
+        if hooks and hooks.post_start:
+            hooks.post_start()
 
     # -- Runtime ------------------------------------------------------------
 

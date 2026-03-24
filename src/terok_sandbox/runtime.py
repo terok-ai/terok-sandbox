@@ -11,11 +11,84 @@ types like ``ProjectConfig``.  Container naming is orchestration policy and
 lives in the caller.
 """
 
+import os
+import re
 import socket
 import subprocess
 from collections.abc import Callable
 
 from ._util import log_debug
+
+# ---------- User namespace ----------
+
+
+def podman_userns_args() -> list[str]:
+    """Return user namespace args for rootless podman so UID 1000 maps correctly.
+
+    Maps the host user to container UID/GID 1000, the conventional non-root
+    ``dev`` user in terok container images.
+    """
+    if os.geteuid() == 0:
+        return []
+    return ["--userns=keep-id:uid=1000,gid=1000"]
+
+
+# ---------- GPU error handling ----------
+
+_CDI_HINT = (
+    "Hint: NVIDIA CDI configuration appears to be missing or broken.\n"
+    "Ensure the NVIDIA Container Toolkit is installed and CDI is configured.\n"
+    "See: https://podman-desktop.io/docs/podman/gpu"
+)
+
+_CDI_ERROR_PATTERNS = ("cdi.k8s.io", "nvidia.com/gpu", "CDI")
+
+
+class GpuConfigError(RuntimeError):
+    """CDI/NVIDIA misconfiguration detected during container launch."""
+
+    def __init__(self, message: str, *, hint: str = _CDI_HINT) -> None:
+        """Store the CDI *hint* alongside the standard error *message*."""
+        self.hint = hint
+        super().__init__(message)
+
+
+def check_gpu_error(exc: subprocess.CalledProcessError) -> None:
+    """Raise :class:`GpuConfigError` if *exc* looks like a CDI/NVIDIA issue.
+
+    Does nothing if the error does not match any known CDI patterns.
+    """
+    stderr = (exc.stderr or b"").decode(errors="replace")
+    if any(pat in stderr for pat in _CDI_ERROR_PATTERNS):
+        msg = f"Container launch failed (GPU misconfiguration):\n{stderr.strip()}\n\n{_CDI_HINT}"
+        raise GpuConfigError(msg) from exc
+
+
+# ---------- Env redaction ----------
+
+_SENSITIVE_KEY_RE = re.compile(r"(?i)(KEY|TOKEN|SECRET|API|PASSWORD|PRIVATE)")
+_ALWAYS_REDACT_KEYS = frozenset({"CODE_REPO", "CLONE_FROM"})
+
+
+def redact_env_args(cmd: list[str]) -> list[str]:
+    """Return a copy of *cmd* with sensitive ``-e KEY=VALUE`` args redacted."""
+    out: list[str] = []
+    redact_next = False
+    for arg in cmd:
+        if redact_next:
+            key, _, _val = arg.partition("=")
+            if _SENSITIVE_KEY_RE.search(key) or key in _ALWAYS_REDACT_KEYS:
+                out.append(f"{key}=<redacted>")
+            else:
+                out.append(arg)
+            redact_next = False
+        elif arg == "-e":
+            out.append(arg)
+            redact_next = True
+        else:
+            out.append(arg)
+    return out
+
 
 # ---------- Public functions ----------
 
@@ -253,3 +326,53 @@ def find_free_port(host: str = "127.0.0.1") -> int:
     s, port = reserve_free_port(host)
     s.close()
     return port
+
+
+# ---------------------------------------------------------------------------
+# Bypass network args (when shield is completely skipped)
+# ---------------------------------------------------------------------------
+
+_LOCALHOST = "127.0.0.1"
+_SLIRP_GATEWAY = "10.0.2.2"
+
+
+def _detect_rootless_network_mode() -> str:
+    """Detect whether podman uses pasta or slirp4netns for rootless networking."""
+    try:
+        out = subprocess.run(
+            ["podman", "info", "-f", "{{.Host.RootlessNetworkCmd}}"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        cmd = out.stdout.strip()
+        return cmd if cmd in ("pasta", "slirp4netns") else "pasta"
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return "pasta"
+
+
+def bypass_network_args(gate_port: int) -> list[str]:
+    """Return podman network args for running without shield.
+
+    Replicates the networking that terok-shield's OCI hook normally provides
+    (allowing the container to reach ``host.containers.internal`` for the gate
+    server) but without nftables rules, annotations, or cap-drops.
+
+    This is a **dangerous fallback** for environments where shield can't run.
+    All egress is unfiltered.
+    """
+    if os.geteuid() == 0:
+        return []
+    if _detect_rootless_network_mode() == "slirp4netns":
+        return [
+            "--network",
+            "slirp4netns:allow_host_loopback=true",
+            "--add-host",
+            f"host.containers.internal:{_SLIRP_GATEWAY}",
+        ]
+    return [
+        "--network",
+        f"pasta:-T,{gate_port}",
+        "--add-host",
+        f"host.containers.internal:{_LOCALHOST}",
+    ]
