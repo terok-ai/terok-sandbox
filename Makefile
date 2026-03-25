@@ -1,4 +1,4 @@
-.PHONY: all lint format test test-unit test-stories ruff-report bandit-report sonar-inputs tach security docstrings complexity deadcode reuse check install install-dev docs docs-build clean spdx
+.PHONY: all lint format test test-unit test-integration ruff-report bandit-report sonar-inputs tach security docstrings complexity deadcode reuse check install install-dev docs docs-build clean spdx
 
 REPORTS_DIR ?= reports
 COVERAGE_XML ?= $(REPORTS_DIR)/coverage.xml
@@ -27,10 +27,10 @@ test-unit:
 	mkdir -p $(REPORTS_DIR)
 	poetry run pytest tests/unit/ --cov=terok_sandbox --cov-report=term-missing --cov-report=xml:$(COVERAGE_XML) --junitxml=$(UNIT_JUNIT_XML) -o junit_family=legacy
 
-# Run end-to-end story tests (disposable environment, real server + DB)
-test-stories:
+# Run integration tests (real servers, databases, system interactions)
+test-integration:
 	mkdir -p $(REPORTS_DIR)
-	poetry run pytest tests/stories/ -v --junitxml=$(REPORTS_DIR)/stories.junit.xml -o junit_family=legacy
+	poetry run pytest tests/integration/ -v --junitxml=$(REPORTS_DIR)/integration.junit.xml -o junit_family=legacy
 
 # Write Ruff's JSON report without failing on findings.
 ruff-report:
