@@ -26,6 +26,7 @@ packages = [
 python = ">=3.12,<4.0"
 terok-shield = {url = "https://github.com/terok-ai/terok-shield/releases/download/v0.4.1/terok_shield-0.4.1-py3-none-any.whl"}
 platformdirs = ">=4.0"
+aiohttp = ">=3.9"
 
 [tool.poetry.group.dev.dependencies]
 ruff = ">=0.8"
@@ -52,6 +53,7 @@ mkdocs-terok = {url = "https://github.com/terok-ai/mkdocs-terok/releases/downloa
 [tool.poetry.scripts]
 terok-sandbox = "terok_sandbox.cli:main"
 terok-gate = "terok_sandbox.gate.server:main"
+terok-credential-proxy = "terok_sandbox.credential_proxy.server:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
