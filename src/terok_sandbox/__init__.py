@@ -49,11 +49,15 @@ from .git_gate import GateStalenessInfo, GitGate
 
 # -- Runtime -----------------------------------------------------------------
 from .runtime import (
+    GpuConfigError,
+    bypass_network_args,
     find_free_port,
     get_container_state,
     get_project_container_states,
     gpu_run_args,
     is_container_running,
+    podman_userns_args,
+    redact_env_args,
     reserve_free_port,
     stop_task_containers,
     stream_initial_logs,
@@ -61,7 +65,7 @@ from .runtime import (
 )
 
 # -- Facade ------------------------------------------------------------------
-from .sandbox import READY_MARKER, RunSpec, Sandbox
+from .sandbox import READY_MARKER, LifecycleHooks, RunSpec, Sandbox
 
 # -- Shield ------------------------------------------------------------------
 from .shield import (
@@ -87,12 +91,16 @@ __all__ = [
     # Config
     "SandboxConfig",
     # Runtime
+    "GpuConfigError",
+    "bypass_network_args",
     "find_free_port",
-    "reserve_free_port",
     "get_container_state",
     "get_project_container_states",
     "gpu_run_args",
     "is_container_running",
+    "podman_userns_args",
+    "redact_env_args",
+    "reserve_free_port",
     "stop_task_containers",
     "stream_initial_logs",
     "wait_for_exit",
@@ -136,6 +144,7 @@ __all__ = [
     "SHIELD_COMMANDS",
     # Facade
     "READY_MARKER",
+    "LifecycleHooks",
     "RunSpec",
     "Sandbox",
     # SSH
