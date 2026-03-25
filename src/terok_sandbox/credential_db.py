@@ -124,3 +124,10 @@ class CredentialDB:
     def close(self) -> None:
         """Close the database connection."""
         self._conn.close()
+
+    def __del__(self) -> None:
+        """Best-effort close on garbage collection."""
+        try:
+            self._conn.close()
+        except Exception:  # noqa: BLE001
+            pass

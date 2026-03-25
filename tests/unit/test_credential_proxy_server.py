@@ -13,6 +13,8 @@ import pytest
 
 from terok_sandbox.credential_db import CredentialDB
 from terok_sandbox.credential_proxy.server import (
+    _KEY_ROUTES,
+    _KEY_TOKEN_DB,
     _build_app,
     _extract_phantom_token,
     _RouteTable,
@@ -146,7 +148,7 @@ class TestBuildApp:
 
         app = _build_app(str(tmp_path / "test.db"), str(routes_file))
 
-        assert isinstance(app["routes"], _RouteTable)
-        assert isinstance(app["token_db"], _TokenDB)
+        assert isinstance(app[_KEY_ROUTES], _RouteTable)
+        assert isinstance(app[_KEY_TOKEN_DB], _TokenDB)
         # Cleanup hook registered
         assert len(app.on_cleanup) > 0

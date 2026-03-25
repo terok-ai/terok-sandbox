@@ -42,6 +42,11 @@ from aiohttp import ClientSession, web
 
 _logger = logging.getLogger("terok-credential-proxy")
 
+# Typed app keys (avoids NotAppKeyWarning on aiohttp >= 3.9)
+_KEY_ROUTES = web.AppKey("routes", "_RouteTable")
+_KEY_TOKEN_DB = web.AppKey("token_db", "_TokenDB")
+_KEY_CLIENT = web.AppKey("client_session", ClientSession)
+
 # ---------------------------------------------------------------------------
 # Route + credential loading (inlined, no terok imports)
 # ---------------------------------------------------------------------------
@@ -97,6 +102,13 @@ class _TokenDB:
         """Close the database connection."""
         self._conn.close()
 
+    def __del__(self) -> None:
+        """Best-effort close on garbage collection."""
+        try:
+            self._conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
 
 # ---------------------------------------------------------------------------
 # Auth extraction helpers
@@ -125,8 +137,8 @@ def _extract_phantom_token(request: web.Request) -> str | None:
 
 async def _handle_request(request: web.Request) -> web.StreamResponse:
     """Route, authenticate, inject credentials, and forward to upstream."""
-    routes: _RouteTable = request.app["routes"]
-    token_db: _TokenDB = request.app["token_db"]
+    routes: _RouteTable = request.app[_KEY_ROUTES]
+    token_db: _TokenDB = request.app[_KEY_TOKEN_DB]
 
     # 1. Route by path prefix
     prefix, rest, route = routes.resolve(request.path)
@@ -165,7 +177,7 @@ async def _handle_request(request: web.Request) -> web.StreamResponse:
     headers[auth_header] = f"{auth_prefix}{real_token}"
 
     # 5. Forward and stream response
-    session: ClientSession = request.app["client_session"]
+    session: ClientSession = request.app[_KEY_CLIENT]
     try:
         async with session.request(
             request.method,
@@ -199,20 +211,20 @@ async def _handle_request(request: web.Request) -> web.StreamResponse:
 
 async def _on_startup(app: web.Application) -> None:
     """Create the shared HTTP client session."""
-    app["client_session"] = ClientSession()
+    app[_KEY_CLIENT] = ClientSession()
 
 
 async def _on_cleanup(app: web.Application) -> None:
     """Close client session and token DB."""
-    await app["client_session"].close()
-    app["token_db"].close()
+    await app[_KEY_CLIENT].close()
+    app[_KEY_TOKEN_DB].close()
 
 
 def _build_app(db_path: str, routes_path: str) -> web.Application:
     """Construct the aiohttp application."""
     app = web.Application()
-    app["routes"] = _RouteTable(routes_path)
-    app["token_db"] = _TokenDB(db_path)
+    app[_KEY_ROUTES] = _RouteTable(routes_path)
+    app[_KEY_TOKEN_DB] = _TokenDB(db_path)
     app.on_startup.append(_on_startup)
     app.on_cleanup.append(_on_cleanup)
     app.router.add_route("*", "/{tail:.*}", _handle_request)
