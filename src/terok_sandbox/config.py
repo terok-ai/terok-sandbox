@@ -81,3 +81,23 @@ class SandboxConfig:
     def shield_profiles_dir(self) -> Path:
         """Return the directory for terok-managed shield profiles."""
         return self.config_dir / "shield" / "profiles"
+
+    @property
+    def proxy_db_path(self) -> Path:
+        """Return the path to the credential proxy sqlite3 database."""
+        return self.state_dir / "proxy" / "credentials.db"
+
+    @property
+    def proxy_socket_path(self) -> Path:
+        """Return the Unix socket path for the credential proxy."""
+        return self.runtime_dir / "credential-proxy.sock"
+
+    @property
+    def proxy_pid_file_path(self) -> Path:
+        """Return the PID file path for the managed credential proxy daemon."""
+        return self.runtime_dir / "credential-proxy.pid"
+
+    @property
+    def proxy_routes_path(self) -> Path:
+        """Return the path to the proxy route configuration JSON."""
+        return self.state_dir / "proxy" / "routes.json"

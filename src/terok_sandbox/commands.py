@@ -180,5 +180,65 @@ SHIELD_COMMANDS: tuple[CommandDef, ...] = (
     ),
 )
 
+# ---------------------------------------------------------------------------
+# Credential proxy handlers
+# ---------------------------------------------------------------------------
+
+
+def _handle_proxy_start() -> None:
+    """Start the credential proxy daemon."""
+    from .credential_proxy_lifecycle import get_proxy_status, start_daemon
+
+    status = get_proxy_status()
+    if status.running:
+        print("Credential proxy is already running.")
+        return
+    start_daemon()
+    print("Credential proxy started.")
+
+
+def _handle_proxy_stop() -> None:
+    """Stop the credential proxy daemon."""
+    from .credential_proxy_lifecycle import is_daemon_running, stop_daemon
+
+    if not is_daemon_running():
+        print("Credential proxy is not running.")
+        return
+    stop_daemon()
+    print("Credential proxy stopped.")
+
+
+def _handle_proxy_status() -> None:
+    """Show credential proxy status."""
+    from .credential_proxy_lifecycle import get_proxy_status
+
+    status = get_proxy_status()
+    state = "running" if status.running else "stopped"
+    print(f"Status: {state}")
+    print(f"Socket: {status.socket_path}")
+    print(f"DB:     {status.db_path}")
+
+
+PROXY_COMMANDS: tuple[CommandDef, ...] = (
+    CommandDef(
+        name="start",
+        help="Start the credential proxy daemon",
+        handler=_handle_proxy_start,
+        group="proxy",
+    ),
+    CommandDef(
+        name="stop",
+        help="Stop the credential proxy daemon",
+        handler=_handle_proxy_stop,
+        group="proxy",
+    ),
+    CommandDef(
+        name="status",
+        help="Show credential proxy status",
+        handler=_handle_proxy_status,
+        group="proxy",
+    ),
+)
+
 #: All sandbox commands, grouped by subsystem.
-COMMANDS: tuple[CommandDef, ...] = GATE_COMMANDS + SHIELD_COMMANDS
+COMMANDS: tuple[CommandDef, ...] = GATE_COMMANDS + SHIELD_COMMANDS + PROXY_COMMANDS

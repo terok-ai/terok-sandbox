@@ -22,8 +22,27 @@ except PackageNotFoundError:
 
 # -- Config ------------------------------------------------------------------
 # -- Command registry --------------------------------------------------------
-from .commands import COMMANDS as SANDBOX_COMMANDS, GATE_COMMANDS, SHIELD_COMMANDS, CommandDef
+from .commands import (
+    COMMANDS as SANDBOX_COMMANDS,
+    GATE_COMMANDS,
+    PROXY_COMMANDS,
+    SHIELD_COMMANDS,
+    CommandDef,
+)
 from .config import SandboxConfig
+
+# -- Credential DB -----------------------------------------------------------
+from .credential_db import CredentialDB
+
+# -- Credential proxy lifecycle ----------------------------------------------
+from .credential_proxy_lifecycle import (
+    CredentialProxyStatus,
+    ensure_proxy_reachable,
+    get_proxy_status,
+    is_daemon_running as is_proxy_running,
+    start_daemon as start_proxy,
+    stop_daemon as stop_proxy,
+)
 
 # -- Gate server -------------------------------------------------------------
 from .gate_server import (
@@ -137,9 +156,19 @@ __all__ = [
     # Git gate
     "GateStalenessInfo",
     "GitGate",
+    # Credential DB
+    "CredentialDB",
+    # Credential proxy
+    "CredentialProxyStatus",
+    "ensure_proxy_reachable",
+    "get_proxy_status",
+    "is_proxy_running",
+    "start_proxy",
+    "stop_proxy",
     # Command registry
     "CommandDef",
     "GATE_COMMANDS",
+    "PROXY_COMMANDS",
     "SANDBOX_COMMANDS",
     "SHIELD_COMMANDS",
     # Facade

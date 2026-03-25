@@ -26,6 +26,7 @@ packages = [
 python = ">=3.12,<4.0"
 terok-shield = {url = "https://github.com/terok-ai/terok-shield/releases/download/v0.4.1/terok_shield-0.4.1-py3-none-any.whl"}
 platformdirs = ">=4.0"
+aiohttp = ">=3.9"
 
 [tool.poetry.group.dev.dependencies]
 ruff = ">=0.8"
@@ -38,6 +39,7 @@ tach = "^0.34.0"
 
 [tool.poetry.group.test.dependencies]
 pytest = ">=7.0"
+pytest-asyncio = ">=0.24"
 pytest-cov = ">=4.0"
 pytest-timeout = ">=2.0"
 
@@ -52,16 +54,19 @@ mkdocs-terok = {url = "https://github.com/terok-ai/mkdocs-terok/releases/downloa
 [tool.poetry.scripts]
 terok-sandbox = "terok_sandbox.cli:main"
 terok-gate = "terok_sandbox.gate.server:main"
+terok-credential-proxy = "terok_sandbox.credential_proxy.server:main"
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests/unit", "tests/integration"]
 python_files = ["test_*.py"]
 python_classes = ["Test*", "*Tests"]
 python_functions = ["test_*"]
 addopts = "-v --tb=short"
 markers = [
   "needs_podman: requires podman on the host",
+  "needs_credential_proxy: credential proxy integration (real server + DB)",
 ]
+asyncio_mode = "auto"
 
 [tool.ruff]
 target-version = "py312"

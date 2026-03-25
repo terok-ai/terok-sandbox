@@ -90,6 +90,23 @@ depends_on = [
     "terok_sandbox.ssh",
 ]
 
+# Credential DB — standalone, no internal deps
+[[modules]]
+path = "terok_sandbox.credential_db"
+depends_on = []
+
+# Credential proxy server — standalone, zero terok imports
+[[modules]]
+path = "terok_sandbox.credential_proxy"
+depends_on = []
+
+# Credential proxy lifecycle — depends on config
+[[modules]]
+path = "terok_sandbox.credential_proxy_lifecycle"
+depends_on = [
+    "terok_sandbox.config",
+]
+
 # Sandbox facade — composes shield, gate, runtime, SSH
 [[modules]]
 path = "terok_sandbox.sandbox"
@@ -106,6 +123,7 @@ depends_on = [
 [[modules]]
 path = "terok_sandbox.commands"
 depends_on = [
+    "terok_sandbox.credential_proxy_lifecycle",
     "terok_sandbox.gate_server",
     "terok_sandbox.shield",
 ]
@@ -123,6 +141,8 @@ path = "terok_sandbox"
 depends_on = [
     "terok_sandbox.commands",
     "terok_sandbox.config",
+    "terok_sandbox.credential_db",
+    "terok_sandbox.credential_proxy_lifecycle",
     "terok_sandbox.gate_server",
     "terok_sandbox.gate_tokens",
     "terok_sandbox.git_gate",
