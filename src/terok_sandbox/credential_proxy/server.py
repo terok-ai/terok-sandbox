@@ -170,13 +170,18 @@ async def _handle_request(request: web.Request) -> web.StreamResponse:
     # Determine the real auth value and header based on credential type.
     # OAuth tokens use "Authorization: Bearer <token>"; API keys use the
     # route-configured header (e.g. "x-api-key: <key>").
+    # Legacy rows without "type" are detected by the presence of "access_token".
     cred_type = cred.get("type", "")
-    if cred_type == "oauth" and cred.get("access_token"):
-        real_token = cred["access_token"]
+    is_oauth = cred_type == "oauth" or (not cred_type and "access_token" in cred)
+    if is_oauth:
+        real_token = cred.get("access_token")
+        if not real_token:
+            _logger.error("Credential for %r is OAuth but missing access_token", prefix)
+            return web.Response(status=502, text="Credential misconfigured")
         auth_header = "Authorization"
         auth_prefix = "Bearer "
     else:
-        real_token = cred.get("access_token") or cred.get("token") or cred.get("key")
+        real_token = cred.get("token") or cred.get("key")
         if not real_token:
             _logger.error("Credential for %r has no usable token field", prefix)
             return web.Response(status=502, text="Credential misconfigured")
