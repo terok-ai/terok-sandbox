@@ -351,6 +351,9 @@ def _detect_rootless_network_mode() -> str:
             text=True,
             timeout=10,
         )
+        if out.returncode != 0:
+            log_debug(f"podman info failed (rc={out.returncode}), defaulting to pasta")
+            return "pasta"
         cmd = out.stdout.strip()
         return cmd if cmd in ("pasta", "slirp4netns") else "pasta"
     except (FileNotFoundError, subprocess.TimeoutExpired):
