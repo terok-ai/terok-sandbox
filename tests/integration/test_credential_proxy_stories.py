@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import aiohttp
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
@@ -195,7 +196,6 @@ class TestProxyForwardsWithRealAuth:
 
     async def test_claude_api_call(self, proxy_env: dict) -> None:
         """Claude API call through proxy gets real Bearer token injected."""
-        import aiohttp
 
         async with aiohttp.ClientSession() as session:
             async with session.post(
@@ -212,7 +212,6 @@ class TestProxyForwardsWithRealAuth:
 
     async def test_gh_api_call(self, proxy_env: dict) -> None:
         """GitHub API call through proxy gets 'token <real>' injected."""
-        import aiohttp
 
         async with aiohttp.ClientSession() as session:
             async with session.get(
@@ -226,7 +225,6 @@ class TestProxyForwardsWithRealAuth:
 
     async def test_unknown_route_returns_404(self, proxy_env: dict) -> None:
         """Request to an unknown provider prefix returns 404."""
-        import aiohttp
 
         async with aiohttp.ClientSession() as session:
             async with session.get(
@@ -237,7 +235,6 @@ class TestProxyForwardsWithRealAuth:
 
     async def test_missing_auth_returns_401(self, proxy_env: dict) -> None:
         """Request without any auth header returns 401."""
-        import aiohttp
 
         async with aiohttp.ClientSession() as session:
             async with session.get(
@@ -247,7 +244,6 @@ class TestProxyForwardsWithRealAuth:
 
     async def test_invalid_token_returns_401(self, proxy_env: dict) -> None:
         """Request with a fake/revoked phantom token returns 401."""
-        import aiohttp
 
         async with aiohttp.ClientSession() as session:
             async with session.get(
@@ -263,7 +259,6 @@ class TestProxyStreaming:
 
     async def test_sse_chunks_forwarded(self, proxy_env: dict) -> None:
         """SSE response from upstream is streamed through the proxy."""
-        import aiohttp
 
         chunks: list[bytes] = []
         async with aiohttp.ClientSession() as session:
@@ -286,7 +281,6 @@ class TestProxyAfterTokenRevocation:
 
     async def test_revoked_token_rejected_by_proxy(self, proxy_env: dict) -> None:
         """After revoking, the proxy returns 401 for the same phantom token."""
-        import aiohttp
 
         db = proxy_env["db"]
         token = proxy_env["token"]

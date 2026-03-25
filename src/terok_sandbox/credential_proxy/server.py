@@ -58,6 +58,9 @@ class _RouteTable:
     def __init__(self, routes_path: str) -> None:
         with open(routes_path) as f:
             self._routes: dict[str, dict] = json.load(f)
+        for prefix, cfg in self._routes.items():
+            if "upstream" not in cfg:
+                raise ValueError(f"Route '{prefix}' missing required 'upstream' field")
 
     def resolve(self, path: str) -> tuple[str | None, str, dict]:
         """Parse ``/{prefix}/{rest}`` and return ``(prefix, rest, route_config)``.
@@ -77,6 +80,8 @@ class _TokenDB:
     """Read-only sqlite3 accessor for phantom token lookups and credential loading."""
 
     def __init__(self, db_path: str) -> None:
+        # check_same_thread=False is safe: this is a read-only accessor and
+        # aiohttp runs handlers in a single event loop thread.
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
 
@@ -157,10 +162,16 @@ async def _handle_request(request: web.Request) -> web.StreamResponse:
     # 3. Load real credential
     cred = token_db.load_credential(token_info["credential_set"], prefix)
     if cred is None:
-        return web.Response(status=502, text=f"No credential stored for provider '{prefix}'")
+        _logger.warning(
+            "No credential for provider %r in set %r", prefix, token_info["credential_set"]
+        )
+        return web.Response(status=502, text="Credential not configured for this provider")
 
     # Determine the real auth value
-    real_token = cred.get("access_token") or cred.get("token") or cred.get("key") or ""
+    real_token = cred.get("access_token") or cred.get("token") or cred.get("key")
+    if not real_token:
+        _logger.error("Credential for %r has no usable token field", prefix)
+        return web.Response(status=502, text="Credential misconfigured")
     auth_header = route.get("auth_header", "Authorization")
     auth_prefix = route.get("auth_prefix", "Bearer ")
 
@@ -200,8 +211,8 @@ async def _handle_request(request: web.Request) -> web.StreamResponse:
             await resp.write_eof()
             return resp
     except Exception as exc:
-        _logger.error("Upstream request failed: %s", exc)
-        return web.Response(status=502, text=f"Upstream error: {exc}")
+        _logger.error("Upstream request to %s failed: %s", prefix, exc)
+        return web.Response(status=502, text="Upstream request failed")
 
 
 # ---------------------------------------------------------------------------
@@ -240,6 +251,9 @@ def main() -> None:
     parser.add_argument("--socket-path", required=True, help="Unix socket path to listen on")
     parser.add_argument("--db-path", required=True, help="Path to the credential sqlite3 database")
     parser.add_argument("--routes-file", required=True, help="Path to the route config JSON")
+    parser.add_argument(
+        "--pid-file", default=None, help="Write PID to this file (for lifecycle management)"
+    )
     parser.add_argument("--log-level", default="INFO", help="Logging level (default: INFO)")
     args = parser.parse_args()
 
@@ -249,10 +263,13 @@ def main() -> None:
     )
 
     sock_path = Path(args.socket_path)
-    # Clean stale socket
-    if sock_path.exists():
-        sock_path.unlink()
+    sock_path.unlink(missing_ok=True)
     sock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if args.pid_file:
+        import os
+
+        Path(args.pid_file).write_text(str(os.getpid()), encoding="utf-8")
 
     app = _build_app(args.db_path, args.routes_file)
 

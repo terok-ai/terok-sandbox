@@ -105,14 +105,26 @@ def start_daemon(cfg: SandboxConfig | None = None) -> None:
         f"--pid-file={pidfile}",
     ]
 
-    # Fork into background: nohup + setsid so the proxy survives shell exit
+    # Fork into background so the proxy survives shell exit.
+    # The server writes its own PID file via --pid-file.
+    import time
+
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
         start_new_session=True,
     )
-    pidfile.write_text(str(proc.pid), encoding="utf-8")
+
+    # Brief wait to catch immediate startup failures (bad args, missing deps)
+    time.sleep(0.3)
+    ret = proc.poll()
+    if ret is not None:
+        stderr = (proc.stderr.read() or b"").decode(errors="replace").strip()
+        msg = f"Credential proxy failed to start (exit {ret})"
+        if stderr:
+            msg += f":\n{stderr}"
+        raise SystemExit(msg)
 
 
 def stop_daemon(cfg: SandboxConfig | None = None) -> None:

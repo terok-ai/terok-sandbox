@@ -64,7 +64,7 @@ build_image() {
     local image="$IMAGE_PREFIX:$name"
 
     echo "==> Building $image from $file"
-    podman build -t "$image" -f "$file" "$REPO_ROOT"
+    podman build -t "$image" -f "$file" "$SCRIPT_DIR"
 }
 
 run_tests() {
@@ -97,7 +97,8 @@ run_tests() {
                 . .venv/bin/activate
                 uv pip install poetry
             else
-                python3 -m venv .venv
+                python${PYTHON_VERSION} -m venv .venv 2>/dev/null \
+                    || python3 -m venv .venv
                 . .venv/bin/activate
                 pip install --quiet --upgrade pip
                 pip install --quiet poetry
@@ -105,7 +106,8 @@ run_tests() {
 
             echo '--- python version ---'
             python --version
-            poetry install --with test --quiet 2>&1 | tail -3
+            poetry install --with test --no-interaction
+            echo '--- deps installed ---'
 
             case '$test_target' in
                 unit)
