@@ -1,0 +1,250 @@
+# SPDX-FileCopyrightText: 2026 Jiri Vyskocil
+# SPDX-License-Identifier: Apache-2.0
+
+"""Tests for credential proxy lifecycle management."""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from terok_sandbox.config import SandboxConfig
+from terok_sandbox.credential_proxy_lifecycle import (
+    CredentialProxyStatus,
+    _is_managed_proxy,
+    _pid_file,
+    ensure_proxy_reachable,
+    get_proxy_status,
+    is_daemon_running,
+    start_daemon,
+    stop_daemon,
+)
+
+
+def _make_cfg(tmp_path: Path) -> SandboxConfig:
+    """Create a SandboxConfig rooted in tmp_path."""
+    return SandboxConfig(
+        state_dir=tmp_path / "state",
+        runtime_dir=tmp_path / "run",
+    )
+
+
+class TestPidFile:
+    """Verify PID file path resolution."""
+
+    def test_pid_file_uses_config(self, tmp_path: Path) -> None:
+        """PID file path comes from config's proxy_pid_file_path."""
+        cfg = _make_cfg(tmp_path)
+        assert _pid_file(cfg) == cfg.proxy_pid_file_path
+
+    def test_pid_file_default_config(self) -> None:
+        """PID file resolves without explicit config."""
+        path = _pid_file()
+        assert "credential-proxy.pid" in str(path)
+
+
+class TestIsManagedProxy:
+    """Verify cmdline-based PID validation."""
+
+    def test_no_proc_entry(self, tmp_path: Path) -> None:
+        """Non-existent PID returns False."""
+        assert _is_managed_proxy(999999999, _make_cfg(tmp_path)) is False
+
+    def test_current_process_is_not_proxy(self, tmp_path: Path) -> None:
+        """Current process (pytest) is not the proxy."""
+        assert _is_managed_proxy(os.getpid(), _make_cfg(tmp_path)) is False
+
+    def test_matches_when_flag_present(self, tmp_path: Path) -> None:
+        """Returns True when /proc/PID/cmdline contains --pid-file=<expected>."""
+        cfg = _make_cfg(tmp_path)
+        expected_flag = f"--pid-file={_pid_file(cfg)}"
+        fake_cmdline = f"terok-credential-proxy\x00{expected_flag}\x00".encode()
+
+        with (
+            patch("pathlib.Path.is_file", return_value=True),
+            patch("pathlib.Path.read_bytes", return_value=fake_cmdline),
+        ):
+            assert _is_managed_proxy(12345, cfg) is True
+
+    def test_rejects_different_pid_file(self, tmp_path: Path) -> None:
+        """Returns False when --pid-file points to a different path."""
+        cfg = _make_cfg(tmp_path)
+        fake_cmdline = b"terok-credential-proxy\x00--pid-file=/other/path.pid\x00"
+
+        with (
+            patch("pathlib.Path.is_file", return_value=True),
+            patch("pathlib.Path.read_bytes", return_value=fake_cmdline),
+        ):
+            assert _is_managed_proxy(12345, cfg) is False
+
+
+class TestStartDaemon:
+    """Verify start_daemon behaviour."""
+
+    def test_missing_routes_file_raises(self, tmp_path: Path) -> None:
+        """start_daemon exits with an error if routes file is missing."""
+        cfg = _make_cfg(tmp_path)
+        with pytest.raises(SystemExit, match="routes file not found"):
+            start_daemon(cfg)
+
+    def test_start_launches_subprocess(self, tmp_path: Path) -> None:
+        """start_daemon calls Popen with the correct command."""
+        cfg = _make_cfg(tmp_path)
+        # Create routes file
+        routes = cfg.proxy_routes_path
+        routes.parent.mkdir(parents=True, exist_ok=True)
+        routes.write_text("{}")
+
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None  # still running
+
+        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen, patch("time.sleep"):
+            start_daemon(cfg)
+
+        cmd = mock_popen.call_args[0][0]
+        assert cmd[0] == "terok-credential-proxy"
+        assert any("--socket-path=" in a for a in cmd)
+        assert any("--pid-file=" in a for a in cmd)
+
+    def test_immediate_exit_raises(self, tmp_path: Path) -> None:
+        """start_daemon raises SystemExit if the process dies immediately."""
+        cfg = _make_cfg(tmp_path)
+        routes = cfg.proxy_routes_path
+        routes.parent.mkdir(parents=True, exist_ok=True)
+        routes.write_text("{}")
+
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = 1  # exited immediately
+        mock_proc.stderr.read.return_value = b"error: bad config"
+
+        with (
+            patch("subprocess.Popen", return_value=mock_proc),
+            patch("time.sleep"),
+            pytest.raises(SystemExit, match="failed to start"),
+        ):
+            start_daemon(cfg)
+
+
+class TestStopDaemon:
+    """Verify stop_daemon behaviour."""
+
+    def test_no_pidfile_is_noop(self, tmp_path: Path) -> None:
+        """stop_daemon does nothing when PID file doesn't exist."""
+        cfg = _make_cfg(tmp_path)
+        stop_daemon(cfg)  # should not raise
+
+    def test_sends_sigterm_to_managed_process(self, tmp_path: Path) -> None:
+        """stop_daemon sends SIGTERM when the PID is a managed proxy."""
+        cfg = _make_cfg(tmp_path)
+        pidfile = _pid_file(cfg)
+        pidfile.parent.mkdir(parents=True, exist_ok=True)
+        pidfile.write_text("42")
+
+        with (
+            patch("terok_sandbox.credential_proxy_lifecycle._is_managed_proxy", return_value=True),
+            patch("os.kill") as mock_kill,
+        ):
+            stop_daemon(cfg)
+
+        mock_kill.assert_called_once_with(42, 15)  # SIGTERM = 15
+        assert not pidfile.exists()
+
+    def test_stale_pid_cleans_up(self, tmp_path: Path) -> None:
+        """stop_daemon cleans PID file even when process is gone."""
+        cfg = _make_cfg(tmp_path)
+        pidfile = _pid_file(cfg)
+        pidfile.parent.mkdir(parents=True, exist_ok=True)
+        pidfile.write_text("99999999")
+
+        with (
+            patch("terok_sandbox.credential_proxy_lifecycle._is_managed_proxy", return_value=True),
+            patch("os.kill", side_effect=ProcessLookupError),
+        ):
+            stop_daemon(cfg)
+
+        assert not pidfile.exists()
+
+
+class TestIsDaemonRunning:
+    """Verify is_daemon_running behaviour."""
+
+    def test_no_pidfile(self, tmp_path: Path) -> None:
+        """Returns False when PID file doesn't exist."""
+        assert is_daemon_running(_make_cfg(tmp_path)) is False
+
+    def test_valid_managed_pid(self, tmp_path: Path) -> None:
+        """Returns True for a valid managed PID."""
+        cfg = _make_cfg(tmp_path)
+        pidfile = _pid_file(cfg)
+        pidfile.parent.mkdir(parents=True, exist_ok=True)
+        pidfile.write_text("42")
+
+        with (
+            patch("terok_sandbox.credential_proxy_lifecycle._is_managed_proxy", return_value=True),
+            patch("os.kill"),
+        ):  # signal 0 succeeds
+            assert is_daemon_running(cfg) is True
+
+    def test_not_our_daemon(self, tmp_path: Path) -> None:
+        """Returns False when PID doesn't match our cmdline."""
+        cfg = _make_cfg(tmp_path)
+        pidfile = _pid_file(cfg)
+        pidfile.parent.mkdir(parents=True, exist_ok=True)
+        pidfile.write_text("42")
+
+        with patch(
+            "terok_sandbox.credential_proxy_lifecycle._is_managed_proxy", return_value=False
+        ):
+            assert is_daemon_running(cfg) is False
+
+    def test_stale_pid(self, tmp_path: Path) -> None:
+        """Returns False when PID is gone."""
+        cfg = _make_cfg(tmp_path)
+        pidfile = _pid_file(cfg)
+        pidfile.parent.mkdir(parents=True, exist_ok=True)
+        pidfile.write_text("99999999")
+
+        with (
+            patch("terok_sandbox.credential_proxy_lifecycle._is_managed_proxy", return_value=True),
+            patch("os.kill", side_effect=ProcessLookupError),
+        ):
+            assert is_daemon_running(cfg) is False
+
+
+class TestGetProxyStatus:
+    """Verify get_proxy_status."""
+
+    def test_returns_status_dataclass(self, tmp_path: Path) -> None:
+        """Returns a CredentialProxyStatus with correct fields."""
+        cfg = _make_cfg(tmp_path)
+        with patch(
+            "terok_sandbox.credential_proxy_lifecycle.is_daemon_running", return_value=False
+        ):
+            status = get_proxy_status(cfg)
+
+        assert isinstance(status, CredentialProxyStatus)
+        assert status.running is False
+        assert status.socket_path == cfg.proxy_socket_path
+        assert status.db_path == cfg.proxy_db_path
+
+
+class TestEnsureProxyReachable:
+    """Verify ensure_proxy_reachable."""
+
+    def test_passes_when_running(self, tmp_path: Path) -> None:
+        """No exception when daemon is running."""
+        cfg = _make_cfg(tmp_path)
+        with patch("terok_sandbox.credential_proxy_lifecycle.is_daemon_running", return_value=True):
+            ensure_proxy_reachable(cfg)  # should not raise
+
+    def test_raises_when_stopped(self, tmp_path: Path) -> None:
+        """Raises SystemExit with actionable message when daemon is down."""
+        cfg = _make_cfg(tmp_path)
+        with (
+            patch("terok_sandbox.credential_proxy_lifecycle.is_daemon_running", return_value=False),
+            pytest.raises(SystemExit, match="not running"),
+        ):
+            ensure_proxy_reachable(cfg)

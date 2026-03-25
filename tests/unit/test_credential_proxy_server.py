@@ -236,3 +236,132 @@ class TestHandlerEdgeCases:
             resp = await client.get("/empty/v1/x", headers={"Authorization": f"Bearer {token}"})
             assert resp.status == 502
             assert "misconfigured" in (await resp.text()).lower()
+
+
+@pytest.fixture()
+def _forwarding_env(tmp_path: Path):
+    """Set up proxy + mock upstream to test the full forwarding path."""
+    from aiohttp import web as _web
+
+    # Mock upstream that echoes back auth
+    async def _echo(request: _web.Request) -> _web.Response:
+        return _web.json_response(
+            {
+                "auth": request.headers.get("Authorization", ""),
+                "path": request.path,
+            }
+        )
+
+    upstream_app = _web.Application()
+    upstream_app.router.add_route("*", "/{tail:.*}", _echo)
+
+    db = CredentialDB(tmp_path / "test.db")
+    db.store_credential("default", "claude", {"access_token": "sk-real-token"})
+    token = db.create_proxy_token("proj", "t1", "default")
+    db.close()
+
+    return upstream_app, tmp_path, token
+
+
+@pytest.mark.asyncio
+class TestForwardingPath:
+    """Exercise the full request forwarding with a mock upstream."""
+
+    async def test_forwards_with_real_auth(self, _forwarding_env) -> None:
+        """Proxy replaces phantom token with real credential in upstream request."""
+        from aiohttp.test_utils import TestClient, TestServer
+
+        upstream_app, tmp_path, token = _forwarding_env
+        upstream_server = TestServer(upstream_app)
+        await upstream_server.start_server()
+
+        routes = tmp_path / "routes.json"
+        routes.write_text(
+            json.dumps(
+                {
+                    "claude": {
+                        "upstream": f"http://127.0.0.1:{upstream_server.port}",
+                        "auth_header": "Authorization",
+                        "auth_prefix": "Bearer ",
+                    },
+                }
+            )
+        )
+
+        proxy_app = _build_app(str(tmp_path / "test.db"), str(routes))
+        async with TestClient(TestServer(proxy_app)) as client:
+            resp = await client.post(
+                "/claude/v1/messages",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"model": "test"},
+            )
+            assert resp.status == 200
+            body = await resp.json()
+            assert body["auth"] == "Bearer sk-real-token"
+            assert body["path"] == "/v1/messages"
+
+        await upstream_server.close()
+
+    async def test_forwards_query_string(self, _forwarding_env) -> None:
+        """Query string is preserved in the upstream request."""
+        from aiohttp.test_utils import TestClient, TestServer
+
+        upstream_app, tmp_path, token = _forwarding_env
+
+        # Add handler that echoes query string
+        from aiohttp import web as _web
+
+        async def echo_qs(request: _web.Request) -> _web.Response:
+            return _web.json_response({"qs": request.query_string})
+
+        upstream_app.router.add_get("/v1/check", echo_qs)
+
+        upstream_server = TestServer(upstream_app)
+        await upstream_server.start_server()
+
+        routes = tmp_path / "routes.json"
+        routes.write_text(
+            json.dumps(
+                {
+                    "claude": {"upstream": f"http://127.0.0.1:{upstream_server.port}"},
+                }
+            )
+        )
+
+        proxy_app = _build_app(str(tmp_path / "test.db"), str(routes))
+        async with TestClient(TestServer(proxy_app)) as client:
+            resp = await client.get(
+                "/claude/v1/check?foo=bar&baz=1",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert resp.status == 200
+            body = await resp.json()
+            assert "foo=bar" in body["qs"]
+
+        await upstream_server.close()
+
+    async def test_upstream_error_returns_502(self, _forwarding_env) -> None:
+        """Connection refused to upstream returns generic 502."""
+        from aiohttp.test_utils import TestClient, TestServer
+
+        _, tmp_path, token = _forwarding_env
+
+        routes = tmp_path / "routes.json"
+        routes.write_text(
+            json.dumps(
+                {
+                    "claude": {"upstream": "http://127.0.0.1:1"},  # port 1 = refused
+                }
+            )
+        )
+
+        proxy_app = _build_app(str(tmp_path / "test.db"), str(routes))
+        async with TestClient(TestServer(proxy_app)) as client:
+            resp = await client.get(
+                "/claude/v1/messages",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert resp.status == 502
+            text = await resp.text()
+            # Must NOT leak internal error details
+            assert "127.0.0.1" not in text
