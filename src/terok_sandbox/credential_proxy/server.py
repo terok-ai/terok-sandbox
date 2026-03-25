@@ -167,13 +167,25 @@ async def _handle_request(request: web.Request) -> web.StreamResponse:
         )
         return web.Response(status=502, text="Credential not configured for this provider")
 
-    # Determine the real auth value
-    real_token = cred.get("access_token") or cred.get("token") or cred.get("key")
-    if not real_token:
-        _logger.error("Credential for %r has no usable token field", prefix)
-        return web.Response(status=502, text="Credential misconfigured")
-    auth_header = route.get("auth_header", "Authorization")
-    auth_prefix = route.get("auth_prefix", "Bearer ")
+    # Determine the real auth value and header based on credential type.
+    # OAuth tokens use "Authorization: Bearer <token>"; API keys use the
+    # route-configured header (e.g. "x-api-key: <key>").
+    cred_type = cred.get("type", "")
+    if cred_type == "oauth" and cred.get("access_token"):
+        real_token = cred["access_token"]
+        auth_header = "Authorization"
+        auth_prefix = "Bearer "
+    else:
+        real_token = cred.get("access_token") or cred.get("token") or cred.get("key")
+        if not real_token:
+            _logger.error("Credential for %r has no usable token field", prefix)
+            return web.Response(status=502, text="Credential misconfigured")
+        auth_header = route.get("auth_header", "Authorization")
+        auth_prefix = route.get("auth_prefix", "Bearer ")
+        # "dynamic" means auto-detect — for API keys, use x-api-key
+        if auth_header == "dynamic":
+            auth_header = "x-api-key"
+            auth_prefix = ""
 
     # 4. Build upstream request — strip phantom auth, inject real auth
     upstream_url = route["upstream"].rstrip("/") + rest
