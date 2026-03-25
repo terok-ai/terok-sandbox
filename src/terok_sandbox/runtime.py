@@ -71,7 +71,13 @@ _ALWAYS_REDACT_KEYS = frozenset({"CODE_REPO", "CLONE_FROM"})
 
 
 def redact_env_args(cmd: list[str]) -> list[str]:
-    """Return a copy of *cmd* with sensitive ``-e KEY=VALUE`` args redacted."""
+    """Return a copy of *cmd* with sensitive ``-e KEY=VALUE`` args redacted.
+
+    Handles the two-arg form (``-e KEY=VALUE``) produced by
+    :meth:`~.sandbox.Sandbox.run`.  Does not handle ``--env``,
+    ``-e=KEY=VALUE``, or ``--env=KEY=VALUE`` — callers passing sensitive
+    values via ``extra_args`` must pre-redact them.
+    """
     out: list[str] = []
     redact_next = False
     for arg in cmd:

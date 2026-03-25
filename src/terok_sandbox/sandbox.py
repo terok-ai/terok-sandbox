@@ -189,8 +189,15 @@ class Sandbox:
                 from .shield import pre_start
 
                 cmd += pre_start(spec.container_name, spec.task_dir, self._cfg)
-            except (OSError, FileNotFoundError, SystemExit):
-                pass
+            except SystemExit:
+                raise  # ShieldNeedsSetup; let the caller handle it
+            except (OSError, FileNotFoundError) as exc:
+                import warnings
+
+                warnings.warn(
+                    f"Shield setup failed ({exc}) — container will have unfiltered egress",
+                    stacklevel=2,
+                )
 
         cmd += gpu_run_args(enabled=spec.gpu_enabled)
 
