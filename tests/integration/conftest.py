@@ -17,9 +17,11 @@ from terok_sandbox.credential_db import CredentialDB
 
 
 @pytest.fixture()
-def db(tmp_path: Path) -> CredentialDB:
-    """Return a fresh credential DB at a temp path."""
-    return CredentialDB(tmp_path / "proxy" / "credentials.db")
+def db(tmp_path: Path):
+    """Yield a fresh credential DB, closing the connection on teardown."""
+    database = CredentialDB(tmp_path / "proxy" / "credentials.db")
+    yield database
+    database.close()
 
 
 @pytest.fixture()
