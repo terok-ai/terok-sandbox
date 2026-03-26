@@ -343,7 +343,12 @@ _SLIRP_GATEWAY = "10.0.2.2"
 
 
 def _detect_rootless_network_mode() -> str:
-    """Detect whether podman uses pasta or slirp4netns for rootless networking."""
+    """Detect whether podman uses pasta or slirp4netns for rootless networking.
+
+    Falls back to slirp4netns when the field is absent (podman < 4.4
+    doesn't have ``RootlessNetworkCmd``) or when detection fails.
+    slirp4netns is the safe default — it works on all podman versions.
+    """
     try:
         out = subprocess.run(
             ["podman", "info", "-f", "{{.Host.RootlessNetworkCmd}}"],
@@ -352,12 +357,12 @@ def _detect_rootless_network_mode() -> str:
             timeout=10,
         )
         if out.returncode != 0:
-            log_debug(f"podman info failed (rc={out.returncode}), defaulting to pasta")
-            return "pasta"
+            log_debug(f"podman info failed (rc={out.returncode}), defaulting to slirp4netns")
+            return "slirp4netns"
         cmd = out.stdout.strip()
-        return cmd if cmd in ("pasta", "slirp4netns") else "pasta"
+        return cmd if cmd in ("pasta", "slirp4netns") else "slirp4netns"
     except (FileNotFoundError, subprocess.TimeoutExpired):
-        return "pasta"
+        return "slirp4netns"
 
 
 def bypass_network_args(gate_port: int) -> list[str]:
