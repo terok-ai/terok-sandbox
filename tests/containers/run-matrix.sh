@@ -25,6 +25,19 @@ SOURCE_MOUNT="/src"
 WORKSPACE_DIR="/workspace"
 PYTHON_VERSION="3.12"
 
+# ── Terminal colors (disabled when stdout is not a tty) ──
+if [[ -t 1 ]]; then
+    C_BOLD='\033[1m'
+    C_CYAN='\033[1;36m'
+    C_YELLOW='\033[1;33m'
+    C_GREEN='\033[1;32m'
+    C_RED='\033[1;31m'
+    C_DIM='\033[2m'
+    C_RESET='\033[0m'
+else
+    C_BOLD='' C_CYAN='' C_YELLOW='' C_GREEN='' C_RED='' C_DIM='' C_RESET=''
+fi
+
 # Target distros: name -> Containerfile suffix
 declare -A DISTROS=(
     [debian12]="debian12"
@@ -43,16 +56,28 @@ declare -A EXPECTED_VERSIONS=(
     [podman]="latest"
 )
 
+# Non-root user baked into each Containerfile (uid 1000).
+# The podman image uses its pre-existing 'podman' user.
+declare -A TEST_USERS=(
+    [debian12]="testrunner"
+    [ubuntu2404]="testrunner"
+    [debian13]="testrunner"
+    [fedora43]="testrunner"
+    [podman]="podman"
+)
+
 usage() {
     echo "Usage: $0 [OPTIONS] [DISTRO...]"
     echo ""
     echo "Options:"
     echo "  --build-only   Build images without running tests"
+    echo "  --no-cache     Rebuild images from scratch (ignore layer cache)"
     echo "  --list         List available distros"
     echo "  --unit-only    Run only unit tests (fast)"
-    echo "  --integration  Run only integration tests"
-    echo "  --all          Run unit + integration tests"
+    echo "  --integ-only   Run only integration tests"
     echo "  -h, --help     Show this help"
+    echo ""
+    echo "Default: run unit + integration tests."
     echo ""
     echo "Available distros: ${!DISTROS[*]}"
     return 0
@@ -62,97 +87,139 @@ build_image() {
     local name="$1"
     local file="$SCRIPT_DIR/Containerfile.${DISTROS[$name]}"
     local image="$IMAGE_PREFIX:$name"
+    local -a build_args=()
 
-    echo "==> Building $image from $file"
-    podman build -t "$image" -f "$file" "$SCRIPT_DIR"
+    $NO_CACHE && build_args+=(--no-cache)
+
+    echo -e "${C_CYAN}==> Building ${C_BOLD}$image${C_CYAN} from $file${C_RESET}"
+    podman build "${build_args[@]}" -t "$image" -f "$file" "$REPO_ROOT"
+    return $?
 }
 
 run_tests() {
     local name="$1"
-    local test_target="${2:-all}"
+    local test_scope="${2:-all}"
     local image="$IMAGE_PREFIX:$name"
     local ctr_name="$IMAGE_PREFIX-$name"
-    local status
+    local test_user="${TEST_USERS[$name]}"
 
     echo ""
-    echo "==> Testing $name (expected podman ${EXPECTED_VERSIONS[$name]})"
-    echo "    target: $test_target"
+    echo -e "${C_CYAN}==> Testing ${C_BOLD}$name${C_CYAN} (expected podman ${EXPECTED_VERSIONS[$name]})${C_RESET}"
+    echo -e "    ${C_DIM}scope: $test_scope, user: $test_user${C_RESET}"
     echo ""
 
+    # The matrix runner is the full-quality environment:
+    # install ALL infrastructure, run ALL tests as a rootless user.
+    # Privileged mode gives the outer container the capabilities needed
+    # for nested podman, but tests run as uid 1000 (rootless podman).
     podman run --rm --name "$ctr_name" \
         --privileged \
         --security-opt label=disable \
+        --device /dev/fuse:rw \
+        -e container=podman \
         -v "$REPO_ROOT:$SOURCE_MOUNT:ro,Z" \
         "$image" \
         bash -c "
             set -e
-            echo '--- podman version ---'
-            podman --version || echo 'podman not available'
 
+            # ── Prepare workspace (as root) ──
             cp -a $SOURCE_MOUNT $WORKSPACE_DIR
-            cd $WORKSPACE_DIR
+            chown -R $test_user:$test_user $WORKSPACE_DIR
 
-            if command -v uv &>/dev/null; then
-                uv venv --python $PYTHON_VERSION .venv
-                . .venv/bin/activate
-                uv pip install poetry
-            else
-                python${PYTHON_VERSION} -m venv .venv 2>/dev/null \
-                    || python3 -m venv .venv
-                . .venv/bin/activate
-                pip install --quiet --upgrade pip
-                pip install --quiet poetry
-            fi
+            # Strip IPv6 zone-ID nameservers — they reference host interfaces
+            # (e.g. eno1) that don't exist inside the container, causing dig
+            # to reject the entire resolv.conf.  Fixed upstream in podman 5.4+
+            # (https://github.com/containers/common/pull/2233).
+            # Remove once we drop < 5.4 support.
+            cp /etc/resolv.conf /tmp/resolv.conf.clean
+            grep -v '^nameserver.*%' /tmp/resolv.conf.clean > /etc/resolv.conf
 
-            echo '--- python version ---'
-            python --version
-            poetry install --with test --no-interaction
-            echo '--- deps installed ---'
+            # ── Run everything as the rootless test user ──
+            su - $test_user -c '
+                set -e
+                export XDG_RUNTIME_DIR=/run/user/\$(id -u)
 
-            case '$test_target' in
-                unit)
-                    echo ''
-                    echo '--- unit tests ---'
-                    poetry run pytest tests/unit/ -v --tb=short
-                    ;;
-                integration)
-                    echo ''
-                    echo '--- integration tests ---'
-                    poetry run pytest tests/integration/ -v --tb=short
-                    ;;
-                all)
-                    echo ''
-                    echo '--- unit tests ---'
-                    poetry run pytest tests/unit/ -v --tb=short
+                cd $WORKSPACE_DIR
 
-                    echo ''
-                    echo '--- integration tests ---'
-                    poetry run pytest tests/integration/ -v --tb=short
-                    ;;
-            esac
+                echo \"--- podman version ---\"
+                podman --version || echo \"podman not available\"
+
+                echo \"--- rootless podman preflight ---\"
+                podman info --format \"podman={{.Version.Version}} storage={{.Store.GraphDriverName}}\" \
+                    || { echo \"FATAL: rootless podman not functional\" >&2; exit 1; }
+
+                if command -v uv >/dev/null 2>&1; then
+                    uv venv --python $PYTHON_VERSION .venv
+                    . .venv/bin/activate
+                    uv pip install poetry
+                else
+                    python${PYTHON_VERSION} -m venv .venv 2>/dev/null \
+                        || python3 -m venv .venv
+                    . .venv/bin/activate
+                    pip install --quiet --upgrade pip
+                    pip install --quiet poetry
+                fi
+
+                echo \"--- python version ---\"
+                python --version
+                poetry install --with test --no-interaction
+                echo \"--- deps installed ---\"
+
+                # ── Test execution ──
+                case \"$test_scope\" in
+                    unit)
+                        echo \"\"
+                        echo \"--- unit tests ---\"
+                        poetry run pytest tests/unit/ -v --tb=short
+                        ;;
+                    integ)
+                        echo \"\"
+                        echo \"--- integration tests ---\"
+                        poetry run pytest tests/integration/ -v --tb=short
+                        ;;
+                    all)
+                        _rc=0
+
+                        echo \"\"
+                        echo \"--- unit tests ---\"
+                        poetry run pytest tests/unit/ -v --tb=short || _rc=\$?
+
+                        echo \"\"
+                        echo \"--- integration tests ---\"
+                        poetry run pytest tests/integration/ -v --tb=short || { _integ_rc=\$?; [ \$_rc -eq 0 ] && _rc=\$_integ_rc; }
+
+                        exit \$_rc
+                        ;;
+                esac
+            '
         "
 
-    status=$?
+    local status=$?
     if [[ $status -eq 0 ]]; then
-        echo "==> $name: done"
+        echo -e "${C_GREEN}==> $name: PASS${C_RESET}"
     else
-        echo "==> $name: failed" >&2
+        echo -e "${C_RED}==> $name: FAIL${C_RESET}" >&2
     fi
     return "$status"
 }
 
 BUILD_ONLY=false
 LIST_ONLY=false
-TEST_TARGET="all"
+NO_CACHE=false
+TEST_SCOPE="all"
 TARGETS=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --build-only) BUILD_ONLY=true ;;
+        --no-cache) NO_CACHE=true ;;
         --list) LIST_ONLY=true ;;
-        --unit-only) TEST_TARGET="unit" ;;
-        --integration) TEST_TARGET="integration" ;;
-        --all) TEST_TARGET="all" ;;
+        --unit-only)
+            [[ "$TEST_SCOPE" != "all" ]] && { echo "Error: --unit-only and --integ-only are mutually exclusive" >&2; exit 1; }
+            TEST_SCOPE="unit" ;;
+        --integ-only)
+            [[ "$TEST_SCOPE" != "all" ]] && { echo "Error: --unit-only and --integ-only are mutually exclusive" >&2; exit 1; }
+            TEST_SCOPE="integ" ;;
         -h|--help) usage; exit 0 ;;
         *) TARGETS+=("$1") ;;
     esac
@@ -172,7 +239,7 @@ fi
 
 for target in "${TARGETS[@]}"; do
     if [[ -z "${DISTROS[$target]+x}" ]]; then
-        echo "Error: unknown distro '$target'. Available: ${!DISTROS[*]}" >&2
+        echo -e "${C_RED}Error: unknown distro '$target'. Available: ${!DISTROS[*]}${C_RESET}" >&2
         exit 1
     fi
 done
@@ -182,7 +249,7 @@ for target in "${TARGETS[@]}"; do
 done
 
 if $BUILD_ONLY; then
-    echo "Images built. Use '$0' without --build-only to run tests."
+    echo -e "${C_GREEN}Images built.${C_RESET} Use '$0' without --build-only to run tests."
     exit 0
 fi
 
@@ -190,7 +257,7 @@ PASSED=()
 FAILED=()
 
 for target in "${TARGETS[@]}"; do
-    if run_tests "$target" "$TEST_TARGET"; then
+    if run_tests "$target" "$TEST_SCOPE"; then
         PASSED+=("$target")
     else
         FAILED+=("$target")
@@ -198,12 +265,12 @@ for target in "${TARGETS[@]}"; do
 done
 
 echo ""
-echo "===== Matrix Summary ====="
+echo -e "${C_BOLD}===== Matrix Summary =====${C_RESET}"
 for target in "${PASSED[@]}"; do
-    echo "  PASS: $target (podman ${EXPECTED_VERSIONS[$target]})"
+    echo -e "  ${C_GREEN}PASS${C_RESET}: $target ${C_DIM}(podman ${EXPECTED_VERSIONS[$target]})${C_RESET}"
 done
 for target in "${FAILED[@]}"; do
-    echo "  FAIL: $target (podman ${EXPECTED_VERSIONS[$target]})"
+    echo -e "  ${C_RED}FAIL${C_RESET}: $target ${C_DIM}(podman ${EXPECTED_VERSIONS[$target]})${C_RESET}"
 done
 
 if [[ ${#FAILED[@]} -gt 0 ]]; then
