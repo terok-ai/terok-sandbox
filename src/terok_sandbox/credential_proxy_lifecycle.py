@@ -151,9 +151,7 @@ def install_systemd_units(cfg: SandboxConfig | None = None) -> None:
     unit_dir.mkdir(parents=True, exist_ok=True)
 
     resource_dir = (
-        Path(terok_sandbox.credential_proxy.__file__).resolve().parent
-        / "resources"
-        / "systemd"
+        Path(terok_sandbox.credential_proxy.__file__).resolve().parent / "resources" / "systemd"
     )
     variables = {
         "SOCKET_PATH": str(c.proxy_socket_path),
@@ -188,7 +186,6 @@ def uninstall_systemd_units() -> None:
         check=False,
         timeout=10,
     )
-    subprocess.run(["systemctl", "--user", "daemon-reload"], check=False, timeout=10)
 
     for name in (_SOCKET_UNIT, _SERVICE_UNIT):
         unit_file = unit_dir / name

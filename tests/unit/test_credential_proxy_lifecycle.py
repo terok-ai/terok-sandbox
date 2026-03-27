@@ -16,9 +16,13 @@ from terok_sandbox.credential_proxy_lifecycle import (
     CredentialProxyStatus,
     _is_managed_proxy,
     _pid_file,
+    _systemd_unit_dir,
     ensure_proxy_reachable,
     get_proxy_status,
     is_daemon_running,
+    is_socket_active,
+    is_socket_installed,
+    is_systemd_available,
     start_daemon,
     stop_daemon,
 )
@@ -315,17 +319,125 @@ class TestGetProxyStatus:
 class TestEnsureProxyReachable:
     """Verify ensure_proxy_reachable."""
 
-    def test_passes_when_running(self, tmp_path: Path) -> None:
+    def test_passes_when_daemon_running(self, tmp_path: Path) -> None:
         """No exception when daemon is running."""
         cfg = _make_cfg(tmp_path)
-        with patch("terok_sandbox.credential_proxy_lifecycle.is_daemon_running", return_value=True):
+        with (
+            patch(f"{_LIFECYCLE}.is_socket_active", return_value=False),
+            patch(f"{_LIFECYCLE}.is_daemon_running", return_value=True),
+        ):
             ensure_proxy_reachable(cfg)  # should not raise
 
     def test_raises_when_stopped(self, tmp_path: Path) -> None:
         """Raises SystemExit with actionable message when daemon is down."""
         cfg = _make_cfg(tmp_path)
         with (
-            patch("terok_sandbox.credential_proxy_lifecycle.is_daemon_running", return_value=False),
+            patch(f"{_LIFECYCLE}.is_socket_active", return_value=False),
+            patch(f"{_LIFECYCLE}.is_daemon_running", return_value=False),
             pytest.raises(SystemExit, match="not running"),
         ):
             ensure_proxy_reachable(cfg)
+
+    def test_passes_when_socket_active(self, tmp_path: Path) -> None:
+        """No exception when systemd socket is active."""
+        cfg = _make_cfg(tmp_path)
+        with patch(f"{_LIFECYCLE}.is_socket_active", return_value=True):
+            ensure_proxy_reachable(cfg)  # should not raise
+
+
+class TestSystemdHelpers:
+    """Verify systemd detection and socket status helpers."""
+
+    def test_systemd_unit_dir_default(self) -> None:
+        """Unit dir falls back to ~/.config/systemd/user."""
+        with patch.dict(os.environ, {}, clear=True):
+            d = _systemd_unit_dir()
+        assert d == Path.home() / ".config" / "systemd" / "user"
+
+    def test_systemd_unit_dir_xdg(self, tmp_path: Path) -> None:
+        """Unit dir respects XDG_CONFIG_HOME."""
+        with patch.dict(os.environ, {"XDG_CONFIG_HOME": str(tmp_path)}):
+            d = _systemd_unit_dir()
+        assert d == tmp_path / "systemd" / "user"
+
+    def test_is_systemd_available_true(self) -> None:
+        """Returns True when systemctl is-system-running exits 0."""
+        result = MagicMock(returncode=0)
+        with patch("subprocess.run", return_value=result):
+            assert is_systemd_available() is True
+
+    def test_is_systemd_available_degraded(self) -> None:
+        """Returns True for degraded state (exit code 1)."""
+        result = MagicMock(returncode=1)
+        with patch("subprocess.run", return_value=result):
+            assert is_systemd_available() is True
+
+    def test_is_systemd_available_missing(self) -> None:
+        """Returns False when systemctl is not found."""
+        with patch("subprocess.run", side_effect=FileNotFoundError):
+            assert is_systemd_available() is False
+
+    def test_is_socket_installed_true(self, tmp_path: Path) -> None:
+        """Returns True when socket unit file exists."""
+        with patch(f"{_LIFECYCLE}._systemd_unit_dir", return_value=tmp_path):
+            (tmp_path / "terok-credential-proxy.socket").write_text("[Socket]")
+            assert is_socket_installed() is True
+
+    def test_is_socket_installed_false(self, tmp_path: Path) -> None:
+        """Returns False when socket unit file is absent."""
+        with patch(f"{_LIFECYCLE}._systemd_unit_dir", return_value=tmp_path):
+            assert is_socket_installed() is False
+
+    def test_is_socket_active_true(self) -> None:
+        """Returns True when systemctl reports active."""
+        result = MagicMock(stdout="active\n")
+        with patch("subprocess.run", return_value=result):
+            assert is_socket_active() is True
+
+    def test_is_socket_active_false(self) -> None:
+        """Returns False when systemctl reports inactive."""
+        result = MagicMock(stdout="inactive\n")
+        with patch("subprocess.run", return_value=result):
+            assert is_socket_active() is False
+
+    def test_is_socket_active_no_systemctl(self) -> None:
+        """Returns False when systemctl is not found."""
+        with patch("subprocess.run", side_effect=FileNotFoundError):
+            assert is_socket_active() is False
+
+
+class TestGetProxyStatusModes:
+    """Verify mode detection in get_proxy_status."""
+
+    def test_systemd_mode_when_socket_installed(self, tmp_path: Path) -> None:
+        """Reports mode='systemd' when socket unit is installed."""
+        cfg = _make_cfg(tmp_path)
+        with (
+            patch(f"{_LIFECYCLE}.is_socket_installed", return_value=True),
+            patch(f"{_LIFECYCLE}.is_socket_active", return_value=True),
+        ):
+            status = get_proxy_status(cfg)
+        assert status.mode == "systemd"
+        assert status.running is True
+
+    def test_daemon_mode_when_pid_running(self, tmp_path: Path) -> None:
+        """Reports mode='daemon' when PID file daemon is alive."""
+        cfg = _make_cfg(tmp_path)
+        with (
+            patch(f"{_LIFECYCLE}.is_socket_installed", return_value=False),
+            patch(f"{_LIFECYCLE}.is_daemon_running", return_value=True),
+        ):
+            status = get_proxy_status(cfg)
+        assert status.mode == "daemon"
+        assert status.running is True
+
+    def test_none_mode_when_nothing_running(self, tmp_path: Path) -> None:
+        """Reports mode='none' when neither systemd nor daemon is active."""
+        cfg = _make_cfg(tmp_path)
+        with (
+            _no_systemd(),
+            patch(f"{_LIFECYCLE}.is_daemon_running", return_value=False),
+        ):
+            status = get_proxy_status(cfg)
+        assert status.mode == "none"
+        assert status.running is False
