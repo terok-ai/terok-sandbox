@@ -317,6 +317,9 @@ def get_proxy_status(cfg: SandboxConfig | None = None) -> CredentialProxyStatus:
         except Exception:  # noqa: BLE001
             pass
 
+    # Systemd takes precedence: when units are installed, report mode="systemd"
+    # even if the socket is inactive — the daemon's running state is ignored so
+    # operators see the correct activation path and don't get mixed signals.
     if is_socket_installed():
         mode = "systemd"
         running = is_socket_active()

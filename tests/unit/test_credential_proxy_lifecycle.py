@@ -19,12 +19,14 @@ from terok_sandbox.credential_proxy_lifecycle import (
     _systemd_unit_dir,
     ensure_proxy_reachable,
     get_proxy_status,
+    install_systemd_units,
     is_daemon_running,
     is_socket_active,
     is_socket_installed,
     is_systemd_available,
     start_daemon,
     stop_daemon,
+    uninstall_systemd_units,
 )
 
 
@@ -349,8 +351,9 @@ class TestSystemdHelpers:
     """Verify systemd detection and socket status helpers."""
 
     def test_systemd_unit_dir_default(self) -> None:
-        """Unit dir falls back to ~/.config/systemd/user."""
-        with patch.dict(os.environ, {}, clear=True):
+        """Unit dir falls back to ~/.config/systemd/user when XDG_CONFIG_HOME is unset."""
+        env = {k: v for k, v in os.environ.items() if k != "XDG_CONFIG_HOME"}
+        with patch.dict(os.environ, env, clear=True):
             d = _systemd_unit_dir()
         assert d == Path.home() / ".config" / "systemd" / "user"
 
@@ -441,3 +444,66 @@ class TestGetProxyStatusModes:
             status = get_proxy_status(cfg)
         assert status.mode == "none"
         assert status.running is False
+
+    def test_systemd_mode_inactive_socket(self, tmp_path: Path) -> None:
+        """Reports mode='systemd' and running=False when socket is installed but inactive."""
+        cfg = _make_cfg(tmp_path)
+        with (
+            patch(f"{_LIFECYCLE}.is_socket_installed", return_value=True),
+            patch(f"{_LIFECYCLE}.is_socket_active", return_value=False),
+        ):
+            status = get_proxy_status(cfg)
+        assert status.mode == "systemd"
+        assert status.running is False
+
+
+class TestInstallSystemdUnits:
+    """Verify install_systemd_units."""
+
+    def test_install_creates_units_and_enables_socket(self, tmp_path: Path) -> None:
+        """install_systemd_units renders templates and runs systemctl enable."""
+        cfg = _make_cfg(tmp_path)
+        unit_dir = tmp_path / "systemd-units"
+        with (
+            patch(f"{_LIFECYCLE}._systemd_unit_dir", return_value=unit_dir),
+            patch("shutil.which", return_value="/usr/bin/terok-credential-proxy"),
+            patch("subprocess.run") as mock_run,
+        ):
+            install_systemd_units(cfg)
+        # Verify unit files were created
+        assert (unit_dir / "terok-credential-proxy.socket").is_file()
+        assert (unit_dir / "terok-credential-proxy.service").is_file()
+        # Verify systemctl was called
+        calls = [c.args[0] for c in mock_run.call_args_list]
+        assert ["systemctl", "--user", "daemon-reload"] in calls
+        assert any("enable" in c and "--now" in c for c in calls)
+
+    def test_install_raises_when_binary_missing(self, tmp_path: Path) -> None:
+        """install_systemd_units exits when terok-credential-proxy is not on PATH."""
+        cfg = _make_cfg(tmp_path)
+        with (
+            patch("shutil.which", return_value=None),
+            pytest.raises(SystemExit, match="Cannot find"),
+        ):
+            install_systemd_units(cfg)
+
+
+class TestUninstallSystemdUnits:
+    """Verify uninstall_systemd_units."""
+
+    def test_uninstall_removes_units(self, tmp_path: Path) -> None:
+        """uninstall_systemd_units removes unit files and reloads."""
+        unit_dir = tmp_path / "systemd-units"
+        unit_dir.mkdir()
+        (unit_dir / "terok-credential-proxy.socket").write_text("[Socket]")
+        (unit_dir / "terok-credential-proxy.service").write_text("[Service]")
+        with (
+            patch(f"{_LIFECYCLE}._systemd_unit_dir", return_value=unit_dir),
+            patch("subprocess.run") as mock_run,
+        ):
+            uninstall_systemd_units()
+        assert not (unit_dir / "terok-credential-proxy.socket").exists()
+        assert not (unit_dir / "terok-credential-proxy.service").exists()
+        # Verify daemon-reload was called
+        calls = [c.args[0] for c in mock_run.call_args_list]
+        assert ["systemctl", "--user", "daemon-reload"] in calls
