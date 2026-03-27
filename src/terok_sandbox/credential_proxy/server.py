@@ -259,6 +259,23 @@ def _build_app(db_path: str, routes_path: str) -> web.Application:
     return app
 
 
+def _systemd_socket():
+    """Return the inherited socket from systemd activation, or ``None``.
+
+    Implements the ``sd_listen_fds(3)`` protocol: if ``LISTEN_FDS=1`` and
+    ``LISTEN_PID`` matches the current process, file descriptor 3 is an
+    already-listening socket passed by systemd.
+    """
+    import os
+    import socket as _socket
+
+    if os.environ.get("LISTEN_FDS") == "1" and os.environ.get("LISTEN_PID") == str(os.getpid()):
+        sock = _socket.socket(fileno=3)
+        sock.setblocking(False)
+        return sock
+    return None
+
+
 def main() -> None:
     """Parse CLI args and run the credential proxy."""
     parser = argparse.ArgumentParser(
@@ -279,10 +296,6 @@ def main() -> None:
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
 
-    sock_path = Path(args.socket_path)
-    sock_path.unlink(missing_ok=True)
-    sock_path.parent.mkdir(parents=True, exist_ok=True)
-
     if args.pid_file:
         import os
 
@@ -297,8 +310,16 @@ def main() -> None:
 
     signal.signal(signal.SIGTERM, _handle_sigterm)
 
-    _logger.info("Listening on %s", sock_path)
-    web.run_app(app, path=str(sock_path), print=lambda *_: None)
+    sd_sock = _systemd_socket()
+    if sd_sock:
+        _logger.info("Using systemd-inherited socket")
+        web.run_app(app, sock=sd_sock, print=lambda *_: None)
+    else:
+        sock_path = Path(args.socket_path)
+        sock_path.unlink(missing_ok=True)
+        sock_path.parent.mkdir(parents=True, exist_ok=True)
+        _logger.info("Listening on %s", sock_path)
+        web.run_app(app, path=str(sock_path), print=lambda *_: None)
 
 
 if __name__ == "__main__":

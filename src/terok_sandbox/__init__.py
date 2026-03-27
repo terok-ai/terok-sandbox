@@ -39,9 +39,14 @@ from .credential_proxy_lifecycle import (
     CredentialProxyStatus,
     ensure_proxy_reachable,
     get_proxy_status,
+    install_systemd_units as install_proxy_systemd,
     is_daemon_running as is_proxy_running,
+    is_socket_active as is_proxy_socket_active,
+    is_socket_installed as is_proxy_socket_installed,
+    is_systemd_available as is_proxy_systemd_available,
     start_daemon as start_proxy,
     stop_daemon as stop_proxy,
+    uninstall_systemd_units as uninstall_proxy_systemd,
 )
 
 # -- Gate server -------------------------------------------------------------
@@ -162,9 +167,14 @@ __all__ = [
     "CredentialProxyStatus",
     "ensure_proxy_reachable",
     "get_proxy_status",
+    "install_proxy_systemd",
     "is_proxy_running",
+    "is_proxy_socket_active",
+    "is_proxy_socket_installed",
+    "is_proxy_systemd_available",
     "start_proxy",
     "stop_proxy",
+    "uninstall_proxy_systemd",
     # Command registry
     "CommandDef",
     "GATE_COMMANDS",
