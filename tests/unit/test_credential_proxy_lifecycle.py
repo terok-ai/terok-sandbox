@@ -477,6 +477,7 @@ class TestInstallSystemdUnits:
         calls = [c.args[0] for c in mock_run.call_args_list]
         assert ["systemctl", "--user", "daemon-reload"] in calls
         assert any("enable" in c and "--now" in c for c in calls)
+        assert any("restart" in c for c in calls)
 
     def test_install_raises_when_binary_missing(self, tmp_path: Path) -> None:
         """install_systemd_units exits when terok-credential-proxy is not on PATH."""

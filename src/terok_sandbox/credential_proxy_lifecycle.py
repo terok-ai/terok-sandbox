@@ -175,6 +175,12 @@ def install_systemd_units(cfg: SandboxConfig | None = None) -> None:
         check=True,
         timeout=10,
     )
+    # Restart to apply updated unit configuration if socket was already active.
+    subprocess.run(
+        ["systemctl", "--user", "restart", _SOCKET_UNIT],
+        check=True,
+        timeout=10,
+    )
 
 
 def uninstall_systemd_units() -> None:
