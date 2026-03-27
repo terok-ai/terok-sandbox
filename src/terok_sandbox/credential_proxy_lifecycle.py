@@ -45,6 +45,15 @@ class CredentialProxyStatus:
     db_path: Path
     """Configured credential database path."""
 
+    routes_path: Path
+    """Configured proxy routes JSON path."""
+
+    routes_configured: int
+    """Number of routes in routes.json (0 if missing or invalid)."""
+
+    credentials_stored: tuple[str, ...]
+    """Provider names with stored credentials."""
+
 
 # ---------- PID file helpers ----------
 
@@ -91,10 +100,13 @@ def start_daemon(cfg: SandboxConfig | None = None) -> None:
     pidfile.parent.mkdir(parents=True, exist_ok=True)
 
     if not routes_path.is_file():
-        raise SystemExit(
-            f"Proxy routes file not found: {routes_path}\n"
-            "Run 'terokctl auth <provider>' first to configure credentials,\n"
-            "or create a routes.json manually."
+        import logging
+
+        routes_path.parent.mkdir(parents=True, exist_ok=True)
+        routes_path.write_text("{}\n")
+        logging.getLogger(__name__).info(
+            "Created empty routes file: %s — add routes via 'terokctl auth <provider>'",
+            routes_path,
         )
 
     cmd = [
@@ -159,12 +171,42 @@ def is_daemon_running(cfg: SandboxConfig | None = None) -> bool:
 
 
 def get_proxy_status(cfg: SandboxConfig | None = None) -> CredentialProxyStatus:
-    """Return the current credential proxy status."""
+    """Return the current credential proxy status.
+
+    Populates route count from the routes JSON (0 if missing/invalid) and
+    credential provider names from the database (empty if DB doesn't exist).
+    """
     c = _cfg(cfg)
+
+    routes_count = 0
+    if c.proxy_routes_path.is_file():
+        try:
+            import json
+
+            routes_count = len(json.loads(c.proxy_routes_path.read_text()))
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    creds: tuple[str, ...] = ()
+    if c.proxy_db_path.is_file():
+        try:
+            from .credential_db import CredentialDB
+
+            db = CredentialDB(c.proxy_db_path)
+            try:
+                creds = tuple(db.list_credentials("default"))
+            finally:
+                db.close()
+        except Exception:  # noqa: BLE001
+            pass
+
     return CredentialProxyStatus(
         running=is_daemon_running(cfg),
         socket_path=c.proxy_socket_path,
         db_path=c.proxy_db_path,
+        routes_path=c.proxy_routes_path,
+        routes_configured=routes_count,
+        credentials_stored=creds,
     )
 
 

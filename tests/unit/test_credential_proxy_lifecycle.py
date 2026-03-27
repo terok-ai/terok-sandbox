@@ -84,11 +84,18 @@ class TestIsManagedProxy:
 class TestStartDaemon:
     """Verify start_daemon behaviour."""
 
-    def test_missing_routes_file_raises(self, tmp_path: Path) -> None:
-        """start_daemon exits with an error if routes file is missing."""
+    def test_missing_routes_file_creates_empty(self, tmp_path: Path) -> None:
+        """start_daemon creates an empty routes file when missing."""
         cfg = _make_cfg(tmp_path)
-        with pytest.raises(SystemExit, match="routes file not found"):
+
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None  # still running
+
+        with patch("subprocess.Popen", return_value=mock_proc), patch("time.sleep"):
             start_daemon(cfg)
+
+        assert cfg.proxy_routes_path.is_file()
+        assert cfg.proxy_routes_path.read_text() == "{}\n"
 
     def test_start_launches_subprocess(self, tmp_path: Path) -> None:
         """start_daemon calls Popen with the correct command."""
@@ -229,6 +236,66 @@ class TestGetProxyStatus:
         assert status.running is False
         assert status.socket_path == cfg.proxy_socket_path
         assert status.db_path == cfg.proxy_db_path
+        assert status.routes_path == cfg.proxy_routes_path
+        assert status.routes_configured == 0
+        assert status.credentials_stored == ()
+
+    def test_counts_routes_from_json(self, tmp_path: Path) -> None:
+        """Routes count reflects the number of entries in routes.json."""
+        cfg = _make_cfg(tmp_path)
+        routes = cfg.proxy_routes_path
+        routes.parent.mkdir(parents=True, exist_ok=True)
+        routes.write_text('{"github": {}, "gitlab": {}}')
+
+        with patch(
+            "terok_sandbox.credential_proxy_lifecycle.is_daemon_running", return_value=False
+        ):
+            status = get_proxy_status(cfg)
+
+        assert status.routes_configured == 2
+
+    def test_invalid_routes_json_yields_zero(self, tmp_path: Path) -> None:
+        """Invalid JSON in routes.json yields routes_configured=0."""
+        cfg = _make_cfg(tmp_path)
+        routes = cfg.proxy_routes_path
+        routes.parent.mkdir(parents=True, exist_ok=True)
+        routes.write_text("not valid json{{{")
+
+        with patch(
+            "terok_sandbox.credential_proxy_lifecycle.is_daemon_running", return_value=False
+        ):
+            status = get_proxy_status(cfg)
+
+        assert status.routes_configured == 0
+
+    def test_lists_stored_credentials(self, tmp_path: Path) -> None:
+        """credentials_stored lists providers from the credential DB."""
+        from terok_sandbox.credential_db import CredentialDB
+
+        cfg = _make_cfg(tmp_path)
+        db = CredentialDB(cfg.proxy_db_path)
+        db.store_credential("default", "github", {"token": "abc"})
+        db.store_credential("default", "anthropic", {"key": "xyz"})
+        db.close()
+
+        with patch(
+            "terok_sandbox.credential_proxy_lifecycle.is_daemon_running", return_value=False
+        ):
+            status = get_proxy_status(cfg)
+
+        assert set(status.credentials_stored) == {"github", "anthropic"}
+
+    def test_no_db_yields_empty_credentials(self, tmp_path: Path) -> None:
+        """credentials_stored is empty when the DB file doesn't exist."""
+        cfg = _make_cfg(tmp_path)
+        assert not cfg.proxy_db_path.is_file()
+
+        with patch(
+            "terok_sandbox.credential_proxy_lifecycle.is_daemon_running", return_value=False
+        ):
+            status = get_proxy_status(cfg)
+
+        assert status.credentials_stored == ()
 
 
 class TestEnsureProxyReachable:
