@@ -21,7 +21,14 @@ class TestProxyStart:
 
     def test_already_running(self, capsys: pytest.CaptureFixture[str]) -> None:
         """Prints message and returns when proxy is already running."""
-        status = CredentialProxyStatus(running=True, socket_path=Path("/s"), db_path=Path("/d"), routes_path=Path("/r"), routes_configured=0, credentials_stored=())
+        status = CredentialProxyStatus(
+            running=True,
+            socket_path=Path("/s"),
+            db_path=Path("/d"),
+            routes_path=Path("/r"),
+            routes_configured=0,
+            credentials_stored=(),
+        )
         with patch(f"{_LIFECYCLE}.get_proxy_status", return_value=status):
             _handle_proxy_start()
 
@@ -29,7 +36,14 @@ class TestProxyStart:
 
     def test_starts_daemon(self, capsys: pytest.CaptureFixture[str]) -> None:
         """Calls start_daemon and prints confirmation."""
-        status = CredentialProxyStatus(running=False, socket_path=Path("/s"), db_path=Path("/d"), routes_path=Path("/r"), routes_configured=0, credentials_stored=())
+        status = CredentialProxyStatus(
+            running=False,
+            socket_path=Path("/s"),
+            db_path=Path("/d"),
+            routes_path=Path("/r"),
+            routes_configured=0,
+            credentials_stored=(),
+        )
         with (
             patch(f"{_LIFECYCLE}.get_proxy_status", return_value=status),
             patch(f"{_LIFECYCLE}.start_daemon") as mock_start,
@@ -68,8 +82,12 @@ class TestProxyStatus:
     def test_shows_running(self, capsys: pytest.CaptureFixture[str]) -> None:
         """Displays running status with socket and DB paths."""
         status = CredentialProxyStatus(
-            running=True, socket_path=Path("/run/s.sock"), db_path=Path("/d/c.db"),
-            routes_path=Path("/r"), routes_configured=0, credentials_stored=(),
+            running=True,
+            socket_path=Path("/run/s.sock"),
+            db_path=Path("/d/c.db"),
+            routes_path=Path("/r"),
+            routes_configured=0,
+            credentials_stored=(),
         )
         with patch(f"{_LIFECYCLE}.get_proxy_status", return_value=status):
             _handle_proxy_status()
@@ -81,7 +99,14 @@ class TestProxyStatus:
 
     def test_shows_stopped(self, capsys: pytest.CaptureFixture[str]) -> None:
         """Displays stopped status."""
-        status = CredentialProxyStatus(running=False, socket_path=Path("/s"), db_path=Path("/d"), routes_path=Path("/r"), routes_configured=0, credentials_stored=())
+        status = CredentialProxyStatus(
+            running=False,
+            socket_path=Path("/s"),
+            db_path=Path("/d"),
+            routes_path=Path("/r"),
+            routes_configured=0,
+            credentials_stored=(),
+        )
         with patch(f"{_LIFECYCLE}.get_proxy_status", return_value=status):
             _handle_proxy_status()
 
