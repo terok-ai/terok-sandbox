@@ -39,7 +39,7 @@ class CredentialProxyStatus:
     """``"systemd"``, ``"daemon"``, or ``"none"``."""
 
     running: bool
-    """Whether the proxy daemon is currently alive."""
+    """Whether the proxy is active (systemd socket listening or daemon alive)."""
 
     socket_path: Path
     """Configured Unix socket path."""
