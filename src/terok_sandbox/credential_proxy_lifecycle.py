@@ -15,6 +15,7 @@ rather than silently starting a daemon.
 from __future__ import annotations
 
 import os
+import shlex
 import signal
 import subprocess
 from dataclasses import dataclass
@@ -136,8 +137,10 @@ def _proxy_exec_prefix() -> list[str]:
 
     Uses ``sys.executable -m terok_sandbox.credential_proxy`` so the
     server runs under the same Python that owns the installed package —
-    works in pipx, venvs, and bare installs without requiring a
-    ``terok-credential-proxy`` binary on ``$PATH``.
+    works in pipx, venvs, and bare installs without requiring the
+    ``terok-credential-proxy`` console script on ``$PATH``.  That entry
+    point (defined in pyproject.toml) remains available for direct CLI
+    use by standalone sandbox users.
     """
     import sys as _sys
 
@@ -161,7 +164,7 @@ def install_systemd_units(cfg: SandboxConfig | None = None) -> None:
         "SOCKET_PATH": str(c.proxy_socket_path),
         "DB_PATH": str(c.proxy_db_path),
         "ROUTES_PATH": str(c.proxy_routes_path),
-        "BIN": " ".join(_proxy_exec_prefix()),
+        "BIN": shlex.join(_proxy_exec_prefix()),
         "UNIT_VERSION": str(_UNIT_VERSION),
     }
 

@@ -117,7 +117,10 @@ class TestStartDaemon:
         with patch("subprocess.Popen", return_value=mock_proc) as mock_popen, patch("time.sleep"):
             start_daemon(cfg)
 
+        import sys
+
         cmd = mock_popen.call_args[0][0]
+        assert cmd[0] == sys.executable
         assert cmd[1:3] == ["-m", "terok_sandbox.credential_proxy"]
         assert any("--socket-path=" in a for a in cmd)
         assert any("--pid-file=" in a for a in cmd)
