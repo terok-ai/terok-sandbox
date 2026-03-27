@@ -117,8 +117,11 @@ class TestStartDaemon:
         with patch("subprocess.Popen", return_value=mock_proc) as mock_popen, patch("time.sleep"):
             start_daemon(cfg)
 
+        import sys
+
         cmd = mock_popen.call_args[0][0]
-        assert cmd[0] == "terok-credential-proxy"
+        assert cmd[0] == sys.executable
+        assert cmd[1:3] == ["-m", "terok_sandbox.credential_proxy"]
         assert any("--socket-path=" in a for a in cmd)
         assert any("--pid-file=" in a for a in cmd)
 
@@ -466,27 +469,20 @@ class TestInstallSystemdUnits:
         unit_dir = tmp_path / "systemd-units"
         with (
             patch(f"{_LIFECYCLE}._systemd_unit_dir", return_value=unit_dir),
-            patch("shutil.which", return_value="/usr/bin/terok-credential-proxy"),
             patch("subprocess.run") as mock_run,
         ):
             install_systemd_units(cfg)
         # Verify unit files were created
         assert (unit_dir / "terok-credential-proxy.socket").is_file()
         assert (unit_dir / "terok-credential-proxy.service").is_file()
+        # Service template should reference python -m, not a standalone binary
+        svc = (unit_dir / "terok-credential-proxy.service").read_text()
+        assert "-m terok_sandbox.credential_proxy" in svc
         # Verify systemctl was called
         calls = [c.args[0] for c in mock_run.call_args_list]
         assert ["systemctl", "--user", "daemon-reload"] in calls
         assert any("enable" in c and "--now" in c for c in calls)
         assert any("restart" in c for c in calls)
-
-    def test_install_raises_when_binary_missing(self, tmp_path: Path) -> None:
-        """install_systemd_units exits when terok-credential-proxy is not on PATH."""
-        cfg = _make_cfg(tmp_path)
-        with (
-            patch("shutil.which", return_value=None),
-            pytest.raises(SystemExit, match="Cannot find"),
-        ):
-            install_systemd_units(cfg)
 
 
 class TestUninstallSystemdUnits:

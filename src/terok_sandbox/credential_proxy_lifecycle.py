@@ -15,6 +15,7 @@ rather than silently starting a daemon.
 from __future__ import annotations
 
 import os
+import shlex
 import signal
 import subprocess
 from dataclasses import dataclass
@@ -131,20 +132,26 @@ def is_socket_active() -> bool:
         return False
 
 
+def _proxy_exec_prefix() -> list[str]:
+    """Return the command prefix for launching the credential proxy server.
+
+    Uses ``sys.executable -m terok_sandbox.credential_proxy`` so the
+    server runs under the same Python that owns the installed package —
+    works in pipx, venvs, and bare installs without requiring the
+    ``terok-credential-proxy`` console script on ``$PATH``.  That entry
+    point (defined in pyproject.toml) remains available for direct CLI
+    use by standalone sandbox users.
+    """
+    import sys as _sys
+
+    return [_sys.executable, "-m", "terok_sandbox.credential_proxy"]
+
+
 def install_systemd_units(cfg: SandboxConfig | None = None) -> None:
     """Render and install systemd socket+service units, then enable+start the socket."""
-    import shutil
-
     import terok_sandbox.credential_proxy
 
     from ._util import render_template
-
-    proxy_bin = shutil.which("terok-credential-proxy")
-    if not proxy_bin:
-        raise SystemExit(
-            "Cannot find 'terok-credential-proxy' on PATH.\n"
-            "Ensure terok is installed (pip/pipx/poetry) and the binary is accessible."
-        )
 
     c = _cfg(cfg)
     unit_dir = _systemd_unit_dir()
@@ -157,7 +164,7 @@ def install_systemd_units(cfg: SandboxConfig | None = None) -> None:
         "SOCKET_PATH": str(c.proxy_socket_path),
         "DB_PATH": str(c.proxy_db_path),
         "ROUTES_PATH": str(c.proxy_routes_path),
-        "BIN": proxy_bin,
+        "BIN": shlex.join(_proxy_exec_prefix()),
         "UNIT_VERSION": str(_UNIT_VERSION),
     }
 
@@ -205,7 +212,7 @@ def uninstall_systemd_units() -> None:
 
 
 def start_daemon(cfg: SandboxConfig | None = None) -> None:
-    """Start a ``terok-credential-proxy`` daemon process.
+    """Start the credential proxy as a background daemon.
 
     The proxy listens on a Unix socket and reads credentials from a
     sqlite3 database.  A routes JSON file must exist at the configured
@@ -233,7 +240,7 @@ def start_daemon(cfg: SandboxConfig | None = None) -> None:
         )
 
     cmd = [
-        "terok-credential-proxy",
+        *_proxy_exec_prefix(),
         f"--socket-path={sock_path}",
         f"--db-path={db_path}",
         f"--routes-file={routes_path}",
