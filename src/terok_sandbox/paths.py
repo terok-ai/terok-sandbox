@@ -69,11 +69,15 @@ def state_root() -> Path:
 def runtime_root() -> Path:
     """Transient runtime directory (PID files, sockets).
 
-    Priority: ``TEROK_RUNTIME_DIR`` → ``/run/terok`` (root) → ``~/.cache/terok``.
+    Priority: ``TEROK_RUNTIME_DIR`` → ``/run/terok`` (root) →
+    ``$XDG_RUNTIME_DIR/terok`` → ``~/.cache/terok``.
     """
     env = os.getenv("TEROK_RUNTIME_DIR")
     if env:
         return Path(env).expanduser()
     if _is_root():
         return Path("/run") / APP_NAME
-    return Path.home() / ".cache" / APP_NAME
+    xdg_runtime = os.getenv("XDG_RUNTIME_DIR")
+    if xdg_runtime:
+        return Path(xdg_runtime) / APP_NAME
+    return Path.home() / ".local" / "state" / APP_NAME
