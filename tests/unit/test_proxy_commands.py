@@ -22,6 +22,7 @@ class TestProxyStart:
     def test_already_running(self, capsys: pytest.CaptureFixture[str]) -> None:
         """Prints message and returns when proxy is already running."""
         status = CredentialProxyStatus(
+            mode="daemon",
             running=True,
             socket_path=Path("/s"),
             db_path=Path("/d"),
@@ -37,6 +38,7 @@ class TestProxyStart:
     def test_starts_daemon(self, capsys: pytest.CaptureFixture[str]) -> None:
         """Calls start_daemon and prints confirmation."""
         status = CredentialProxyStatus(
+            mode="none",
             running=False,
             socket_path=Path("/s"),
             db_path=Path("/d"),
@@ -82,6 +84,7 @@ class TestProxyStatus:
     def test_shows_running(self, capsys: pytest.CaptureFixture[str]) -> None:
         """Displays running status with socket and DB paths."""
         status = CredentialProxyStatus(
+            mode="daemon",
             running=True,
             socket_path=Path("/run/s.sock"),
             db_path=Path("/d/c.db"),
@@ -100,6 +103,7 @@ class TestProxyStatus:
     def test_shows_stopped(self, capsys: pytest.CaptureFixture[str]) -> None:
         """Displays stopped status."""
         status = CredentialProxyStatus(
+            mode="none",
             running=False,
             socket_path=Path("/s"),
             db_path=Path("/d"),

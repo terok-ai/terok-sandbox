@@ -221,18 +221,28 @@ class TestIsDaemonRunning:
             assert is_daemon_running(cfg) is False
 
 
+_LIFECYCLE = "terok_sandbox.credential_proxy_lifecycle"
+
+
+def _no_systemd():
+    """Context manager that patches out systemd detection."""
+    return patch(f"{_LIFECYCLE}.is_socket_installed", return_value=False)
+
+
 class TestGetProxyStatus:
     """Verify get_proxy_status."""
 
     def test_returns_status_dataclass(self, tmp_path: Path) -> None:
         """Returns a CredentialProxyStatus with correct fields."""
         cfg = _make_cfg(tmp_path)
-        with patch(
-            "terok_sandbox.credential_proxy_lifecycle.is_daemon_running", return_value=False
+        with (
+            _no_systemd(),
+            patch(f"{_LIFECYCLE}.is_daemon_running", return_value=False),
         ):
             status = get_proxy_status(cfg)
 
         assert isinstance(status, CredentialProxyStatus)
+        assert status.mode == "none"
         assert status.running is False
         assert status.socket_path == cfg.proxy_socket_path
         assert status.db_path == cfg.proxy_db_path
@@ -247,8 +257,9 @@ class TestGetProxyStatus:
         routes.parent.mkdir(parents=True, exist_ok=True)
         routes.write_text('{"github": {}, "gitlab": {}}')
 
-        with patch(
-            "terok_sandbox.credential_proxy_lifecycle.is_daemon_running", return_value=False
+        with (
+            _no_systemd(),
+            patch(f"{_LIFECYCLE}.is_daemon_running", return_value=False),
         ):
             status = get_proxy_status(cfg)
 
@@ -261,8 +272,9 @@ class TestGetProxyStatus:
         routes.parent.mkdir(parents=True, exist_ok=True)
         routes.write_text("not valid json{{{")
 
-        with patch(
-            "terok_sandbox.credential_proxy_lifecycle.is_daemon_running", return_value=False
+        with (
+            _no_systemd(),
+            patch(f"{_LIFECYCLE}.is_daemon_running", return_value=False),
         ):
             status = get_proxy_status(cfg)
 
@@ -278,8 +290,9 @@ class TestGetProxyStatus:
         db.store_credential("default", "anthropic", {"key": "xyz"})
         db.close()
 
-        with patch(
-            "terok_sandbox.credential_proxy_lifecycle.is_daemon_running", return_value=False
+        with (
+            _no_systemd(),
+            patch(f"{_LIFECYCLE}.is_daemon_running", return_value=False),
         ):
             status = get_proxy_status(cfg)
 
@@ -290,8 +303,9 @@ class TestGetProxyStatus:
         cfg = _make_cfg(tmp_path)
         assert not cfg.proxy_db_path.is_file()
 
-        with patch(
-            "terok_sandbox.credential_proxy_lifecycle.is_daemon_running", return_value=False
+        with (
+            _no_systemd(),
+            patch(f"{_LIFECYCLE}.is_daemon_running", return_value=False),
         ):
             status = get_proxy_status(cfg)
 

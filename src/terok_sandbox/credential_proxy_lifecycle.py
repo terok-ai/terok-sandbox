@@ -4,9 +4,8 @@
 """Credential proxy lifecycle management.
 
 Manages the ``terok-credential-proxy`` daemon: start, stop, status, and
-pre-task health checks.  Mirrors the gate server pattern from
-:mod:`gate_server` but simpler (daemon-only for now; systemd socket
-activation can be added later).
+pre-task health checks.  Supports systemd socket activation (preferred)
+and a manual daemon fallback.
 
 **No auto-start.**  Task creation checks reachability via
 :func:`ensure_proxy_reachable` and fails with an actionable error
@@ -35,6 +34,9 @@ def _cfg(cfg: SandboxConfig | None = None) -> SandboxConfig:
 @dataclass(frozen=True)
 class CredentialProxyStatus:
     """Current state of the credential proxy."""
+
+    mode: str
+    """``"systemd"``, ``"daemon"``, or ``"none"``."""
 
     running: bool
     """Whether the proxy daemon is currently alive."""
@@ -76,6 +78,124 @@ def _is_managed_proxy(pid: int, cfg: SandboxConfig | None = None) -> bool:
     args_str = [a.decode("utf-8", errors="ignore") for a in args]
     expected = f"--pid-file={_pid_file(cfg)}"
     return expected in args_str
+
+
+# ---------- Systemd helpers ----------
+
+_UNIT_VERSION = 1
+"""Bump when the systemd unit templates change."""
+
+_SOCKET_UNIT = "terok-credential-proxy.socket"
+"""Name of the systemd socket unit file."""
+
+_SERVICE_UNIT = "terok-credential-proxy.service"
+"""Name of the systemd service unit file."""
+
+
+def _systemd_unit_dir() -> Path:
+    """Return the systemd user unit directory."""
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    return (Path(xdg) if xdg else Path.home() / ".config") / "systemd" / "user"
+
+
+def is_systemd_available() -> bool:
+    """Check whether the systemd user session is reachable."""
+    try:
+        result = subprocess.run(
+            ["systemctl", "--user", "is-system-running"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return result.returncode in (0, 1)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
+def is_socket_installed() -> bool:
+    """Check whether the ``terok-credential-proxy.socket`` unit file exists."""
+    return (_systemd_unit_dir() / _SOCKET_UNIT).is_file()
+
+
+def is_socket_active() -> bool:
+    """Check whether the ``terok-credential-proxy.socket`` unit is active."""
+    try:
+        result = subprocess.run(
+            ["systemctl", "--user", "is-active", _SOCKET_UNIT],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return result.stdout.strip() == "active"
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
+def install_systemd_units(cfg: SandboxConfig | None = None) -> None:
+    """Render and install systemd socket+service units, then enable+start the socket."""
+    import shutil
+
+    import terok_sandbox.credential_proxy
+
+    from ._util import render_template
+
+    proxy_bin = shutil.which("terok-credential-proxy")
+    if not proxy_bin:
+        raise SystemExit(
+            "Cannot find 'terok-credential-proxy' on PATH.\n"
+            "Ensure terok is installed (pip/pipx/poetry) and the binary is accessible."
+        )
+
+    c = _cfg(cfg)
+    unit_dir = _systemd_unit_dir()
+    unit_dir.mkdir(parents=True, exist_ok=True)
+
+    resource_dir = (
+        Path(terok_sandbox.credential_proxy.__file__).resolve().parent
+        / "resources"
+        / "systemd"
+    )
+    variables = {
+        "SOCKET_PATH": str(c.proxy_socket_path),
+        "DB_PATH": str(c.proxy_db_path),
+        "ROUTES_PATH": str(c.proxy_routes_path),
+        "BIN": proxy_bin,
+        "UNIT_VERSION": str(_UNIT_VERSION),
+    }
+
+    for template_name in (_SOCKET_UNIT, _SERVICE_UNIT):
+        template_path = resource_dir / template_name
+        if not template_path.is_file():
+            raise SystemExit(f"Missing systemd template: {template_path}")
+        content = render_template(template_path, variables)
+        (unit_dir / template_name).write_text(content, encoding="utf-8")
+
+    c.proxy_socket_path.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["systemctl", "--user", "daemon-reload"], check=True, timeout=10)
+    subprocess.run(
+        ["systemctl", "--user", "enable", "--now", _SOCKET_UNIT],
+        check=True,
+        timeout=10,
+    )
+
+
+def uninstall_systemd_units() -> None:
+    """Disable+stop the socket and remove unit files."""
+    unit_dir = _systemd_unit_dir()
+
+    subprocess.run(
+        ["systemctl", "--user", "disable", "--now", _SOCKET_UNIT],
+        check=False,
+        timeout=10,
+    )
+    subprocess.run(["systemctl", "--user", "daemon-reload"], check=False, timeout=10)
+
+    for name in (_SOCKET_UNIT, _SERVICE_UNIT):
+        unit_file = unit_dir / name
+        if unit_file.is_file():
+            unit_file.unlink()
+
+    subprocess.run(["systemctl", "--user", "daemon-reload"], check=False, timeout=10)
 
 
 # ---------- Public API ----------
@@ -200,8 +320,19 @@ def get_proxy_status(cfg: SandboxConfig | None = None) -> CredentialProxyStatus:
         except Exception:  # noqa: BLE001
             pass
 
+    if is_socket_installed():
+        mode = "systemd"
+        running = is_socket_active()
+    elif is_daemon_running(cfg):
+        mode = "daemon"
+        running = True
+    else:
+        mode = "none"
+        running = False
+
     return CredentialProxyStatus(
-        running=is_daemon_running(cfg),
+        mode=mode,
+        running=running,
         socket_path=c.proxy_socket_path,
         db_path=c.proxy_db_path,
         routes_path=c.proxy_routes_path,
@@ -216,17 +347,21 @@ def ensure_proxy_reachable(cfg: SandboxConfig | None = None) -> None:
     Raises ``SystemExit`` with an actionable message if the proxy is down.
     Called before task creation when credential proxy is enabled.
     """
-    if is_daemon_running(cfg):
+    if is_socket_active() or is_daemon_running(cfg):
         return
 
     c = _cfg(cfg)
+    hint = (
+        "  terokctl credentials install   (systemd socket activation)\n"
+        "  terokctl credentials start      (manual daemon)"
+    )
     msg = (
         "Credential proxy is not running.\n"
         "\n"
         "The credential proxy injects real API credentials into container\n"
         "requests without exposing secrets to the container filesystem.\n"
         "\n"
-        f"Start it with:\n  terok-sandbox proxy start\n"
+        f"Start it with:\n{hint}\n"
         f"\n"
         f"Socket: {c.proxy_socket_path}\n"
         f"DB:     {c.proxy_db_path}\n"

@@ -100,12 +100,14 @@ depends_on = []
 path = "terok_sandbox.credential_proxy"
 depends_on = []
 
-# Credential proxy lifecycle — depends on config, credential_db
+# Credential proxy lifecycle — depends on config, credential_db, _util
 [[modules]]
 path = "terok_sandbox.credential_proxy_lifecycle"
 depends_on = [
+    "terok_sandbox._util",
     "terok_sandbox.config",
     "terok_sandbox.credential_db",
+    "terok_sandbox.credential_proxy",
 ]
 
 # Sandbox facade — composes shield, gate, runtime, SSH
