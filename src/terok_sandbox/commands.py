@@ -217,6 +217,11 @@ def _handle_proxy_status() -> None:
     print(f"Status: {state}")
     print(f"Socket: {status.socket_path}")
     print(f"DB:     {status.db_path}")
+    print(f"Routes: {status.routes_path} ({status.routes_configured} configured)")
+    if status.credentials_stored:
+        print(f"Credentials: {', '.join(status.credentials_stored)}")
+    else:
+        print("Credentials: none stored")
 
 
 PROXY_COMMANDS: tuple[CommandDef, ...] = (
