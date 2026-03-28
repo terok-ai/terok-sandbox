@@ -83,7 +83,7 @@ def _is_managed_proxy(pid: int, cfg: SandboxConfig | None = None) -> bool:
 
 # ---------- Systemd helpers ----------
 
-_UNIT_VERSION = 1
+_UNIT_VERSION = 2
 """Bump when the systemd unit templates change."""
 
 _SOCKET_UNIT = "terok-credential-proxy.socket"
@@ -164,6 +164,7 @@ def install_systemd_units(cfg: SandboxConfig | None = None) -> None:
         "SOCKET_PATH": str(c.proxy_socket_path),
         "DB_PATH": str(c.proxy_db_path),
         "ROUTES_PATH": str(c.proxy_routes_path),
+        "PORT": str(c.proxy_port),
         "BIN": shlex.join(_proxy_exec_prefix()),
         "UNIT_VERSION": str(_UNIT_VERSION),
     }
