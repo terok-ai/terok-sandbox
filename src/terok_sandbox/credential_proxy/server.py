@@ -123,7 +123,7 @@ class _TokenDB:
 # Auth extraction helpers
 # ---------------------------------------------------------------------------
 
-_AUTH_HEADERS = ("authorization", "x-api-key")
+_AUTH_HEADERS = ("authorization", "x-api-key", "private-token")
 
 
 def _extract_phantom_token(request: web.Request) -> str | None:
