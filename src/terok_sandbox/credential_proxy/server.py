@@ -205,7 +205,9 @@ async def _handle_request(request: web.Request) -> web.StreamResponse:
     }
     headers[auth_header] = f"{auth_prefix}{real_token}"
     if is_oauth and oauth_beta_header:
-        headers.setdefault("anthropic-beta", oauth_beta_header)
+        existing = headers.get("anthropic-beta", "")
+        if oauth_beta_header not in existing:
+            headers["anthropic-beta"] = f"{existing},{oauth_beta_header}".lstrip(",")
 
     # 5. Forward and stream response
     session: ClientSession = request.app[_KEY_CLIENT]
