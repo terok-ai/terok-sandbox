@@ -69,7 +69,27 @@ class TestProxyTokens:
         token = db.create_proxy_token("proj1", "task-42", "default")
         assert len(token) == 32  # hex(16 bytes)
         info = db.lookup_proxy_token(token)
-        assert info == {"project": "proj1", "task": "task-42", "credential_set": "default"}
+        assert info == {
+            "project": "proj1",
+            "task": "task-42",
+            "credential_set": "default",
+            "provider": "",
+        }
+
+    def test_create_with_provider(self, db: CredentialDB) -> None:
+        """Per-provider tokens encode the provider name."""
+        token = db.create_proxy_token("proj1", "task-1", "default", "claude")
+        info = db.lookup_proxy_token(token)
+        assert info is not None
+        assert info["provider"] == "claude"
+
+    def test_per_provider_tokens_are_independent(self, db: CredentialDB) -> None:
+        """Different providers get different tokens for the same task."""
+        t_claude = db.create_proxy_token("p", "t", "default", "claude")
+        t_vibe = db.create_proxy_token("p", "t", "default", "vibe")
+        assert t_claude != t_vibe
+        assert db.lookup_proxy_token(t_claude)["provider"] == "claude"
+        assert db.lookup_proxy_token(t_vibe)["provider"] == "vibe"
 
     def test_lookup_invalid_returns_none(self, db: CredentialDB) -> None:
         """Looking up a non-existent token returns None."""
