@@ -53,31 +53,18 @@ _KEY_CLIENT = web.AppKey("client_session", ClientSession)
 
 
 class _RouteTable:
-    """Path-prefix routing table loaded from a JSON file."""
+    """Provider routing table loaded from a JSON file."""
 
     def __init__(self, routes_path: str) -> None:
         with open(routes_path) as f:
             self._routes: dict[str, dict] = json.load(f)
-        for prefix, cfg in self._routes.items():
+        for name, cfg in self._routes.items():
             if "upstream" not in cfg:
-                raise ValueError(f"Route '{prefix}' missing required 'upstream' field")
+                raise ValueError(f"Route '{name}' missing required 'upstream' field")
 
     def get(self, provider: str) -> dict | None:
         """Return the route config for *provider*, or ``None``."""
         return self._routes.get(provider)
-
-    def resolve(self, path: str) -> tuple[str | None, str, dict]:
-        """Parse ``/{prefix}/{rest}`` and return ``(prefix, rest, route_config)``.
-
-        Returns ``(None, path, {})`` if no route matches.
-        """
-        parts = path.lstrip("/").split("/", 1)
-        prefix = parts[0] if parts else ""
-        rest = f"/{parts[1]}" if len(parts) > 1 else "/"
-        route = self._routes.get(prefix)
-        if route is None:
-            return None, path, {}
-        return prefix, rest, route
 
 
 class _TokenDB:
@@ -132,7 +119,7 @@ def _extract_phantom_token(request: web.Request) -> str | None:
         value = request.headers.get(header)
         if not value:
             continue
-        # Strip "Bearer ", "token ", etc. prefixes
+        # Strip "Bearer ", "token ", etc. provideres
         if " " in value:
             return value.split(None, 1)[1]
         return value
@@ -158,20 +145,14 @@ async def _handle_request(request: web.Request) -> web.StreamResponse:
     if token_info is None:
         return web.Response(status=401, text="Invalid token")
 
-    # 2. Route by token's provider, falling back to path prefix
+    # 2. Route by token's provider
     provider = token_info.get("provider", "")
-    token_routed = bool(provider)
-    if provider:
-        route = routes.get(provider)
-        if route is None:
-            return web.Response(status=404, text=f"No route for provider: {provider}")
-        rest = request.path  # Client sends the full API path
-    else:
-        # Legacy: no provider in token, fall back to path-based routing
-        prefix, rest, route = routes.resolve(request.path)
-        if prefix is None:
-            return web.Response(status=404, text="Unknown route")
-        provider = prefix
+    if not provider:
+        return web.Response(status=400, text="Token has no provider — re-auth required")
+    route = routes.get(provider)
+    if route is None:
+        return web.Response(status=404, text=f"No route for provider: {provider}")
+    rest = request.path
 
     # 3. Load real credential
     cred = token_db.load_credential(token_info["credential_set"], provider)
@@ -190,7 +171,7 @@ async def _handle_request(request: web.Request) -> web.StreamResponse:
     if is_oauth:
         real_token = cred.get("access_token")
         if not real_token:
-            _logger.error("Credential for %r is OAuth but missing access_token", prefix)
+            _logger.error("Credential for %r is OAuth but missing access_token", provider)
             return web.Response(status=502, text="Credential misconfigured")
         auth_header = "Authorization"
         auth_prefix = "Bearer "
@@ -198,7 +179,7 @@ async def _handle_request(request: web.Request) -> web.StreamResponse:
     else:
         real_token = cred.get("token") or cred.get("key")
         if not real_token:
-            _logger.error("Credential for %r has no usable token field", prefix)
+            _logger.error("Credential for %r has no usable token field", provider)
             return web.Response(status=502, text="Credential misconfigured")
         auth_header = route.get("auth_header", "Authorization")
         auth_prefix = route.get("auth_prefix", "Bearer ")
@@ -208,15 +189,10 @@ async def _handle_request(request: web.Request) -> web.StreamResponse:
             auth_prefix = ""
 
     # 4. Build upstream request — strip phantom auth, inject real auth
-    if token_routed:
-        # Token-routed: client sends full API path, use upstream origin only
-        from urllib.parse import urlparse
+    from urllib.parse import urlparse
 
-        parsed = urlparse(route["upstream"])
-        upstream_url = f"{parsed.scheme}://{parsed.netloc}{rest}"
-    else:
-        # Path-routed: prefix was stripped, append rest to full upstream
-        upstream_url = route["upstream"].rstrip("/") + rest
+    parsed = urlparse(route["upstream"])
+    upstream_url = f"{parsed.scheme}://{parsed.netloc}{rest}"
     if request.query_string:
         upstream_url += f"?{request.query_string}"
 
@@ -255,7 +231,7 @@ async def _handle_request(request: web.Request) -> web.StreamResponse:
             await resp.write_eof()
             return resp
     except Exception as exc:
-        _logger.error("Upstream request to %s failed: %s", prefix, exc)
+        _logger.error("Upstream request to %s failed: %s", provider, exc)
         return web.Response(status=502, text="Upstream request failed")
 
 
