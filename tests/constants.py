@@ -48,9 +48,6 @@ LOCALHOST = "127.0.0.1"
 GATE_PORT = 9418
 """Default gate server port."""
 
-PROXY_PORT = 18731
-"""Default credential proxy port."""
-
 FAKE_PEER_PORT = 12345
 """Arbitrary port for fake client_address tuples."""
 

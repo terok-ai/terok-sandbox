@@ -284,30 +284,23 @@ async def _run_multi(app: web.Application, *, sock_path: str, port: int | None) 
 
     runner = AppRunner(app)
     await runner.setup()
-
-    sites: list[SockSite | UnixSite | TCPSite] = []
-
-    sd_sock = _systemd_socket()
-    if sd_sock:
-        _logger.info("Using systemd-inherited socket")
-        sites.append(SockSite(runner, sd_sock))
-    else:
-        path = Path(sock_path)
-        path.unlink(missing_ok=True)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        _logger.info("Listening on %s", path)
-        sites.append(UnixSite(runner, str(path)))
-
-    if port is not None:
-        _logger.info("Listening on 127.0.0.1:%d", port)
-        sites.append(TCPSite(runner, "127.0.0.1", port))
-
-    for site in sites:
-        await site.start()
-
-    # Block until cancelled
     try:
-        await asyncio.Event().wait()
+        sd_sock = _systemd_socket()
+        if sd_sock:
+            _logger.info("Using systemd-inherited socket")
+            await SockSite(runner, sd_sock).start()
+        else:
+            path = Path(sock_path)
+            path.unlink(missing_ok=True)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            _logger.info("Listening on %s", path)
+            await UnixSite(runner, str(path)).start()
+
+        if port is not None:
+            _logger.info("Listening on 127.0.0.1:%d", port)
+            await TCPSite(runner, "127.0.0.1", port).start()
+
+        await asyncio.Event().wait()  # Block until cancelled
     finally:
         await runner.cleanup()
 
