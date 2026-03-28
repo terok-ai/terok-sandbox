@@ -119,7 +119,7 @@ def _extract_phantom_token(request: web.Request) -> str | None:
         value = request.headers.get(header)
         if not value:
             continue
-        # Strip "Bearer ", "token ", etc. provideres
+        # Strip "Bearer ", "token ", etc. prefixes
         if " " in value:
             return value.split(None, 1)[1]
         return value
