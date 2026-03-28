@@ -53,7 +53,7 @@ class CredentialDB:
                 project        TEXT NOT NULL,
                 task           TEXT NOT NULL,
                 credential_set TEXT NOT NULL,
-                provider       TEXT NOT NULL DEFAULT ''
+                provider       TEXT NOT NULL
             );
         """)
 
@@ -94,9 +94,9 @@ class CredentialDB:
     # ── Phantom tokens ───────────────────────────────────────────────────
 
     def create_proxy_token(
-        self, project: str, task: str, credential_set: str, provider: str = ""
+        self, project: str, task: str, credential_set: str, provider: str
     ) -> str:
-        """Create a per-task phantom token, optionally scoped to *provider*."""
+        """Create a per-task, per-provider phantom token."""
         token = secrets.token_hex(16)
         self._conn.execute(
             "INSERT INTO proxy_tokens (token, project, task, credential_set, provider)"

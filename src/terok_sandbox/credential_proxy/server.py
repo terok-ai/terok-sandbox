@@ -146,9 +146,7 @@ async def _handle_request(request: web.Request) -> web.StreamResponse:
         return web.Response(status=401, text="Invalid token")
 
     # 2. Route by token's provider
-    provider = token_info.get("provider", "")
-    if not provider:
-        return web.Response(status=400, text="Token has no provider — re-auth required")
+    provider = token_info["provider"]
     route = routes.get(provider)
     if route is None:
         return web.Response(status=404, text=f"No route for provider: {provider}")

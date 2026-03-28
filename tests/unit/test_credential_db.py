@@ -66,14 +66,14 @@ class TestProxyTokens:
 
     def test_create_and_lookup(self, db: CredentialDB) -> None:
         """Create a token, look it up, verify fields."""
-        token = db.create_proxy_token("proj1", "task-42", "default")
+        token = db.create_proxy_token("proj1", "task-42", "default", "claude")
         assert len(token) == 32  # hex(16 bytes)
         info = db.lookup_proxy_token(token)
         assert info == {
             "project": "proj1",
             "task": "task-42",
             "credential_set": "default",
-            "provider": "",
+            "provider": "claude",
         }
 
     def test_create_with_provider(self, db: CredentialDB) -> None:
@@ -97,17 +97,17 @@ class TestProxyTokens:
 
     def test_tokens_are_unique(self, db: CredentialDB) -> None:
         """Multiple tokens for the same task are distinct."""
-        t1 = db.create_proxy_token("p", "t", "default")
-        t2 = db.create_proxy_token("p", "t", "default")
+        t1 = db.create_proxy_token("p", "t", "default", "claude")
+        t2 = db.create_proxy_token("p", "t", "default", "claude")
         assert t1 != t2
         assert db.lookup_proxy_token(t1) is not None
         assert db.lookup_proxy_token(t2) is not None
 
     def test_revoke_removes_all_for_task(self, db: CredentialDB) -> None:
         """revoke_proxy_tokens removes all tokens for a project/task pair."""
-        t1 = db.create_proxy_token("proj", "task-1", "default")
-        t2 = db.create_proxy_token("proj", "task-1", "default")
-        t3 = db.create_proxy_token("proj", "task-2", "default")
+        t1 = db.create_proxy_token("proj", "task-1", "default", "claude")
+        t2 = db.create_proxy_token("proj", "task-1", "default", "claude")
+        t3 = db.create_proxy_token("proj", "task-2", "default", "claude")
         count = db.revoke_proxy_tokens("proj", "task-1")
         assert count == 2
         assert db.lookup_proxy_token(t1) is None

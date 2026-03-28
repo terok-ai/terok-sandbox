@@ -172,7 +172,6 @@ def _proxy_env(tmp_path: Path):
     db.store_credential("default", "empty", {"type": "oauth"})  # no token fields
     claude_token = db.create_proxy_token("proj", "t1", "default", "claude")
     empty_token = db.create_proxy_token("proj", "t1", "default", "empty")
-    no_provider_token = db.create_proxy_token("proj", "t1", "default")
     db.close()
 
     routes = tmp_path / "routes.json"
@@ -193,7 +192,6 @@ def _proxy_env(tmp_path: Path):
     return app, {
         "claude": claude_token,
         "empty": empty_token,
-        "no_provider": no_provider_token,
     }
 
 
@@ -218,19 +216,6 @@ class TestHandlerEdgeCases:
         async with TestClient(TestServer(app)) as client:
             resp = await client.get("/v1/messages", headers={"Authorization": "Bearer fake"})
             assert resp.status == 401
-
-    async def test_token_without_provider_400(self, _proxy_env) -> None:
-        """Token without provider field returns 400."""
-        from aiohttp.test_utils import TestClient, TestServer
-
-        app, tokens = _proxy_env
-        async with TestClient(TestServer(app)) as client:
-            resp = await client.get(
-                "/v1/messages",
-                headers={"Authorization": f"Bearer {tokens['no_provider']}"},
-            )
-            assert resp.status == 400
-            assert "re-auth" in (await resp.text()).lower()
 
     async def test_empty_credential_returns_502(self, _proxy_env) -> None:
         """Credential with no usable token field returns 502."""
