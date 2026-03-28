@@ -180,6 +180,7 @@ async def _handle_request(request: web.Request) -> web.StreamResponse:
             return web.Response(status=502, text="Credential misconfigured")
         auth_header = "Authorization"
         auth_prefix = "Bearer "
+        oauth_beta_header = cred.get("beta_header", "oauth-2025-04-20")
     else:
         real_token = cred.get("token") or cred.get("key")
         if not real_token:
@@ -203,6 +204,8 @@ async def _handle_request(request: web.Request) -> web.StreamResponse:
         if k.lower() not in _AUTH_HEADERS and k.lower() != "host"
     }
     headers[auth_header] = f"{auth_prefix}{real_token}"
+    if is_oauth and oauth_beta_header:
+        headers.setdefault("anthropic-beta", oauth_beta_header)
 
     # 5. Forward and stream response
     session: ClientSession = request.app[_KEY_CLIENT]
