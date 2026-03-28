@@ -224,6 +224,28 @@ def _handle_proxy_status() -> None:
         print("Credentials: none stored")
 
 
+def _handle_proxy_install() -> None:
+    """Install and start systemd socket activation for the credential proxy."""
+    from .credential_proxy_lifecycle import install_systemd_units, is_systemd_available
+
+    if not is_systemd_available():
+        print("Error: systemd user services are not available on this host.")
+        raise SystemExit(1)
+    install_systemd_units()
+    print("Credential proxy systemd socket installed and started.")
+
+
+def _handle_proxy_uninstall() -> None:
+    """Remove credential proxy systemd units."""
+    from .credential_proxy_lifecycle import is_systemd_available, uninstall_systemd_units
+
+    if not is_systemd_available():
+        print("Error: systemd user services are not available. Nothing to uninstall.")
+        raise SystemExit(1)
+    uninstall_systemd_units()
+    print("Credential proxy systemd units removed.")
+
+
 PROXY_COMMANDS: tuple[CommandDef, ...] = (
     CommandDef(
         name="start",
@@ -241,6 +263,18 @@ PROXY_COMMANDS: tuple[CommandDef, ...] = (
         name="status",
         help="Show credential proxy status",
         handler=_handle_proxy_status,
+        group="proxy",
+    ),
+    CommandDef(
+        name="install",
+        help="Install systemd socket activation",
+        handler=_handle_proxy_install,
+        group="proxy",
+    ),
+    CommandDef(
+        name="uninstall",
+        help="Remove systemd units",
+        handler=_handle_proxy_uninstall,
         group="proxy",
     ),
 )
