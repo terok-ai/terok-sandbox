@@ -13,7 +13,7 @@ from __future__ import annotations
 import argparse
 from importlib.metadata import PackageNotFoundError, version as _meta_version
 
-from .commands import GATE_COMMANDS, SHIELD_COMMANDS, CommandDef
+from .commands import GATE_COMMANDS, PROXY_COMMANDS, SHIELD_COMMANDS, CommandDef
 
 try:
     __version__ = _meta_version("terok-sandbox")
@@ -78,6 +78,13 @@ def main() -> None:
     for cmd in GATE_COMMANDS:
         _wire_command(gate_sub, cmd)
     gate_p.set_defaults(_group_help=gate_p)
+
+    # -- proxy --
+    proxy_p = sub.add_parser("proxy", help="Credential proxy management")
+    proxy_sub = proxy_p.add_subparsers()
+    for cmd in PROXY_COMMANDS:
+        _wire_command(proxy_sub, cmd)
+    proxy_p.set_defaults(_group_help=proxy_p)
 
     args = parser.parse_args()
     if hasattr(args, "_cmd"):
