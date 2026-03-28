@@ -160,14 +160,12 @@ async def _handle_request(request: web.Request) -> web.StreamResponse:
 
     # 2. Route by token's provider, falling back to path prefix
     provider = token_info.get("provider", "")
+    token_routed = bool(provider)
     if provider:
         route = routes.get(provider)
         if route is None:
             return web.Response(status=404, text=f"No route for provider: {provider}")
-        # Strip path prefix if present (client may or may not include it)
-        path = request.path
-        expected_prefix = f"/{provider}/"
-        rest = path[len(expected_prefix) - 1 :] if path.startswith(expected_prefix) else path
+        rest = request.path  # Client sends the full API path
     else:
         # Legacy: no provider in token, fall back to path-based routing
         prefix, rest, route = routes.resolve(request.path)
@@ -179,7 +177,7 @@ async def _handle_request(request: web.Request) -> web.StreamResponse:
     cred = token_db.load_credential(token_info["credential_set"], provider)
     if cred is None:
         _logger.warning(
-            "No credential for provider %r in set %r", prefix, token_info["credential_set"]
+            "No credential for provider %r in set %r", provider, token_info["credential_set"]
         )
         return web.Response(status=502, text="Credential not configured for this provider")
 
@@ -210,7 +208,15 @@ async def _handle_request(request: web.Request) -> web.StreamResponse:
             auth_prefix = ""
 
     # 4. Build upstream request — strip phantom auth, inject real auth
-    upstream_url = route["upstream"].rstrip("/") + rest
+    if token_routed:
+        # Token-routed: client sends full API path, use upstream origin only
+        from urllib.parse import urlparse
+
+        parsed = urlparse(route["upstream"])
+        upstream_url = f"{parsed.scheme}://{parsed.netloc}{rest}"
+    else:
+        # Path-routed: prefix was stripped, append rest to full upstream
+        upstream_url = route["upstream"].rstrip("/") + rest
     if request.query_string:
         upstream_url += f"?{request.query_string}"
 
