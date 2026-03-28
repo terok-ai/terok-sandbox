@@ -316,9 +316,16 @@ def main() -> None:
     parser.add_argument("--socket-path", required=True, help="Unix socket path to listen on")
     parser.add_argument("--db-path", required=True, help="Path to the credential sqlite3 database")
     parser.add_argument("--routes-file", required=True, help="Path to the route config JSON")
+
+    def _tcp_port(value: str) -> int:
+        port = int(value)
+        if not 1 <= port <= 65535:
+            raise argparse.ArgumentTypeError("--port must be between 1 and 65535")
+        return port
+
     parser.add_argument(
         "--port",
-        type=int,
+        type=_tcp_port,
         default=None,
         help="TCP port for container access (in addition to the Unix socket)",
     )
