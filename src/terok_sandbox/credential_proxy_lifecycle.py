@@ -83,7 +83,7 @@ def _is_managed_proxy(pid: int, cfg: SandboxConfig | None = None) -> bool:
 
 # ---------- Systemd helpers ----------
 
-_UNIT_VERSION = 1
+_UNIT_VERSION = 2
 """Bump when the systemd unit templates change."""
 
 _SOCKET_UNIT = "terok-credential-proxy.socket"
@@ -164,6 +164,7 @@ def install_systemd_units(cfg: SandboxConfig | None = None) -> None:
         "SOCKET_PATH": str(c.proxy_socket_path),
         "DB_PATH": str(c.proxy_db_path),
         "ROUTES_PATH": str(c.proxy_routes_path),
+        "PORT": str(c.proxy_port),
         "BIN": shlex.join(_proxy_exec_prefix()),
         "UNIT_VERSION": str(_UNIT_VERSION),
     }
@@ -245,6 +246,7 @@ def start_daemon(cfg: SandboxConfig | None = None) -> None:
         f"--db-path={db_path}",
         f"--routes-file={routes_path}",
         f"--pid-file={pidfile}",
+        f"--port={c.proxy_port}",
     ]
 
     # Fork into background so the proxy survives shell exit.
@@ -298,6 +300,11 @@ def is_daemon_running(cfg: SandboxConfig | None = None) -> bool:
         return True
     except (ValueError, ProcessLookupError, PermissionError):
         return False
+
+
+def get_proxy_port(cfg: SandboxConfig | None = None) -> int:
+    """Return the configured credential proxy TCP port."""
+    return _cfg(cfg).proxy_port
 
 
 def get_proxy_status(cfg: SandboxConfig | None = None) -> CredentialProxyStatus:

@@ -52,7 +52,8 @@ class CredentialDB:
                 token          TEXT PRIMARY KEY,
                 project        TEXT NOT NULL,
                 task           TEXT NOT NULL,
-                credential_set TEXT NOT NULL
+                credential_set TEXT NOT NULL,
+                provider       TEXT NOT NULL DEFAULT ''
             );
         """)
 
@@ -92,25 +93,28 @@ class CredentialDB:
 
     # ── Phantom tokens ───────────────────────────────────────────────────
 
-    def create_proxy_token(self, project: str, task: str, credential_set: str) -> str:
-        """Create a per-task phantom token and return it."""
+    def create_proxy_token(
+        self, project: str, task: str, credential_set: str, provider: str = ""
+    ) -> str:
+        """Create a per-task phantom token, optionally scoped to *provider*."""
         token = secrets.token_hex(16)
         self._conn.execute(
-            "INSERT INTO proxy_tokens (token, project, task, credential_set) VALUES (?, ?, ?, ?)",
-            (token, project, task, credential_set),
+            "INSERT INTO proxy_tokens (token, project, task, credential_set, provider)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (token, project, task, credential_set, provider),
         )
         self._conn.commit()
         return token
 
     def lookup_proxy_token(self, token: str) -> dict | None:
-        """Return ``{project, task, credential_set}`` or ``None``."""
+        """Return ``{project, task, credential_set, provider}`` or ``None``."""
         row = self._conn.execute(
-            "SELECT project, task, credential_set FROM proxy_tokens WHERE token = ?",
+            "SELECT project, task, credential_set, provider FROM proxy_tokens WHERE token = ?",
             (token,),
         ).fetchone()
         if row is None:
             return None
-        return {"project": row[0], "task": row[1], "credential_set": row[2]}
+        return {"project": row[0], "task": row[1], "credential_set": row[2], "provider": row[3]}
 
     def revoke_proxy_tokens(self, project: str, task: str) -> int:
         """Revoke all tokens for a project/task pair.  Returns count revoked."""

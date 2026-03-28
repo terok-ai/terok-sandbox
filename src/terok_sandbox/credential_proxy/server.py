@@ -53,27 +53,18 @@ _KEY_CLIENT = web.AppKey("client_session", ClientSession)
 
 
 class _RouteTable:
-    """Path-prefix routing table loaded from a JSON file."""
+    """Provider routing table loaded from a JSON file."""
 
     def __init__(self, routes_path: str) -> None:
         with open(routes_path) as f:
             self._routes: dict[str, dict] = json.load(f)
-        for prefix, cfg in self._routes.items():
+        for name, cfg in self._routes.items():
             if "upstream" not in cfg:
-                raise ValueError(f"Route '{prefix}' missing required 'upstream' field")
+                raise ValueError(f"Route '{name}' missing required 'upstream' field")
 
-    def resolve(self, path: str) -> tuple[str | None, str, dict]:
-        """Parse ``/{prefix}/{rest}`` and return ``(prefix, rest, route_config)``.
-
-        Returns ``(None, path, {})`` if no route matches.
-        """
-        parts = path.lstrip("/").split("/", 1)
-        prefix = parts[0] if parts else ""
-        rest = f"/{parts[1]}" if len(parts) > 1 else "/"
-        route = self._routes.get(prefix)
-        if route is None:
-            return None, path, {}
-        return prefix, rest, route
+    def get(self, provider: str) -> dict | None:
+        """Return the route config for *provider*, or ``None``."""
+        return self._routes.get(provider)
 
 
 class _TokenDB:
@@ -86,14 +77,14 @@ class _TokenDB:
         self._conn.execute("PRAGMA journal_mode=WAL")
 
     def lookup_token(self, token: str) -> dict | None:
-        """Return ``{project, task, credential_set}`` or ``None``."""
+        """Return ``{project, task, credential_set, provider}`` or ``None``."""
         row = self._conn.execute(
-            "SELECT project, task, credential_set FROM proxy_tokens WHERE token = ?",
+            "SELECT project, task, credential_set, provider FROM proxy_tokens WHERE token = ?",
             (token,),
         ).fetchone()
         if row is None:
             return None
-        return {"project": row[0], "task": row[1], "credential_set": row[2]}
+        return {"project": row[0], "task": row[1], "credential_set": row[2], "provider": row[3]}
 
     def load_credential(self, credential_set: str, provider: str) -> dict | None:
         """Return parsed credential data dict, or ``None``."""
@@ -119,7 +110,7 @@ class _TokenDB:
 # Auth extraction helpers
 # ---------------------------------------------------------------------------
 
-_AUTH_HEADERS = ("authorization", "x-api-key")
+_AUTH_HEADERS = ("authorization", "x-api-key", "private-token")
 
 
 def _extract_phantom_token(request: web.Request) -> str | None:
@@ -128,7 +119,7 @@ def _extract_phantom_token(request: web.Request) -> str | None:
         value = request.headers.get(header)
         if not value:
             continue
-        # Strip "Bearer ", "token ", etc. prefixes
+        # Strip "Bearer ", "token ", etc. provideres
         if " " in value:
             return value.split(None, 1)[1]
         return value
@@ -141,16 +132,11 @@ def _extract_phantom_token(request: web.Request) -> str | None:
 
 
 async def _handle_request(request: web.Request) -> web.StreamResponse:
-    """Route, authenticate, inject credentials, and forward to upstream."""
+    """Authenticate, route by token, inject credentials, and forward to upstream."""
     routes: _RouteTable = request.app[_KEY_ROUTES]
     token_db: _TokenDB = request.app[_KEY_TOKEN_DB]
 
-    # 1. Route by path prefix
-    prefix, rest, route = routes.resolve(request.path)
-    if prefix is None:
-        return web.Response(status=404, text="Unknown route")
-
-    # 2. Validate phantom token
+    # 1. Validate phantom token
     phantom = _extract_phantom_token(request)
     if not phantom:
         return web.Response(status=401, text="Missing authentication")
@@ -159,11 +145,20 @@ async def _handle_request(request: web.Request) -> web.StreamResponse:
     if token_info is None:
         return web.Response(status=401, text="Invalid token")
 
+    # 2. Route by token's provider
+    provider = token_info.get("provider", "")
+    if not provider:
+        return web.Response(status=400, text="Token has no provider — re-auth required")
+    route = routes.get(provider)
+    if route is None:
+        return web.Response(status=404, text=f"No route for provider: {provider}")
+    rest = request.path
+
     # 3. Load real credential
-    cred = token_db.load_credential(token_info["credential_set"], prefix)
+    cred = token_db.load_credential(token_info["credential_set"], provider)
     if cred is None:
         _logger.warning(
-            "No credential for provider %r in set %r", prefix, token_info["credential_set"]
+            "No credential for provider %r in set %r", provider, token_info["credential_set"]
         )
         return web.Response(status=502, text="Credential not configured for this provider")
 
@@ -176,14 +171,15 @@ async def _handle_request(request: web.Request) -> web.StreamResponse:
     if is_oauth:
         real_token = cred.get("access_token")
         if not real_token:
-            _logger.error("Credential for %r is OAuth but missing access_token", prefix)
+            _logger.error("Credential for %r is OAuth but missing access_token", provider)
             return web.Response(status=502, text="Credential misconfigured")
         auth_header = "Authorization"
         auth_prefix = "Bearer "
+        oauth_beta_header = cred.get("beta_header", "oauth-2025-04-20")
     else:
         real_token = cred.get("token") or cred.get("key")
         if not real_token:
-            _logger.error("Credential for %r has no usable token field", prefix)
+            _logger.error("Credential for %r has no usable token field", provider)
             return web.Response(status=502, text="Credential misconfigured")
         auth_header = route.get("auth_header", "Authorization")
         auth_prefix = route.get("auth_prefix", "Bearer ")
@@ -193,7 +189,10 @@ async def _handle_request(request: web.Request) -> web.StreamResponse:
             auth_prefix = ""
 
     # 4. Build upstream request — strip phantom auth, inject real auth
-    upstream_url = route["upstream"].rstrip("/") + rest
+    from urllib.parse import urlparse
+
+    parsed = urlparse(route["upstream"])
+    upstream_url = f"{parsed.scheme}://{parsed.netloc}{rest}"
     if request.query_string:
         upstream_url += f"?{request.query_string}"
 
@@ -203,6 +202,10 @@ async def _handle_request(request: web.Request) -> web.StreamResponse:
         if k.lower() not in _AUTH_HEADERS and k.lower() != "host"
     }
     headers[auth_header] = f"{auth_prefix}{real_token}"
+    if is_oauth and oauth_beta_header:
+        existing = headers.get("anthropic-beta", "")
+        if oauth_beta_header not in existing:
+            headers["anthropic-beta"] = f"{existing},{oauth_beta_header}".lstrip(",")
 
     # 5. Forward and stream response
     session: ClientSession = request.app[_KEY_CLIENT]
@@ -228,7 +231,7 @@ async def _handle_request(request: web.Request) -> web.StreamResponse:
             await resp.write_eof()
             return resp
     except Exception as exc:
-        _logger.error("Upstream request to %s failed: %s", prefix, exc)
+        _logger.error("Upstream request to %s failed: %s", provider, exc)
         return web.Response(status=502, text="Upstream request failed")
 
 
@@ -276,8 +279,57 @@ def _systemd_socket():
     return None
 
 
+async def _run_multi(app: web.Application, *, sock_path: str, port: int | None) -> None:
+    """Run the app on a Unix socket and optionally a TCP port simultaneously."""
+    import asyncio
+
+    from aiohttp.web_runner import AppRunner, SockSite, TCPSite, UnixSite
+
+    runner = AppRunner(app)
+    await runner.setup()
+    try:
+        sd_sock = _systemd_socket()
+        if sd_sock:
+            _logger.info("Using systemd-inherited socket")
+            await SockSite(runner, sd_sock).start()
+        else:
+            path = Path(sock_path)
+            try:
+                mode = path.lstat().st_mode
+            except FileNotFoundError:
+                pass
+            else:
+                import socket as _socket
+                import stat as _stat
+
+                if not _stat.S_ISSOCK(mode):
+                    raise RuntimeError(f"Refusing to remove non-socket path: {path}")
+
+                probe = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+                try:
+                    if probe.connect_ex(str(path)) == 0:
+                        raise RuntimeError(f"Socket path already in use: {path}")
+                finally:
+                    probe.close()
+
+                path.unlink()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            _logger.info("Listening on %s", path)
+            await UnixSite(runner, str(path)).start()
+
+        if port is not None:
+            _logger.info("Listening on 127.0.0.1:%d", port)
+            await TCPSite(runner, "127.0.0.1", port).start()
+
+        await asyncio.Event().wait()  # Block until cancelled
+    finally:
+        await runner.cleanup()
+
+
 def main() -> None:
     """Parse CLI args and run the credential proxy."""
+    import asyncio
+
     parser = argparse.ArgumentParser(
         prog="terok-credential-proxy",
         description="Credential injection reverse proxy for terok containers",
@@ -285,6 +337,19 @@ def main() -> None:
     parser.add_argument("--socket-path", required=True, help="Unix socket path to listen on")
     parser.add_argument("--db-path", required=True, help="Path to the credential sqlite3 database")
     parser.add_argument("--routes-file", required=True, help="Path to the route config JSON")
+
+    def _tcp_port(value: str) -> int:
+        port = int(value)
+        if not 1 <= port <= 65535:
+            raise argparse.ArgumentTypeError("--port must be between 1 and 65535")
+        return port
+
+    parser.add_argument(
+        "--port",
+        type=_tcp_port,
+        default=None,
+        help="TCP port for container access (in addition to the Unix socket)",
+    )
     parser.add_argument(
         "--pid-file", default=None, help="Write PID to this file (for lifecycle management)"
     )
@@ -310,16 +375,10 @@ def main() -> None:
 
     signal.signal(signal.SIGTERM, _handle_sigterm)
 
-    sd_sock = _systemd_socket()
-    if sd_sock:
-        _logger.info("Using systemd-inherited socket")
-        web.run_app(app, sock=sd_sock, print=lambda *_: None)
-    else:
-        sock_path = Path(args.socket_path)
-        sock_path.unlink(missing_ok=True)
-        sock_path.parent.mkdir(parents=True, exist_ok=True)
-        _logger.info("Listening on %s", sock_path)
-        web.run_app(app, path=str(sock_path), print=lambda *_: None)
+    try:
+        asyncio.run(_run_multi(app, sock_path=args.socket_path, port=args.port))
+    except (KeyboardInterrupt, SystemExit):
+        pass
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for the credential proxy server — routing, auth, and forwarding."""
+"""Tests for the credential proxy server — token routing, auth, and forwarding."""
 
 from __future__ import annotations
 
@@ -21,11 +21,11 @@ from terok_sandbox.credential_proxy.server import (
     _TokenDB,
 )
 
-# ── Route resolution ─────────────────────────────────────────────────────
+# ── Route table ──────────────────────────────────────────────────────────
 
 
 class TestRouteTable:
-    """Verify path-prefix routing."""
+    """Verify provider-keyed route lookup."""
 
     @pytest.fixture()
     def routes(self, tmp_path: Path) -> _RouteTable:
@@ -44,24 +44,15 @@ class TestRouteTable:
         )
         return _RouteTable(str(routes_file))
 
-    def test_resolve_known_prefix(self, routes: _RouteTable) -> None:
-        """Known prefix extracts provider + rest."""
-        prefix, rest, route = routes.resolve("/claude/v1/messages")
-        assert prefix == "claude"
-        assert rest == "/v1/messages"
+    def test_get_known_provider(self, routes: _RouteTable) -> None:
+        """Known provider returns route config."""
+        route = routes.get("claude")
+        assert route is not None
         assert route["upstream"] == "https://api.anthropic.com"
 
-    def test_resolve_unknown_prefix(self, routes: _RouteTable) -> None:
-        """Unknown prefix returns None and passes through the original path."""
-        prefix, rest, _ = routes.resolve("/unknown/v1/chat")
-        assert prefix is None
-        assert rest == "/unknown/v1/chat"
-
-    def test_resolve_root_only(self, routes: _RouteTable) -> None:
-        """Prefix with no rest gives '/' as rest."""
-        prefix, rest, _ = routes.resolve("/claude")
-        assert prefix == "claude"
-        assert rest == "/"
+    def test_get_unknown_provider(self, routes: _RouteTable) -> None:
+        """Unknown provider returns None."""
+        assert routes.get("nonexistent") is None
 
 
 # ── Token extraction ─────────────────────────────────────────────────────
@@ -86,6 +77,11 @@ class TestExtractPhantomToken:
         req = self._make_request(**{"x-api-key": "sk-phantom-xyz"})
         assert _extract_phantom_token(req) == "sk-phantom-xyz"
 
+    def test_private_token(self) -> None:
+        """Extract token from PRIVATE-TOKEN header (glab)."""
+        req = self._make_request(**{"private-token": "glpat-abc"})
+        assert _extract_phantom_token(req) == "glpat-abc"
+
     def test_no_auth_headers(self) -> None:
         """Return None when no auth headers present."""
         req = self._make_request(**{"content-type": "application/json"})
@@ -108,7 +104,7 @@ class TestTokenDB:
         """Create a DB with test data and return a _TokenDB accessor."""
         db = CredentialDB(tmp_path / "test.db")
         db.store_credential("default", "claude", {"access_token": "sk-real-123"})
-        token = db.create_proxy_token("proj", "task-1", "default")
+        token = db.create_proxy_token("proj", "task-1", "default", "claude")
         db.close()
         accessor = _TokenDB(str(tmp_path / "test.db"))
         accessor._test_token = token  # stash for test use
@@ -116,10 +112,11 @@ class TestTokenDB:
         accessor.close()
 
     def test_lookup_valid_token(self, token_db: _TokenDB) -> None:
-        """Valid token returns project/task/credential_set."""
+        """Valid token returns project/task/credential_set/provider."""
         info = token_db.lookup_token(token_db._test_token)
         assert info["project"] == "proj"
         assert info["credential_set"] == "default"
+        assert info["provider"] == "claude"
 
     def test_lookup_invalid_token(self, token_db: _TokenDB) -> None:
         """Invalid token returns None."""
@@ -169,16 +166,16 @@ class TestBuildApp:
 
 @pytest.fixture()
 def _proxy_env(tmp_path: Path):
-    """Set up a DB with credentials + routes, return (app, token)."""
+    """Set up a DB with per-provider tokens + routes, return (app, tokens)."""
     db = CredentialDB(tmp_path / "test.db")
     db.store_credential("default", "claude", {"access_token": "sk-real"})
     db.store_credential("default", "empty", {"type": "oauth"})  # no token fields
-    token = db.create_proxy_token("proj", "t1", "default")
+    claude_token = db.create_proxy_token("proj", "t1", "default", "claude")
+    empty_token = db.create_proxy_token("proj", "t1", "default", "empty")
+    no_provider_token = db.create_proxy_token("proj", "t1", "default")
     db.close()
 
     routes = tmp_path / "routes.json"
-    # Use a placeholder upstream — tests that hit the handler won't
-    # reach it because we're testing auth/routing failures only.
     routes.write_text(
         json.dumps(
             {
@@ -193,47 +190,58 @@ def _proxy_env(tmp_path: Path):
     )
 
     app = _build_app(str(tmp_path / "test.db"), str(routes))
-    return app, token
+    return app, {
+        "claude": claude_token,
+        "empty": empty_token,
+        "no_provider": no_provider_token,
+    }
 
 
 @pytest.mark.asyncio
 class TestHandlerEdgeCases:
     """Exercise _handle_request edge cases via aiohttp TestClient."""
 
-    async def test_unknown_route_404(self, _proxy_env) -> None:
-        """Request to unknown prefix returns 404."""
-        from aiohttp.test_utils import TestClient, TestServer
-
-        app, token = _proxy_env
-        async with TestClient(TestServer(app)) as client:
-            resp = await client.get("/bogus/v1/x", headers={"Authorization": f"Bearer {token}"})
-            assert resp.status == 404
-
     async def test_missing_auth_401(self, _proxy_env) -> None:
         """Request without auth header returns 401."""
         from aiohttp.test_utils import TestClient, TestServer
 
-        app, _token = _proxy_env
+        app, _tokens = _proxy_env
         async with TestClient(TestServer(app)) as client:
-            resp = await client.get("/claude/v1/messages")
+            resp = await client.get("/v1/messages")
             assert resp.status == 401
 
     async def test_invalid_token_401(self, _proxy_env) -> None:
         """Request with bad phantom token returns 401."""
         from aiohttp.test_utils import TestClient, TestServer
 
-        app, _token = _proxy_env
+        app, _tokens = _proxy_env
         async with TestClient(TestServer(app)) as client:
-            resp = await client.get("/claude/v1/messages", headers={"Authorization": "Bearer fake"})
+            resp = await client.get("/v1/messages", headers={"Authorization": "Bearer fake"})
             assert resp.status == 401
+
+    async def test_token_without_provider_400(self, _proxy_env) -> None:
+        """Token without provider field returns 400."""
+        from aiohttp.test_utils import TestClient, TestServer
+
+        app, tokens = _proxy_env
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get(
+                "/v1/messages",
+                headers={"Authorization": f"Bearer {tokens['no_provider']}"},
+            )
+            assert resp.status == 400
+            assert "re-auth" in (await resp.text()).lower()
 
     async def test_empty_credential_returns_502(self, _proxy_env) -> None:
         """Credential with no usable token field returns 502."""
         from aiohttp.test_utils import TestClient, TestServer
 
-        app, token = _proxy_env
+        app, tokens = _proxy_env
         async with TestClient(TestServer(app)) as client:
-            resp = await client.get("/empty/v1/x", headers={"Authorization": f"Bearer {token}"})
+            resp = await client.get(
+                "/v1/x",
+                headers={"Authorization": f"Bearer {tokens['empty']}"},
+            )
             assert resp.status == 502
             assert "misconfigured" in (await resp.text()).lower()
 
@@ -243,12 +251,16 @@ def _forwarding_env(tmp_path: Path):
     """Set up proxy + mock upstream to test the full forwarding path."""
     from aiohttp import web as _web
 
-    # Mock upstream that echoes back auth
+    # Mock upstream that echoes back auth and path
     async def _echo(request: _web.Request) -> _web.Response:
         return _web.json_response(
             {
                 "auth": request.headers.get("Authorization", ""),
+                "x_api_key": request.headers.get("x-api-key", ""),
+                "private_token": request.headers.get("PRIVATE-TOKEN", ""),
                 "path": request.path,
+                "qs": request.query_string,
+                "beta": request.headers.get("anthropic-beta", ""),
             }
         )
 
@@ -256,22 +268,26 @@ def _forwarding_env(tmp_path: Path):
     upstream_app.router.add_route("*", "/{tail:.*}", _echo)
 
     db = CredentialDB(tmp_path / "test.db")
-    db.store_credential("default", "claude", {"access_token": "sk-real-token"})
-    token = db.create_proxy_token("proj", "t1", "default")
+    db.store_credential("default", "claude", {"type": "oauth", "access_token": "sk-real-oauth"})
+    db.store_credential("default", "vibe", {"type": "api_key", "key": "mistral-real-key"})
+    db.store_credential("default", "glab", {"type": "pat", "token": "glpat-real"})
+    claude_token = db.create_proxy_token("proj", "t1", "default", "claude")
+    vibe_token = db.create_proxy_token("proj", "t1", "default", "vibe")
+    glab_token = db.create_proxy_token("proj", "t1", "default", "glab")
     db.close()
 
-    return upstream_app, tmp_path, token
+    return upstream_app, tmp_path, {"claude": claude_token, "vibe": vibe_token, "glab": glab_token}
 
 
 @pytest.mark.asyncio
 class TestForwardingPath:
     """Exercise the full request forwarding with a mock upstream."""
 
-    async def test_forwards_with_real_auth(self, _forwarding_env) -> None:
-        """Proxy replaces phantom token with real credential in upstream request."""
+    async def test_oauth_forwards_with_bearer_and_beta(self, _forwarding_env) -> None:
+        """OAuth credential forwards as Bearer + anthropic-beta header."""
         from aiohttp.test_utils import TestClient, TestServer
 
-        upstream_app, tmp_path, token = _forwarding_env
+        upstream_app, tmp_path, tokens = _forwarding_env
         upstream_server = TestServer(upstream_app)
         await upstream_server.start_server()
 
@@ -280,6 +296,45 @@ class TestForwardingPath:
             json.dumps(
                 {
                     "claude": {
+                        "upstream": f"http://127.0.0.1:{upstream_server.port}",
+                        "auth_header": "dynamic",
+                    },
+                }
+            )
+        )
+
+        proxy_app = _build_app(str(tmp_path / "test.db"), str(routes))
+        async with TestClient(TestServer(proxy_app)) as client:
+            resp = await client.post(
+                "/v1/messages",
+                headers={
+                    "Authorization": f"Bearer {tokens['claude']}",
+                    "anthropic-beta": "some-feature",
+                },
+                json={"model": "test"},
+            )
+            assert resp.status == 200
+            body = await resp.json()
+            assert body["auth"] == "Bearer sk-real-oauth"
+            assert "oauth-2025-04-20" in body["beta"]
+            assert "some-feature" in body["beta"]
+            assert body["path"] == "/v1/messages"
+
+        await upstream_server.close()
+
+    async def test_api_key_forwards_correctly(self, _forwarding_env) -> None:
+        """API key credential uses route-configured auth header."""
+        from aiohttp.test_utils import TestClient, TestServer
+
+        upstream_app, tmp_path, tokens = _forwarding_env
+        upstream_server = TestServer(upstream_app)
+        await upstream_server.start_server()
+
+        routes = tmp_path / "routes.json"
+        routes.write_text(
+            json.dumps(
+                {
+                    "vibe": {
                         "upstream": f"http://127.0.0.1:{upstream_server.port}",
                         "auth_header": "Authorization",
                         "auth_prefix": "Bearer ",
@@ -291,31 +346,21 @@ class TestForwardingPath:
         proxy_app = _build_app(str(tmp_path / "test.db"), str(routes))
         async with TestClient(TestServer(proxy_app)) as client:
             resp = await client.post(
-                "/claude/v1/messages",
-                headers={"Authorization": f"Bearer {token}"},
+                "/v1/chat/completions",
+                headers={"Authorization": f"Bearer {tokens['vibe']}"},
                 json={"model": "test"},
             )
             assert resp.status == 200
             body = await resp.json()
-            assert body["auth"] == "Bearer sk-real-token"
-            assert body["path"] == "/v1/messages"
+            assert body["auth"] == "Bearer mistral-real-key"
 
         await upstream_server.close()
 
-    async def test_forwards_query_string(self, _forwarding_env) -> None:
-        """Query string is preserved in the upstream request."""
+    async def test_pat_forwards_with_private_token(self, _forwarding_env) -> None:
+        """PAT credential uses PRIVATE-TOKEN header."""
         from aiohttp.test_utils import TestClient, TestServer
 
-        upstream_app, tmp_path, token = _forwarding_env
-
-        # Add handler that echoes query string
-        from aiohttp import web as _web
-
-        async def echo_qs(request: _web.Request) -> _web.Response:
-            return _web.json_response({"qs": request.query_string})
-
-        upstream_app.router.add_get("/v1/check", echo_qs)
-
+        upstream_app, tmp_path, tokens = _forwarding_env
         upstream_server = TestServer(upstream_app)
         await upstream_server.start_server()
 
@@ -323,7 +368,11 @@ class TestForwardingPath:
         routes.write_text(
             json.dumps(
                 {
-                    "claude": {"upstream": f"http://127.0.0.1:{upstream_server.port}"},
+                    "glab": {
+                        "upstream": f"http://127.0.0.1:{upstream_server.port}",
+                        "auth_header": "PRIVATE-TOKEN",
+                        "auth_prefix": "",
+                    },
                 }
             )
         )
@@ -331,8 +380,34 @@ class TestForwardingPath:
         proxy_app = _build_app(str(tmp_path / "test.db"), str(routes))
         async with TestClient(TestServer(proxy_app)) as client:
             resp = await client.get(
-                "/claude/v1/check?foo=bar&baz=1",
-                headers={"Authorization": f"Bearer {token}"},
+                "/api/v4/projects",
+                headers={"PRIVATE-TOKEN": tokens["glab"]},
+            )
+            assert resp.status == 200
+            body = await resp.json()
+            assert body["private_token"] == "glpat-real"
+            assert body["path"] == "/api/v4/projects"
+
+        await upstream_server.close()
+
+    async def test_query_string_preserved(self, _forwarding_env) -> None:
+        """Query string is preserved in the upstream request."""
+        from aiohttp.test_utils import TestClient, TestServer
+
+        upstream_app, tmp_path, tokens = _forwarding_env
+        upstream_server = TestServer(upstream_app)
+        await upstream_server.start_server()
+
+        routes = tmp_path / "routes.json"
+        routes.write_text(
+            json.dumps({"claude": {"upstream": f"http://127.0.0.1:{upstream_server.port}"}})
+        )
+
+        proxy_app = _build_app(str(tmp_path / "test.db"), str(routes))
+        async with TestClient(TestServer(proxy_app)) as client:
+            resp = await client.get(
+                "/v1/check?foo=bar&baz=1",
+                headers={"Authorization": f"Bearer {tokens['claude']}"},
             )
             assert resp.status == 200
             body = await resp.json()
@@ -344,24 +419,21 @@ class TestForwardingPath:
         """Connection refused to upstream returns generic 502."""
         from aiohttp.test_utils import TestClient, TestServer
 
-        _, tmp_path, token = _forwarding_env
+        _, tmp_path, tokens = _forwarding_env
 
         routes = tmp_path / "routes.json"
         routes.write_text(
             json.dumps(
-                {
-                    "claude": {"upstream": "http://127.0.0.1:1"},  # port 1 = refused
-                }
+                {"claude": {"upstream": "http://127.0.0.1:1"}}  # port 1 = refused
             )
         )
 
         proxy_app = _build_app(str(tmp_path / "test.db"), str(routes))
         async with TestClient(TestServer(proxy_app)) as client:
             resp = await client.get(
-                "/claude/v1/messages",
-                headers={"Authorization": f"Bearer {token}"},
+                "/v1/messages",
+                headers={"Authorization": f"Bearer {tokens['claude']}"},
             )
             assert resp.status == 502
             text = await resp.text()
-            # Must NOT leak internal error details
             assert "127.0.0.1" not in text
