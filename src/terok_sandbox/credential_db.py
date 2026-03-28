@@ -40,7 +40,7 @@ class CredentialDB:
         self._create_tables()
 
     def _create_tables(self) -> None:
-        """Ensure both tables exist (idempotent)."""
+        """Ensure both tables exist and are up to date (idempotent)."""
         self._conn.executescript("""
             CREATE TABLE IF NOT EXISTS credentials (
                 credential_set TEXT NOT NULL,
@@ -56,6 +56,13 @@ class CredentialDB:
                 provider       TEXT NOT NULL DEFAULT ''
             );
         """)
+        # Migrate: add provider column if missing (pre-v2 databases)
+        cols = {row[1] for row in self._conn.execute("PRAGMA table_info(proxy_tokens)").fetchall()}
+        if "provider" not in cols:
+            self._conn.execute(
+                "ALTER TABLE proxy_tokens ADD COLUMN provider TEXT NOT NULL DEFAULT ''"
+            )
+            self._conn.commit()
 
     # ── Credentials ──────────────────────────────────────────────────────
 
