@@ -13,10 +13,13 @@ import pytest
 
 from terok_sandbox.credential_db import CredentialDB
 from terok_sandbox.credential_proxy.server import (
+    _KEY_CLIENT,
     _KEY_ROUTES,
     _KEY_TOKEN_DB,
     _build_app,
+    _do_oauth_refresh,
     _extract_phantom_token,
+    _refresh_all,
     _RouteTable,
     _TokenDB,
 )
@@ -422,3 +425,256 @@ class TestForwardingPath:
             assert resp.status == 502
             text = await resp.text()
             assert "127.0.0.1" not in text
+
+
+# ── TokenDB refresh methods ──────────────────────────────────────────────
+
+
+class TestTokenDBRefresh:
+    """Verify list_refreshable() and update_credential() on _TokenDB."""
+
+    @pytest.fixture()
+    def db_with_creds(self, tmp_path: Path):
+        """Create a DB with mixed credential types."""
+        db = CredentialDB(tmp_path / "test.db")
+        db.store_credential("default", "claude", {
+            "type": "oauth",
+            "access_token": "sk-old",
+            "refresh_token": "rt-abc",
+            "expires_at": 1000,
+        })
+        db.store_credential("default", "vibe", {
+            "type": "api_key",
+            "key": "mistral-key",
+        })
+        db.store_credential("default", "codex", {
+            "type": "oauth",
+            "access_token": "sk-codex",
+            # no refresh_token
+        })
+        db.close()
+        accessor = _TokenDB(str(tmp_path / "test.db"))
+        yield accessor
+        accessor.close()
+
+    def test_list_refreshable_returns_only_oauth_with_refresh(self, db_with_creds) -> None:
+        """Only OAuth credentials with refresh_token are returned."""
+        result = db_with_creds.list_refreshable()
+        assert len(result) == 1
+        cs, prov, data = result[0]
+        assert cs == "default"
+        assert prov == "claude"
+        assert data["refresh_token"] == "rt-abc"
+
+    def test_update_credential_persists(self, db_with_creds) -> None:
+        """update_credential writes new data that load_credential can read back."""
+        db_with_creds.update_credential("default", "claude", {
+            "type": "oauth",
+            "access_token": "sk-new",
+            "refresh_token": "rt-new",
+            "expires_at": 9999,
+        })
+        cred = db_with_creds.load_credential("default", "claude")
+        assert cred["access_token"] == "sk-new"
+        assert cred["refresh_token"] == "rt-new"
+
+
+# ── OAuth refresh logic ──────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+class TestDoOAuthRefresh:
+    """Exercise _do_oauth_refresh against a mock token endpoint."""
+
+    async def test_successful_refresh(self) -> None:
+        """A 200 response updates access_token, refresh_token, and expires_at."""
+        import time
+
+        from aiohttp import web as _web
+        from aiohttp.test_utils import TestServer
+
+        async def _token_handler(request: _web.Request) -> _web.Response:
+            body = await request.json()
+            assert body["grant_type"] == "refresh_token"
+            assert body["refresh_token"] == "rt-old"
+            assert body["client_id"] == "test-client"
+            return _web.json_response({
+                "access_token": "sk-fresh",
+                "refresh_token": "rt-rotated",
+                "expires_in": 3600,
+            })
+
+        token_app = _web.Application()
+        token_app.router.add_post("/v1/oauth/token", _token_handler)
+        server = TestServer(token_app)
+        await server.start_server()
+
+        from aiohttp import ClientSession
+
+        async with ClientSession() as session:
+            oauth_cfg = {
+                "token_url": f"http://127.0.0.1:{server.port}/v1/oauth/token",
+                "client_id": "test-client",
+                "scope": "user:inference",
+            }
+            cred = {"type": "oauth", "access_token": "sk-old", "refresh_token": "rt-old"}
+            result = await _do_oauth_refresh(session, "claude", oauth_cfg, cred)
+
+        assert result["access_token"] == "sk-fresh"
+        assert result["refresh_token"] == "rt-rotated"
+        assert result["expires_at"] > time.time()
+        await server.close()
+
+    async def test_refresh_failure_raises(self) -> None:
+        """Non-200 response raises RuntimeError."""
+        from aiohttp import web as _web
+        from aiohttp.test_utils import TestServer
+
+        async def _fail_handler(_request: _web.Request) -> _web.Response:
+            return _web.Response(status=400, text="bad_request")
+
+        token_app = _web.Application()
+        token_app.router.add_post("/v1/oauth/token", _fail_handler)
+        server = TestServer(token_app)
+        await server.start_server()
+
+        from aiohttp import ClientSession
+
+        async with ClientSession() as session:
+            oauth_cfg = {
+                "token_url": f"http://127.0.0.1:{server.port}/v1/oauth/token",
+                "client_id": "test-client",
+            }
+            cred = {"type": "oauth", "access_token": "sk-old", "refresh_token": "rt-old"}
+            with pytest.raises(RuntimeError, match="Token refresh failed"):
+                await _do_oauth_refresh(session, "claude", oauth_cfg, cred)
+
+        await server.close()
+
+    async def test_missing_rotated_token_keeps_old(self) -> None:
+        """If response omits refresh_token, the old one is preserved."""
+        from aiohttp import web as _web
+        from aiohttp.test_utils import TestServer
+
+        async def _no_rotate_handler(_request: _web.Request) -> _web.Response:
+            return _web.json_response({"access_token": "sk-new", "expires_in": 7200})
+
+        token_app = _web.Application()
+        token_app.router.add_post("/v1/oauth/token", _no_rotate_handler)
+        server = TestServer(token_app)
+        await server.start_server()
+
+        from aiohttp import ClientSession
+
+        async with ClientSession() as session:
+            oauth_cfg = {
+                "token_url": f"http://127.0.0.1:{server.port}/v1/oauth/token",
+                "client_id": "c",
+            }
+            cred = {"type": "oauth", "access_token": "sk-old", "refresh_token": "rt-keep"}
+            result = await _do_oauth_refresh(session, "claude", oauth_cfg, cred)
+
+        assert result["refresh_token"] == "rt-keep"
+        await server.close()
+
+
+@pytest.mark.asyncio
+class TestRefreshAll:
+    """Exercise _refresh_all with real DB and mock token endpoint."""
+
+    async def test_refreshes_expired_skips_valid(self, tmp_path: Path) -> None:
+        """Only expired/expiring credentials are refreshed."""
+        import time
+
+        from aiohttp import web as _web
+        from aiohttp.test_utils import TestServer
+
+        refreshed_providers: list[str] = []
+
+        async def _token_handler(request: _web.Request) -> _web.Response:
+            body = await request.json()
+            refreshed_providers.append(body.get("client_id", ""))
+            return _web.json_response({
+                "access_token": "sk-refreshed",
+                "refresh_token": "rt-new",
+                "expires_in": 3600,
+            })
+
+        token_app = _web.Application()
+        token_app.router.add_post("/v1/oauth/token", _token_handler)
+        server = TestServer(token_app)
+        await server.start_server()
+
+        token_url = f"http://127.0.0.1:{server.port}/v1/oauth/token"
+
+        # DB: claude expired, codex still valid
+        db = CredentialDB(tmp_path / "test.db")
+        db.store_credential("default", "claude", {
+            "type": "oauth", "access_token": "sk-expired",
+            "refresh_token": "rt-c", "expires_at": 1000,
+        })
+        db.store_credential("default", "codex", {
+            "type": "oauth", "access_token": "sk-valid",
+            "refresh_token": "rt-x", "expires_at": time.time() + 7200,
+        })
+        db.close()
+
+        routes_file = tmp_path / "routes.json"
+        routes_file.write_text(json.dumps({
+            "claude": {
+                "upstream": "https://api.anthropic.com",
+                "oauth_refresh": {"token_url": token_url, "client_id": "claude-id"},
+            },
+            "codex": {
+                "upstream": "https://api.openai.com",
+                "oauth_refresh": {"token_url": token_url, "client_id": "codex-id"},
+            },
+        }))
+
+        app = _build_app(str(tmp_path / "test.db"), str(routes_file))
+        from aiohttp import ClientSession
+
+        app[_KEY_CLIENT] = ClientSession()
+        try:
+            await _refresh_all(app)
+        finally:
+            await app[_KEY_CLIENT].close()
+
+        # Only claude (expired) should have been refreshed
+        assert refreshed_providers == ["claude-id"]
+
+        # Verify DB was updated
+        accessor = _TokenDB(str(tmp_path / "test.db"))
+        cred = accessor.load_credential("default", "claude")
+        assert cred["access_token"] == "sk-refreshed"
+        accessor.close()
+
+        await server.close()
+
+    async def test_skips_provider_without_oauth_refresh(self, tmp_path: Path) -> None:
+        """Providers without oauth_refresh in routes are skipped."""
+        db = CredentialDB(tmp_path / "test.db")
+        db.store_credential("default", "gh", {
+            "type": "oauth", "access_token": "ghp-old",
+            "refresh_token": "rt-gh", "expires_at": 1000,
+        })
+        db.close()
+
+        routes_file = tmp_path / "routes.json"
+        routes_file.write_text(json.dumps({
+            "gh": {"upstream": "https://api.github.com"},
+        }))
+
+        app = _build_app(str(tmp_path / "test.db"), str(routes_file))
+        from aiohttp import ClientSession
+
+        app[_KEY_CLIENT] = ClientSession()
+        try:
+            await _refresh_all(app)  # should not raise
+        finally:
+            await app[_KEY_CLIENT].close()
+
+        # Credential unchanged
+        accessor = _TokenDB(str(tmp_path / "test.db"))
+        assert accessor.load_credential("default", "gh")["access_token"] == "ghp-old"
+        accessor.close()
