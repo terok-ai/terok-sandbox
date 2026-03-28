@@ -62,6 +62,10 @@ class _RouteTable:
             if "upstream" not in cfg:
                 raise ValueError(f"Route '{prefix}' missing required 'upstream' field")
 
+    def get(self, provider: str) -> dict | None:
+        """Return the route config for *provider*, or ``None``."""
+        return self._routes.get(provider)
+
     def resolve(self, path: str) -> tuple[str | None, str, dict]:
         """Parse ``/{prefix}/{rest}`` and return ``(prefix, rest, route_config)``.
 
@@ -86,14 +90,14 @@ class _TokenDB:
         self._conn.execute("PRAGMA journal_mode=WAL")
 
     def lookup_token(self, token: str) -> dict | None:
-        """Return ``{project, task, credential_set}`` or ``None``."""
+        """Return ``{project, task, credential_set, provider}`` or ``None``."""
         row = self._conn.execute(
-            "SELECT project, task, credential_set FROM proxy_tokens WHERE token = ?",
+            "SELECT project, task, credential_set, provider FROM proxy_tokens WHERE token = ?",
             (token,),
         ).fetchone()
         if row is None:
             return None
-        return {"project": row[0], "task": row[1], "credential_set": row[2]}
+        return {"project": row[0], "task": row[1], "credential_set": row[2], "provider": row[3]}
 
     def load_credential(self, credential_set: str, provider: str) -> dict | None:
         """Return parsed credential data dict, or ``None``."""
@@ -141,16 +145,11 @@ def _extract_phantom_token(request: web.Request) -> str | None:
 
 
 async def _handle_request(request: web.Request) -> web.StreamResponse:
-    """Route, authenticate, inject credentials, and forward to upstream."""
+    """Authenticate, route by token, inject credentials, and forward to upstream."""
     routes: _RouteTable = request.app[_KEY_ROUTES]
     token_db: _TokenDB = request.app[_KEY_TOKEN_DB]
 
-    # 1. Route by path prefix
-    prefix, rest, route = routes.resolve(request.path)
-    if prefix is None:
-        return web.Response(status=404, text="Unknown route")
-
-    # 2. Validate phantom token
+    # 1. Validate phantom token
     phantom = _extract_phantom_token(request)
     if not phantom:
         return web.Response(status=401, text="Missing authentication")
@@ -159,8 +158,25 @@ async def _handle_request(request: web.Request) -> web.StreamResponse:
     if token_info is None:
         return web.Response(status=401, text="Invalid token")
 
+    # 2. Route by token's provider, falling back to path prefix
+    provider = token_info.get("provider", "")
+    if provider:
+        route = routes.get(provider)
+        if route is None:
+            return web.Response(status=404, text=f"No route for provider: {provider}")
+        # Strip path prefix if present (client may or may not include it)
+        path = request.path
+        expected_prefix = f"/{provider}/"
+        rest = path[len(expected_prefix) - 1 :] if path.startswith(expected_prefix) else path
+    else:
+        # Legacy: no provider in token, fall back to path-based routing
+        prefix, rest, route = routes.resolve(request.path)
+        if prefix is None:
+            return web.Response(status=404, text="Unknown route")
+        provider = prefix
+
     # 3. Load real credential
-    cred = token_db.load_credential(token_info["credential_set"], prefix)
+    cred = token_db.load_credential(token_info["credential_set"], provider)
     if cred is None:
         _logger.warning(
             "No credential for provider %r in set %r", prefix, token_info["credential_set"]
