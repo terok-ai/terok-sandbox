@@ -324,7 +324,9 @@ def main() -> None:
     parser.add_argument("--db-path", required=True, help="Path to the credential sqlite3 database")
     parser.add_argument("--routes-file", required=True, help="Path to the route config JSON")
     parser.add_argument(
-        "--port", type=int, default=None,
+        "--port",
+        type=int,
+        default=None,
         help="TCP port for container access (in addition to the Unix socket)",
     )
     parser.add_argument(
