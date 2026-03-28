@@ -290,30 +290,27 @@ async def _run_multi(app: web.Application, *, sock_path: str, port: int | None) 
             _logger.info("Using systemd-inherited socket")
             await SockSite(runner, sd_sock).start()
         else:
+            path = Path(sock_path)
+            try:
+                mode = path.lstat().st_mode
+            except FileNotFoundError:
+                pass
             else:
-                path = Path(sock_path)
+                import socket as _socket
+                import stat as _stat
+
+                if not _stat.S_ISSOCK(mode):
+                    raise RuntimeError(f"Refusing to remove non-socket path: {path}")
+
+                probe = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
                 try:
-                    mode = path.lstat().st_mode
-                except FileNotFoundError:
-                    pass
-                else:
-                    import socket as _socket
-                    import stat as _stat
+                    if probe.connect_ex(str(path)) == 0:
+                        raise RuntimeError(f"Socket path already in use: {path}")
+                finally:
+                    probe.close()
 
-                    if not _stat.S_ISSOCK(mode):
-                        raise RuntimeError(f"Refusing to remove non-socket path: {path}")
-
-                    probe = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
-                    try:
-                        if probe.connect_ex(str(path)) == 0:
-                            raise RuntimeError(f"Socket path already in use: {path}")
-                    finally:
-                        probe.close()
-
-                    path.unlink()
-                path.parent.mkdir(parents=True, exist_ok=True)
-                _logger.info("Listening on %s", path)
-                await UnixSite(runner, str(path)).start()
+                path.unlink()
+            path.parent.mkdir(parents=True, exist_ok=True)
             _logger.info("Listening on %s", path)
             await UnixSite(runner, str(path)).start()
 
