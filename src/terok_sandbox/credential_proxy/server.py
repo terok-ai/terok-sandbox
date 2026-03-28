@@ -276,8 +276,46 @@ def _systemd_socket():
     return None
 
 
+async def _run_multi(app: web.Application, *, sock_path: str, port: int | None) -> None:
+    """Run the app on a Unix socket and optionally a TCP port simultaneously."""
+    import asyncio
+
+    from aiohttp.web_runner import AppRunner, SockSite, TCPSite, UnixSite
+
+    runner = AppRunner(app)
+    await runner.setup()
+
+    sites: list[SockSite | UnixSite | TCPSite] = []
+
+    sd_sock = _systemd_socket()
+    if sd_sock:
+        _logger.info("Using systemd-inherited socket")
+        sites.append(SockSite(runner, sd_sock))
+    else:
+        path = Path(sock_path)
+        path.unlink(missing_ok=True)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _logger.info("Listening on %s", path)
+        sites.append(UnixSite(runner, str(path)))
+
+    if port is not None:
+        _logger.info("Listening on 127.0.0.1:%d", port)
+        sites.append(TCPSite(runner, "127.0.0.1", port))
+
+    for site in sites:
+        await site.start()
+
+    # Block until cancelled
+    try:
+        await asyncio.Event().wait()
+    finally:
+        await runner.cleanup()
+
+
 def main() -> None:
     """Parse CLI args and run the credential proxy."""
+    import asyncio
+
     parser = argparse.ArgumentParser(
         prog="terok-credential-proxy",
         description="Credential injection reverse proxy for terok containers",
@@ -285,6 +323,10 @@ def main() -> None:
     parser.add_argument("--socket-path", required=True, help="Unix socket path to listen on")
     parser.add_argument("--db-path", required=True, help="Path to the credential sqlite3 database")
     parser.add_argument("--routes-file", required=True, help="Path to the route config JSON")
+    parser.add_argument(
+        "--port", type=int, default=None,
+        help="TCP port for container access (in addition to the Unix socket)",
+    )
     parser.add_argument(
         "--pid-file", default=None, help="Write PID to this file (for lifecycle management)"
     )
@@ -310,16 +352,10 @@ def main() -> None:
 
     signal.signal(signal.SIGTERM, _handle_sigterm)
 
-    sd_sock = _systemd_socket()
-    if sd_sock:
-        _logger.info("Using systemd-inherited socket")
-        web.run_app(app, sock=sd_sock, print=lambda *_: None)
-    else:
-        sock_path = Path(args.socket_path)
-        sock_path.unlink(missing_ok=True)
-        sock_path.parent.mkdir(parents=True, exist_ok=True)
-        _logger.info("Listening on %s", sock_path)
-        web.run_app(app, path=str(sock_path), print=lambda *_: None)
+    try:
+        asyncio.run(_run_multi(app, sock_path=args.socket_path, port=args.port))
+    except (KeyboardInterrupt, SystemExit):
+        pass
 
 
 if __name__ == "__main__":

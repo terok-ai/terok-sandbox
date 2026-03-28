@@ -48,6 +48,9 @@ class SandboxConfig:
     gate_port: int = 9418
     """HTTP port for the gate server."""
 
+    proxy_port: int = 18731
+    """TCP port for the credential proxy (container access)."""
+
     shield_profiles: tuple[str, ...] = ("dev-standard",)
     """Shield egress firewall profile names."""
 

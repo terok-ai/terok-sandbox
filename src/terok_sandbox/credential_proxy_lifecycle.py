@@ -245,6 +245,7 @@ def start_daemon(cfg: SandboxConfig | None = None) -> None:
         f"--db-path={db_path}",
         f"--routes-file={routes_path}",
         f"--pid-file={pidfile}",
+        f"--port={c.proxy_port}",
     ]
 
     # Fork into background so the proxy survives shell exit.
@@ -298,6 +299,11 @@ def is_daemon_running(cfg: SandboxConfig | None = None) -> bool:
         return True
     except (ValueError, ProcessLookupError, PermissionError):
         return False
+
+
+def get_proxy_port(cfg: SandboxConfig | None = None) -> int:
+    """Return the configured credential proxy TCP port."""
+    return _cfg(cfg).proxy_port
 
 
 def get_proxy_status(cfg: SandboxConfig | None = None) -> CredentialProxyStatus:

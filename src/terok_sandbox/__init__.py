@@ -38,6 +38,7 @@ from .credential_db import CredentialDB
 from .credential_proxy_lifecycle import (
     CredentialProxyStatus,
     ensure_proxy_reachable,
+    get_proxy_port,
     get_proxy_status,
     install_systemd_units as install_proxy_systemd,
     is_daemon_running as is_proxy_running,
@@ -166,6 +167,7 @@ __all__ = [
     # Credential proxy
     "CredentialProxyStatus",
     "ensure_proxy_reachable",
+    "get_proxy_port",
     "get_proxy_status",
     "install_proxy_systemd",
     "is_proxy_running",
