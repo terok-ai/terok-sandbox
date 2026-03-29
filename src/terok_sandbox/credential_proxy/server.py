@@ -40,7 +40,7 @@ import sqlite3
 import time
 from pathlib import Path
 
-from aiohttp import ClientSession, ClientTimeout, ServerDisconnectedError, TCPConnector, web
+from aiohttp import ClientSession, ClientTimeout, web
 
 _logger = logging.getLogger("terok-credential-proxy")
 
@@ -51,7 +51,6 @@ _KEY_CLIENT = web.AppKey("client_session", ClientSession)
 _KEY_REFRESH_TASK = web.AppKey("refresh_task", object)  # asyncio.Task
 
 _REFRESH_INTERVAL = 300  # seconds between background refresh checks
-_IDEMPOTENT_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 _REFRESH_BUFFER = 600  # refresh this many seconds before expiry
 
 # ---------------------------------------------------------------------------
@@ -234,49 +233,30 @@ async def _handle_request(request: web.Request) -> web.StreamResponse:
 
     # 5. Forward and stream response
     session: ClientSession = request.app[_KEY_CLIENT]
-    # Read the body once (streaming body can only be consumed once).
-    body = await request.read() if request.can_read_body else None
-    # Only retry idempotent methods (or those with an Idempotency-Key header) to
-    # avoid replaying non-idempotent writes on stale-connection recovery.
-    can_retry = (
-        request.method.upper() in _IDEMPOTENT_METHODS or "idempotency-key" in request.headers
-    )
-    for attempt in range(2 if can_retry else 1):
-        # Track whether __aenter__ succeeded so we never retry after resp.prepare().
-        connection_established = False
-        try:
-            async with session.request(
-                request.method,
-                upstream_url,
-                headers=headers,
-                data=body,
-                allow_redirects=False,
-                timeout=ClientTimeout(connect=10, sock_read=60),
-            ) as upstream:
-                connection_established = True
-                # Build response with upstream status + headers
-                resp = web.StreamResponse(status=upstream.status)
-                # Forward selected headers
-                for hdr in ("content-type", "transfer-encoding", "cache-control"):
-                    val = upstream.headers.get(hdr)
-                    if val:
-                        resp.headers[hdr] = val
-                await resp.prepare(request)
+    try:
+        async with session.request(
+            request.method,
+            upstream_url,
+            headers=headers,
+            data=request.content if request.can_read_body else None,
+            allow_redirects=False,
+        ) as upstream:
+            # Build response with upstream status + headers
+            resp = web.StreamResponse(status=upstream.status)
+            # Forward selected headers
+            for hdr in ("content-type", "transfer-encoding", "cache-control"):
+                val = upstream.headers.get(hdr)
+                if val:
+                    resp.headers[hdr] = val
+            await resp.prepare(request)
 
-                async for chunk in upstream.content.iter_any():
-                    await resp.write(chunk)
-                await resp.write_eof()
-                return resp
-        except ServerDisconnectedError:
-            if not connection_established and attempt == 0 and can_retry:
-                _logger.debug("Upstream %s disconnected on pooled conn, retrying", provider)
-                continue
-            _logger.error("Upstream %s disconnected on fresh connection", provider)
-            return web.Response(status=502, text="Upstream disconnected")
-        except Exception as exc:
-            _logger.error("Upstream request to %s failed: %s", provider, exc)
-            return web.Response(status=502, text="Upstream request failed")
-    return web.Response(status=502, text="Upstream disconnected")  # unreachable
+            async for chunk in upstream.content.iter_any():
+                await resp.write(chunk)
+            await resp.write_eof()
+            return resp
+    except Exception as exc:
+        _logger.error("Upstream request to %s failed: %s", provider, exc)
+        return web.Response(status=502, text="Upstream request failed")
 
 
 # ---------------------------------------------------------------------------
@@ -369,10 +349,7 @@ async def _refresh_loop(app: web.Application) -> None:
 
 async def _on_startup(app: web.Application) -> None:
     """Create the shared HTTP client session and start background refresh."""
-    # keepalive_timeout=30 ensures we retire connections before upstream servers
-    # close them (~60-90s typical for Anthropic/OpenAI), preventing stale-pool 502s.
-    connector = TCPConnector(enable_cleanup_closed=True, keepalive_timeout=30)
-    app[_KEY_CLIENT] = ClientSession(connector=connector)
+    app[_KEY_CLIENT] = ClientSession()
     app[_KEY_REFRESH_TASK] = asyncio.create_task(_refresh_loop(app))
 
 
