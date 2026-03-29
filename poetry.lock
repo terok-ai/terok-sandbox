@@ -2245,8 +2245,8 @@ PyYAML = ">=6.0"
 [package.source]
 type = "git"
 url = "https://github.com/sliwowitz/terok-shield.git"
-reference = "132b71fa2ebf98887a0ce21fb3a365a5897f4da3"
-resolved_reference = "132b71fa2ebf98887a0ce21fb3a365a5897f4da3"
+reference = "18d87d4262aa9565a08438cb412dd4923f2edaff"
+resolved_reference = "18d87d4262aa9565a08438cb412dd4923f2edaff"
 
 [[package]]
 name = "tomli"
@@ -2613,4 +2613,4 @@ propcache = ">=0.2.1"
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<4.0"
-content-hash = "270c561c33877d178c24def1f497f8653fe276e1265e8a3eb7b48c79116cfc37"
+content-hash = "7df02ff4fe304f820e5e3afc5e97a2f4d151ea9defe64233bd3cd9d96fd490e5"
