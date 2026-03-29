@@ -278,7 +278,10 @@ def update_ssh_keys_json(keys_json_path: Path, project_id: str, result: SSHInitR
     fd = os.open(str(keys_json_path), os.O_RDWR | os.O_CREAT)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
-        raw = os.read(fd, 1 << 20)  # 1 MiB — more than enough
+        chunks: list[bytes] = []
+        while chunk := os.read(fd, 8192):
+            chunks.append(chunk)
+        raw = b"".join(chunks)
         mapping: dict[str, dict[str, str]] = json.loads(raw) if raw.strip() else {}
         mapping[project_id] = {
             "private_key": result["private_key"],

@@ -107,16 +107,26 @@ def _write_msg(writer: asyncio.StreamWriter, msg_type: int, payload: bytes = b""
 
 
 class _KeyTable:
-    """Project-keyed SSH key path table loaded from a JSON file."""
+    """Project-keyed SSH key path table loaded from a JSON file.
+
+    The file is re-read on every lookup so that new keys registered by
+    ``ssh-init`` are visible without restarting the proxy.  The file may
+    not exist on a fresh install (returns empty for all lookups).
+    """
 
     def __init__(self, keys_path: str) -> None:
-        """Load the key mapping from *keys_path* (JSON file)."""
-        with open(keys_path) as f:
-            self._keys: dict[str, dict[str, str]] = json.load(f)
+        """Store the *keys_path* for on-demand reads."""
+        self._path = Path(keys_path)
 
     def get(self, project: str) -> dict[str, str] | None:
         """Return ``{"private_key": path, "public_key": path}`` or ``None``."""
-        return self._keys.get(project)
+        if not self._path.is_file():
+            return None
+        try:
+            mapping = json.loads(self._path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return None
+        return mapping.get(project)
 
 
 # ---------------------------------------------------------------------------
@@ -173,7 +183,7 @@ def _sign(key: Ed25519PrivateKey | RSAPrivateKey, data: bytes, flags: int) -> by
         algo, hash_cls = b"rsa-sha2-256", SHA256()
     else:
         # ssh-rsa uses SHA-1 per RFC 4253 §6.6
-        algo, hash_cls = b"ssh-rsa", SHA1()  # noqa: S303
+        algo, hash_cls = b"ssh-rsa", SHA1()  # noqa: S303  # nosec B303 — RFC 4253 §6.6
     raw_sig = key.sign(data, PKCS1v15(), hash_cls)
     return _pack_string(algo) + _pack_string(raw_sig)
 
