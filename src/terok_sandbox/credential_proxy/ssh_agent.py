@@ -122,11 +122,13 @@ class _KeyCache:
     The file may not exist on a fresh install (returns ``None``).
     """
 
+    # Cache entry: (priv_path, pub_path, priv_mtime_ns, pub_mtime_ns, resolved)
+    _CacheEntry = tuple[str, str, int, int, _ResolvedKey]
+
     def __init__(self, keys_path: str) -> None:
         """Store the *keys_path* for on-demand reads."""
         self._path = Path(keys_path)
-        # project → (private_key_path, public_key_path, resolved_key)
-        self._cache: dict[str, tuple[str, str, _ResolvedKey]] = {}
+        self._cache: dict[str, _KeyCache._CacheEntry] = {}
 
     def get(self, project: str) -> _ResolvedKey | None:
         """Return ``(private_key, pub_blob, comment)`` or ``None``."""
@@ -135,22 +137,33 @@ class _KeyCache:
             return None
         priv_path, pub_path = entry["private_key"], entry["public_key"]
 
-        # Cache hit: paths unchanged since last resolve
+        # Cache hit: paths and mtimes unchanged since last resolve
         cached = self._cache.get(project)
-        if cached and cached[0] == priv_path and cached[1] == pub_path:
-            return cached[2]
+        if cached:
+            c_priv, c_pub, c_priv_mt, c_pub_mt, c_resolved = cached
+            if c_priv == priv_path and c_pub == pub_path:
+                try:
+                    if (
+                        Path(priv_path).stat().st_mtime_ns == c_priv_mt
+                        and Path(pub_path).stat().st_mtime_ns == c_pub_mt
+                    ):
+                        return c_resolved
+                except OSError:
+                    pass  # file gone — fall through to reload
 
-        # Cache miss: load from disk and cache
+        # Cache miss or stale: load from disk and cache
         try:
             private_key = _load_private_key(priv_path)
             pub_blob, comment = _load_public_key_blob(pub_path)
+            priv_mt = Path(priv_path).stat().st_mtime_ns
+            pub_mt = Path(pub_path).stat().st_mtime_ns
         except (FileNotFoundError, ValueError) as exc:
             _logger.error("Failed to load SSH key for project %r: %s", project, exc)
             self._cache.pop(project, None)
             return None
 
         resolved: _ResolvedKey = (private_key, pub_blob, comment)
-        self._cache[project] = (priv_path, pub_path, resolved)
+        self._cache[project] = (priv_path, pub_path, priv_mt, pub_mt, resolved)
         return resolved
 
     def _lookup_paths(self, project: str) -> dict[str, str] | None:

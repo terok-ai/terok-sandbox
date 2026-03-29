@@ -655,3 +655,31 @@ class TestKeyCacheEdgeCases:
         r2 = cache.get("proj")
         assert r1 is not None and r2 is not None
         assert r1[0] is not r2[0]  # different private key object (re-loaded)
+
+    def test_reloads_on_same_path_rotation(
+        self, tmp_path: Path, ed25519_keypair: tuple[Path, Path, bytes]
+    ) -> None:
+        """In-place key rotation (same paths, new content) reloads the cache."""
+        import time
+
+        priv_path, pub_path, _ = ed25519_keypair
+        kf = tmp_path / "keys.json"
+        kf.write_text(
+            json.dumps({"proj": {"private_key": str(priv_path), "public_key": str(pub_path)}})
+        )
+        cache = _KeyCache(str(kf))
+        r1 = cache.get("proj")
+
+        # Overwrite the same files with a freshly generated key
+        # (sleep briefly so mtime_ns differs — filesystem granularity)
+        time.sleep(0.05)
+        key2 = Ed25519PrivateKey.generate()
+        priv_path.write_bytes(
+            key2.private_bytes(Encoding.PEM, PrivateFormat.OpenSSH, NoEncryption())
+        )
+        pub_raw2 = key2.public_key().public_bytes(Encoding.OpenSSH, PublicFormat.OpenSSH)
+        pub_path.write_text(f"{pub_raw2.decode()} rotated\n")
+
+        r2 = cache.get("proj")
+        assert r1 is not None and r2 is not None
+        assert r1[0] is not r2[0]  # different key object (reloaded from same path)
