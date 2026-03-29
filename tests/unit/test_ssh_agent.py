@@ -558,11 +558,17 @@ class TestRSASign:
         algo, _ = _unpack_string(memoryview(sig_blob), 0)
         assert algo == b"rsa-sha2-512"
 
-    def test_rsa_no_flags_uses_ssh_rsa(self, rsa_key) -> None:
-        """No flags defaults to ssh-rsa (SHA-1 per RFC 4253)."""
-        sig_blob = _sign(rsa_key, b"test", 0)
-        algo, _ = _unpack_string(memoryview(sig_blob), 0)
+    def test_rsa_no_flags_uses_ssh_rsa_sha1(self, rsa_key) -> None:
+        """No flags defaults to ssh-rsa with SHA-1 per RFC 4253 §6.6."""
+        from cryptography.hazmat.primitives.asymmetric.padding import PKCS1v15
+        from cryptography.hazmat.primitives.hashes import SHA1
+
+        data = b"test"
+        sig_blob = _sign(rsa_key, data, 0)
+        algo, off = _unpack_string(memoryview(sig_blob), 0)
         assert algo == b"ssh-rsa"
+        raw_sig, _ = _unpack_string(memoryview(sig_blob), off)
+        rsa_key.public_key().verify(raw_sig, data, PKCS1v15(), SHA1())  # noqa: S303
 
     def test_rsa_sha256_signature_verifies(self, rsa_key) -> None:
         """RSA-SHA2-256 signature verifies against the public key."""

@@ -154,11 +154,23 @@ class _KeyCache:
         return resolved
 
     def _lookup_paths(self, project: str) -> dict[str, str] | None:
-        """Read ssh-keys.json and return the entry for *project*, or ``None``."""
+        """Read ssh-keys.json and return the entry for *project*, or ``None``.
+
+        Uses ``LOCK_SH`` to coordinate with the ``LOCK_EX`` writer in
+        :func:`update_ssh_keys_json`.
+        """
+        import fcntl
+
         if not self._path.is_file():
             return None
         try:
-            mapping = json.loads(self._path.read_text(encoding="utf-8"))
+            fd = self._path.open()
+            try:
+                fcntl.flock(fd, fcntl.LOCK_SH)
+                mapping = json.loads(fd.read())
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                fd.close()
         except (json.JSONDecodeError, OSError):
             return None
         if not isinstance(mapping, dict):
