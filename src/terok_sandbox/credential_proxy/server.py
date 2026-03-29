@@ -51,6 +51,7 @@ _KEY_CLIENT = web.AppKey("client_session", ClientSession)
 _KEY_REFRESH_TASK = web.AppKey("refresh_task", object)  # asyncio.Task
 
 _REFRESH_INTERVAL = 300  # seconds between background refresh checks
+_IDEMPOTENT_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 _REFRESH_BUFFER = 600  # refresh this many seconds before expiry
 
 # ---------------------------------------------------------------------------
@@ -235,7 +236,14 @@ async def _handle_request(request: web.Request) -> web.StreamResponse:
     session: ClientSession = request.app[_KEY_CLIENT]
     # Read the body once (streaming body can only be consumed once).
     body = await request.read() if request.can_read_body else None
-    for attempt in range(2):
+    # Only retry idempotent methods (or those with an Idempotency-Key header) to
+    # avoid replaying non-idempotent writes on stale-connection recovery.
+    can_retry = (
+        request.method.upper() in _IDEMPOTENT_METHODS or "idempotency-key" in request.headers
+    )
+    for attempt in range(2 if can_retry else 1):
+        # Track whether __aenter__ succeeded so we never retry after resp.prepare().
+        connection_established = False
         try:
             async with session.request(
                 request.method,
@@ -243,8 +251,9 @@ async def _handle_request(request: web.Request) -> web.StreamResponse:
                 headers=headers,
                 data=body,
                 allow_redirects=False,
-                timeout=ClientTimeout(total=120, connect=10, sock_read=60),
+                timeout=ClientTimeout(connect=10, sock_read=60),
             ) as upstream:
+                connection_established = True
                 # Build response with upstream status + headers
                 resp = web.StreamResponse(status=upstream.status)
                 # Forward selected headers
@@ -259,7 +268,7 @@ async def _handle_request(request: web.Request) -> web.StreamResponse:
                 await resp.write_eof()
                 return resp
         except ServerDisconnectedError:
-            if attempt == 0:
+            if not connection_established and attempt == 0 and can_retry:
                 _logger.debug("Upstream %s disconnected on pooled conn, retrying", provider)
                 continue
             _logger.error("Upstream %s disconnected on fresh connection", provider)
@@ -267,6 +276,7 @@ async def _handle_request(request: web.Request) -> web.StreamResponse:
         except Exception as exc:
             _logger.error("Upstream request to %s failed: %s", provider, exc)
             return web.Response(status=502, text="Upstream request failed")
+    return web.Response(status=502, text="Upstream disconnected")  # unreachable
 
 
 # ---------------------------------------------------------------------------
