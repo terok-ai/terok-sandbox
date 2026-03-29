@@ -313,8 +313,6 @@ class TestSSHAgentRoundTrip:
         pub_raw = key.public_key().public_bytes(E.OpenSSH, PuF.OpenSSH)
         (ssh_dir / "id.pub").write_text(f"{pub_raw.decode()} c\n")
 
-        import json
-
         keys_file = tmp_path / "keys.json"
         keys_file.write_text(
             json.dumps(
