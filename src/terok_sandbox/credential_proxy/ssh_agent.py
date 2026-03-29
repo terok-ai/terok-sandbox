@@ -106,27 +106,71 @@ def _write_msg(writer: asyncio.StreamWriter, msg_type: int, payload: bytes = b""
 # ---------------------------------------------------------------------------
 
 
-class _KeyTable:
-    """Project-keyed SSH key path table loaded from a JSON file.
+_ResolvedKey = tuple[Ed25519PrivateKey | RSAPrivateKey, bytes, str]
+"""(private_key, pub_blob, comment) — cached per project."""
 
-    The file is re-read on every lookup so that new keys registered by
-    ``ssh-init`` are visible without restarting the proxy.  The file may
-    not exist on a fresh install (returns empty for all lookups).
+
+class _KeyCache:
+    """Caches resolved SSH key material per project.
+
+    On each :meth:`get` call the sidecar JSON is re-read (so ``ssh-init``
+    changes are visible without a proxy restart).  When the key *paths*
+    for a project haven't changed since the last load, the cached
+    private-key object, public-key blob, and comment are returned
+    directly — no disk I/O or crypto parsing on subsequent connections.
+
+    The file may not exist on a fresh install (returns ``None``).
     """
 
     def __init__(self, keys_path: str) -> None:
         """Store the *keys_path* for on-demand reads."""
         self._path = Path(keys_path)
+        # project → (private_key_path, public_key_path, resolved_key)
+        self._cache: dict[str, tuple[str, str, _ResolvedKey]] = {}
 
-    def get(self, project: str) -> dict[str, str] | None:
-        """Return ``{"private_key": path, "public_key": path}`` or ``None``."""
+    def get(self, project: str) -> _ResolvedKey | None:
+        """Return ``(private_key, pub_blob, comment)`` or ``None``."""
+        entry = self._lookup_paths(project)
+        if entry is None:
+            return None
+        priv_path, pub_path = entry["private_key"], entry["public_key"]
+
+        # Cache hit: paths unchanged since last resolve
+        cached = self._cache.get(project)
+        if cached and cached[0] == priv_path and cached[1] == pub_path:
+            return cached[2]
+
+        # Cache miss: load from disk and cache
+        try:
+            private_key = _load_private_key(priv_path)
+            pub_blob, comment = _load_public_key_blob(pub_path)
+        except (FileNotFoundError, ValueError) as exc:
+            _logger.error("Failed to load SSH key for project %r: %s", project, exc)
+            self._cache.pop(project, None)
+            return None
+
+        resolved: _ResolvedKey = (private_key, pub_blob, comment)
+        self._cache[project] = (priv_path, pub_path, resolved)
+        return resolved
+
+    def _lookup_paths(self, project: str) -> dict[str, str] | None:
+        """Read ssh-keys.json and return the entry for *project*, or ``None``."""
         if not self._path.is_file():
             return None
         try:
             mapping = json.loads(self._path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             return None
-        return mapping.get(project)
+        if not isinstance(mapping, dict):
+            return None
+        entry = mapping.get(project)
+        if not isinstance(entry, dict):
+            return None
+        if not (
+            isinstance(entry.get("private_key"), str) and isinstance(entry.get("public_key"), str)
+        ):
+            return None
+        return entry
 
 
 # ---------------------------------------------------------------------------
@@ -218,12 +262,12 @@ async def _handle_connection(
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
     token_db: object,
-    key_table: _KeyTable,
+    key_cache: _KeyCache,
 ) -> None:
     """Handle one SSH agent TCP connection.
 
     1. Read phantom-token handshake → validate via DB
-    2. Load SSH key from host filesystem
+    2. Resolve SSH key from cache (or load from filesystem on miss)
     3. Serve agent protocol messages until EOF
     """
     peer = writer.get_extra_info("peername")
@@ -244,18 +288,12 @@ async def _handle_connection(
             return
 
         project = token_info["project"]
-        key_entry = key_table.get(project)
-        if key_entry is None:
+        resolved = key_cache.get(project)
+        if resolved is None:
             _logger.warning("No SSH key configured for project %r", project)
             return
 
-        try:
-            private_key = _load_private_key(key_entry["private_key"])
-            pub_blob, comment = _load_public_key_blob(key_entry["public_key"])
-        except (FileNotFoundError, ValueError) as exc:
-            _logger.error("Failed to load SSH key for project %r: %s", project, exc)
-            return
-
+        private_key, pub_blob, comment = resolved
         _logger.debug("SSH agent session for project %r from %s", project, peer)
 
         # --- Agent message loop ---
@@ -328,11 +366,11 @@ async def start_ssh_agent_server(
     from .server import _TokenDB
 
     token_db = _TokenDB(db_path)
-    key_table = _KeyTable(keys_file)
+    key_cache = _KeyCache(keys_file)
 
     async def _on_connect(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         """Handle an incoming SSH agent connection."""
-        await _handle_connection(reader, writer, token_db, key_table)
+        await _handle_connection(reader, writer, token_db, key_cache)
 
     server = await asyncio.start_server(_on_connect, host, port)
     _logger.info("SSH agent proxy listening on %s:%d", host, port)

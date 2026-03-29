@@ -29,7 +29,7 @@ from terok_sandbox.credential_proxy.ssh_agent import (
     SSH_AGENT_SIGN_RESPONSE,
     SSH_AGENTC_REQUEST_IDENTITIES,
     SSH_AGENTC_SIGN_REQUEST,
-    _KeyTable,
+    _KeyCache,
     _load_private_key,
     _load_public_key_blob,
     _pack_string,
@@ -120,21 +120,45 @@ class TestWireFormat:
 # ── Key table ───────────────────────────────────────────────────────────
 
 
-class TestKeyTable:
-    """Verify project-keyed SSH key path lookup."""
+class TestKeyCache:
+    """Verify project-keyed SSH key cache."""
 
-    def test_get_known_project(self, tmp_path: Path) -> None:
-        """Known project returns key paths."""
+    def test_get_known_project(
+        self, tmp_path: Path, ed25519_keypair: tuple[Path, Path, bytes]
+    ) -> None:
+        """Known project with valid keys returns resolved key material."""
+        priv_path, pub_path, expected_blob = ed25519_keypair
         kf = tmp_path / "keys.json"
-        kf.write_text(json.dumps({"proj": {"private_key": "/a", "public_key": "/b"}}))
-        kt = _KeyTable(str(kf))
-        assert kt.get("proj") == {"private_key": "/a", "public_key": "/b"}
+        kf.write_text(
+            json.dumps({"proj": {"private_key": str(priv_path), "public_key": str(pub_path)}})
+        )
+        resolved = _KeyCache(str(kf)).get("proj")
+        assert resolved is not None
+        private_key, pub_blob, comment = resolved
+        assert isinstance(private_key, Ed25519PrivateKey)
+        assert pub_blob == expected_blob
+        assert comment == "test-comment"
 
     def test_get_unknown_project(self, tmp_path: Path) -> None:
         """Unknown project returns None."""
         kf = tmp_path / "keys.json"
         kf.write_text("{}")
-        assert _KeyTable(str(kf)).get("nope") is None
+        assert _KeyCache(str(kf)).get("nope") is None
+
+    def test_caches_across_calls(
+        self, tmp_path: Path, ed25519_keypair: tuple[Path, Path, bytes]
+    ) -> None:
+        """Second get() for the same project returns cached object (same identity)."""
+        priv_path, pub_path, _ = ed25519_keypair
+        kf = tmp_path / "keys.json"
+        kf.write_text(
+            json.dumps({"proj": {"private_key": str(priv_path), "public_key": str(pub_path)}})
+        )
+        cache = _KeyCache(str(kf))
+        r1 = cache.get("proj")
+        r2 = cache.get("proj")
+        assert r1 is not None and r2 is not None
+        assert r1[0] is r2[0]  # same private key object (cached, not re-loaded)
 
 
 # ── Signing ─────────────────────────────────────────────────────────────
@@ -552,29 +576,76 @@ class TestRSASign:
         rsa_key.public_key().verify(raw_sig, data, PKCS1v15(), SHA256())
 
 
-# ── _KeyTable dynamic behavior ──────────────────────────────────────────
+# ── _KeyCache edge cases ─────────────────────────────────────────────────
 
 
-class TestKeyTableDynamic:
-    """Verify _KeyTable re-reads the file and handles edge cases."""
+class TestKeyCacheEdgeCases:
+    """Verify _KeyCache re-reads the file, caches, and handles malformed data."""
 
     def test_missing_file_returns_none(self, tmp_path: Path) -> None:
         """Non-existent keys file returns None for any project."""
-        kt = _KeyTable(str(tmp_path / "no-such.json"))
-        assert kt.get("any") is None
+        assert _KeyCache(str(tmp_path / "no-such.json")).get("any") is None
 
     def test_corrupt_json_returns_none(self, tmp_path: Path) -> None:
         """Corrupt JSON file returns None gracefully."""
         kf = tmp_path / "bad.json"
         kf.write_text("{invalid json")
-        assert _KeyTable(str(kf)).get("proj") is None
+        assert _KeyCache(str(kf)).get("proj") is None
 
-    def test_reflects_file_updates(self, tmp_path: Path) -> None:
+    def test_reflects_file_updates(
+        self, tmp_path: Path, ed25519_keypair: tuple[Path, Path, bytes]
+    ) -> None:
         """New entries in ssh-keys.json are visible on next get() call."""
+        priv_path, pub_path, _ = ed25519_keypair
         kf = tmp_path / "keys.json"
         kf.write_text("{}")
-        kt = _KeyTable(str(kf))
-        assert kt.get("proj") is None
+        cache = _KeyCache(str(kf))
+        assert cache.get("proj") is None
 
-        kf.write_text(json.dumps({"proj": {"private_key": "/a", "public_key": "/b"}}))
-        assert kt.get("proj") == {"private_key": "/a", "public_key": "/b"}
+        kf.write_text(
+            json.dumps({"proj": {"private_key": str(priv_path), "public_key": str(pub_path)}})
+        )
+        assert cache.get("proj") is not None
+
+    def test_json_list_returns_none(self, tmp_path: Path) -> None:
+        """JSON root is a list (not a dict) — returns None gracefully."""
+        kf = tmp_path / "keys.json"
+        kf.write_text('[{"private_key": "/a"}]')
+        assert _KeyCache(str(kf)).get("proj") is None
+
+    def test_entry_missing_keys_returns_none(self, tmp_path: Path) -> None:
+        """Entry without required 'private_key'/'public_key' strings returns None."""
+        kf = tmp_path / "keys.json"
+        kf.write_text(json.dumps({"proj": {"only_one": "/a"}}))
+        assert _KeyCache(str(kf)).get("proj") is None
+
+    def test_entry_non_string_values_returns_none(self, tmp_path: Path) -> None:
+        """Entry with non-string values returns None."""
+        kf = tmp_path / "keys.json"
+        kf.write_text(json.dumps({"proj": {"private_key": 42, "public_key": "/b"}}))
+        assert _KeyCache(str(kf)).get("proj") is None
+
+    def test_invalidates_cache_on_path_change(
+        self, tmp_path: Path, ed25519_keypair: tuple[Path, Path, bytes]
+    ) -> None:
+        """Cache is invalidated when key paths change in ssh-keys.json."""
+        priv_path, pub_path, _ = ed25519_keypair
+        kf = tmp_path / "keys.json"
+        kf.write_text(
+            json.dumps({"proj": {"private_key": str(priv_path), "public_key": str(pub_path)}})
+        )
+        cache = _KeyCache(str(kf))
+        r1 = cache.get("proj")
+
+        # Generate a second keypair with different paths
+        key2 = Ed25519PrivateKey.generate()
+        priv2 = tmp_path / "id2"
+        pub2 = tmp_path / "id2.pub"
+        priv2.write_bytes(key2.private_bytes(Encoding.PEM, PrivateFormat.OpenSSH, NoEncryption()))
+        pub_raw2 = key2.public_key().public_bytes(Encoding.OpenSSH, PublicFormat.OpenSSH)
+        pub2.write_text(f"{pub_raw2.decode()} comment2\n")
+
+        kf.write_text(json.dumps({"proj": {"private_key": str(priv2), "public_key": str(pub2)}}))
+        r2 = cache.get("proj")
+        assert r1 is not None and r2 is not None
+        assert r1[0] is not r2[0]  # different private key object (re-loaded)
