@@ -203,11 +203,14 @@ def _build_msg(msg_type: int, payload: bytes = b"") -> bytes:
     return struct.pack(">I", len(body)) + body
 
 
+_READ_TIMEOUT = 5.0  # seconds — prevent tests from hanging on CI
+
+
 async def _read_response(reader: asyncio.StreamReader) -> tuple[int, bytes]:
     """Read one SSH agent response message."""
-    raw_len = await reader.readexactly(4)
+    raw_len = await asyncio.wait_for(reader.readexactly(4), timeout=_READ_TIMEOUT)
     (msg_len,) = struct.unpack(">I", raw_len)
-    body = await reader.readexactly(msg_len)
+    body = await asyncio.wait_for(reader.readexactly(msg_len), timeout=_READ_TIMEOUT)
     return body[0], body[1:]
 
 
