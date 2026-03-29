@@ -13,6 +13,7 @@ terok-specific types.  The orchestration layer constructs the manager
 from project configuration.
 """
 
+import fcntl
 import json
 import os
 import subprocess
@@ -269,16 +270,27 @@ def update_ssh_keys_json(keys_json_path: Path, project_id: str, result: SSHInitR
     to how ``routes.json`` maps provider names to proxy routes.  The
     credential proxy's SSH agent handler reads this file to locate the
     private key for signing requests.
+
+    Uses ``fcntl.flock`` to prevent concurrent ``ssh-init`` invocations
+    from overwriting each other's entries.
     """
     keys_json_path.parent.mkdir(parents=True, exist_ok=True)
-    mapping: dict[str, dict[str, str]] = {}
-    if keys_json_path.is_file():
-        mapping = json.loads(keys_json_path.read_text(encoding="utf-8"))
-    mapping[project_id] = {
-        "private_key": result["private_key"],
-        "public_key": result["public_key"],
-    }
-    keys_json_path.write_text(json.dumps(mapping, indent=2) + "\n", encoding="utf-8")
+    fd = os.open(str(keys_json_path), os.O_RDWR | os.O_CREAT)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        raw = os.read(fd, 1 << 20)  # 1 MiB — more than enough
+        mapping: dict[str, dict[str, str]] = json.loads(raw) if raw.strip() else {}
+        mapping[project_id] = {
+            "private_key": result["private_key"],
+            "public_key": result["public_key"],
+        }
+        data = (json.dumps(mapping, indent=2) + "\n").encode("utf-8")
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.ftruncate(fd, 0)
+        os.write(fd, data)
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 def _harden_permissions(target_dir: Path, priv_path: Path, pub_path: Path, cfg_path: Path) -> None:

@@ -33,15 +33,13 @@ import struct
 from pathlib import Path
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric.padding import PKCS1v15
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
-from cryptography.hazmat.primitives.hashes import SHA256, SHA512
+from cryptography.hazmat.primitives.hashes import SHA1, SHA256, SHA512
 from cryptography.hazmat.primitives.serialization import (
     load_pem_private_key,
     load_ssh_private_key,
 )
-
-if RSAPrivateKey:  # keep ruff happy about the conditional import
-    from cryptography.hazmat.primitives.asymmetric.padding import PKCS1v15
 
 _logger = logging.getLogger("terok-ssh-agent")
 
@@ -73,10 +71,18 @@ def _pack_string(data: bytes) -> bytes:
 
 
 def _unpack_string(buf: memoryview, offset: int) -> tuple[bytes, int]:
-    """Unpack an SSH string from *buf* at *offset*.  Returns ``(data, new_offset)``."""
+    """Unpack an SSH string from *buf* at *offset*.  Returns ``(data, new_offset)``.
+
+    Raises ``ValueError`` if the encoded length exceeds the remaining buffer.
+    """
+    if offset + 4 > len(buf):
+        raise ValueError(f"Buffer too short for string header at offset {offset}")
     (slen,) = struct.unpack_from(">I", buf, offset)
     start = offset + 4
-    return bytes(buf[start : start + slen]), start + slen
+    end = start + slen
+    if end > len(buf):
+        raise ValueError(f"String length {slen} exceeds buffer (remaining {len(buf) - start})")
+    return bytes(buf[start:end]), end
 
 
 async def _read_msg(reader: asyncio.StreamReader) -> tuple[int, bytes]:
@@ -139,9 +145,13 @@ def _load_public_key_blob(pub_key_path: str) -> tuple[bytes, str]:
 
     Returns ``(key_blob, comment)``.  The blob is the base64-decoded middle
     field of the ``<type> <base64> <comment>`` format.
+
+    Raises ``ValueError`` if the file format is invalid.
     """
     text = Path(pub_key_path).read_text(encoding="utf-8").strip()
     parts = text.split(None, 2)
+    if len(parts) < 2:
+        raise ValueError("Malformed public key file: expected '<type> <base64> [comment]'")
     blob = base64.b64decode(parts[1])
     comment = parts[2] if len(parts) > 2 else ""
     return blob, comment
@@ -156,13 +166,14 @@ def _sign(key: Ed25519PrivateKey | RSAPrivateKey, data: bytes, flags: int) -> by
         raw_sig = key.sign(data)
         return _pack_string(b"ssh-ed25519") + _pack_string(raw_sig)
 
-    # RSA: choose algorithm based on flags
+    # RSA: choose algorithm based on flags (RFC 8332)
     if flags & SSH_AGENT_RSA_SHA2_512:
         algo, hash_cls = b"rsa-sha2-512", SHA512()
     elif flags & SSH_AGENT_RSA_SHA2_256:
         algo, hash_cls = b"rsa-sha2-256", SHA256()
     else:
-        algo, hash_cls = b"ssh-rsa", SHA256()
+        # ssh-rsa uses SHA-1 per RFC 4253 §6.6
+        algo, hash_cls = b"ssh-rsa", SHA1()  # noqa: S303
     raw_sig = key.sign(data, PKCS1v15(), hash_cls)
     return _pack_string(algo) + _pack_string(raw_sig)
 
@@ -248,17 +259,23 @@ async def _handle_connection(
                 _write_msg(writer, SSH_AGENT_IDENTITIES_ANSWER, body)
 
             elif msg_type == SSH_AGENTC_SIGN_REQUEST:
-                mv = memoryview(payload)
-                req_blob, off = _unpack_string(mv, 0)
-                sign_data, off = _unpack_string(mv, off)
-                (flags,) = struct.unpack_from(">I", mv, off)
-
-                if req_blob != pub_blob:
-                    _logger.debug("Sign request for unknown key, returning failure")
+                try:
+                    mv = memoryview(payload)
+                    req_blob, off = _unpack_string(mv, 0)
+                    sign_data, off = _unpack_string(mv, off)
+                    if off + 4 > len(mv):
+                        raise ValueError("Payload too short for flags field")
+                    (flags,) = struct.unpack_from(">I", mv, off)
+                except (ValueError, struct.error) as exc:
+                    _logger.debug("Malformed sign request: %s", exc)
                     _write_msg(writer, SSH_AGENT_FAILURE)
                 else:
-                    sig_blob = _sign(private_key, sign_data, flags)
-                    _write_msg(writer, SSH_AGENT_SIGN_RESPONSE, _pack_string(sig_blob))
+                    if req_blob != pub_blob:
+                        _logger.debug("Sign request for unknown key, returning failure")
+                        _write_msg(writer, SSH_AGENT_FAILURE)
+                    else:
+                        sig_blob = _sign(private_key, sign_data, flags)
+                        _write_msg(writer, SSH_AGENT_SIGN_RESPONSE, _pack_string(sig_blob))
 
             else:
                 _write_msg(writer, SSH_AGENT_FAILURE)

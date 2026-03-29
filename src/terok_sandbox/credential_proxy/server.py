@@ -527,6 +527,9 @@ def main() -> None:
     parser.add_argument("--log-level", default="INFO", help="Logging level (default: INFO)")
     args = parser.parse_args()
 
+    if bool(args.ssh_agent_port) != bool(args.ssh_keys_file):
+        parser.error("--ssh-agent-port and --ssh-keys-file must be provided together")
+
     logging.basicConfig(
         level=getattr(logging, args.log_level.upper(), logging.INFO),
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
