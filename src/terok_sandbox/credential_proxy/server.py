@@ -417,7 +417,15 @@ def _systemd_socket():
     return None
 
 
-async def _run_multi(app: web.Application, *, sock_path: str, port: int | None) -> None:
+async def _run_multi(
+    app: web.Application,
+    *,
+    sock_path: str,
+    port: int | None,
+    ssh_agent_port: int | None = None,
+    ssh_keys_file: str | None = None,
+    db_path: str | None = None,
+) -> None:
     """Run the app on a Unix socket and optionally a TCP port simultaneously."""
     import asyncio
 
@@ -425,6 +433,7 @@ async def _run_multi(app: web.Application, *, sock_path: str, port: int | None) 
 
     runner = AppRunner(app)
     await runner.setup()
+    ssh_server = None
     try:
         sd_sock = _systemd_socket()
         if sd_sock:
@@ -459,8 +468,21 @@ async def _run_multi(app: web.Application, *, sock_path: str, port: int | None) 
             _logger.info("Listening on 127.0.0.1:%d", port)
             await TCPSite(runner, "127.0.0.1", port).start()
 
+        if ssh_agent_port is not None and ssh_keys_file and db_path:
+            from .ssh_agent import start_ssh_agent_server
+
+            ssh_server = await start_ssh_agent_server(
+                db_path=db_path,
+                keys_file=ssh_keys_file,
+                host="127.0.0.1",
+                port=ssh_agent_port,
+            )
+
         await asyncio.Event().wait()  # Block until cancelled
     finally:
+        if ssh_server is not None:
+            ssh_server.close()
+            await ssh_server.wait_closed()
         await runner.cleanup()
 
 
@@ -489,6 +511,17 @@ def main() -> None:
         help="TCP port for container access (in addition to the Unix socket)",
     )
     parser.add_argument(
+        "--ssh-agent-port",
+        type=_tcp_port,
+        default=None,
+        help="TCP port for the SSH agent proxy (signs with host-side keys)",
+    )
+    parser.add_argument(
+        "--ssh-keys-file",
+        default=None,
+        help="Path to ssh-keys.json mapping project IDs to key file paths",
+    )
+    parser.add_argument(
         "--pid-file", default=None, help="Write PID to this file (for lifecycle management)"
     )
     parser.add_argument("--log-level", default="INFO", help="Logging level (default: INFO)")
@@ -514,7 +547,16 @@ def main() -> None:
     signal.signal(signal.SIGTERM, _handle_sigterm)
 
     try:
-        asyncio.run(_run_multi(app, sock_path=args.socket_path, port=args.port))
+        asyncio.run(
+            _run_multi(
+                app,
+                sock_path=args.socket_path,
+                port=args.port,
+                ssh_agent_port=args.ssh_agent_port,
+                ssh_keys_file=args.ssh_keys_file,
+                db_path=args.db_path,
+            )
+        )
     except (KeyboardInterrupt, SystemExit):
         pass
 

@@ -40,6 +40,7 @@ from .credential_proxy_lifecycle import (
     ensure_proxy_reachable,
     get_proxy_port,
     get_proxy_status,
+    get_ssh_agent_port,
     install_systemd_units as install_proxy_systemd,
     is_daemon_running as is_proxy_running,
     is_socket_active as is_proxy_socket_active,
@@ -110,7 +111,7 @@ from .shield import (
 )
 
 # -- SSH ---------------------------------------------------------------------
-from .ssh import SSHManager
+from .ssh import SSHManager, update_ssh_keys_json
 
 __all__ = [
     # Config
@@ -169,6 +170,7 @@ __all__ = [
     "ensure_proxy_reachable",
     "get_proxy_port",
     "get_proxy_status",
+    "get_ssh_agent_port",
     "install_proxy_systemd",
     "is_proxy_running",
     "is_proxy_socket_active",
@@ -190,6 +192,7 @@ __all__ = [
     "Sandbox",
     # SSH
     "SSHManager",
+    "update_ssh_keys_json",
     # Meta
     "__version__",
 ]

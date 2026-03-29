@@ -83,7 +83,7 @@ def _is_managed_proxy(pid: int, cfg: SandboxConfig | None = None) -> bool:
 
 # ---------- Systemd helpers ----------
 
-_UNIT_VERSION = 2
+_UNIT_VERSION = 3
 """Bump when the systemd unit templates change."""
 
 _SOCKET_UNIT = "terok-credential-proxy.socket"
@@ -165,6 +165,8 @@ def install_systemd_units(cfg: SandboxConfig | None = None) -> None:
         "DB_PATH": str(c.proxy_db_path),
         "ROUTES_PATH": str(c.proxy_routes_path),
         "PORT": str(c.proxy_port),
+        "SSH_AGENT_PORT": str(c.ssh_agent_port),
+        "SSH_KEYS_FILE": str(c.ssh_keys_json_path),
         "BIN": shlex.join(_proxy_exec_prefix()),
         "UNIT_VERSION": str(_UNIT_VERSION),
     }
@@ -240,6 +242,11 @@ def start_daemon(cfg: SandboxConfig | None = None) -> None:
             routes_path,
         )
 
+    ssh_keys_path = c.ssh_keys_json_path
+    if not ssh_keys_path.is_file():
+        ssh_keys_path.parent.mkdir(parents=True, exist_ok=True)
+        ssh_keys_path.write_text("{}\n")
+
     cmd = [
         *_proxy_exec_prefix(),
         f"--socket-path={sock_path}",
@@ -247,6 +254,8 @@ def start_daemon(cfg: SandboxConfig | None = None) -> None:
         f"--routes-file={routes_path}",
         f"--pid-file={pidfile}",
         f"--port={c.proxy_port}",
+        f"--ssh-agent-port={c.ssh_agent_port}",
+        f"--ssh-keys-file={ssh_keys_path}",
     ]
 
     # Fork into background so the proxy survives shell exit.
@@ -305,6 +314,11 @@ def is_daemon_running(cfg: SandboxConfig | None = None) -> bool:
 def get_proxy_port(cfg: SandboxConfig | None = None) -> int:
     """Return the configured credential proxy TCP port."""
     return _cfg(cfg).proxy_port
+
+
+def get_ssh_agent_port(cfg: SandboxConfig | None = None) -> int:
+    """Return the configured SSH agent proxy TCP port."""
+    return _cfg(cfg).ssh_agent_port
 
 
 def get_proxy_status(cfg: SandboxConfig | None = None) -> CredentialProxyStatus:
