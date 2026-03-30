@@ -446,3 +446,9 @@ def ensure_proxy_reachable(cfg: SandboxConfig | None = None) -> None:
             f"Credential proxy service started but TCP port {c.proxy_port} "
             "is not reachable. Check: journalctl --user -u terok-credential-proxy"
         )
+
+    if not _wait_for_tcp_port(c.ssh_agent_port):
+        raise SystemExit(
+            f"Credential proxy service started but SSH agent port {c.ssh_agent_port} "
+            "is not reachable. Check: journalctl --user -u terok-credential-proxy"
+        )

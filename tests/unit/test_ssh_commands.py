@@ -151,6 +151,36 @@ class TestHandleSshImport:
             assert Path(entry["private_key"]).parent == dest_dir
             assert Path(entry["public_key"]).parent == dest_dir
 
+    def test_same_basename_gets_numeric_suffix(self, tmp_path: Path) -> None:
+        """Two keys with the same filename don't overwrite each other in the managed dir."""
+        cfg = _mock_cfg(tmp_path)
+
+        src_a = tmp_path / "a"
+        src_b = tmp_path / "b"
+        src_a.mkdir()
+        src_b.mkdir()
+
+        # Both source dirs have a key called id_ed25519_proj (same basename)
+        for src_dir in (src_a, src_b):
+            key = Ed25519PrivateKey.generate()
+            priv = src_dir / "id_ed25519_proj"
+            pub = src_dir / "id_ed25519_proj.pub"
+            priv.write_bytes(key.private_bytes(Encoding.PEM, PrivateFormat.OpenSSH, NoEncryption()))
+            pub_raw = key.public_key().public_bytes(Encoding.OpenSSH, PublicFormat.OpenSSH)
+            pub.write_text(f"{pub_raw.decode()} comment\n")
+
+        with patch("terok_sandbox.config.SandboxConfig", return_value=cfg):
+            _handle_ssh_import(project="proj", private_key=str(src_a / "id_ed25519_proj"))
+            _handle_ssh_import(project="proj", private_key=str(src_b / "id_ed25519_proj"))
+
+        data = json.loads(cfg.ssh_keys_json_path.read_text())
+        assert len(data["proj"]) == 2
+        priv_paths = [Path(e["private_key"]).name for e in data["proj"]]
+        # Second key must have a unique name (numeric suffix)
+        assert len(set(priv_paths)) == 2, f"Expected distinct dest names, got: {priv_paths}"
+        assert "id_ed25519_proj" in priv_paths
+        assert "id_ed25519_proj_1" in priv_paths
+
     def test_reimport_same_key_is_idempotent(
         self, tmp_path: Path, keypair: tuple[Path, Path]
     ) -> None:

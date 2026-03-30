@@ -308,8 +308,25 @@ def _handle_ssh_import(*, project: str, private_key: str, public_key: str | None
     dest_dir = cfg.ssh_keys_dir / project
     dest_dir.mkdir(parents=True, exist_ok=True)
 
-    priv_dst = dest_dir / priv_src.name
-    pub_dst = dest_dir / pub_src.name
+    def _unique_dst(src: Path) -> Path:
+        """Return dest path for *src* inside *dest_dir*, with numeric suffix on collision.
+
+        A destination that already exists with identical content is considered
+        the same key (re-import) and returns the existing path unchanged.
+        """
+        p = dest_dir / src.name
+        if not p.exists() or p.read_bytes() == src.read_bytes():
+            return p
+        stem, suffix = p.stem, p.suffix
+        n = 1
+        while True:
+            p = dest_dir / f"{stem}_{n}{suffix}"
+            if not p.exists() or p.read_bytes() == src.read_bytes():
+                return p
+            n += 1
+
+    priv_dst = _unique_dst(priv_src)
+    pub_dst = _unique_dst(pub_src)
 
     print(f"Copying private key: {priv_src}")
     print(f"              → {priv_dst}")
@@ -325,7 +342,7 @@ def _handle_ssh_import(*, project: str, private_key: str, public_key: str | None
         private_key=str(priv_dst),
         public_key=str(pub_dst),
         config_path="",
-        key_name=priv_src.name,
+        key_name=priv_dst.name,
     )
     keys_path = cfg.ssh_keys_json_path
     update_ssh_keys_json(keys_path, project, result)
