@@ -38,6 +38,8 @@ def _wire_command(sub: argparse._SubParsersAction, cmd: CommandDef) -> None:
             kwargs["dest"] = arg.dest
         if arg.nargs is not None:
             kwargs["nargs"] = arg.nargs
+        if arg.required:
+            kwargs["required"] = arg.required
         p.add_argument(arg.name, **kwargs)
     p.set_defaults(_cmd=cmd)
 

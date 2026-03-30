@@ -32,6 +32,7 @@ class ArgDef:
     action: str | None = None
     dest: str | None = None
     nargs: int | str | None = None
+    required: bool = False
 
 
 @dataclass(frozen=True)
@@ -294,9 +295,7 @@ def _handle_ssh_import(*, project: str, private_key: str, public_key: str | None
     from .ssh import SSHInitResult, update_ssh_keys_json
 
     priv_src = Path(private_key).expanduser().resolve()
-    pub_src = (
-        Path(public_key).expanduser().resolve() if public_key else priv_src.with_suffix(".pub")
-    )
+    pub_src = Path(public_key).expanduser().resolve() if public_key else Path(f"{priv_src}.pub")
 
     if not priv_src.exists():
         raise SystemExit(f"Private key not found: {priv_src}")
@@ -341,7 +340,12 @@ SSH_COMMANDS: tuple[CommandDef, ...] = (
         group="ssh",
         args=(
             ArgDef(name="project", help="Project ID to associate the key with"),
-            ArgDef(name="--private-key", help="Path to the private key file", dest="private_key"),
+            ArgDef(
+                name="--private-key",
+                help="Path to the private key file",
+                dest="private_key",
+                required=True,
+            ),
             ArgDef(
                 name="--public-key",
                 help="Path to the .pub file (default: <private-key>.pub)",
