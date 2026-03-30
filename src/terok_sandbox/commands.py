@@ -279,5 +279,56 @@ PROXY_COMMANDS: tuple[CommandDef, ...] = (
     ),
 )
 
+# ---------------------------------------------------------------------------
+# SSH handlers
+# ---------------------------------------------------------------------------
+
+
+def _handle_ssh_import(*, project: str, private_key: str, public_key: str | None = None) -> None:
+    """Register an existing SSH keypair in ssh-keys.json."""
+    from pathlib import Path
+
+    from .config import SandboxConfig
+    from .ssh import SSHInitResult, update_ssh_keys_json
+
+    priv = Path(private_key).expanduser().resolve()
+    pub = Path(public_key).expanduser().resolve() if public_key else priv.with_suffix(".pub")
+
+    if not priv.exists():
+        raise SystemExit(f"Private key not found: {priv}")
+    if not pub.exists():
+        raise SystemExit(f"Public key not found: {pub} (use --public-key to specify explicitly)")
+
+    result = SSHInitResult(
+        dir=str(priv.parent),
+        private_key=str(priv),
+        public_key=str(pub),
+        config_path="",
+        key_name=priv.name,
+    )
+    keys_path = SandboxConfig().ssh_keys_json_path
+    update_ssh_keys_json(keys_path, project, result)
+    print(f"Registered key for project '{project}': {priv}")
+
+
+SSH_COMMANDS: tuple[CommandDef, ...] = (
+    CommandDef(
+        name="import",
+        help="Register an existing SSH keypair in ssh-keys.json",
+        handler=_handle_ssh_import,
+        group="ssh",
+        args=(
+            ArgDef(name="project", help="Project ID to associate the key with"),
+            ArgDef(name="--private-key", help="Path to the private key file", dest="private_key"),
+            ArgDef(
+                name="--public-key",
+                help="Path to the .pub file (default: <private-key>.pub)",
+                default=None,
+                dest="public_key",
+            ),
+        ),
+    ),
+)
+
 #: All sandbox commands, grouped by subsystem.
-COMMANDS: tuple[CommandDef, ...] = GATE_COMMANDS + SHIELD_COMMANDS + PROXY_COMMANDS
+COMMANDS: tuple[CommandDef, ...] = GATE_COMMANDS + SHIELD_COMMANDS + PROXY_COMMANDS + SSH_COMMANDS

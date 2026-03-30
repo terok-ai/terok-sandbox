@@ -27,6 +27,7 @@ from .commands import (
     GATE_COMMANDS,
     PROXY_COMMANDS,
     SHIELD_COMMANDS,
+    SSH_COMMANDS,
     CommandDef,
 )
 from .config import SandboxConfig
@@ -185,6 +186,7 @@ __all__ = [
     "PROXY_COMMANDS",
     "SANDBOX_COMMANDS",
     "SHIELD_COMMANDS",
+    "SSH_COMMANDS",
     # Facade
     "READY_MARKER",
     "LifecycleHooks",
