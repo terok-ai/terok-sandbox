@@ -206,7 +206,7 @@ class TestProxyForwardsWithRealAuth:
 
         async with aiohttp.ClientSession() as session:
             async with session.post(
-                f"{proxy_env['proxy_url']}/claude/v1/messages",
+                f"{proxy_env['proxy_url']}/v1/messages",
                 headers={"Authorization": f"Bearer {proxy_env['token']}"},
                 json={"model": "claude-sonnet-4-20250514", "messages": []},
             ) as resp:
@@ -245,7 +245,7 @@ class TestProxyForwardsWithRealAuth:
 
         async with aiohttp.ClientSession() as session:
             async with session.get(
-                f"{proxy_env['proxy_url']}/claude/v1/messages",
+                f"{proxy_env['proxy_url']}/v1/messages",
             ) as resp:
                 assert resp.status == 401
 
@@ -254,7 +254,7 @@ class TestProxyForwardsWithRealAuth:
 
         async with aiohttp.ClientSession() as session:
             async with session.get(
-                f"{proxy_env['proxy_url']}/claude/v1/messages",
+                f"{proxy_env['proxy_url']}/v1/messages",
                 headers={"Authorization": "Bearer totally-fake-token"},
             ) as resp:
                 assert resp.status == 401
@@ -270,7 +270,7 @@ class TestProxyStreaming:
         chunks: list[bytes] = []
         async with aiohttp.ClientSession() as session:
             async with session.get(
-                f"{proxy_env['proxy_url']}/claude/v1/stream",
+                f"{proxy_env['proxy_url']}/v1/stream",
                 headers={"Authorization": f"Bearer {proxy_env['token']}"},
             ) as resp:
                 assert resp.status == 200
@@ -295,7 +295,7 @@ class TestProxyAfterTokenRevocation:
         # Verify it works before revocation
         async with aiohttp.ClientSession() as session:
             async with session.post(
-                f"{proxy_env['proxy_url']}/claude/v1/messages",
+                f"{proxy_env['proxy_url']}/v1/messages",
                 headers={"Authorization": f"Bearer {token}"},
             ) as resp:
                 assert resp.status == 200
@@ -306,7 +306,7 @@ class TestProxyAfterTokenRevocation:
         # Now it's rejected
         async with aiohttp.ClientSession() as session:
             async with session.post(
-                f"{proxy_env['proxy_url']}/claude/v1/messages",
+                f"{proxy_env['proxy_url']}/v1/messages",
                 headers={"Authorization": f"Bearer {token}"},
             ) as resp:
                 assert resp.status == 401
