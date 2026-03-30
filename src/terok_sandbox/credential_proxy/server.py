@@ -334,6 +334,11 @@ async def _refresh_all(app: web.Application) -> None:
         if not route or "oauth_refresh" not in route:
             continue
         expires_at = cred.get("expires_at")
+        # Guard against credentials imported before the ms→s fix: JS apps
+        # store expiresAt in milliseconds, making the token appear valid for
+        # ~55 000 years and silently preventing any refresh.
+        if isinstance(expires_at, (int, float)) and expires_at > 1e12:
+            expires_at = expires_at / 1000
         if expires_at and time.time() < expires_at - _REFRESH_BUFFER:
             continue  # still valid
 

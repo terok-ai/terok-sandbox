@@ -725,6 +725,75 @@ class TestRefreshAll:
         assert accessor.load_credential("default", "gh")["access_token"] == "ghp-old"
         accessor.close()
 
+    async def test_ms_expires_at_triggers_refresh(self, tmp_path: Path) -> None:
+        """credentials with expiresAt stored as JS milliseconds are refreshed, not skipped."""
+        from aiohttp import web as _web
+        from aiohttp.test_utils import TestServer
+
+        refreshed: list[str] = []
+
+        async def _token_handler(request: _web.Request) -> _web.Response:
+            refreshed.append("claude")
+            return _web.json_response(
+                {"access_token": "sk-fresh", "refresh_token": "rt-new", "expires_in": 28800}
+            )
+
+        token_app = _web.Application()
+        token_app.router.add_post("/v1/oauth/token", _token_handler)
+        server = TestServer(token_app)
+        await server.start_server()
+
+        # Store an expired credential with expiresAt in JS milliseconds (the pre-fix bug
+        # state): before the fix, 1_700_000_000_000 ms looked like year ~57244 to the
+        # Python refresh check and was never refreshed; after the fix it converts to
+        # 1_700_000_000 s (November 2023) which is clearly expired.
+        expires_at_ms = 1_700_000_000_000  # November 2023 in JS ms — expired
+        db = CredentialDB(tmp_path / "test.db")
+        db.store_credential(
+            "default",
+            "claude",
+            {
+                "type": "oauth",
+                "access_token": "sk-expired-ms",
+                "refresh_token": "rt-ms",
+                "expires_at": expires_at_ms,  # ms timestamp — should NOT be treated as valid
+            },
+        )
+        db.close()
+
+        routes_file = tmp_path / "routes.json"
+        routes_file.write_text(
+            json.dumps(
+                {
+                    "claude": {
+                        "upstream": "https://api.anthropic.com",
+                        "oauth_refresh": {
+                            "token_url": f"http://127.0.0.1:{server.port}/v1/oauth/token",
+                            "client_id": "test-client",
+                        },
+                    }
+                }
+            )
+        )
+
+        app = _build_app(str(tmp_path / "test.db"), str(routes_file))
+        from aiohttp import ClientSession
+
+        app[_KEY_CLIENT] = ClientSession()
+        try:
+            await _refresh_all(app)
+        finally:
+            await app[_KEY_CLIENT].close()
+
+        assert refreshed == ["claude"], "ms-stored token should have been refreshed"
+        accessor = _TokenDB(str(tmp_path / "test.db"))
+        cred = accessor.load_credential("default", "claude")
+        assert cred["access_token"] == "sk-fresh"
+        # expires_at after refresh is stored in seconds (time.time() + expires_in)
+        assert cred["expires_at"] < 1e12, "refreshed expires_at must be in seconds, not ms"
+        accessor.close()
+        await server.close()
+
 
 # ── ServerDisconnectedError retry paths ─────────────────────────────────
 
