@@ -87,7 +87,6 @@ def _git_env_with_ssh(
     project_id: str,
     ssh_host_dir: Path | None,
     ssh_key_name: str | None,
-    envs_base_dir: Path | None,
 ) -> dict:
     """Return an env that forces git to use the project's SSH config only.
 
@@ -97,12 +96,10 @@ def _git_env_with_ssh(
 
     If the ssh host dir or config is missing, returns the current env.
     """
-    env = os.environ.copy()
-    if envs_base_dir is None:
-        from .config import SandboxConfig
+    from .config import SandboxConfig
 
-        envs_base_dir = SandboxConfig().effective_envs_dir
-    ssh_dir = ssh_host_dir or (envs_base_dir / f"_ssh-config-{project_id}")
+    env = os.environ.copy()
+    ssh_dir = ssh_host_dir or (SandboxConfig().ssh_keys_dir / project_id)
     cfg = Path(ssh_dir) / "config"
     if cfg.is_file():
         ssh_cmd = ["ssh", "-F", str(cfg), "-o", "IdentitiesOnly=yes"]
@@ -121,17 +118,14 @@ def _require_ssh_config(
     project_id: str,
     upstream_url: str | None,
     ssh_host_dir: Path | None,
-    envs_base_dir: Path | None,
 ) -> None:
     """Raise SystemExit if an SSH upstream is configured but SSH config is missing."""
+    from .config import SandboxConfig
+
     upstream = upstream_url or ""
     if not (upstream.startswith("git@") or upstream.startswith("ssh://")):
         return
-    if envs_base_dir is None:
-        from .config import SandboxConfig
-
-        envs_base_dir = SandboxConfig().effective_envs_dir
-    ssh_dir = ssh_host_dir or (envs_base_dir / f"_ssh-config-{project_id}")
+    ssh_dir = ssh_host_dir or (SandboxConfig().ssh_keys_dir / project_id)
     ssh_cfg_path = Path(ssh_dir) / "config"
     if not ssh_cfg_path.is_file():
         raise SystemExit(
@@ -247,7 +241,6 @@ class GitGate:
         default_branch: str | None = None,
         ssh_host_dir: Path | str | None = None,
         ssh_key_name: str | None = None,
-        envs_base_dir: Path | str | None = None,
         validate_gate_fn: Callable[[str], None] | None = None,
     ) -> None:
         """Initialise with plain parameters.
@@ -263,11 +256,10 @@ class GitGate:
         default_branch:
             Branch name used for staleness comparisons.
         ssh_host_dir:
-            Explicit SSH directory for git operations.
+            Explicit SSH directory for git operations.  When ``None``,
+            falls back to ``SandboxConfig().ssh_keys_dir / project_id``.
         ssh_key_name:
             Explicit SSH key filename.
-        envs_base_dir:
-            Base directory for environment data.
         validate_gate_fn:
             Optional callback ``(project_id) -> None`` that validates no other
             project uses the same gate with a different upstream.  Injected by
@@ -279,7 +271,6 @@ class GitGate:
         self._default_branch = default_branch
         self._ssh_host_dir = Path(ssh_host_dir) if ssh_host_dir else None
         self._ssh_key_name = ssh_key_name
-        self._envs_base_dir = Path(envs_base_dir) if envs_base_dir else None
         self._validate_gate_fn = validate_gate_fn
 
     def _ssh_env(self) -> dict:
@@ -288,7 +279,6 @@ class GitGate:
             project_id=self._project_id,
             ssh_host_dir=self._ssh_host_dir,
             ssh_key_name=self._ssh_key_name,
-            envs_base_dir=self._envs_base_dir,
         )
 
     def _validate_gate(self) -> None:
@@ -324,7 +314,6 @@ class GitGate:
             project_id=self._project_id,
             upstream_url=self._upstream_url,
             ssh_host_dir=self._ssh_host_dir,
-            envs_base_dir=self._envs_base_dir,
         )
 
         env = self._ssh_env()

@@ -55,8 +55,8 @@ class SSHManager:
 
     Handles the full SSH setup lifecycle: directory creation, keypair
     generation (ed25519 or RSA), config file rendering from templates, and
-    permission hardening.  The generated directory is bind-mounted into task
-    containers as ``/home/dev/.ssh``.
+    permission hardening.  Keys are stored under ``ssh_keys_dir/<project>``
+    and used by the credential proxy's SSH agent for container access.
     """
 
     def __init__(
@@ -75,7 +75,7 @@ class SSHManager:
         project_id:
             Identifier used for key naming and directory layout.
         ssh_host_dir:
-            Explicit SSH directory (overrides default ``<envs_base>/_ssh-config-<id>``).
+            Explicit SSH directory (overrides default ``<ssh_keys_dir>/<id>``).
         ssh_key_name:
             Explicit key filename (overrides derived ``id_<type>_<id>``).
         ssh_config_template:
@@ -109,7 +109,7 @@ class SSHManager:
 
         Location resolution:
           - If *ssh_host_dir* was provided, use that path.
-          - Otherwise: ``<envs_base>/_ssh-config-<project_id>``
+          - Otherwise: ``<ssh_keys_dir>/<project_id>``
 
         Key name defaults to ``id_<type>_<project_id>`` (e.g. ``id_ed25519_proj``).
         """
