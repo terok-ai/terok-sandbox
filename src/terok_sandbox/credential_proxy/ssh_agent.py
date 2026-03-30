@@ -184,8 +184,8 @@ class _KeyCache:
     def _lookup_entries(self, project: str) -> list[_KeyEntry] | None:
         """Read ssh-keys.json and return the key entries for *project*.
 
-        Supports both a single dict entry (legacy) and a list of entries.
-        Uses ``LOCK_SH`` to coordinate with the ``LOCK_EX`` writer in
+        The JSON maps project IDs to lists of ``{"private_key", "public_key"}``
+        dicts.  Uses ``LOCK_SH`` to coordinate with the ``LOCK_EX`` writer in
         :func:`update_ssh_keys_json`.
         """
         import fcntl
@@ -204,11 +204,9 @@ class _KeyCache:
             return None
         if not isinstance(mapping, dict):
             return None
-        raw = mapping.get(project)
-        if raw is None:
+        entries = mapping.get(project)
+        if not isinstance(entries, list):
             return None
-        # Normalize: single dict → list of one
-        entries = raw if isinstance(raw, list) else [raw]
         return [
             e
             for e in entries

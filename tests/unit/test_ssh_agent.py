@@ -71,14 +71,7 @@ def ssh_agent_env(tmp_path: Path, ed25519_keypair: tuple[Path, Path, bytes]):
     # Write ssh-keys.json
     keys_file = tmp_path / "ssh-keys.json"
     keys_file.write_text(
-        json.dumps(
-            {
-                "test-project": {
-                    "private_key": str(priv_path),
-                    "public_key": str(pub_path),
-                }
-            }
-        )
+        json.dumps({"test-project": [{"private_key": str(priv_path), "public_key": str(pub_path)}]})
     )
 
     return str(tmp_path / "test.db"), str(keys_file), token, pub_blob
@@ -130,7 +123,7 @@ class TestKeyCache:
         priv_path, pub_path, expected_blob = ed25519_keypair
         kf = tmp_path / "keys.json"
         kf.write_text(
-            json.dumps({"proj": {"private_key": str(priv_path), "public_key": str(pub_path)}})
+            json.dumps({"proj": [{"private_key": str(priv_path), "public_key": str(pub_path)}]})
         )
         keys = _KeyCache(str(kf)).get("proj")
         assert keys is not None and len(keys) == 1
@@ -181,7 +174,7 @@ class TestKeyCache:
         priv_path, pub_path, _ = ed25519_keypair
         kf = tmp_path / "keys.json"
         kf.write_text(
-            json.dumps({"proj": {"private_key": str(priv_path), "public_key": str(pub_path)}})
+            json.dumps({"proj": [{"private_key": str(priv_path), "public_key": str(pub_path)}]})
         )
         cache = _KeyCache(str(kf))
         r1 = cache.get("proj")
@@ -421,10 +414,9 @@ class TestSSHAgentRoundTrip:
         keys_file.write_text(
             json.dumps(
                 {
-                    "proj": {
-                        "private_key": str(ssh_dir / "id"),
-                        "public_key": str(ssh_dir / "id.pub"),
-                    }
+                    "proj": [
+                        {"private_key": str(ssh_dir / "id"), "public_key": str(ssh_dir / "id.pub")}
+                    ]
                 }
             )
         )
@@ -717,7 +709,7 @@ class TestKeyCacheEdgeCases:
         assert cache.get("proj") is None
 
         kf.write_text(
-            json.dumps({"proj": {"private_key": str(priv_path), "public_key": str(pub_path)}})
+            json.dumps({"proj": [{"private_key": str(priv_path), "public_key": str(pub_path)}]})
         )
         assert cache.get("proj") is not None
 
@@ -728,15 +720,21 @@ class TestKeyCacheEdgeCases:
         assert _KeyCache(str(kf)).get("proj") is None
 
     def test_entry_missing_keys_returns_none(self, tmp_path: Path) -> None:
-        """Entry without required 'private_key'/'public_key' strings returns None."""
+        """List entry without required 'private_key'/'public_key' strings returns None."""
         kf = tmp_path / "keys.json"
-        kf.write_text(json.dumps({"proj": {"only_one": "/a"}}))
+        kf.write_text(json.dumps({"proj": [{"only_one": "/a"}]}))
         assert _KeyCache(str(kf)).get("proj") is None
 
     def test_entry_non_string_values_returns_none(self, tmp_path: Path) -> None:
-        """Entry with non-string values returns None."""
+        """List entry with non-string key path values returns None."""
         kf = tmp_path / "keys.json"
-        kf.write_text(json.dumps({"proj": {"private_key": 42, "public_key": "/b"}}))
+        kf.write_text(json.dumps({"proj": [{"private_key": 42, "public_key": "/b"}]}))
+        assert _KeyCache(str(kf)).get("proj") is None
+
+    def test_project_not_a_list_returns_none(self, tmp_path: Path) -> None:
+        """Project entry that is not a list returns None."""
+        kf = tmp_path / "keys.json"
+        kf.write_text(json.dumps({"proj": {"private_key": "/a", "public_key": "/a.pub"}}))
         assert _KeyCache(str(kf)).get("proj") is None
 
     def test_invalidates_cache_on_path_change(
@@ -746,7 +744,7 @@ class TestKeyCacheEdgeCases:
         priv_path, pub_path, _ = ed25519_keypair
         kf = tmp_path / "keys.json"
         kf.write_text(
-            json.dumps({"proj": {"private_key": str(priv_path), "public_key": str(pub_path)}})
+            json.dumps({"proj": [{"private_key": str(priv_path), "public_key": str(pub_path)}]})
         )
         cache = _KeyCache(str(kf))
         r1 = cache.get("proj")
@@ -759,7 +757,7 @@ class TestKeyCacheEdgeCases:
         pub_raw2 = key2.public_key().public_bytes(Encoding.OpenSSH, PublicFormat.OpenSSH)
         pub2.write_text(f"{pub_raw2.decode()} comment2\n")
 
-        kf.write_text(json.dumps({"proj": {"private_key": str(priv2), "public_key": str(pub2)}}))
+        kf.write_text(json.dumps({"proj": [{"private_key": str(priv2), "public_key": str(pub2)}]}))
         r2 = cache.get("proj")
         assert r1 is not None and r2 is not None
         assert r1[0][0] is not r2[0][0]  # different private key object (re-loaded)
@@ -773,7 +771,7 @@ class TestKeyCacheEdgeCases:
         priv_path, pub_path, _ = ed25519_keypair
         kf = tmp_path / "keys.json"
         kf.write_text(
-            json.dumps({"proj": {"private_key": str(priv_path), "public_key": str(pub_path)}})
+            json.dumps({"proj": [{"private_key": str(priv_path), "public_key": str(pub_path)}]})
         )
         cache = _KeyCache(str(kf))
         r1 = cache.get("proj")

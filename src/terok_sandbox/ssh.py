@@ -294,24 +294,16 @@ def update_ssh_keys_json(keys_json_path: Path, project_id: str, result: SSHInitR
             chunks.append(chunk)
         raw = b"".join(chunks)
         mapping: dict = json.loads(raw) if raw.strip() else {}
-        existing = mapping.get(project_id)
-        if existing is None:
-            mapping[project_id] = new_entry
-        elif isinstance(existing, dict):
-            if existing.get("private_key") == new_entry["private_key"]:
-                mapping[project_id] = new_entry  # same path — idempotent
-            else:
-                mapping[project_id] = [existing, new_entry]  # expand to list
-        elif isinstance(existing, list):
-            for i, entry in enumerate(existing):
-                if isinstance(entry, dict) and entry.get("private_key") == new_entry["private_key"]:
-                    existing[i] = new_entry  # replace matching entry
-                    break
-            else:
-                existing.append(new_entry)  # new path — append
-            mapping[project_id] = existing
+        entries: list[dict[str, str]] = mapping.get(project_id) or []
+        if not isinstance(entries, list):
+            entries = []
+        for i, entry in enumerate(entries):
+            if isinstance(entry, dict) and entry.get("private_key") == new_entry["private_key"]:
+                entries[i] = new_entry  # same path — idempotent update
+                break
         else:
-            mapping[project_id] = new_entry  # unexpected type — overwrite
+            entries.append(new_entry)  # new path — append
+        mapping[project_id] = entries
         data = (json.dumps(mapping, indent=2) + "\n").encode("utf-8")
         os.lseek(fd, 0, os.SEEK_SET)
         os.ftruncate(fd, 0)

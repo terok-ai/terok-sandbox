@@ -29,18 +29,18 @@ class TestUpdateSshKeysJson:
         update_ssh_keys_json(keys_path, "proj-a", _result("/a/priv", "/a/pub"))
 
         data = json.loads(keys_path.read_text())
-        assert data == {"proj-a": {"private_key": "/a/priv", "public_key": "/a/pub"}}
+        assert data == {"proj-a": [{"private_key": "/a/priv", "public_key": "/a/pub"}]}
 
     def test_appends_to_existing(self, tmp_path: Path) -> None:
         """Adds a new project without overwriting existing entries."""
         keys_path = tmp_path / "ssh-keys.json"
-        keys_path.write_text(json.dumps({"old": {"private_key": "/o", "public_key": "/o.pub"}}))
+        keys_path.write_text(json.dumps({"old": [{"private_key": "/o", "public_key": "/o.pub"}]}))
 
         update_ssh_keys_json(keys_path, "new", _result("/n", "/n.pub"))
 
         data = json.loads(keys_path.read_text())
         assert "old" in data
-        assert data["new"] == {"private_key": "/n", "public_key": "/n.pub"}
+        assert data["new"] == [{"private_key": "/n", "public_key": "/n.pub"}]
 
     def test_same_private_key_path_is_idempotent(self, tmp_path: Path) -> None:
         """Re-running ssh-init with the same private key path updates in-place."""
@@ -49,9 +49,9 @@ class TestUpdateSshKeysJson:
         update_ssh_keys_json(keys_path, "proj", _result("/v1/priv", "/v1/pub-updated"))
 
         data = json.loads(keys_path.read_text())
-        # Still a single dict, not a list
-        assert isinstance(data["proj"], dict)
-        assert data["proj"]["public_key"] == "/v1/pub-updated"
+        assert isinstance(data["proj"], list)
+        assert len(data["proj"]) == 1
+        assert data["proj"][0]["public_key"] == "/v1/pub-updated"
 
     def test_different_path_expands_to_list(self, tmp_path: Path) -> None:
         """A second key with a different private_key path creates a list for the project."""
