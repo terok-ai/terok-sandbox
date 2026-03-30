@@ -194,3 +194,25 @@ class TestHandleSshImport:
 
         data = json.loads(cfg.ssh_keys_json_path.read_text())
         assert len(data["proj"]) == 1
+
+    @pytest.mark.parametrize(
+        "bad_project",
+        [
+            "../other-dir",
+            "dir/subdir",
+            "/absolute",
+            "..",
+            "",
+            "has space",
+            "has\x00null",
+        ],
+    )
+    def test_invalid_project_id_exits(
+        self, tmp_path: Path, keypair: tuple[Path, Path], bad_project: str
+    ) -> None:
+        """Project IDs with path-traversal or invalid characters raise SystemExit."""
+        priv_src, _pub = keypair
+        cfg = _mock_cfg(tmp_path)
+        with patch("terok_sandbox.config.SandboxConfig", return_value=cfg):
+            with pytest.raises(SystemExit, match="Invalid project ID"):
+                _handle_ssh_import(project=bad_project, private_key=str(priv_src))

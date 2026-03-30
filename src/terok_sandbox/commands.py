@@ -288,11 +288,18 @@ PROXY_COMMANDS: tuple[CommandDef, ...] = (
 def _handle_ssh_import(*, project: str, private_key: str, public_key: str | None = None) -> None:
     """Copy an SSH keypair into the managed key store and register it in ssh-keys.json."""
     import os
+    import re
     import shutil
     from pathlib import Path
 
     from .config import SandboxConfig
     from .ssh import SSHInitResult, update_ssh_keys_json
+
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", project):
+        raise SystemExit(
+            f"Invalid project ID {project!r}: must start with a letter or digit "
+            "and contain only [A-Za-z0-9._-]"
+        )
 
     priv_src = Path(private_key).expanduser().resolve()
     pub_src = Path(public_key).expanduser().resolve() if public_key else Path(f"{priv_src}.pub")

@@ -232,20 +232,26 @@ def start_daemon(cfg: SandboxConfig | None = None) -> None:
     sock_path.parent.mkdir(parents=True, exist_ok=True)
     pidfile.parent.mkdir(parents=True, exist_ok=True)
 
-    if not routes_path.is_file():
+    routes_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with routes_path.open("x", encoding="utf-8") as f:
+            f.write("{}\n")
         import logging
 
-        routes_path.parent.mkdir(parents=True, exist_ok=True)
-        routes_path.write_text("{}\n")
         logging.getLogger(__name__).info(
             "Created empty routes file: %s — add routes via 'terokctl auth <provider>'",
             routes_path,
         )
+    except FileExistsError:
+        pass
 
     ssh_keys_path = c.ssh_keys_json_path
-    if not ssh_keys_path.is_file():
-        ssh_keys_path.parent.mkdir(parents=True, exist_ok=True)
-        ssh_keys_path.write_text("{}\n")
+    ssh_keys_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with ssh_keys_path.open("x", encoding="utf-8") as f:
+            f.write("{}\n")
+    except FileExistsError:
+        pass
 
     log_file = c.state_dir / "proxy" / "credential-proxy.log"
     log_file.parent.mkdir(parents=True, exist_ok=True)
