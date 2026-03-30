@@ -24,7 +24,7 @@ packages = [
 
 [tool.poetry.dependencies]
 python = ">=3.12,<4.0"
-terok-shield = {git = "https://github.com/sliwowitz/terok-shield.git", rev = "1e1d218f40d9584d0f9b1b7290d3c56cca2147d9"}
+terok-shield = {git = "https://github.com/sliwowitz/terok-shield.git", rev = "d2a9dd84f2389594730ac163b264028894e2c0ed"}
 platformdirs = ">=4.0"
 aiohttp = ">=3.9"
 cryptography = ">=43.0"
