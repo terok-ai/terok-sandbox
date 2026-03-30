@@ -271,9 +271,20 @@ def update_ssh_keys_json(keys_json_path: Path, project_id: str, result: SSHInitR
     credential proxy's SSH agent handler reads this file to locate the
     private key for signing requests.
 
+    Key management rules (keyed by ``private_key`` path):
+
+    - **No existing entry**: write a single-dict entry (simple case).
+    - **Same private_key path**: replace in-place (idempotent re-run of ``ssh-init``).
+    - **Different private_key path**: expand to / append to a list, so a project can
+      hold multiple independent SSH keys (e.g. GitHub + GitLab).
+
     Uses ``fcntl.flock`` to prevent concurrent ``ssh-init`` invocations
-    from overwriting each other's entries.
+    from corrupting the file.
     """
+    new_entry: dict[str, str] = {
+        "private_key": result["private_key"],
+        "public_key": result["public_key"],
+    }
     keys_json_path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(keys_json_path), os.O_RDWR | os.O_CREAT)
     try:
@@ -282,11 +293,25 @@ def update_ssh_keys_json(keys_json_path: Path, project_id: str, result: SSHInitR
         while chunk := os.read(fd, 8192):
             chunks.append(chunk)
         raw = b"".join(chunks)
-        mapping: dict[str, dict[str, str]] = json.loads(raw) if raw.strip() else {}
-        mapping[project_id] = {
-            "private_key": result["private_key"],
-            "public_key": result["public_key"],
-        }
+        mapping: dict = json.loads(raw) if raw.strip() else {}
+        existing = mapping.get(project_id)
+        if existing is None:
+            mapping[project_id] = new_entry
+        elif isinstance(existing, dict):
+            if existing.get("private_key") == new_entry["private_key"]:
+                mapping[project_id] = new_entry  # same path — idempotent
+            else:
+                mapping[project_id] = [existing, new_entry]  # expand to list
+        elif isinstance(existing, list):
+            for i, entry in enumerate(existing):
+                if isinstance(entry, dict) and entry.get("private_key") == new_entry["private_key"]:
+                    existing[i] = new_entry  # replace matching entry
+                    break
+            else:
+                existing.append(new_entry)  # new path — append
+            mapping[project_id] = existing
+        else:
+            mapping[project_id] = new_entry  # unexpected type — overwrite
         data = (json.dumps(mapping, indent=2) + "\n").encode("utf-8")
         os.lseek(fd, 0, os.SEEK_SET)
         os.ftruncate(fd, 0)

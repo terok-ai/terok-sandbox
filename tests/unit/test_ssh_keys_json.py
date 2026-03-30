@@ -42,14 +42,60 @@ class TestUpdateSshKeysJson:
         assert "old" in data
         assert data["new"] == {"private_key": "/n", "public_key": "/n.pub"}
 
-    def test_overwrites_existing_project(self, tmp_path: Path) -> None:
-        """Re-running ssh-init for a project updates its entry."""
+    def test_same_private_key_path_is_idempotent(self, tmp_path: Path) -> None:
+        """Re-running ssh-init with the same private key path updates in-place."""
         keys_path = tmp_path / "ssh-keys.json"
-        update_ssh_keys_json(keys_path, "proj", _result("/v1", "/v1.pub"))
-        update_ssh_keys_json(keys_path, "proj", _result("/v2", "/v2.pub"))
+        update_ssh_keys_json(keys_path, "proj", _result("/v1/priv", "/v1/pub"))
+        update_ssh_keys_json(keys_path, "proj", _result("/v1/priv", "/v1/pub-updated"))
 
         data = json.loads(keys_path.read_text())
-        assert data["proj"]["private_key"] == "/v2"
+        # Still a single dict, not a list
+        assert isinstance(data["proj"], dict)
+        assert data["proj"]["public_key"] == "/v1/pub-updated"
+
+    def test_different_path_expands_to_list(self, tmp_path: Path) -> None:
+        """A second key with a different private_key path creates a list for the project."""
+        keys_path = tmp_path / "ssh-keys.json"
+        update_ssh_keys_json(keys_path, "proj", _result("/k1/priv", "/k1/pub"))
+        update_ssh_keys_json(keys_path, "proj", _result("/k2/priv", "/k2/pub"))
+
+        data = json.loads(keys_path.read_text())
+        assert isinstance(data["proj"], list)
+        assert len(data["proj"]) == 2
+        assert data["proj"][0]["private_key"] == "/k1/priv"
+        assert data["proj"][1]["private_key"] == "/k2/priv"
+
+    def test_list_replaces_matching_entry(self, tmp_path: Path) -> None:
+        """Updating a key already in a list replaces the entry with the matching path."""
+        keys_path = tmp_path / "ssh-keys.json"
+        keys_path.write_text(
+            json.dumps(
+                {
+                    "proj": [
+                        {"private_key": "/k1/priv", "public_key": "/k1/pub"},
+                        {"private_key": "/k2/priv", "public_key": "/k2/pub"},
+                    ]
+                }
+            )
+        )
+        update_ssh_keys_json(keys_path, "proj", _result("/k1/priv", "/k1/pub-new"))
+
+        data = json.loads(keys_path.read_text())
+        assert len(data["proj"]) == 2
+        assert data["proj"][0]["public_key"] == "/k1/pub-new"
+        assert data["proj"][1]["private_key"] == "/k2/priv"
+
+    def test_list_appends_new_path(self, tmp_path: Path) -> None:
+        """A new private_key path is appended to an existing list entry."""
+        keys_path = tmp_path / "ssh-keys.json"
+        keys_path.write_text(
+            json.dumps({"proj": [{"private_key": "/k1/priv", "public_key": "/k1/pub"}]})
+        )
+        update_ssh_keys_json(keys_path, "proj", _result("/k3/priv", "/k3/pub"))
+
+        data = json.loads(keys_path.read_text())
+        assert len(data["proj"]) == 2
+        assert data["proj"][1]["private_key"] == "/k3/priv"
 
     def test_handles_empty_file(self, tmp_path: Path) -> None:
         """Handles a pre-existing empty file (e.g. from lifecycle.start_daemon)."""

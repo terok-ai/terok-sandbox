@@ -306,6 +306,78 @@ class TestSSHAgentRoundTrip:
             server.close()
             await server.wait_closed()
 
+    async def test_multi_key_identity_listing_and_signing(self, tmp_path: Path) -> None:
+        """IDENTITIES_ANSWER returns all keys for a list-format project; each key signs."""
+
+        # Generate two independent ed25519 keypairs
+        def _make_pair(name: str) -> tuple[Path, Path, bytes]:
+            k = Ed25519PrivateKey.generate()
+            priv = tmp_path / name
+            pub = tmp_path / f"{name}.pub"
+            priv.write_bytes(k.private_bytes(Encoding.PEM, PrivateFormat.OpenSSH, NoEncryption()))
+            pub_raw = k.public_key().public_bytes(Encoding.OpenSSH, PublicFormat.OpenSSH)
+            pub.write_text(f"{pub_raw.decode()} {name}\n")
+            blob = base64.b64decode(pub_raw.decode().split()[1])
+            return priv, pub, blob
+
+        priv1, pub1, blob1 = _make_pair("id_github")
+        priv2, pub2, blob2 = _make_pair("id_gitlab")
+
+        keys_file = tmp_path / "ssh-keys.json"
+        keys_file.write_text(
+            json.dumps(
+                {
+                    "proj": [
+                        {"private_key": str(priv1), "public_key": str(pub1)},
+                        {"private_key": str(priv2), "public_key": str(pub2)},
+                    ]
+                }
+            )
+        )
+
+        db = CredentialDB(tmp_path / "test.db")
+        token = db.create_proxy_token("proj", "task-1", "proj", "ssh")
+        db.close()
+
+        server = await start_ssh_agent_server(
+            str(tmp_path / "test.db"), str(keys_file), "127.0.0.1", 0
+        )
+        port = server.sockets[0].getsockname()[1]
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            writer.write(_build_handshake(token))
+            writer.write(_build_msg(SSH_AGENTC_REQUEST_IDENTITIES))
+            await writer.drain()
+
+            msg_type, payload = await _read_response(reader)
+            assert msg_type == SSH_AGENT_IDENTITIES_ANSWER
+            (nkeys,) = struct.unpack_from(">I", payload, 0)
+            assert nkeys == 2
+
+            # Parse both blobs from the identities response
+            mv = memoryview(payload)
+            off = 4
+            returned_blobs = []
+            for _ in range(nkeys):
+                blob, off = _unpack_string(mv, off)
+                _comment, off = _unpack_string(mv, off)
+                returned_blobs.append(blob)
+            assert set(returned_blobs) == {blob1, blob2}
+
+            # Sign with each key individually
+            for blob in (blob1, blob2):
+                sign_payload = _pack_string(blob) + _pack_string(b"sign-me") + struct.pack(">I", 0)
+                writer.write(_build_msg(SSH_AGENTC_SIGN_REQUEST, sign_payload))
+                await writer.drain()
+                msg_type, resp = await _read_response(reader)
+                assert msg_type == SSH_AGENT_SIGN_RESPONSE
+
+            writer.close()
+            await writer.wait_closed()
+        finally:
+            server.close()
+            await server.wait_closed()
+
     async def test_invalid_token_closes_connection(self, ssh_agent_env) -> None:
         """Invalid phantom token closes the connection without response."""
         db_path, keys_file, _token, _pub_blob = ssh_agent_env
@@ -696,7 +768,7 @@ class TestKeyCacheEdgeCases:
         self, tmp_path: Path, ed25519_keypair: tuple[Path, Path, bytes]
     ) -> None:
         """In-place key rotation (same paths, new content) reloads the cache."""
-        import time
+        import os
 
         priv_path, pub_path, _ = ed25519_keypair
         kf = tmp_path / "keys.json"
@@ -706,15 +778,17 @@ class TestKeyCacheEdgeCases:
         cache = _KeyCache(str(kf))
         r1 = cache.get("proj")
 
-        # Overwrite the same files with a freshly generated key
-        # (sleep briefly so mtime_ns differs — filesystem granularity)
-        time.sleep(0.05)
+        # Overwrite the same files with a freshly generated key, then force a
+        # deterministic mtime advance to avoid filesystem-granularity flakiness.
         key2 = Ed25519PrivateKey.generate()
         priv_path.write_bytes(
             key2.private_bytes(Encoding.PEM, PrivateFormat.OpenSSH, NoEncryption())
         )
         pub_raw2 = key2.public_key().public_bytes(Encoding.OpenSSH, PublicFormat.OpenSSH)
         pub_path.write_text(f"{pub_raw2.decode()} rotated\n")
+        for p in (priv_path, pub_path):
+            mt = p.stat().st_mtime_ns
+            os.utime(p, ns=(mt, mt + 1_000_000))
 
         r2 = cache.get("proj")
         assert r1 is not None and r2 is not None
