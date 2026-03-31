@@ -24,6 +24,7 @@ class TestProxyStart:
         status = CredentialProxyStatus(
             mode="daemon",
             running=True,
+            healthy=True,
             socket_path=Path("/s"),
             db_path=Path("/d"),
             routes_path=Path("/r"),
@@ -40,6 +41,7 @@ class TestProxyStart:
         status = CredentialProxyStatus(
             mode="none",
             running=False,
+            healthy=False,
             socket_path=Path("/s"),
             db_path=Path("/d"),
             routes_path=Path("/r"),
@@ -86,6 +88,7 @@ class TestProxyStatus:
         status = CredentialProxyStatus(
             mode="daemon",
             running=True,
+            healthy=True,
             socket_path=Path("/run/s.sock"),
             db_path=Path("/d/c.db"),
             routes_path=Path("/r"),
@@ -105,6 +108,7 @@ class TestProxyStatus:
         status = CredentialProxyStatus(
             mode="none",
             running=False,
+            healthy=False,
             socket_path=Path("/s"),
             db_path=Path("/d"),
             routes_path=Path("/r"),

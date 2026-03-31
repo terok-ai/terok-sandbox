@@ -42,6 +42,9 @@ class CredentialProxyStatus:
     running: bool
     """Whether the proxy is active (systemd socket listening or daemon alive)."""
 
+    healthy: bool
+    """Whether the proxy responded to an HTTP health check."""
+
     socket_path: Path
     """Configured Unix socket path."""
 
@@ -211,6 +214,50 @@ def uninstall_systemd_units() -> None:
     subprocess.run(["systemctl", "--user", "daemon-reload"], check=False, timeout=10)
 
 
+# ---------- Health probing ----------
+
+_HEALTH_PATH = "/-/health"
+"""Server-side readiness endpoint (no auth, no DB access)."""
+
+
+def _probe_proxy(port: int, *, timeout: float = 2.0) -> bool:
+    """Return ``True`` if the proxy's health endpoint responds 200.
+
+    Uses :mod:`http.client` (stdlib only) to hit the TCP port.
+    ``http.client.HTTPConnection`` is restricted to HTTP — no ``file://``
+    or custom-scheme risk, so no Bandit B310 suppression needed.
+    """
+    import http.client
+
+    conn: http.client.HTTPConnection | None = None
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+        conn.request("GET", _HEALTH_PATH)
+        resp = conn.getresponse()
+        resp.read()  # drain body before connection reuse/close
+        return resp.status == 200
+    except (OSError, http.client.HTTPException, ValueError):
+        return False
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def _wait_for_ready(port: int, *, timeout: float = 5.0, interval: float = 0.2) -> bool:
+    """Poll the health endpoint until it responds 200 or *timeout* expires.
+
+    Returns ``True`` when the proxy is ready, ``False`` on timeout.
+    """
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _probe_proxy(port, timeout=min(1.0, interval)):
+            return True
+        time.sleep(interval)
+    return False
+
+
 # ---------- Public API ----------
 
 
@@ -273,8 +320,6 @@ def start_daemon(cfg: SandboxConfig | None = None) -> None:
     # The server writes its own PID file via --pid-file.
     # stderr=PIPE only for the startup-failure detection window; the pipe is
     # closed immediately after so the daemon's stderr does not block on a full buffer.
-    import time
-
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.DEVNULL,
@@ -282,8 +327,13 @@ def start_daemon(cfg: SandboxConfig | None = None) -> None:
         start_new_session=True,
     )
 
-    # Brief wait to catch immediate startup failures (bad args, missing deps)
-    time.sleep(0.3)
+    # Poll the /-/health endpoint until the server is actually ready.
+    if _wait_for_ready(c.proxy_port):
+        # Close our end of the pipe — the daemon logs to the log file, not stderr.
+        proc.stderr.close()
+        return
+
+    # Timed out — check whether the process crashed or is just slow.
     ret = proc.poll()
     if ret is not None:
         stderr = (proc.stderr.read() or b"").decode(errors="replace").strip()
@@ -291,9 +341,11 @@ def start_daemon(cfg: SandboxConfig | None = None) -> None:
         if stderr:
             msg += f":\n{stderr}"
         raise SystemExit(msg)
-
-    # Close our end of the pipe — the daemon logs to the log file, not stderr.
     proc.stderr.close()
+    raise SystemExit(
+        "Credential proxy process started but did not become ready within 5 s.\n"
+        f"Check logs or try: curl http://127.0.0.1:{c.proxy_port}{_HEALTH_PATH}"
+    )
 
 
 def stop_daemon(cfg: SandboxConfig | None = None) -> None:
@@ -373,16 +425,20 @@ def get_proxy_status(cfg: SandboxConfig | None = None) -> CredentialProxyStatus:
     if is_socket_installed():
         mode = "systemd"
         running = is_socket_active()
+        healthy = running  # avoid triggering socket activation with a probe
     elif is_daemon_running(cfg):
         mode = "daemon"
         running = True
+        healthy = _probe_proxy(c.proxy_port)
     else:
         mode = "none"
         running = False
+        healthy = False
 
     return CredentialProxyStatus(
         mode=mode,
         running=running,
+        healthy=healthy,
         socket_path=c.proxy_socket_path,
         db_path=c.proxy_db_path,
         routes_path=c.proxy_routes_path,
@@ -411,13 +467,15 @@ def _wait_for_tcp_port(port: int, timeout: float = 5.0) -> bool:
 def ensure_proxy_reachable(cfg: SandboxConfig | None = None) -> None:
     """Verify the credential proxy is running and its TCP ports are up.
 
-    For systemd socket activation the service may not have started yet
+    For **systemd** socket activation the service may not have started yet
     (e.g. after a fresh boot).  This function triggers a start via
     ``systemctl --user start`` and waits for the HTTP and SSH agent TCP
-    ports to become reachable.
+    ports to become reachable via ``/-/health`` and raw TCP probes.
 
-    Raises ``SystemExit`` with an actionable message if the proxy is down.
-    Called before task creation when credential proxy is enabled.
+    For **daemon** mode the ``/-/health`` endpoint is probed on the TCP port.
+
+    Raises ``SystemExit`` with an actionable message if the proxy is
+    unreachable.  Called before task creation when credential proxy is enabled.
     """
     c = _cfg(cfg)
 
@@ -427,7 +485,7 @@ def ensure_proxy_reachable(cfg: SandboxConfig | None = None) -> None:
             "  terokctl credentials start      (manual daemon)"
         )
         raise SystemExit(
-            "Credential proxy is not running.\n"
+            "Credential proxy is not reachable.\n"
             "\n"
             "The credential proxy injects real API credentials into container\n"
             "requests without exposing secrets to the container filesystem.\n"
@@ -447,7 +505,7 @@ def ensure_proxy_reachable(cfg: SandboxConfig | None = None) -> None:
             timeout=10,
         )
 
-    if not _wait_for_tcp_port(c.proxy_port):
+    if not _wait_for_ready(c.proxy_port):
         raise SystemExit(
             f"Credential proxy service started but TCP port {c.proxy_port} "
             "is not reachable. Check: journalctl --user -u terok-credential-proxy"

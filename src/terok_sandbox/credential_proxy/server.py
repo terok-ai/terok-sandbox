@@ -389,6 +389,11 @@ async def _on_cleanup(app: web.Application) -> None:
     app[_KEY_TOKEN_DB].close()
 
 
+async def _handle_health(_request: web.Request) -> web.Response:
+    """Return 200 — unauthenticated readiness probe for lifecycle management."""
+    return web.json_response({"status": "ok"})
+
+
 def _build_app(db_path: str, routes_path: str) -> web.Application:
     """Construct the aiohttp application."""
     app = web.Application()
@@ -396,6 +401,7 @@ def _build_app(db_path: str, routes_path: str) -> web.Application:
     app[_KEY_TOKEN_DB] = _TokenDB(db_path)
     app.on_startup.append(_on_startup)
     app.on_cleanup.append(_on_cleanup)
+    app.router.add_get("/-/health", _handle_health)
     app.router.add_route("*", "/{tail:.*}", _handle_request)
     return app
 

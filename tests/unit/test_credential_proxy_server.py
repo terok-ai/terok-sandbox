@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from aiohttp import web
 
 from terok_sandbox.credential_db import CredentialDB
 from terok_sandbox.credential_proxy.server import (
@@ -23,6 +24,41 @@ from terok_sandbox.credential_proxy.server import (
     _RouteTable,
     _TokenDB,
 )
+
+# ── Health endpoint ──────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+class TestHealthEndpoint:
+    """Verify the /-/health readiness probe."""
+
+    @pytest.fixture()
+    def _app(self, tmp_path: Path) -> web.Application:
+        """Build a minimal app with a valid (empty) routes file and DB."""
+        routes_file = tmp_path / "routes.json"
+        routes_file.write_text("{}")
+        db_path = tmp_path / "creds.db"
+        CredentialDB(db_path).close()
+        return _build_app(str(db_path), str(routes_file))
+
+    async def test_health_returns_200(self, _app) -> None:
+        """GET /-/health returns 200 with status ok."""
+        from aiohttp.test_utils import TestClient, TestServer
+
+        async with TestClient(TestServer(_app)) as client:
+            resp = await client.get("/-/health")
+            assert resp.status == 200
+            body = await resp.json()
+            assert body == {"status": "ok"}
+
+    async def test_health_no_auth_required(self, _app) -> None:
+        """Health endpoint succeeds without any authentication headers."""
+        from aiohttp.test_utils import TestClient, TestServer
+
+        async with TestClient(TestServer(_app)) as client:
+            resp = await client.get("/-/health")
+            assert resp.status == 200
+
 
 # ── Route table ──────────────────────────────────────────────────────────
 

@@ -16,7 +16,9 @@ from terok_sandbox.credential_proxy_lifecycle import (
     CredentialProxyStatus,
     _is_managed_proxy,
     _pid_file,
+    _probe_proxy,
     _systemd_unit_dir,
+    _wait_for_ready,
     ensure_proxy_reachable,
     get_proxy_status,
     install_systemd_units,
@@ -95,9 +97,12 @@ class TestStartDaemon:
         cfg = _make_cfg(tmp_path)
 
         mock_proc = MagicMock()
-        mock_proc.poll.return_value = None  # still running
+        mock_proc.poll.return_value = None
 
-        with patch("subprocess.Popen", return_value=mock_proc), patch("time.sleep"):
+        with (
+            patch("subprocess.Popen", return_value=mock_proc),
+            patch(f"{_LIFECYCLE}._wait_for_ready", return_value=True),
+        ):
             start_daemon(cfg)
 
         assert cfg.proxy_routes_path.is_file()
@@ -106,15 +111,17 @@ class TestStartDaemon:
     def test_start_launches_subprocess(self, tmp_path: Path) -> None:
         """start_daemon calls Popen with the correct command."""
         cfg = _make_cfg(tmp_path)
-        # Create routes file
         routes = cfg.proxy_routes_path
         routes.parent.mkdir(parents=True, exist_ok=True)
         routes.write_text("{}")
 
         mock_proc = MagicMock()
-        mock_proc.poll.return_value = None  # still running
+        mock_proc.poll.return_value = None
 
-        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen, patch("time.sleep"):
+        with (
+            patch("subprocess.Popen", return_value=mock_proc) as mock_popen,
+            patch(f"{_LIFECYCLE}._wait_for_ready", return_value=True),
+        ):
             start_daemon(cfg)
 
         import sys
@@ -126,20 +133,37 @@ class TestStartDaemon:
         assert any("--pid-file=" in a for a in cmd)
 
     def test_immediate_exit_raises(self, tmp_path: Path) -> None:
-        """start_daemon raises SystemExit if the process dies immediately."""
+        """start_daemon raises SystemExit if the process dies during readiness wait."""
         cfg = _make_cfg(tmp_path)
         routes = cfg.proxy_routes_path
         routes.parent.mkdir(parents=True, exist_ok=True)
         routes.write_text("{}")
 
         mock_proc = MagicMock()
-        mock_proc.poll.return_value = 1  # exited immediately
+        mock_proc.poll.return_value = 1
         mock_proc.stderr.read.return_value = b"error: bad config"
 
         with (
             patch("subprocess.Popen", return_value=mock_proc),
-            patch("time.sleep"),
+            patch(f"{_LIFECYCLE}._wait_for_ready", return_value=False),
             pytest.raises(SystemExit, match="failed to start"),
+        ):
+            start_daemon(cfg)
+
+    def test_timeout_without_crash_raises(self, tmp_path: Path) -> None:
+        """start_daemon raises SystemExit when proxy stays alive but never becomes ready."""
+        cfg = _make_cfg(tmp_path)
+        routes = cfg.proxy_routes_path
+        routes.parent.mkdir(parents=True, exist_ok=True)
+        routes.write_text("{}")
+
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None  # still running, just not ready
+
+        with (
+            patch("subprocess.Popen", return_value=mock_proc),
+            patch(f"{_LIFECYCLE}._wait_for_ready", return_value=False),
+            pytest.raises(SystemExit, match="did not become ready"),
         ):
             start_daemon(cfg)
 
@@ -253,6 +277,7 @@ class TestGetProxyStatus:
         assert isinstance(status, CredentialProxyStatus)
         assert status.mode == "none"
         assert status.running is False
+        assert status.healthy is False
         assert status.socket_path == cfg.proxy_socket_path
         assert status.db_path == cfg.proxy_db_path
         assert status.routes_path == cfg.proxy_routes_path
@@ -324,15 +349,27 @@ class TestGetProxyStatus:
 class TestEnsureProxyReachable:
     """Verify ensure_proxy_reachable."""
 
-    def test_passes_when_daemon_running(self, tmp_path: Path) -> None:
-        """No exception when daemon is running and TCP port is up."""
+    def test_passes_when_daemon_healthy(self, tmp_path: Path) -> None:
+        """No exception when daemon is running and health probe succeeds."""
         cfg = _make_cfg(tmp_path)
         with (
             patch(f"{_LIFECYCLE}.is_socket_active", return_value=False),
             patch(f"{_LIFECYCLE}.is_daemon_running", return_value=True),
+            patch(f"{_LIFECYCLE}._wait_for_ready", return_value=True),
             patch(f"{_LIFECYCLE}._wait_for_tcp_port", return_value=True),
         ):
             ensure_proxy_reachable(cfg)  # should not raise
+
+    def test_raises_when_daemon_running_but_unhealthy(self, tmp_path: Path) -> None:
+        """Raises SystemExit when daemon is alive but health probe fails."""
+        cfg = _make_cfg(tmp_path)
+        with (
+            patch(f"{_LIFECYCLE}.is_socket_active", return_value=False),
+            patch(f"{_LIFECYCLE}.is_daemon_running", return_value=True),
+            patch(f"{_LIFECYCLE}._wait_for_ready", return_value=False),
+            pytest.raises(SystemExit, match="not reachable"),
+        ):
+            ensure_proxy_reachable(cfg)
 
     def test_raises_when_stopped(self, tmp_path: Path) -> None:
         """Raises SystemExit with actionable message when daemon is down."""
@@ -340,27 +377,40 @@ class TestEnsureProxyReachable:
         with (
             patch(f"{_LIFECYCLE}.is_socket_active", return_value=False),
             patch(f"{_LIFECYCLE}.is_daemon_running", return_value=False),
-            pytest.raises(SystemExit, match="not running"),
+            pytest.raises(SystemExit, match="not reachable"),
         ):
             ensure_proxy_reachable(cfg)
 
     def test_passes_when_socket_active(self, tmp_path: Path) -> None:
-        """Socket active → starts service, waits for TCP port."""
+        """Socket active → starts service, waits for health + SSH agent port."""
         cfg = _make_cfg(tmp_path)
         with (
             patch(f"{_LIFECYCLE}.is_socket_active", return_value=True),
             patch(f"{_LIFECYCLE}.subprocess") as mock_sub,
+            patch(f"{_LIFECYCLE}._wait_for_ready", return_value=True),
             patch(f"{_LIFECYCLE}._wait_for_tcp_port", return_value=True),
         ):
             ensure_proxy_reachable(cfg)  # should not raise
             mock_sub.run.assert_called_once()  # systemctl --user start
 
-    def test_raises_when_tcp_port_unreachable(self, tmp_path: Path) -> None:
-        """Service started but TCP port never comes up → SystemExit."""
+    def test_raises_when_health_unreachable(self, tmp_path: Path) -> None:
+        """Service started but health endpoint never responds → SystemExit."""
         cfg = _make_cfg(tmp_path)
         with (
             patch(f"{_LIFECYCLE}.is_socket_active", return_value=True),
             patch(f"{_LIFECYCLE}.subprocess"),
+            patch(f"{_LIFECYCLE}._wait_for_ready", return_value=False),
+            pytest.raises(SystemExit, match="not reachable"),
+        ):
+            ensure_proxy_reachable(cfg)
+
+    def test_raises_when_ssh_agent_port_unreachable(self, tmp_path: Path) -> None:
+        """Service started but SSH agent port never comes up → SystemExit."""
+        cfg = _make_cfg(tmp_path)
+        with (
+            patch(f"{_LIFECYCLE}.is_socket_active", return_value=True),
+            patch(f"{_LIFECYCLE}.subprocess"),
+            patch(f"{_LIFECYCLE}._wait_for_ready", return_value=True),
             patch(f"{_LIFECYCLE}._wait_for_tcp_port", return_value=False),
             pytest.raises(SystemExit, match="not reachable"),
         ):
@@ -430,10 +480,10 @@ class TestSystemdHelpers:
 
 
 class TestGetProxyStatusModes:
-    """Verify mode detection in get_proxy_status."""
+    """Verify mode detection and health probing in get_proxy_status."""
 
     def test_systemd_mode_when_socket_installed(self, tmp_path: Path) -> None:
-        """Reports mode='systemd' when socket unit is installed."""
+        """Reports mode='systemd' and healthy=True when socket is active."""
         cfg = _make_cfg(tmp_path)
         with (
             patch(f"{_LIFECYCLE}.is_socket_installed", return_value=True),
@@ -442,20 +492,36 @@ class TestGetProxyStatusModes:
             status = get_proxy_status(cfg)
         assert status.mode == "systemd"
         assert status.running is True
+        assert status.healthy is True
 
-    def test_daemon_mode_when_pid_running(self, tmp_path: Path) -> None:
-        """Reports mode='daemon' when PID file daemon is alive."""
+    def test_daemon_mode_healthy(self, tmp_path: Path) -> None:
+        """Reports mode='daemon' and healthy=True when health probe succeeds."""
         cfg = _make_cfg(tmp_path)
         with (
             patch(f"{_LIFECYCLE}.is_socket_installed", return_value=False),
             patch(f"{_LIFECYCLE}.is_daemon_running", return_value=True),
+            patch(f"{_LIFECYCLE}._probe_proxy", return_value=True),
         ):
             status = get_proxy_status(cfg)
         assert status.mode == "daemon"
         assert status.running is True
+        assert status.healthy is True
+
+    def test_daemon_mode_unhealthy(self, tmp_path: Path) -> None:
+        """Reports healthy=False when daemon is alive but probe fails."""
+        cfg = _make_cfg(tmp_path)
+        with (
+            patch(f"{_LIFECYCLE}.is_socket_installed", return_value=False),
+            patch(f"{_LIFECYCLE}.is_daemon_running", return_value=True),
+            patch(f"{_LIFECYCLE}._probe_proxy", return_value=False),
+        ):
+            status = get_proxy_status(cfg)
+        assert status.mode == "daemon"
+        assert status.running is True
+        assert status.healthy is False
 
     def test_none_mode_when_nothing_running(self, tmp_path: Path) -> None:
-        """Reports mode='none' when neither systemd nor daemon is active."""
+        """Reports mode='none' and healthy=False when nothing is active."""
         cfg = _make_cfg(tmp_path)
         with (
             _no_systemd(),
@@ -464,9 +530,10 @@ class TestGetProxyStatusModes:
             status = get_proxy_status(cfg)
         assert status.mode == "none"
         assert status.running is False
+        assert status.healthy is False
 
     def test_systemd_mode_inactive_socket(self, tmp_path: Path) -> None:
-        """Reports mode='systemd' and running=False when socket is installed but inactive."""
+        """Reports healthy=False when socket is installed but inactive."""
         cfg = _make_cfg(tmp_path)
         with (
             patch(f"{_LIFECYCLE}.is_socket_installed", return_value=True),
@@ -475,6 +542,67 @@ class TestGetProxyStatusModes:
             status = get_proxy_status(cfg)
         assert status.mode == "systemd"
         assert status.running is False
+        assert status.healthy is False
+
+
+class TestProbeProxy:
+    """Verify _probe_proxy single-shot health check."""
+
+    def _mock_conn(self, *, status: int = 200) -> MagicMock:
+        """Return a mock HTTPConnection whose getresponse() returns *status*."""
+        mock_resp = MagicMock()
+        mock_resp.status = status
+        mock_resp.read.return_value = b""
+        conn = MagicMock()
+        conn.getresponse.return_value = mock_resp
+        return conn
+
+    def test_returns_true_on_200(self) -> None:
+        """Returns True when health endpoint responds 200."""
+        conn = self._mock_conn(status=200)
+        with patch("http.client.HTTPConnection", return_value=conn):
+            assert _probe_proxy(18731) is True
+
+    def test_returns_false_on_connection_refused(self) -> None:
+        """Returns False when the proxy is not listening."""
+        conn = MagicMock()
+        conn.request.side_effect = ConnectionRefusedError
+        with patch("http.client.HTTPConnection", return_value=conn):
+            assert _probe_proxy(18731) is False
+
+    def test_returns_false_on_timeout(self) -> None:
+        """Returns False when the request times out."""
+        conn = MagicMock()
+        conn.request.side_effect = OSError("timed out")
+        with patch("http.client.HTTPConnection", return_value=conn):
+            assert _probe_proxy(18731) is False
+
+
+class TestWaitForReady:
+    """Verify _wait_for_ready polling loop."""
+
+    def test_returns_true_on_immediate_success(self) -> None:
+        """Returns True when the first probe succeeds."""
+        with patch(f"{_LIFECYCLE}._probe_proxy", return_value=True):
+            assert _wait_for_ready(18731, timeout=1.0) is True
+
+    def test_returns_false_on_timeout(self) -> None:
+        """Returns False when all probes fail within the timeout."""
+        with (
+            patch(f"{_LIFECYCLE}._probe_proxy", return_value=False),
+            patch("time.sleep"),
+            patch("time.monotonic", side_effect=[0.0, 0.0, 0.2, 0.4, 6.0]),
+        ):
+            assert _wait_for_ready(18731, timeout=5.0) is False
+
+    def test_retries_then_succeeds(self) -> None:
+        """Returns True after a few failed probes followed by success."""
+        with (
+            patch(f"{_LIFECYCLE}._probe_proxy", side_effect=[False, False, True]),
+            patch("time.sleep"),
+            patch("time.monotonic", side_effect=[0.0, 0.0, 0.2, 0.4, 0.6]),
+        ):
+            assert _wait_for_ready(18731, timeout=5.0) is True
 
 
 class TestInstallSystemdUnits:
