@@ -22,7 +22,8 @@ except ImportError:  # optional dependency
     _user_config_dir = _user_data_dir = None  # type: ignore[assignment]
 
 
-APP_NAME = "terok"
+APP_NAME = "terok-sandbox"
+CREDENTIALS_APP_NAME = "terok-credentials"
 
 
 def _is_root() -> bool:
@@ -36,9 +37,10 @@ def _is_root() -> bool:
 def config_root() -> Path:
     """Base directory for configuration.
 
-    Priority: ``TEROK_CONFIG_DIR`` → ``/etc/terok`` (root) → ``~/.config/terok``.
+    Priority: ``TEROK_SANDBOX_CONFIG_DIR`` → ``/etc/terok-sandbox`` (root)
+    → ``~/.config/terok-sandbox``.
     """
-    env = os.getenv("TEROK_CONFIG_DIR")
+    env = os.getenv("TEROK_SANDBOX_CONFIG_DIR")
     if env:
         return Path(env).expanduser()
     if _is_root():
@@ -51,9 +53,10 @@ def config_root() -> Path:
 def state_root() -> Path:
     """Writable state root (tasks, tokens, caches).
 
-    Priority: ``TEROK_STATE_DIR`` → ``/var/lib/terok`` (root) → XDG data dir.
+    Priority: ``TEROK_SANDBOX_STATE_DIR`` → ``/var/lib/terok-sandbox`` (root)
+    → ``~/.local/share/terok-sandbox``.
     """
-    env = os.getenv("TEROK_STATE_DIR")
+    env = os.getenv("TEROK_SANDBOX_STATE_DIR")
     if env:
         return Path(env).expanduser()
     if _is_root():
@@ -69,11 +72,11 @@ def state_root() -> Path:
 def runtime_root() -> Path:
     """Transient runtime directory (PID files, sockets).
 
-    Priority: ``TEROK_RUNTIME_DIR`` → ``/run/terok`` (root) →
-    ``$XDG_RUNTIME_DIR/terok`` → ``$XDG_STATE_HOME/terok`` →
-    ``~/.local/state/terok``.
+    Priority: ``TEROK_SANDBOX_RUNTIME_DIR`` → ``/run/terok-sandbox`` (root) →
+    ``$XDG_RUNTIME_DIR/terok-sandbox`` → ``$XDG_STATE_HOME/terok-sandbox`` →
+    ``~/.local/state/terok-sandbox``.
     """
-    env = os.getenv("TEROK_RUNTIME_DIR")
+    env = os.getenv("TEROK_SANDBOX_RUNTIME_DIR")
     if env:
         return Path(env).expanduser()
     if _is_root():
@@ -85,3 +88,22 @@ def runtime_root() -> Path:
     if xdg_state:
         return Path(xdg_state) / APP_NAME
     return Path.home() / ".local" / "state" / APP_NAME
+
+
+def credentials_root() -> Path:
+    """Shared credentials directory used by all terok ecosystem packages.
+
+    Priority: ``TEROK_CREDENTIALS_DIR`` → ``/var/lib/terok-credentials`` (root)
+    → XDG data dir.
+    """
+    env = os.getenv("TEROK_CREDENTIALS_DIR")
+    if env:
+        return Path(env).expanduser()
+    if _is_root():
+        return Path("/var/lib") / CREDENTIALS_APP_NAME
+    if _user_data_dir is not None:
+        return Path(_user_data_dir(CREDENTIALS_APP_NAME))
+    xdg = os.getenv("XDG_DATA_HOME")
+    if xdg:
+        return Path(xdg) / CREDENTIALS_APP_NAME
+    return Path.home() / ".local" / "share" / CREDENTIALS_APP_NAME
