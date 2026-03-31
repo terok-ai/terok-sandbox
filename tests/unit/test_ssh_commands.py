@@ -274,11 +274,13 @@ def _fake_keygen(tmp_path: Path):
     """Return a side_effect for subprocess.run that creates fake key files."""
 
     def _side_effect(cmd, **_kwargs):
-        if cmd[0] == "ssh-keygen":
-            priv = Path(cmd[4])  # -f argument
-            comment = cmd[8]  # -C argument
-            priv.write_text("FAKE-PRIVATE-KEY\n")
-            Path(f"{priv}.pub").write_text(f"ssh-ed25519 AAAA... {comment}\n")
+        if cmd[0] != "ssh-keygen":
+            return None
+        args = dict(zip(cmd[1::2], cmd[2::2], strict=False))
+        priv = Path(args["-f"])
+        comment = args.get("-C", "")
+        priv.write_text("FAKE-PRIVATE-KEY\n")
+        Path(f"{priv}.pub").write_text(f"ssh-ed25519 AAAA... {comment}\n")
         return None
 
     return _side_effect
@@ -363,7 +365,8 @@ class TestHandleSshAddKey:
             _handle_ssh_add_key(project="proj", name="deploy")
 
         assert len(captured_cmds) == 1
-        assert captured_cmds[0][8] == "tk-side:proj deploy"  # -C argument
+        args = dict(zip(captured_cmds[0][1::2], captured_cmds[0][2::2], strict=False))
+        assert args["-C"] == "tk-side:proj deploy"
 
     def test_existing_key_refuses_overwrite(self, tmp_path: Path) -> None:
         """Refuses to overwrite an existing key file."""
