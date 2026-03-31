@@ -37,6 +37,7 @@ def _make_cfg(tmp_path: Path) -> SandboxConfig:
     return SandboxConfig(
         state_dir=tmp_path / "state",
         runtime_dir=tmp_path / "run",
+        credentials_dir=tmp_path / "credentials",
     )
 
 

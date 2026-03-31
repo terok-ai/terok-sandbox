@@ -74,6 +74,9 @@ from .gate_tokens import create_token, revoke_token_for_task
 # -- Git gate ----------------------------------------------------------------
 from .git_gate import GateStalenessInfo, GitGate
 
+# -- Paths -------------------------------------------------------------------
+from .paths import credentials_root
+
 # -- Runtime -----------------------------------------------------------------
 from .runtime import (
     GpuConfigError,
@@ -117,6 +120,7 @@ from .ssh import SSHManager, update_ssh_keys_json
 __all__ = [
     # Config
     "SandboxConfig",
+    "credentials_root",
     # Runtime
     "GpuConfigError",
     "bypass_network_args",

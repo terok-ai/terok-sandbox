@@ -16,6 +16,7 @@ from pathlib import Path
 
 from .paths import (
     config_root as _config_root,
+    credentials_root as _credentials_root,
     runtime_root as _runtime_root,
     state_root as _state_root,
 )
@@ -39,11 +40,8 @@ class SandboxConfig:
     config_dir: Path = field(default_factory=_config_root)
     """Configuration root (shield profiles)."""
 
-    envs_dir: Path | None = None
-    """Base directory for per-project environment data (SSH dirs, etc.).
-
-    When ``None``, individual modules fall back to ``state_dir / "envs"``.
-    """
+    credentials_dir: Path = field(default_factory=_credentials_root)
+    """Shared credentials directory (DB, routes, env mounts)."""
 
     gate_port: int = 9418
     """HTTP port for the gate server."""
@@ -65,8 +63,8 @@ class SandboxConfig:
 
     @property
     def effective_envs_dir(self) -> Path:
-        """Return *envs_dir* or the default ``state_dir / "envs"``."""
-        return self.envs_dir or self.state_dir / "envs"
+        """Return the shared agent auth mount directory."""
+        return self.credentials_dir / "envs"
 
     @property
     def gate_base_path(self) -> Path:
@@ -91,7 +89,7 @@ class SandboxConfig:
     @property
     def proxy_db_path(self) -> Path:
         """Return the path to the credential proxy sqlite3 database."""
-        return self.state_dir / "proxy" / "credentials.db"
+        return self.credentials_dir / "credentials.db"
 
     @property
     def proxy_socket_path(self) -> Path:
@@ -106,7 +104,7 @@ class SandboxConfig:
     @property
     def proxy_routes_path(self) -> Path:
         """Return the path to the proxy route configuration JSON."""
-        return self.state_dir / "proxy" / "routes.json"
+        return self.credentials_dir / "routes.json"
 
     @property
     def ssh_keys_dir(self) -> Path:
@@ -116,4 +114,4 @@ class SandboxConfig:
     @property
     def ssh_keys_json_path(self) -> Path:
         """Return the path to the SSH key mapping JSON."""
-        return self.state_dir / "proxy" / "ssh-keys.json"
+        return self.credentials_dir / "ssh-keys.json"
