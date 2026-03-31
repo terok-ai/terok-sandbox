@@ -382,6 +382,20 @@ class TestHandleSshAddKey:
             with pytest.raises(SystemExit, match="already exists"):
                 _handle_ssh_add_key(project="proj", name="my-key")
 
+    def test_existing_pub_key_refuses_overwrite(self, tmp_path: Path) -> None:
+        """A lone .pub file also prevents generation."""
+        cfg = _mock_cfg(tmp_path)
+        dest_dir = cfg.ssh_keys_dir / "proj"
+        dest_dir.mkdir(parents=True)
+        (dest_dir / "id_ed25519_my-key.pub").touch()
+
+        with (
+            patch("terok_sandbox.config.SandboxConfig", return_value=cfg),
+            patch("terok_sandbox.ssh.subprocess.run", side_effect=_fake_keygen(tmp_path)),
+        ):
+            with pytest.raises(SystemExit, match="already exists"):
+                _handle_ssh_add_key(project="proj", name="my-key")
+
     def test_registers_in_ssh_keys_json(self, tmp_path: Path) -> None:
         """Generated key is registered in ssh-keys.json."""
         cfg = _mock_cfg(tmp_path)

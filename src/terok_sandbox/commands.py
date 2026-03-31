@@ -400,9 +400,10 @@ def _handle_ssh_add_key(
     priv_path = dest_dir / filename
     pub_path = dest_dir / f"{filename}.pub"
 
-    if priv_path.exists():
+    existing = priv_path if priv_path.exists() else pub_path if pub_path.exists() else None
+    if existing:
         raise SystemExit(
-            f"Key file already exists: {priv_path}\n"
+            f"Key file already exists: {existing}\n"
             "Use a different --name or remove the existing key first."
         )
 
