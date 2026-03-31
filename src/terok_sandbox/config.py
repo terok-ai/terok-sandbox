@@ -51,6 +51,9 @@ class SandboxConfig:
     proxy_port: int = 18731
     """TCP port for the credential proxy (container access)."""
 
+    ssh_agent_port: int = 18732
+    """TCP port for the SSH agent proxy (container access)."""
+
     shield_profiles: tuple[str, ...] = ("dev-standard",)
     """Shield egress firewall profile names."""
 
@@ -104,3 +107,13 @@ class SandboxConfig:
     def proxy_routes_path(self) -> Path:
         """Return the path to the proxy route configuration JSON."""
         return self.state_dir / "proxy" / "routes.json"
+
+    @property
+    def ssh_keys_dir(self) -> Path:
+        """Return the base directory for per-project SSH keys."""
+        return self.state_dir / "ssh-keys"
+
+    @property
+    def ssh_keys_json_path(self) -> Path:
+        """Return the path to the SSH key mapping JSON."""
+        return self.state_dir / "proxy" / "ssh-keys.json"

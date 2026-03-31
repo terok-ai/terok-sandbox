@@ -262,4 +262,4 @@ class Sandbox:
         """Create an SSH manager for *project_id*."""
         from .ssh import SSHManager
 
-        return SSHManager(project_id=project_id, envs_base_dir=self._cfg.effective_envs_dir)
+        return SSHManager(project_id=project_id)

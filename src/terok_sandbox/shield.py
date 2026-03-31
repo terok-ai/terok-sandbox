@@ -53,7 +53,7 @@ def make_shield(task_dir: Path, cfg: SandboxConfig | None = None) -> Shield:
         state_dir=task_dir / "shield",
         mode=ShieldMode.HOOK,
         default_profiles=c.shield_profiles,
-        loopback_ports=(c.gate_port, c.proxy_port),
+        loopback_ports=(c.gate_port, c.proxy_port, c.ssh_agent_port),
         audit_enabled=c.shield_audit,
         profiles_dir=c.shield_profiles_dir,
     )

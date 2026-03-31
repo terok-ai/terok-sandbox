@@ -338,8 +338,8 @@ def find_free_port(host: str = "127.0.0.1") -> int:
 # Bypass network args (when shield is completely skipped)
 # ---------------------------------------------------------------------------
 
-_LOCALHOST = "127.0.0.1"
 _SLIRP_GATEWAY = "10.0.2.2"
+_PASTA_HOST_LOOPBACK_MAP = "169.254.1.2"
 
 
 def _detect_rootless_network_mode() -> str:
@@ -386,7 +386,7 @@ def bypass_network_args(gate_port: int) -> list[str]:
         ]
     return [
         "--network",
-        f"pasta:-T,{gate_port}",
+        f"pasta:--map-host-loopback,{_PASTA_HOST_LOOPBACK_MAP}",
         "--add-host",
-        f"host.containers.internal:{_LOCALHOST}",
+        f"host.containers.internal:{_PASTA_HOST_LOOPBACK_MAP}",
     ]

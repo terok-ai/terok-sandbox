@@ -9,7 +9,13 @@ from io import StringIO
 from unittest.mock import patch
 
 from terok_sandbox.cli import main
-from terok_sandbox.commands import COMMANDS, GATE_COMMANDS, SHIELD_COMMANDS, CommandDef
+from terok_sandbox.commands import (
+    COMMANDS,
+    GATE_COMMANDS,
+    SHIELD_COMMANDS,
+    SSH_COMMANDS,
+    CommandDef,
+)
 
 
 def _run_cli(*args: str) -> tuple[str, str, int]:
@@ -62,6 +68,10 @@ class TestCommandRegistry:
         names = {cmd.name for cmd in SHIELD_COMMANDS}
         assert {"setup", "status"} <= names
 
+    def test_ssh_has_import(self) -> None:
+        names = {cmd.name for cmd in SSH_COMMANDS}
+        assert "import" in names
+
 
 # ---------------------------------------------------------------------------
 # CLI dispatch
@@ -91,6 +101,10 @@ class TestCLIBasics:
         out, _, _ = _run_cli("gate")
         combined = out.lower()
         assert "start" in combined or "stop" in combined
+
+    def test_ssh_no_subcommand_shows_help(self) -> None:
+        out, _, _ = _run_cli("ssh")
+        assert "import" in out.lower()
 
 
 class TestShieldCLI:

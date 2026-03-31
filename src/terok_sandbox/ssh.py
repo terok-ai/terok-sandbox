@@ -13,6 +13,8 @@ terok-specific types.  The orchestration layer constructs the manager
 from project configuration.
 """
 
+import fcntl
+import json
 import os
 import subprocess
 from importlib import resources
@@ -53,8 +55,8 @@ class SSHManager:
 
     Handles the full SSH setup lifecycle: directory creation, keypair
     generation (ed25519 or RSA), config file rendering from templates, and
-    permission hardening.  The generated directory is bind-mounted into task
-    containers as ``/home/dev/.ssh``.
+    permission hardening.  Keys are stored under ``ssh_keys_dir/<project>``
+    and used by the credential proxy's SSH agent for container access.
     """
 
     def __init__(
@@ -73,7 +75,7 @@ class SSHManager:
         project_id:
             Identifier used for key naming and directory layout.
         ssh_host_dir:
-            Explicit SSH directory (overrides default ``<envs_base>/_ssh-config-<id>``).
+            Explicit SSH directory (overrides default ``<ssh_keys_dir>/<id>``).
         ssh_key_name:
             Explicit key filename (overrides derived ``id_<type>_<id>``).
         ssh_config_template:
@@ -93,9 +95,9 @@ class SSHManager:
         """Return the effective SSH key name."""
         return effective_ssh_key_name(self._project_id, ssh_key_name=self._ssh_key_name)
 
-    def _resolve_envs_base(self) -> Path:
-        """Return the envs base directory, falling back to sandbox defaults."""
-        return self._envs_base_dir or SandboxConfig().effective_envs_dir
+    def _resolve_ssh_keys_base(self) -> Path:
+        """Return the SSH keys base directory, falling back to sandbox defaults."""
+        return self._envs_base_dir or SandboxConfig().ssh_keys_dir
 
     def init(
         self,
@@ -107,16 +109,14 @@ class SSHManager:
 
         Location resolution:
           - If *ssh_host_dir* was provided, use that path.
-          - Otherwise: ``<envs_base>/_ssh-config-<project_id>``
+          - Otherwise: ``<ssh_keys_dir>/<project_id>``
 
         Key name defaults to ``id_<type>_<project_id>`` (e.g. ``id_ed25519_proj``).
         """
         if key_type not in ("ed25519", "rsa"):
             raise SystemExit("Unsupported --key-type. Use 'ed25519' or 'rsa'.")
 
-        target_dir = self._ssh_host_dir or (
-            self._resolve_envs_base() / f"_ssh-config-{self._project_id}"
-        )
+        target_dir = self._ssh_host_dir or (self._resolve_ssh_keys_base() / self._project_id)
         target_dir = Path(target_dir).expanduser().resolve()
         ensure_dir_writable(target_dir, "SSH host dir")
 
@@ -189,7 +189,7 @@ class SSHManager:
             "-N",
             "",
             "-C",
-            f"terok {project_id}",
+            f"tk-main:{project_id}",
         ]
         try:
             subprocess.run(cmd, check=True)
@@ -261,6 +261,56 @@ def _try_render_packaged_template(variables: dict[str, str]) -> str | None:
     for k, v in variables.items():
         raw = raw.replace(f"{{{{{k}}}}}", v)
     return raw
+
+
+def update_ssh_keys_json(keys_json_path: Path, project_id: str, result: SSHInitResult) -> None:
+    """Update the SSH key mapping JSON with a project's key paths.
+
+    The JSON file maps project IDs to their SSH key file paths, similar
+    to how ``routes.json`` maps provider names to proxy routes.  The
+    credential proxy's SSH agent handler reads this file to locate the
+    private key for signing requests.
+
+    Key management rules (keyed by ``private_key`` path):
+
+    - **No existing entry**: write a single-dict entry (simple case).
+    - **Same private_key path**: replace in-place (idempotent re-run of ``ssh-init``).
+    - **Different private_key path**: expand to / append to a list, so a project can
+      hold multiple independent SSH keys (e.g. GitHub + GitLab).
+
+    Uses ``fcntl.flock`` to prevent concurrent ``ssh-init`` invocations
+    from corrupting the file.
+    """
+    new_entry: dict[str, str] = {
+        "private_key": result["private_key"],
+        "public_key": result["public_key"],
+    }
+    keys_json_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(keys_json_path), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        chunks: list[bytes] = []
+        while chunk := os.read(fd, 8192):
+            chunks.append(chunk)
+        raw = b"".join(chunks)
+        mapping: dict = json.loads(raw) if raw.strip() else {}
+        entries: list[dict[str, str]] = mapping.get(project_id) or []
+        if not isinstance(entries, list):
+            entries = []
+        for i, entry in enumerate(entries):
+            if isinstance(entry, dict) and entry.get("private_key") == new_entry["private_key"]:
+                entries[i] = new_entry  # same path — idempotent update
+                break
+        else:
+            entries.append(new_entry)  # new path — append
+        mapping[project_id] = entries
+        data = (json.dumps(mapping, indent=2) + "\n").encode("utf-8")
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.ftruncate(fd, 0)
+        os.write(fd, data)
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 def _harden_permissions(target_dir: Path, priv_path: Path, pub_path: Path, cfg_path: Path) -> None:

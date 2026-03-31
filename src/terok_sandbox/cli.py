@@ -13,7 +13,7 @@ from __future__ import annotations
 import argparse
 from importlib.metadata import PackageNotFoundError, version as _meta_version
 
-from .commands import GATE_COMMANDS, PROXY_COMMANDS, SHIELD_COMMANDS, CommandDef
+from .commands import GATE_COMMANDS, PROXY_COMMANDS, SHIELD_COMMANDS, SSH_COMMANDS, CommandDef
 
 try:
     __version__ = _meta_version("terok-sandbox")
@@ -38,6 +38,8 @@ def _wire_command(sub: argparse._SubParsersAction, cmd: CommandDef) -> None:
             kwargs["dest"] = arg.dest
         if arg.nargs is not None:
             kwargs["nargs"] = arg.nargs
+        if arg.required and arg.name.startswith("-"):
+            kwargs["required"] = True
         p.add_argument(arg.name, **kwargs)
     p.set_defaults(_cmd=cmd)
 
@@ -85,6 +87,13 @@ def main() -> None:
     for cmd in PROXY_COMMANDS:
         _wire_command(proxy_sub, cmd)
     proxy_p.set_defaults(_group_help=proxy_p)
+
+    # -- ssh --
+    ssh_p = sub.add_parser("ssh", help="SSH keypair management")
+    ssh_sub = ssh_p.add_subparsers()
+    for cmd in SSH_COMMANDS:
+        _wire_command(ssh_sub, cmd)
+    ssh_p.set_defaults(_group_help=ssh_p)
 
     args = parser.parse_args()
     if hasattr(args, "_cmd"):

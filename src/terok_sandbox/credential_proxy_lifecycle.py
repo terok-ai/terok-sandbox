@@ -83,7 +83,7 @@ def _is_managed_proxy(pid: int, cfg: SandboxConfig | None = None) -> bool:
 
 # ---------- Systemd helpers ----------
 
-_UNIT_VERSION = 2
+_UNIT_VERSION = 3
 """Bump when the systemd unit templates change."""
 
 _SOCKET_UNIT = "terok-credential-proxy.socket"
@@ -165,6 +165,8 @@ def install_systemd_units(cfg: SandboxConfig | None = None) -> None:
         "DB_PATH": str(c.proxy_db_path),
         "ROUTES_PATH": str(c.proxy_routes_path),
         "PORT": str(c.proxy_port),
+        "SSH_AGENT_PORT": str(c.ssh_agent_port),
+        "SSH_KEYS_FILE": str(c.ssh_keys_json_path),
         "BIN": shlex.join(_proxy_exec_prefix()),
         "UNIT_VERSION": str(_UNIT_VERSION),
     }
@@ -230,15 +232,29 @@ def start_daemon(cfg: SandboxConfig | None = None) -> None:
     sock_path.parent.mkdir(parents=True, exist_ok=True)
     pidfile.parent.mkdir(parents=True, exist_ok=True)
 
-    if not routes_path.is_file():
+    routes_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with routes_path.open("x", encoding="utf-8") as f:
+            f.write("{}\n")
         import logging
 
-        routes_path.parent.mkdir(parents=True, exist_ok=True)
-        routes_path.write_text("{}\n")
         logging.getLogger(__name__).info(
             "Created empty routes file: %s — add routes via 'terokctl auth <provider>'",
             routes_path,
         )
+    except FileExistsError:
+        pass
+
+    ssh_keys_path = c.ssh_keys_json_path
+    ssh_keys_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with ssh_keys_path.open("x", encoding="utf-8") as f:
+            f.write("{}\n")
+    except FileExistsError:
+        pass
+
+    log_file = c.state_dir / "proxy" / "credential-proxy.log"
+    log_file.parent.mkdir(parents=True, exist_ok=True)
 
     cmd = [
         *_proxy_exec_prefix(),
@@ -247,10 +263,16 @@ def start_daemon(cfg: SandboxConfig | None = None) -> None:
         f"--routes-file={routes_path}",
         f"--pid-file={pidfile}",
         f"--port={c.proxy_port}",
+        f"--ssh-agent-port={c.ssh_agent_port}",
+        f"--ssh-keys-file={ssh_keys_path}",
+        f"--log-file={log_file}",
+        "--log-level=DEBUG",
     ]
 
     # Fork into background so the proxy survives shell exit.
     # The server writes its own PID file via --pid-file.
+    # stderr=PIPE only for the startup-failure detection window; the pipe is
+    # closed immediately after so the daemon's stderr does not block on a full buffer.
     import time
 
     proc = subprocess.Popen(
@@ -269,6 +291,9 @@ def start_daemon(cfg: SandboxConfig | None = None) -> None:
         if stderr:
             msg += f":\n{stderr}"
         raise SystemExit(msg)
+
+    # Close our end of the pipe — the daemon logs to the log file, not stderr.
+    proc.stderr.close()
 
 
 def stop_daemon(cfg: SandboxConfig | None = None) -> None:
@@ -305,6 +330,11 @@ def is_daemon_running(cfg: SandboxConfig | None = None) -> bool:
 def get_proxy_port(cfg: SandboxConfig | None = None) -> int:
     """Return the configured credential proxy TCP port."""
     return _cfg(cfg).proxy_port
+
+
+def get_ssh_agent_port(cfg: SandboxConfig | None = None) -> int:
+    """Return the configured SSH agent proxy TCP port."""
+    return _cfg(cfg).ssh_agent_port
 
 
 def get_proxy_status(cfg: SandboxConfig | None = None) -> CredentialProxyStatus:
@@ -361,29 +391,70 @@ def get_proxy_status(cfg: SandboxConfig | None = None) -> CredentialProxyStatus:
     )
 
 
+def _wait_for_tcp_port(port: int, timeout: float = 5.0) -> bool:
+    """Wait up to *timeout* seconds for a TCP port on localhost to accept connections."""
+    import socket
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            if sock.connect_ex(("127.0.0.1", port)) == 0:
+                return True
+        finally:
+            sock.close()
+        time.sleep(0.2)
+    return False
+
+
 def ensure_proxy_reachable(cfg: SandboxConfig | None = None) -> None:
-    """Verify the credential proxy is running.
+    """Verify the credential proxy is running and its TCP ports are up.
+
+    For systemd socket activation the service may not have started yet
+    (e.g. after a fresh boot).  This function triggers a start via
+    ``systemctl --user start`` and waits for the HTTP and SSH agent TCP
+    ports to become reachable.
 
     Raises ``SystemExit`` with an actionable message if the proxy is down.
     Called before task creation when credential proxy is enabled.
     """
-    if is_socket_active() or is_daemon_running(cfg):
-        return
-
     c = _cfg(cfg)
-    hint = (
-        "  terokctl credentials install   (systemd socket activation)\n"
-        "  terokctl credentials start      (manual daemon)"
-    )
-    msg = (
-        "Credential proxy is not running.\n"
-        "\n"
-        "The credential proxy injects real API credentials into container\n"
-        "requests without exposing secrets to the container filesystem.\n"
-        "\n"
-        f"Start it with:\n{hint}\n"
-        f"\n"
-        f"Socket: {c.proxy_socket_path}\n"
-        f"DB:     {c.proxy_db_path}\n"
-    )
-    raise SystemExit(msg)
+
+    if not is_socket_active() and not is_daemon_running(cfg):
+        hint = (
+            "  terokctl credentials install   (systemd socket activation)\n"
+            "  terokctl credentials start      (manual daemon)"
+        )
+        raise SystemExit(
+            "Credential proxy is not running.\n"
+            "\n"
+            "The credential proxy injects real API credentials into container\n"
+            "requests without exposing secrets to the container filesystem.\n"
+            "\n"
+            f"Start it with:\n{hint}\n"
+            f"\n"
+            f"Socket: {c.proxy_socket_path}\n"
+            f"DB:     {c.proxy_db_path}\n"
+        )
+
+    # Systemd socket activation: the socket unit is active but the service
+    # may be idle.  Explicitly start the service so the TCP ports come up.
+    if is_socket_active():
+        subprocess.run(
+            ["systemctl", "--user", "start", _SERVICE_UNIT],
+            check=False,
+            timeout=10,
+        )
+
+    if not _wait_for_tcp_port(c.proxy_port):
+        raise SystemExit(
+            f"Credential proxy service started but TCP port {c.proxy_port} "
+            "is not reachable. Check: journalctl --user -u terok-credential-proxy"
+        )
+
+    if not _wait_for_tcp_port(c.ssh_agent_port):
+        raise SystemExit(
+            f"Credential proxy service started but SSH agent port {c.ssh_agent_port} "
+            "is not reachable. Check: journalctl --user -u terok-credential-proxy"
+        )

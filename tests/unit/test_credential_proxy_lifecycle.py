@@ -325,11 +325,12 @@ class TestEnsureProxyReachable:
     """Verify ensure_proxy_reachable."""
 
     def test_passes_when_daemon_running(self, tmp_path: Path) -> None:
-        """No exception when daemon is running."""
+        """No exception when daemon is running and TCP port is up."""
         cfg = _make_cfg(tmp_path)
         with (
             patch(f"{_LIFECYCLE}.is_socket_active", return_value=False),
             patch(f"{_LIFECYCLE}.is_daemon_running", return_value=True),
+            patch(f"{_LIFECYCLE}._wait_for_tcp_port", return_value=True),
         ):
             ensure_proxy_reachable(cfg)  # should not raise
 
@@ -344,10 +345,26 @@ class TestEnsureProxyReachable:
             ensure_proxy_reachable(cfg)
 
     def test_passes_when_socket_active(self, tmp_path: Path) -> None:
-        """No exception when systemd socket is active."""
+        """Socket active → starts service, waits for TCP port."""
         cfg = _make_cfg(tmp_path)
-        with patch(f"{_LIFECYCLE}.is_socket_active", return_value=True):
+        with (
+            patch(f"{_LIFECYCLE}.is_socket_active", return_value=True),
+            patch(f"{_LIFECYCLE}.subprocess") as mock_sub,
+            patch(f"{_LIFECYCLE}._wait_for_tcp_port", return_value=True),
+        ):
             ensure_proxy_reachable(cfg)  # should not raise
+            mock_sub.run.assert_called_once()  # systemctl --user start
+
+    def test_raises_when_tcp_port_unreachable(self, tmp_path: Path) -> None:
+        """Service started but TCP port never comes up → SystemExit."""
+        cfg = _make_cfg(tmp_path)
+        with (
+            patch(f"{_LIFECYCLE}.is_socket_active", return_value=True),
+            patch(f"{_LIFECYCLE}.subprocess"),
+            patch(f"{_LIFECYCLE}._wait_for_tcp_port", return_value=False),
+            pytest.raises(SystemExit, match="not reachable"),
+        ):
+            ensure_proxy_reachable(cfg)
 
 
 class TestSystemdHelpers:

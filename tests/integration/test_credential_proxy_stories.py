@@ -110,14 +110,20 @@ async def proxy_env(tmp_path: Path, populated_db: CredentialDB):
     proxy_server = TestServer(proxy_app)
     await proxy_server.start_server()
 
-    # 4. Create a phantom token
-    token = populated_db.create_proxy_token("test-project", "task-1", "default")
+    # 4. Create per-provider phantom tokens (proxy routes by token's provider field)
+    claude_token = populated_db.create_proxy_token("test-project", "task-1", "default", "claude")
+    gh_token = populated_db.create_proxy_token("test-project", "task-1", "default", "gh")
+    no_route_token = populated_db.create_proxy_token(
+        "test-project", "task-1", "default", "unknown-provider"
+    )
 
     yield {
         "proxy_url": f"http://127.0.0.1:{proxy_server.port}",
         "upstream_url": upstream_base,
         "db": populated_db,
-        "token": token,
+        "token": claude_token,
+        "gh_token": gh_token,
+        "no_route_token": no_route_token,
     }
 
     await proxy_server.close()
@@ -171,13 +177,14 @@ class TestPhantomTokenLifecycle:
     def test_full_token_lifecycle(self, db: CredentialDB) -> None:
         """Token is created, resolvable, then revoked on task end."""
         # Task starts → token created
-        token = db.create_proxy_token("myproject", "task-42", "default")
+        token = db.create_proxy_token("myproject", "task-42", "default", "claude")
         assert len(token) == 32
 
-        # Token resolves to the right credential set
+        # Token resolves to the right credential set and provider
         info = db.lookup_proxy_token(token)
         assert info["project"] == "myproject"
         assert info["credential_set"] == "default"
+        assert info["provider"] == "claude"
 
         # Task ends → tokens revoked
         db.revoke_proxy_tokens("myproject", "task-42")
@@ -185,7 +192,7 @@ class TestPhantomTokenLifecycle:
 
     def test_revoked_token_rejected(self, populated_db: CredentialDB) -> None:
         """After revocation, the token is no longer valid."""
-        token = populated_db.create_proxy_token("proj", "task-1", "default")
+        token = populated_db.create_proxy_token("proj", "task-1", "default", "claude")
         populated_db.revoke_proxy_tokens("proj", "task-1")
         assert populated_db.lookup_proxy_token(token) is None
 
@@ -199,7 +206,7 @@ class TestProxyForwardsWithRealAuth:
 
         async with aiohttp.ClientSession() as session:
             async with session.post(
-                f"{proxy_env['proxy_url']}/claude/v1/messages",
+                f"{proxy_env['proxy_url']}/v1/messages",
                 headers={"Authorization": f"Bearer {proxy_env['token']}"},
                 json={"model": "claude-sonnet-4-20250514", "messages": []},
             ) as resp:
@@ -215,8 +222,8 @@ class TestProxyForwardsWithRealAuth:
 
         async with aiohttp.ClientSession() as session:
             async with session.get(
-                f"{proxy_env['proxy_url']}/gh/user",
-                headers={"Authorization": f"token {proxy_env['token']}"},
+                f"{proxy_env['proxy_url']}/user",
+                headers={"Authorization": f"token {proxy_env['gh_token']}"},
             ) as resp:
                 assert resp.status == 200
                 body = await resp.json()
@@ -224,12 +231,12 @@ class TestProxyForwardsWithRealAuth:
         assert body["auth"] == "token ghp_realGitHubToken123"
 
     async def test_unknown_route_returns_404(self, proxy_env: dict) -> None:
-        """Request to an unknown provider prefix returns 404."""
+        """Token for an unregistered provider returns 404."""
 
         async with aiohttp.ClientSession() as session:
             async with session.get(
-                f"{proxy_env['proxy_url']}/unknown/v1/foo",
-                headers={"Authorization": f"Bearer {proxy_env['token']}"},
+                f"{proxy_env['proxy_url']}/v1/foo",
+                headers={"Authorization": f"Bearer {proxy_env['no_route_token']}"},
             ) as resp:
                 assert resp.status == 404
 
@@ -238,7 +245,7 @@ class TestProxyForwardsWithRealAuth:
 
         async with aiohttp.ClientSession() as session:
             async with session.get(
-                f"{proxy_env['proxy_url']}/claude/v1/messages",
+                f"{proxy_env['proxy_url']}/v1/messages",
             ) as resp:
                 assert resp.status == 401
 
@@ -247,7 +254,7 @@ class TestProxyForwardsWithRealAuth:
 
         async with aiohttp.ClientSession() as session:
             async with session.get(
-                f"{proxy_env['proxy_url']}/claude/v1/messages",
+                f"{proxy_env['proxy_url']}/v1/messages",
                 headers={"Authorization": "Bearer totally-fake-token"},
             ) as resp:
                 assert resp.status == 401
@@ -263,7 +270,7 @@ class TestProxyStreaming:
         chunks: list[bytes] = []
         async with aiohttp.ClientSession() as session:
             async with session.get(
-                f"{proxy_env['proxy_url']}/claude/v1/stream",
+                f"{proxy_env['proxy_url']}/v1/stream",
                 headers={"Authorization": f"Bearer {proxy_env['token']}"},
             ) as resp:
                 assert resp.status == 200
@@ -288,7 +295,7 @@ class TestProxyAfterTokenRevocation:
         # Verify it works before revocation
         async with aiohttp.ClientSession() as session:
             async with session.post(
-                f"{proxy_env['proxy_url']}/claude/v1/messages",
+                f"{proxy_env['proxy_url']}/v1/messages",
                 headers={"Authorization": f"Bearer {token}"},
             ) as resp:
                 assert resp.status == 200
@@ -299,7 +306,7 @@ class TestProxyAfterTokenRevocation:
         # Now it's rejected
         async with aiohttp.ClientSession() as session:
             async with session.post(
-                f"{proxy_env['proxy_url']}/claude/v1/messages",
+                f"{proxy_env['proxy_url']}/v1/messages",
                 headers={"Authorization": f"Bearer {token}"},
             ) as resp:
                 assert resp.status == 401

@@ -32,6 +32,7 @@ class ArgDef:
     action: str | None = None
     dest: str | None = None
     nargs: int | str | None = None
+    required: bool = False
 
 
 @dataclass(frozen=True)
@@ -279,5 +280,105 @@ PROXY_COMMANDS: tuple[CommandDef, ...] = (
     ),
 )
 
+# ---------------------------------------------------------------------------
+# SSH handlers
+# ---------------------------------------------------------------------------
+
+
+def _handle_ssh_import(*, project: str, private_key: str, public_key: str | None = None) -> None:
+    """Copy an SSH keypair into the managed key store and register it in ssh-keys.json."""
+    import os
+    import re
+    import shutil
+    from pathlib import Path
+
+    from .config import SandboxConfig
+    from .ssh import SSHInitResult, update_ssh_keys_json
+
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", project):
+        raise SystemExit(
+            f"Invalid project ID {project!r}: must start with a letter or digit "
+            "and contain only [A-Za-z0-9._-]"
+        )
+
+    priv_src = Path(private_key).expanduser().resolve()
+    pub_src = Path(public_key).expanduser().resolve() if public_key else Path(f"{priv_src}.pub")
+
+    if not priv_src.exists():
+        raise SystemExit(f"Private key not found: {priv_src}")
+    if not pub_src.exists():
+        raise SystemExit(
+            f"Public key not found: {pub_src} (use --public-key to specify explicitly)"
+        )
+
+    cfg = SandboxConfig()
+    dest_dir = cfg.ssh_keys_dir / project
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    def _unique_dst(src: Path) -> Path:
+        """Return dest path for *src* inside *dest_dir*, with numeric suffix on collision.
+
+        A destination that already exists with identical content is considered
+        the same key (re-import) and returns the existing path unchanged.
+        """
+        p = dest_dir / src.name
+        if not p.exists() or p.read_bytes() == src.read_bytes():
+            return p
+        stem, suffix = p.stem, p.suffix
+        n = 1
+        while True:
+            p = dest_dir / f"{stem}_{n}{suffix}"
+            if not p.exists() or p.read_bytes() == src.read_bytes():
+                return p
+            n += 1
+
+    priv_dst = _unique_dst(priv_src)
+    pub_dst = _unique_dst(pub_src)
+
+    print(f"Copying private key: {priv_src}")
+    print(f"              → {priv_dst}")
+    shutil.copy2(str(priv_src), str(priv_dst))
+    os.chmod(priv_dst, 0o600)
+
+    print(f"Copying public key:  {pub_src}")
+    print(f"              → {pub_dst}")
+    shutil.copy2(str(pub_src), str(pub_dst))
+
+    result = SSHInitResult(
+        dir=str(dest_dir),
+        private_key=str(priv_dst),
+        public_key=str(pub_dst),
+        config_path="",
+        key_name=priv_dst.name,
+    )
+    keys_path = cfg.ssh_keys_json_path
+    update_ssh_keys_json(keys_path, project, result)
+    print(f"Registered key for project '{project}': {priv_dst}")
+
+
+SSH_COMMANDS: tuple[CommandDef, ...] = (
+    CommandDef(
+        name="import",
+        help="Register an existing SSH keypair in ssh-keys.json",
+        handler=_handle_ssh_import,
+        group="ssh",
+        args=(
+            ArgDef(name="project", help="Project ID to associate the key with"),
+            ArgDef(
+                name="--private-key",
+                help="Path to the private key file",
+                dest="private_key",
+                required=True,
+            ),
+            ArgDef(
+                name="--public-key",
+                help="Path to the .pub file (default: <private-key>.pub)",
+                default=None,
+                dest="public_key",
+            ),
+        ),
+    ),
+)
+
 #: All sandbox commands, grouped by subsystem.
-COMMANDS: tuple[CommandDef, ...] = GATE_COMMANDS + SHIELD_COMMANDS + PROXY_COMMANDS
+COMMANDS: tuple[CommandDef, ...] = GATE_COMMANDS + SHIELD_COMMANDS + PROXY_COMMANDS + SSH_COMMANDS

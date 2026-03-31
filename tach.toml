@@ -126,9 +126,11 @@ depends_on = [
 [[modules]]
 path = "terok_sandbox.commands"
 depends_on = [
+    "terok_sandbox.config",
     "terok_sandbox.credential_proxy_lifecycle",
     "terok_sandbox.gate_server",
     "terok_sandbox.shield",
+    "terok_sandbox.ssh",
 ]
 
 # CLI entry point — wires command registry to argparse
