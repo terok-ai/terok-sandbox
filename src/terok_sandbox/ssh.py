@@ -16,6 +16,7 @@ from project configuration.
 import fcntl
 import json
 import os
+import re
 import subprocess
 from importlib import resources
 from pathlib import Path
@@ -38,6 +39,34 @@ def effective_ssh_key_name(
         return ssh_key_name
     algo = "ed25519" if key_type == "ed25519" else "rsa"
     return f"id_{algo}_{project_id}"
+
+
+def generate_keypair(key_type: str, priv_path: Path, pub_path: Path, comment: str) -> None:
+    """Generate an SSH keypair via ``ssh-keygen``.
+
+    Removes any stale half-existing files first, then invokes
+    ``ssh-keygen`` with the given *comment* embedded in the public key.
+    """
+    for p in (priv_path, pub_path):
+        p.unlink(missing_ok=True)
+
+    cmd = [
+        "ssh-keygen",
+        "-t",
+        key_type,
+        "-f",
+        str(priv_path),
+        "-N",
+        "",
+        "-C",
+        comment,
+    ]
+    try:
+        subprocess.run(cmd, check=True)
+    except FileNotFoundError:
+        raise SystemExit("ssh-keygen not found. Please install OpenSSH client tools.")
+    except subprocess.CalledProcessError as e:
+        raise SystemExit(f"ssh-keygen failed: {e}")
 
 
 class SSHInitResult(TypedDict):
@@ -177,26 +206,7 @@ class SSHManager:
     @staticmethod
     def _generate_keypair(key_type: str, priv_path: Path, pub_path: Path, project_id: str) -> None:
         """Generate an SSH keypair, removing any stale half-existing files first."""
-        for p in (priv_path, pub_path):
-            p.unlink(missing_ok=True)
-
-        cmd = [
-            "ssh-keygen",
-            "-t",
-            key_type,
-            "-f",
-            str(priv_path),
-            "-N",
-            "",
-            "-C",
-            f"tk-main:{project_id}",
-        ]
-        try:
-            subprocess.run(cmd, check=True)
-        except FileNotFoundError:
-            raise SystemExit("ssh-keygen not found. Please install OpenSSH client tools.")
-        except subprocess.CalledProcessError as e:
-            raise SystemExit(f"ssh-keygen failed: {e}")
+        generate_keypair(key_type, priv_path, pub_path, f"tk-main:{project_id}")
 
     @staticmethod
     def _render_config(
@@ -325,6 +335,21 @@ def _harden_permissions(target_dir: Path, priv_path: Path, pub_path: Path, cfg_p
         os.chmod(pub_path, 0o644)
     if cfg_path.exists():
         os.chmod(cfg_path, 0o644)
+
+
+def _next_key_number(project_dir: Path, algo: str) -> int:
+    """Scan *project_dir* for ``id_<algo>_key-N`` files and return the next *N*.
+
+    Returns 1 when no numbered keys exist yet.  Uses max+1 (no gap-filling)
+    so that retired key numbers are never reused.
+    """
+    pattern = re.compile(rf"^id_{re.escape(algo)}_key-(\d+)$")
+    max_n = 0
+    if project_dir.is_dir():
+        for entry in project_dir.iterdir():
+            if m := pattern.match(entry.name):
+                max_n = max(max_n, int(m.group(1)))
+    return max_n + 1
 
 
 def _print_init_summary(target_dir: Path, priv_path: Path, pub_path: Path, cfg_path: Path) -> None:

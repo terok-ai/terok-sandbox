@@ -356,6 +356,88 @@ def _handle_ssh_import(*, project: str, private_key: str, public_key: str | None
     print(f"Registered key for project '{project}': {priv_dst}")
 
 
+def _handle_ssh_add_key(
+    *,
+    project: str,
+    name: str | None = None,
+    key_type: str = "ed25519",
+) -> None:
+    """Generate a new SSH keypair and register it for a project."""
+    import re
+
+    from .config import SandboxConfig
+    from .ssh import (
+        SSHInitResult,
+        _harden_permissions,
+        _next_key_number,
+        generate_keypair,
+        update_ssh_keys_json,
+    )
+
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", project):
+        raise SystemExit(
+            f"Invalid project ID {project!r}: must start with a letter or digit "
+            "and contain only [A-Za-z0-9._-]"
+        )
+    if key_type not in ("ed25519", "rsa"):
+        raise SystemExit("Unsupported --key-type. Use 'ed25519' or 'rsa'.")
+
+    algo = "ed25519" if key_type == "ed25519" else "rsa"
+    cfg = SandboxConfig()
+    dest_dir = cfg.ssh_keys_dir / project
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    if name is not None:
+        if not re.fullmatch(r"[a-zA-Z_-]+", name):
+            raise SystemExit(
+                f"Invalid key name {name!r}: must contain only letters, underscores, and hyphens"
+            )
+        key_name = name
+    else:
+        key_name = f"key-{_next_key_number(dest_dir, algo)}"
+
+    filename = f"id_{algo}_{key_name}"
+    priv_path = dest_dir / filename
+    pub_path = dest_dir / f"{filename}.pub"
+
+    existing = priv_path if priv_path.exists() else pub_path if pub_path.exists() else None
+    if existing:
+        raise SystemExit(
+            f"Key file already exists: {existing}\n"
+            "Use a different --name or remove the existing key first."
+        )
+
+    comment = f"tk-side:{project} {key_name}"
+    generate_keypair(key_type, priv_path, pub_path, comment)
+
+    try:
+        _harden_permissions(dest_dir, priv_path, pub_path, dest_dir / "config")
+    except OSError as e:
+        raise SystemExit(f"Failed to set permissions: {e}") from e
+
+    result = SSHInitResult(
+        dir=str(dest_dir),
+        private_key=str(priv_path),
+        public_key=str(pub_path),
+        config_path="",
+        key_name=filename,
+    )
+    update_ssh_keys_json(cfg.ssh_keys_json_path, project, result)
+
+    print(f"SSH key generated for project '{project}':")
+    print(f"  name:        {key_name}")
+    print(f"  private key: {priv_path}")
+    print(f"  public key:  {pub_path}")
+    print(f"  comment:     {comment}")
+    try:
+        pub_text = pub_path.read_text(encoding="utf-8", errors="ignore").strip()
+        if pub_text:
+            print("Public key (add as deploy key):")
+            print(f"  {pub_text}")
+    except Exception:
+        pass
+
+
 SSH_COMMANDS: tuple[CommandDef, ...] = (
     CommandDef(
         name="import",
@@ -375,6 +457,26 @@ SSH_COMMANDS: tuple[CommandDef, ...] = (
                 help="Path to the .pub file (default: <private-key>.pub)",
                 default=None,
                 dest="public_key",
+            ),
+        ),
+    ),
+    CommandDef(
+        name="add-key",
+        help="Generate a new SSH keypair for a project",
+        handler=_handle_ssh_add_key,
+        group="ssh",
+        args=(
+            ArgDef(name="project", help="Project ID to associate the key with"),
+            ArgDef(
+                name="--name",
+                help="Key name ([a-zA-Z_-]; auto-generates key-1, key-2, ... if omitted)",
+                default=None,
+            ),
+            ArgDef(
+                name="--key-type",
+                help="Key algorithm: ed25519 (default) or rsa",
+                default="ed25519",
+                dest="key_type",
             ),
         ),
     ),

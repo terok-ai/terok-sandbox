@@ -112,7 +112,7 @@ from .shield import (
 )
 
 # -- SSH ---------------------------------------------------------------------
-from .ssh import SSHManager, update_ssh_keys_json
+from .ssh import SSHManager, generate_keypair, update_ssh_keys_json
 
 __all__ = [
     # Config
@@ -194,6 +194,7 @@ __all__ = [
     "Sandbox",
     # SSH
     "SSHManager",
+    "generate_keypair",
     "update_ssh_keys_json",
     # Meta
     "__version__",
