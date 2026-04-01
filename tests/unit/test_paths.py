@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: 2025 Jiri Vyskocil
+# SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
 """Tests for path resolution functions in terok_sandbox.paths."""
@@ -9,10 +10,22 @@ import os
 import unittest.mock
 from pathlib import Path
 
-from terok_sandbox.paths import config_root, credentials_root, runtime_root, state_root
+from terok_sandbox.paths import (
+    config_root,
+    credentials_root,
+    runtime_root,
+    state_root,
+    umbrella_config_root,
+)
 from tests.constants import MOCK_BASE
 
 MOCK_CREDENTIALS_DIR = MOCK_BASE / "credentials"
+
+_UMBRELLA_SEP = "terok" + os.sep + "sandbox"
+"""Expected umbrella path segment for sandbox roots (``terok/sandbox``)."""
+
+_CRED_UMBRELLA_SEP = "terok" + os.sep + "credentials"
+"""Expected umbrella path segment for credentials root (``terok/credentials``)."""
 
 
 class TestConfigRoot:
@@ -29,11 +42,19 @@ class TestConfigRoot:
         ):
             assert config_root() == MOCK_BASE / "cfg"
 
-    def test_default_contains_app_name(self):
-        """Default path uses the terok-sandbox namespace."""
+    def test_default_uses_umbrella_namespace(self):
+        """Default path nests under the terok/ umbrella."""
         with unittest.mock.patch.dict(os.environ, {}, clear=True):
             result = config_root()
-            assert "terok-sandbox" in str(result)
+            assert _UMBRELLA_SEP in str(result)
+
+    def test_root_user_fallback(self):
+        """When running as root, falls back to /etc/terok/sandbox."""
+        with (
+            unittest.mock.patch.dict(os.environ, {}, clear=True),
+            unittest.mock.patch("terok_sandbox.paths._is_root", return_value=True),
+        ):
+            assert config_root() == Path("/etc/terok/sandbox")
 
 
 class TestStateRoot:
@@ -50,11 +71,19 @@ class TestStateRoot:
         ):
             assert state_root() == MOCK_BASE / "state"
 
-    def test_default_contains_app_name(self):
-        """Default path uses the terok-sandbox namespace."""
+    def test_default_uses_umbrella_namespace(self):
+        """Default path nests under the terok/ umbrella."""
         with unittest.mock.patch.dict(os.environ, {}, clear=True):
             result = state_root()
-            assert "terok-sandbox" in str(result)
+            assert _UMBRELLA_SEP in str(result)
+
+    def test_root_user_fallback(self):
+        """When running as root, falls back to /var/lib/terok/sandbox."""
+        with (
+            unittest.mock.patch.dict(os.environ, {}, clear=True),
+            unittest.mock.patch("terok_sandbox.paths._is_root", return_value=True),
+        ):
+            assert state_root() == Path("/var/lib/terok/sandbox")
 
 
 class TestRuntimeRoot:
@@ -71,11 +100,19 @@ class TestRuntimeRoot:
         ):
             assert runtime_root() == MOCK_BASE / "run"
 
-    def test_default_contains_app_name(self):
-        """Default path uses the terok-sandbox namespace."""
+    def test_default_uses_umbrella_namespace(self):
+        """Default path nests under the terok/ umbrella."""
         with unittest.mock.patch.dict(os.environ, {}, clear=True):
             result = runtime_root()
-            assert "terok-sandbox" in str(result)
+            assert _UMBRELLA_SEP in str(result)
+
+    def test_root_user_fallback(self):
+        """When running as root, falls back to /run/terok/sandbox."""
+        with (
+            unittest.mock.patch.dict(os.environ, {}, clear=True),
+            unittest.mock.patch("terok_sandbox.paths._is_root", return_value=True),
+        ):
+            assert runtime_root() == Path("/run/terok/sandbox")
 
 
 class TestCredentialsRoot:
@@ -92,11 +129,11 @@ class TestCredentialsRoot:
         ):
             assert credentials_root() == MOCK_CREDENTIALS_DIR
 
-    def test_default_contains_credentials_app_name(self):
-        """Default path uses the terok-credentials namespace."""
+    def test_default_uses_umbrella_namespace(self):
+        """Default path nests under the terok/ umbrella."""
         with unittest.mock.patch.dict(os.environ, {}, clear=True):
             result = credentials_root()
-            assert "terok-credentials" in str(result)
+            assert _CRED_UMBRELLA_SEP in str(result)
 
     def test_env_override_with_tilde(self):
         """TEROK_CREDENTIALS_DIR supports ~ expansion."""
@@ -106,9 +143,38 @@ class TestCredentialsRoot:
             assert result.is_absolute()
 
     def test_root_user_fallback(self):
-        """When running as root, falls back to /var/lib/terok-credentials."""
+        """When running as root, falls back to /var/lib/terok/credentials."""
         with (
             unittest.mock.patch.dict(os.environ, {}, clear=True),
             unittest.mock.patch("terok_sandbox.paths._is_root", return_value=True),
         ):
-            assert credentials_root() == Path("/var/lib/terok-credentials")
+            assert credentials_root() == Path("/var/lib/terok/credentials")
+
+
+class TestUmbrellaConfigRoot:
+    """Tests for umbrella_config_root()."""
+
+    def test_returns_path(self):
+        """umbrella_config_root() returns a Path instance."""
+        assert isinstance(umbrella_config_root(), Path)
+
+    def test_env_override(self):
+        """TEROK_CONFIG_DIR env var takes precedence."""
+        with unittest.mock.patch.dict(
+            os.environ, {"TEROK_CONFIG_DIR": str(MOCK_BASE / "umbrella-cfg")}
+        ):
+            assert umbrella_config_root() == MOCK_BASE / "umbrella-cfg"
+
+    def test_default_ends_with_terok(self):
+        """Default path ends with the 'terok' umbrella directory."""
+        with unittest.mock.patch.dict(os.environ, {}, clear=True):
+            result = umbrella_config_root()
+            assert result.name == "terok"
+
+    def test_root_user_fallback(self):
+        """When running as root, falls back to /etc/terok."""
+        with (
+            unittest.mock.patch.dict(os.environ, {}, clear=True),
+            unittest.mock.patch("terok_sandbox.paths._is_root", return_value=True),
+        ):
+            assert umbrella_config_root() == Path("/etc/terok")

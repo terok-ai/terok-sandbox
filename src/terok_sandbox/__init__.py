@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: 2025 Jiri Vyskocil
+# SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
 """terok-sandbox: hardened Podman container runner with gate and shield integration.
@@ -75,7 +76,7 @@ from .gate_tokens import create_token, revoke_token_for_task
 from .git_gate import GateStalenessInfo, GitGate
 
 # -- Paths -------------------------------------------------------------------
-from .paths import credentials_root
+from .paths import credentials_root, umbrella_config_root
 
 # -- Runtime -----------------------------------------------------------------
 from .runtime import (
@@ -121,6 +122,7 @@ __all__ = [
     # Config
     "SandboxConfig",
     "credentials_root",
+    "umbrella_config_root",
     # Runtime
     "GpuConfigError",
     "bypass_network_args",

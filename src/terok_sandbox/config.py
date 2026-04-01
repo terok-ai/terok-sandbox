@@ -38,7 +38,12 @@ class SandboxConfig:
     """Transient runtime directory (PID files, sockets)."""
 
     config_dir: Path = field(default_factory=_config_root)
-    """Configuration root (shield profiles)."""
+    """Sandbox-scoped configuration root.
+
+    Note: shield profiles are resolved by :attr:`shield_profiles_dir`
+    via :func:`~terok_sandbox.paths.umbrella_config_root`, not from
+    this directory.
+    """
 
     credentials_dir: Path = field(default_factory=_credentials_root)
     """Shared credentials directory (DB, routes, env mounts)."""
@@ -79,7 +84,9 @@ class SandboxConfig:
     @property
     def shield_profiles_dir(self) -> Path:
         """Return the directory for terok-managed shield profiles."""
-        return self.config_dir / "shield" / "profiles"
+        from .paths import umbrella_config_root
+
+        return umbrella_config_root() / "shield" / "profiles"
 
     @property
     def proxy_db_path(self) -> Path:
