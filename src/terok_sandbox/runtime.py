@@ -17,7 +17,7 @@ import socket
 import subprocess
 from collections.abc import Callable
 
-from ._util import log_debug
+from ._util import log_debug, log_warning
 
 # ---------- User namespace ----------
 
@@ -175,8 +175,8 @@ def stop_task_containers(container_names: list[str]) -> None:
                 timeout=120,
             )
             log_debug(f"stop_containers: podman rm -f {name} (done)")
-        except Exception:
-            pass
+        except Exception as exc:
+            log_debug(f"stop_containers: podman rm -f {name} failed: {exc}")
 
 
 def gpu_run_args(*, enabled: bool = False) -> list[str]:
@@ -246,7 +246,7 @@ def stream_initial_logs(
                         continue
                     buf += chunk
                 except Exception as exc:
-                    log_debug(f"_stream_initial_logs read error: {exc}")
+                    log_warning(f"_stream_initial_logs read error: {exc}")
                     break
 
                 while b"\n" in buf:
@@ -268,7 +268,7 @@ def stream_initial_logs(
 
             proc.terminate()
         except Exception as exc:
-            log_debug(f"_stream_initial_logs error: {exc}")
+            log_warning(f"_stream_initial_logs error: {exc}")
 
     stream_thread = threading.Thread(target=_stream_logs)
     stream_thread.start()

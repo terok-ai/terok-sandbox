@@ -374,7 +374,14 @@ def _make_handler_class(base_path: Path, token_store: TokenStore) -> type[BaseHT
                 )
 
         def log_message(self, _format: str, *args: object) -> None:
-            """Suppress default stderr logging."""
+            """Log 4xx/5xx responses at WARNING level; suppress everything else."""
+            try:
+                if args and isinstance(args[0], str) and len(args) >= 2:
+                    code = int(str(args[1]).split(None, 1)[0])
+                    if code >= 400:
+                        _logger.warning(_format, *args)
+            except (ValueError, IndexError, TypeError):
+                pass
 
     return GateRequestHandler
 

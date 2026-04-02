@@ -22,6 +22,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from ._util._logging import log_warning
 from .config import SandboxConfig
 
 
@@ -436,8 +437,8 @@ def get_proxy_status(cfg: SandboxConfig | None = None) -> CredentialProxyStatus:
                 creds = tuple(db.list_credentials("default"))
             finally:
                 db.close()
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            log_warning(f"Failed to read credential DB for status: {exc}")
 
     # Systemd takes precedence: when units are installed, report mode="systemd"
     # even if the socket is inactive — the daemon's running state is ignored so
