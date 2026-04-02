@@ -7,9 +7,10 @@ Manages the ``terok-credential-proxy`` daemon: start, stop, status, and
 pre-task health checks.  Supports systemd socket activation (preferred)
 and a manual daemon fallback.
 
-**No auto-start.**  Task creation checks reachability via
-:func:`ensure_proxy_reachable` and fails with an actionable error
-rather than silently starting a daemon.
+The systemd socket unit listens on both the Unix socket and the TCP
+port used by containers.  A connection to either triggers the service.
+:func:`ensure_proxy_reachable` also performs an explicit start as a
+belt-and-suspenders measure before task creation.
 """
 
 from __future__ import annotations
@@ -86,7 +87,7 @@ def _is_managed_proxy(pid: int, cfg: SandboxConfig | None = None) -> bool:
 
 # ---------- Systemd helpers ----------
 
-_UNIT_VERSION = 3
+_UNIT_VERSION = 4
 """Bump when the systemd unit templates change."""
 
 _SOCKET_UNIT = "terok-credential-proxy.socket"
