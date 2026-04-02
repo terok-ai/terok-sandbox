@@ -136,6 +136,25 @@ def is_socket_active() -> bool:
         return False
 
 
+def is_service_active() -> bool:
+    """Check whether the ``terok-credential-proxy.service`` unit is active.
+
+    Unlike :func:`is_socket_active`, this tells whether the proxy daemon
+    itself is running (TCP ports bound), not just whether the socket is
+    listening.  Does not trigger socket activation.
+    """
+    try:
+        result = subprocess.run(
+            ["systemctl", "--user", "is-active", _SERVICE_UNIT],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return result.stdout.strip() == "active"
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
 def _proxy_exec_prefix() -> list[str]:
     """Return the command prefix for launching the credential proxy server.
 
@@ -425,8 +444,8 @@ def get_proxy_status(cfg: SandboxConfig | None = None) -> CredentialProxyStatus:
     # operators see the correct activation path and don't get mixed signals.
     if is_socket_installed():
         mode = "systemd"
-        running = is_socket_active()
-        healthy = running  # avoid triggering socket activation with a probe
+        running = is_service_active()
+        healthy = _probe_proxy(c.proxy_port) if running else False
     elif is_daemon_running(cfg):
         mode = "daemon"
         running = True
