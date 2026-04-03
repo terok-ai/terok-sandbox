@@ -105,6 +105,7 @@ def _handle_gate_status(*, cfg: SandboxConfig | None = None) -> None:
         import sys
 
         print(f"\nWarning: {warning}", file=sys.stderr)
+        print("Run 'terok-sandbox gate start' to update.", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------

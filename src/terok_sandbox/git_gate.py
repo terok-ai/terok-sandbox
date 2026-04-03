@@ -134,7 +134,7 @@ def _require_ssh_config(
         raise SystemExit(
             "SSH upstream detected but project SSH config is missing.\n"
             f"Expected SSH config at: {ssh_cfg_path}\n"
-            f"Run 'terok-sandbox ssh-init {project_id}' first to generate keys and config."
+            f"Run 'ssh-init {project_id}' first to generate keys and config."
         )
 
 
