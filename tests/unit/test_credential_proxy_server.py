@@ -22,6 +22,7 @@ from terok_sandbox.credential_proxy.server import (
     _extract_phantom_token,
     _refresh_all,
     _RouteTable,
+    _run_multi,
     _TokenDB,
 )
 
@@ -858,3 +859,101 @@ class TestServerDisconnectRetry:
             resp = await client.get("/v1/messages", headers={"Authorization": f"Bearer {token}"})
             assert resp.status == 502
             assert await resp.text() == "Upstream disconnected"
+
+
+# ── _run_multi site selection ────────────────────────────────────────────
+
+
+class TestRunMultiSiteSelection:
+    """Verify _run_multi uses inherited sockets or creates its own."""
+
+    @staticmethod
+    def _make_app(tmp_path: Path) -> web.Application:
+        """Build a minimal app with required keys."""
+        routes_file = tmp_path / "routes.json"
+        routes_file.write_text("{}")
+        db = CredentialDB(tmp_path / "creds.db")
+        db.close()
+        return _build_app(
+            routes_path=str(routes_file),
+            db_path=str(tmp_path / "creds.db"),
+        )
+
+    @pytest.mark.asyncio
+    async def test_systemd_inherited_sockets(self, tmp_path: Path) -> None:
+        """When _systemd_sockets returns both FDs, SockSite is used for each."""
+        import asyncio
+        import socket as _socket
+        from unittest.mock import patch
+
+        app = self._make_app(tmp_path)
+        mock_unix = MagicMock(spec=_socket.socket)
+        mock_tcp = MagicMock(spec=_socket.socket)
+        sock_sites: list = []
+
+        class _TrackingSockSite:
+            def __init__(self, runner, sock, **kw):
+                sock_sites.append(sock)
+
+            async def start(self):
+                pass
+
+        with (
+            patch(
+                "terok_sandbox.credential_proxy.server._systemd_sockets",
+                return_value=(mock_unix, mock_tcp),
+            ),
+            patch("aiohttp.web_runner.SockSite", _TrackingSockSite),
+        ):
+            task = asyncio.create_task(
+                _run_multi(app, sock_path=str(tmp_path / "proxy.sock"), port=18731)
+            )
+            await asyncio.sleep(0.05)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        assert mock_unix in sock_sites
+        assert mock_tcp in sock_sites
+
+    @pytest.mark.asyncio
+    async def test_daemon_mode_creates_own_listeners(self, tmp_path: Path) -> None:
+        """When _systemd_sockets returns (None, None), UnixSite and TCPSite are used."""
+        import asyncio
+        from unittest.mock import patch
+
+        app = self._make_app(tmp_path)
+        used_sites: list[str] = []
+
+        class _TrackingUnixSite:
+            def __init__(self, runner, path, **kw):
+                used_sites.append(f"unix:{path}")
+
+            async def start(self):
+                pass
+
+        class _TrackingTCPSite:
+            def __init__(self, runner, host, port, **kw):
+                used_sites.append(f"tcp:{host}:{port}")
+
+            async def start(self):
+                pass
+
+        with (
+            patch(
+                "terok_sandbox.credential_proxy.server._systemd_sockets",
+                return_value=(None, None),
+            ),
+            patch("aiohttp.web_runner.UnixSite", _TrackingUnixSite),
+            patch("aiohttp.web_runner.TCPSite", _TrackingTCPSite),
+        ):
+            task = asyncio.create_task(
+                _run_multi(app, sock_path=str(tmp_path / "proxy.sock"), port=18731)
+            )
+            await asyncio.sleep(0.05)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        assert any("unix:" in s for s in used_sites)
+        assert any("tcp:127.0.0.1:18731" in s for s in used_sites)

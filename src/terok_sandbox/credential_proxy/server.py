@@ -36,6 +36,7 @@ import asyncio
 import json
 import logging
 import signal
+import socket
 import sqlite3
 import time
 from pathlib import Path
@@ -406,7 +407,7 @@ def _build_app(db_path: str, routes_path: str) -> web.Application:
     return app
 
 
-def _systemd_sockets() -> tuple:
+def _systemd_sockets() -> tuple[socket.socket | None, socket.socket | None]:
     """Return ``(unix_sock, tcp_sock)`` inherited from systemd, or ``(None, None)``.
 
     Implements the ``sd_listen_fds(3)`` protocol.  The socket unit
@@ -415,7 +416,6 @@ def _systemd_sockets() -> tuple:
     when ``LISTEN_FDS=2``.
     """
     import os
-    import socket as _socket
 
     if os.environ.get("LISTEN_PID") != str(os.getpid()):
         return None, None
@@ -423,9 +423,9 @@ def _systemd_sockets() -> tuple:
     if os.environ.get("LISTEN_FDS") != "2":
         return None, None
 
-    unix_sock = _socket.socket(fileno=3)
+    unix_sock = socket.socket(fileno=3)
     unix_sock.setblocking(False)
-    tcp_sock = _socket.socket(fileno=4)
+    tcp_sock = socket.socket(fileno=4)
     tcp_sock.setblocking(False)
     return unix_sock, tcp_sock
 

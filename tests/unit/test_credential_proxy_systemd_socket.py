@@ -40,10 +40,17 @@ class TestSystemdSockets:
     def test_returns_two_sockets_on_listen_fds_2(self) -> None:
         """Returns (unix_sock, tcp_sock) when LISTEN_FDS=2 and PID matches."""
         # Create real sockets on FDs 3 and 4 so socket.socket(fileno=N) works.
+        # Save whatever currently lives on FDs 3/4 to restore afterwards.
+        saved: dict[int, int] = {}
+        for fd in (3, 4):
+            try:
+                saved[fd] = os.dup(fd)
+            except OSError:
+                pass  # FD not open — nothing to save
+
         unix_s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         tcp_s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
-            # dup2 to the expected FDs (3 and 4)
             os.dup2(unix_s.fileno(), 3)
             os.dup2(tcp_s.fileno(), 4)
             with patch.dict(os.environ, {"LISTEN_FDS": "2", "LISTEN_PID": str(os.getpid())}):
@@ -52,10 +59,9 @@ class TestSystemdSockets:
             assert sd_tcp is not None
             assert sd_unix.fileno() == 3
             assert sd_tcp.fileno() == 4
-            # Sockets should be non-blocking
             assert sd_unix.getblocking() is False
             assert sd_tcp.getblocking() is False
-            # Detach so close() below doesn't close FD 3/4 twice
+            # Detach so close() below doesn't double-close FD 3/4
             sd_unix.detach()
             sd_tcp.detach()
         finally:
@@ -63,3 +69,6 @@ class TestSystemdSockets:
             os.close(4)
             unix_s.close()
             tcp_s.close()
+            for fd, dup_fd in saved.items():
+                os.dup2(dup_fd, fd)
+                os.close(dup_fd)
