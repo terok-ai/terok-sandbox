@@ -321,7 +321,8 @@ def _handle_ssh_import(
             f"Public key not found: {pub_src} (use --public-key to specify explicitly)"
         )
 
-    cfg = cfg or _SandboxConfig()
+    if cfg is None:
+        cfg = _SandboxConfig()
     dest_dir = cfg.ssh_keys_dir / project
     dest_dir.mkdir(parents=True, exist_ok=True)
 
@@ -394,7 +395,8 @@ def _handle_ssh_add_key(
         raise SystemExit("Unsupported --key-type. Use 'ed25519' or 'rsa'.")
 
     algo = "ed25519" if key_type == "ed25519" else "rsa"
-    cfg = cfg or _SandboxConfig()
+    if cfg is None:
+        cfg = _SandboxConfig()
     dest_dir = cfg.ssh_keys_dir / project
     dest_dir.mkdir(parents=True, exist_ok=True)
 

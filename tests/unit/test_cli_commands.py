@@ -144,6 +144,72 @@ class TestHandlerCfgSignatures:
             assert "cfg" in sig.parameters, f"{cmd.handler.__name__} missing cfg param"
 
 
+class TestGateHandlerCfgPassthrough:
+    """Verify gate handlers propagate cfg to downstream functions."""
+
+    def test_gate_start_passes_cfg_to_systemd(self) -> None:
+        """_handle_gate_start propagates cfg to install_systemd_units."""
+        from unittest.mock import sentinel
+
+        from terok_sandbox.commands import _handle_gate_start
+
+        with (
+            patch("terok_sandbox.gate_server.is_systemd_available", return_value=True),
+            patch("terok_sandbox.gate_server.install_systemd_units") as mock_install,
+        ):
+            _handle_gate_start(cfg=sentinel.CFG)
+        mock_install.assert_called_once_with(cfg=sentinel.CFG)
+
+    def test_gate_start_daemon_passes_cfg(self) -> None:
+        """_handle_gate_start propagates cfg to start_daemon in daemon mode."""
+        from unittest.mock import sentinel
+
+        from terok_sandbox.commands import _handle_gate_start
+
+        with (
+            patch("terok_sandbox.gate_server.is_systemd_available", return_value=False),
+            patch("terok_sandbox.gate_server.start_daemon") as mock_start,
+        ):
+            _handle_gate_start(port=1234, cfg=sentinel.CFG)
+        mock_start.assert_called_once_with(port=1234, cfg=sentinel.CFG)
+
+    def test_gate_stop_passes_cfg(self) -> None:
+        """_handle_gate_stop propagates cfg to status/uninstall/stop functions."""
+        from terok_sandbox.commands import _handle_gate_stop
+        from terok_sandbox.gate_server import GateServerStatus
+
+        mock_status = GateServerStatus(mode="systemd", running=True, port=9418)
+        with (
+            patch("terok_sandbox.gate_server.get_server_status", return_value=mock_status) as m_st,
+            patch("terok_sandbox.gate_server.uninstall_systemd_units") as m_uninstall,
+        ):
+            _handle_gate_stop(cfg=mock_status)
+        m_st.assert_called_once_with(cfg=mock_status)
+        m_uninstall.assert_called_once_with(cfg=mock_status)
+
+    def test_gate_status_passes_cfg(self) -> None:
+        """_handle_gate_status propagates cfg to all downstream calls."""
+        from unittest.mock import sentinel
+
+        from terok_sandbox.commands import _handle_gate_status
+        from terok_sandbox.gate_server import GateServerStatus
+
+        mock_status = GateServerStatus(mode="none", running=False, port=9418)
+        with (
+            patch(
+                "terok_sandbox.gate_server.get_server_status", return_value=mock_status
+            ) as m_status,
+            patch("terok_sandbox.gate_server.get_gate_base_path", return_value="/t/gate") as m_bp,
+            patch(
+                "terok_sandbox.gate_server.check_units_outdated", return_value=None
+            ) as m_outdated,
+        ):
+            _handle_gate_status(cfg=sentinel.CFG)
+        m_status.assert_called_once_with(cfg=sentinel.CFG)
+        m_bp.assert_called_once_with(cfg=sentinel.CFG)
+        m_outdated.assert_called_once_with(cfg=sentinel.CFG)
+
+
 class TestGateCLI:
     """Verify gate subcommand dispatch."""
 
