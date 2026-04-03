@@ -173,8 +173,8 @@ class TestGateHandlerCfgPassthrough:
             _handle_gate_start(port=1234, cfg=sentinel.CFG)
         mock_start.assert_called_once_with(port=1234, cfg=sentinel.CFG)
 
-    def test_gate_stop_passes_cfg(self) -> None:
-        """_handle_gate_stop propagates cfg to status/uninstall/stop functions."""
+    def test_gate_stop_systemd_passes_cfg(self) -> None:
+        """_handle_gate_stop propagates cfg through the systemd branch."""
         from terok_sandbox.commands import _handle_gate_stop
         from terok_sandbox.gate_server import GateServerStatus
 
@@ -186,6 +186,22 @@ class TestGateHandlerCfgPassthrough:
             _handle_gate_stop(cfg=mock_status)
         m_st.assert_called_once_with(cfg=mock_status)
         m_uninstall.assert_called_once_with(cfg=mock_status)
+
+    def test_gate_stop_daemon_passes_cfg(self) -> None:
+        """_handle_gate_stop propagates cfg through the daemon branch."""
+        from unittest.mock import sentinel
+
+        from terok_sandbox.commands import _handle_gate_stop
+        from terok_sandbox.gate_server import GateServerStatus
+
+        mock_status = GateServerStatus(mode="daemon", running=True, port=9418)
+        with (
+            patch("terok_sandbox.gate_server.get_server_status", return_value=mock_status) as m_st,
+            patch("terok_sandbox.gate_server.stop_daemon") as m_stop,
+        ):
+            _handle_gate_stop(cfg=sentinel.CFG)
+        m_st.assert_called_once_with(cfg=sentinel.CFG)
+        m_stop.assert_called_once_with(cfg=sentinel.CFG)
 
     def test_gate_status_passes_cfg(self) -> None:
         """_handle_gate_status propagates cfg to all downstream calls."""
