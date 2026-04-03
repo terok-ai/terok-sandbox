@@ -272,6 +272,75 @@ class TestHandlerEdgeCases:
 
 
 @pytest.fixture()
+def _static_marker_env(tmp_path: Path):
+    """Set up DB with Claude OAuth credential + routes for static marker tests."""
+    db = CredentialDB(tmp_path / "test.db")
+    db.store_credential(
+        "default", "claude", {"type": "oauth", "access_token": "sk-real-oauth-static"}
+    )
+    db.close()
+
+    routes = tmp_path / "routes.json"
+    routes.write_text(
+        json.dumps({"claude": {"upstream": "http://127.0.0.1:1", "auth_header": "dynamic"}})
+    )
+    return _build_app(str(tmp_path / "test.db"), str(routes))
+
+
+@pytest.mark.asyncio
+class TestStaticPhantomMarker:
+    """Verify the static PHANTOM_CREDENTIALS_MARKER is accepted by the proxy."""
+
+    async def test_static_marker_routes_to_claude(self, _static_marker_env) -> None:
+        """Static marker token resolves to Claude credential (returns 502 since upstream is down)."""
+        from aiohttp.test_utils import TestClient, TestServer
+
+        from terok_sandbox.credential_proxy.constants import PHANTOM_CREDENTIALS_MARKER
+
+        app = _static_marker_env
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get(
+                "/v1/messages",
+                headers={"Authorization": f"Bearer {PHANTOM_CREDENTIALS_MARKER}"},
+            )
+            # 502 = upstream unreachable, which means auth succeeded and routing worked
+            assert resp.status == 502
+
+    async def test_static_marker_rejected_without_claude_credential(self, tmp_path: Path) -> None:
+        """Static marker returns 502 (no credential) when Claude has no stored credentials."""
+        from aiohttp.test_utils import TestClient, TestServer
+
+        from terok_sandbox.credential_proxy.constants import PHANTOM_CREDENTIALS_MARKER
+
+        db = CredentialDB(tmp_path / "test.db")
+        db.close()  # empty DB
+
+        routes = tmp_path / "routes.json"
+        routes.write_text(json.dumps({"claude": {"upstream": "http://127.0.0.1:1"}}))
+        app = _build_app(str(tmp_path / "test.db"), str(routes))
+
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get(
+                "/v1/messages",
+                headers={"Authorization": f"Bearer {PHANTOM_CREDENTIALS_MARKER}"},
+            )
+            assert resp.status == 502
+            assert "not configured" in (await resp.text()).lower()
+
+    async def test_random_token_still_rejected(self, _static_marker_env) -> None:
+        """Non-marker, non-registered tokens are still rejected with 401."""
+        from aiohttp.test_utils import TestClient, TestServer
+
+        app = _static_marker_env
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get(
+                "/v1/messages",
+                headers={"Authorization": "Bearer not-a-valid-token"},
+            )
+            assert resp.status == 401
+
+
+@pytest.fixture()
 def _forwarding_env(tmp_path: Path):
     """Set up proxy + mock upstream to test the full forwarding path."""
     from aiohttp import web as _web

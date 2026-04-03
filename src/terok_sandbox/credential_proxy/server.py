@@ -171,7 +171,22 @@ async def _handle_request(request: web.Request) -> web.StreamResponse:
 
     token_info = token_db.lookup_token(phantom)
     if token_info is None:
-        return web.Response(status=401, text="Invalid token")
+        # Workaround: Claude Code shows "Claude API" instead of the subscription
+        # plan when CLAUDE_CODE_OAUTH_TOKEN env var is the token source.  For
+        # Claude OAuth setups the static marker in .credentials.json is used as
+        # the access token instead of a per-task phantom.  Accept it here and
+        # route to the Claude credential in the default set.
+        from .constants import PHANTOM_CREDENTIALS_MARKER
+
+        if phantom == PHANTOM_CREDENTIALS_MARKER:
+            token_info = {
+                "project": "__static__",
+                "task": "__static__",
+                "credential_set": "default",
+                "provider": "claude",
+            }
+        else:
+            return web.Response(status=401, text="Invalid token")
 
     # 2. Route by token's provider
     provider = token_info["provider"]

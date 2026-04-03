@@ -36,6 +36,9 @@ from .config import SandboxConfig
 # -- Credential DB -----------------------------------------------------------
 from .credential_db import CredentialDB
 
+# -- Credential constants ----------------------------------------------------
+from .credential_proxy.constants import PHANTOM_CREDENTIALS_MARKER
+
 # -- Credential proxy lifecycle ----------------------------------------------
 from .credential_proxy_lifecycle import (
     CredentialProxyStatus,
@@ -171,6 +174,8 @@ __all__ = [
     # Git gate
     "GateStalenessInfo",
     "GitGate",
+    # Credential constants
+    "PHANTOM_CREDENTIALS_MARKER",
     # Credential DB
     "CredentialDB",
     # Credential proxy
