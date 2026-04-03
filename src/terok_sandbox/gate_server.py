@@ -127,8 +127,7 @@ def _base_path_diverged(cfg: SandboxConfig | None = None) -> str | None:
     return (
         f"Installed gate base path diverges from current config.\n"
         f"  Installed: {installed}\n"
-        f"  Expected:  {expected}\n"
-        "Run 'terok-sandbox gate start' to re-install with the current path."
+        f"  Expected:  {expected}"
     )
 
 
@@ -377,8 +376,7 @@ def check_units_outdated(cfg: SandboxConfig | None = None) -> str | None:
         installed_label = "unversioned" if installed is None else f"v{installed}"
         return (
             f"Systemd units are outdated (installed {installed_label}, "
-            f"expected v{_UNIT_VERSION}). "
-            "Run 'terok-sandbox gate start' to update."
+            f"expected v{_UNIT_VERSION})."
         )
     return _base_path_diverged(cfg)
 
@@ -408,8 +406,7 @@ def ensure_server_reachable(cfg: SandboxConfig | None = None) -> None:
                 installed_label = "unversioned" if installed is None else f"v{installed}"
                 raise SystemExit(
                     "Gate server systemd units are outdated "
-                    f"(installed {installed_label}, expected v{_UNIT_VERSION}).\n"
-                    "Run 'terok-sandbox gate start' to update."
+                    f"(installed {installed_label}, expected v{_UNIT_VERSION})."
                 )
             path_warning = _base_path_diverged(cfg)
             if path_warning:
@@ -424,7 +421,7 @@ def ensure_server_reachable(cfg: SandboxConfig | None = None) -> None:
         "\n"
     )
     if is_systemd_available():
-        msg += "Recommended: install and start the systemd socket:\n  terok-sandbox gate start\n"
+        msg += "Recommended: install and start the systemd socket (gate start).\n"
     else:
-        msg += "Start the gate daemon:\n  terok-sandbox gate start --daemon\n"
+        msg += "Start the gate daemon (gate start --daemon).\n"
     raise SystemExit(msg)

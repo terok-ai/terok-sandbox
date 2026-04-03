@@ -630,7 +630,6 @@ class TestCheckUnitsOutdated:
         else:
             assert result is not None
             assert expected in result
-            assert "gate start" in result
 
     def test_base_path_divergence_warning(self) -> None:
         """Current units + divergent base path → warning string."""
