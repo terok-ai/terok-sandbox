@@ -25,6 +25,7 @@ except PackageNotFoundError:
 # -- Command registry --------------------------------------------------------
 from .commands import (
     COMMANDS as SANDBOX_COMMANDS,
+    DOCTOR_COMMANDS,
     GATE_COMMANDS,
     PROXY_COMMANDS,
     SHIELD_COMMANDS,
@@ -56,6 +57,9 @@ from .credential_proxy_lifecycle import (
     stop_daemon as stop_proxy,
     uninstall_systemd_units as uninstall_proxy_systemd,
 )
+
+# -- Doctor (container health checks) ----------------------------------------
+from .doctor import CheckVerdict, DoctorCheck, sandbox_doctor_checks
 
 # -- Gate server -------------------------------------------------------------
 from .gate_server import (
@@ -195,6 +199,7 @@ __all__ = [
     "uninstall_proxy_systemd",
     # Command registry
     "CommandDef",
+    "DOCTOR_COMMANDS",
     "GATE_COMMANDS",
     "PROXY_COMMANDS",
     "SANDBOX_COMMANDS",
@@ -205,6 +210,10 @@ __all__ = [
     "LifecycleHooks",
     "RunSpec",
     "Sandbox",
+    # Doctor (container health checks)
+    "CheckVerdict",
+    "DoctorCheck",
+    "sandbox_doctor_checks",
     # SSH
     "SSHManager",
     "generate_keypair",
