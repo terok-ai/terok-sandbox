@@ -375,8 +375,7 @@ def check_units_outdated(cfg: SandboxConfig | None = None) -> str | None:
     if installed is None or installed < _UNIT_VERSION:
         installed_label = "unversioned" if installed is None else f"v{installed}"
         return (
-            f"Systemd units are outdated (installed {installed_label}, "
-            f"expected v{_UNIT_VERSION})."
+            f"Systemd units are outdated (installed {installed_label}, expected v{_UNIT_VERSION})."
         )
     return _base_path_diverged(cfg)
 

@@ -75,9 +75,7 @@ def pre_start(container: str, task_dir: Path, cfg: SandboxConfig | None = None) 
     try:
         return make_shield(task_dir, cfg).pre_start(container)
     except ShieldNeedsSetup as exc:
-        raise SystemExit(
-            f"{exc}\n\nRun 'shield setup' to install global hooks."
-        ) from None
+        raise SystemExit(f"{exc}\n\nRun 'shield setup' to install global hooks.") from None
 
 
 def down(
