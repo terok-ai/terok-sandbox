@@ -122,12 +122,18 @@ depends_on = [
     "terok_sandbox.ssh",
 ]
 
+# Health check protocol + sandbox-level diagnostics — standalone
+[[modules]]
+path = "terok_sandbox.doctor"
+depends_on = []
+
 # Command registry — defines all sandbox CLI commands
 [[modules]]
 path = "terok_sandbox.commands"
 depends_on = [
     "terok_sandbox.config",
     "terok_sandbox.credential_proxy_lifecycle",
+    "terok_sandbox.doctor",
     "terok_sandbox.gate_server",
     "terok_sandbox.shield",
     "terok_sandbox.ssh",
@@ -146,6 +152,7 @@ path = "terok_sandbox"
 depends_on = [
     "terok_sandbox.commands",
     "terok_sandbox.config",
+    "terok_sandbox.doctor",
     "terok_sandbox.credential_db",
     "terok_sandbox.credential_proxy",
     "terok_sandbox.credential_proxy_lifecycle",

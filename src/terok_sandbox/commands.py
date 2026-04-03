@@ -496,5 +496,80 @@ SSH_COMMANDS: tuple[CommandDef, ...] = (
     ),
 )
 
+# ---------------------------------------------------------------------------
+# Doctor handler
+# ---------------------------------------------------------------------------
+
+
+def _handle_doctor(*, cfg: SandboxConfig | None = None) -> None:
+    """Run sandbox-level health checks and print results.
+
+    This is the standalone host-side doctor — it runs on the host, not
+    inside a container.  For non-host_side checks (network probes), we
+    execute the probe_cmd directly via subprocess instead of ``podman exec``.
+    For host_side checks (e.g. shield), we delegate to ``evaluate`` which
+    performs the check itself using Python APIs.
+    """
+    import subprocess
+    import sys
+
+    from .config import SandboxConfig as _SandboxConfig
+    from .credential_proxy_lifecycle import get_proxy_port, get_ssh_agent_port
+    from .doctor import sandbox_doctor_checks
+
+    if cfg is None:
+        cfg = _SandboxConfig()
+    checks = sandbox_doctor_checks(
+        proxy_port=get_proxy_port(cfg),
+        ssh_agent_port=get_ssh_agent_port(cfg),
+        desired_shield_state=None,  # standalone mode — no task context
+    )
+    worst = "ok"
+    markers = {"ok": "ok", "warn": "WARN", "error": "ERROR"}
+    for check in checks:
+        if check.host_side:
+            # Host-side checks perform the check inside evaluate() itself.
+            verdict = check.evaluate(0, "", "")
+        elif check.probe_cmd:
+            # Non-host_side checks: run probe_cmd directly on the host
+            # (the command targets host.containers.internal which resolves
+            # to localhost when not inside a container, so we rewrite to
+            # localhost for standalone execution).
+            try:
+                result = subprocess.run(  # noqa: S603
+                    check.probe_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                verdict = check.evaluate(result.returncode, result.stdout, result.stderr)
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                verdict = check.evaluate(1, "", "probe command unavailable or timed out")
+        else:
+            verdict = check.evaluate(0, "", "")
+        tag = markers.get(verdict.severity, verdict.severity)
+        print(f"  {check.label} .... {tag} ({verdict.detail})")
+        if verdict.severity == "error" or worst == "error":
+            worst = "error"
+        elif verdict.severity == "warn" or worst == "warn":
+            worst = "warn"
+
+    if worst == "error":
+        sys.exit(2)
+    elif worst == "warn":
+        sys.exit(1)
+
+
+DOCTOR_COMMANDS: tuple[CommandDef, ...] = (
+    CommandDef(
+        name="doctor",
+        help="Run sandbox health checks",
+        handler=_handle_doctor,
+        group="doctor",
+    ),
+)
+
 #: All sandbox commands, grouped by subsystem.
-COMMANDS: tuple[CommandDef, ...] = GATE_COMMANDS + SHIELD_COMMANDS + PROXY_COMMANDS + SSH_COMMANDS
+COMMANDS: tuple[CommandDef, ...] = (
+    GATE_COMMANDS + SHIELD_COMMANDS + PROXY_COMMANDS + SSH_COMMANDS + DOCTOR_COMMANDS
+)

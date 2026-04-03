@@ -13,7 +13,14 @@ from __future__ import annotations
 import argparse
 from importlib.metadata import PackageNotFoundError, version as _meta_version
 
-from .commands import GATE_COMMANDS, PROXY_COMMANDS, SHIELD_COMMANDS, SSH_COMMANDS, CommandDef
+from .commands import (
+    DOCTOR_COMMANDS,
+    GATE_COMMANDS,
+    PROXY_COMMANDS,
+    SHIELD_COMMANDS,
+    SSH_COMMANDS,
+    CommandDef,
+)
 
 try:
     __version__ = _meta_version("terok-sandbox")
@@ -94,6 +101,10 @@ def main() -> None:
     for cmd in SSH_COMMANDS:
         _wire_command(ssh_sub, cmd)
     ssh_p.set_defaults(_group_help=ssh_p)
+
+    # -- doctor --
+    for cmd in DOCTOR_COMMANDS:
+        _wire_command(sub, cmd)
 
     args = parser.parse_args()
     if hasattr(args, "_cmd"):
