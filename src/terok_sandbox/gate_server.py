@@ -420,7 +420,7 @@ def ensure_server_reachable(cfg: SandboxConfig | None = None) -> None:
         "\n"
     )
     if is_systemd_available():
-        msg += "Recommended: install and start the systemd socket (gate start).\n"
+        msg += "Recommended: install and start the systemd socket.\n"
     else:
-        msg += "Start the gate daemon (gate start --daemon).\n"
+        msg += "Start the gate daemon.\n"
     raise SystemExit(msg)
