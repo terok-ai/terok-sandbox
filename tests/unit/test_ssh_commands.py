@@ -603,6 +603,20 @@ class TestHandleSshList:
         with pytest.raises(SystemExit, match="No keys registered"):
             _handle_ssh_list(project="ghost", cfg=cfg)
 
+    def test_multiword_comment(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        """Side-key comments like 'tk-side:proj keyname' are preserved in full."""
+        cfg = _mock_cfg(tmp_path)
+        priv = tmp_path / "id_ed25519_dbus"
+        pub = tmp_path / "id_ed25519_dbus.pub"
+        priv.touch()
+        _make_pub_file(pub, comment="tk-side:terok terok-dbus")
+
+        _write_keys_json(cfg, {"terok": [{"private_key": str(priv), "public_key": str(pub)}]})
+        _handle_ssh_list(cfg=cfg)
+
+        out = capsys.readouterr().out
+        assert "tk-side:terok terok-dbus" in out
+
     def test_missing_pub_file(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         """Missing .pub file shows '(pub missing)' instead of crashing."""
         cfg = _mock_cfg(tmp_path)

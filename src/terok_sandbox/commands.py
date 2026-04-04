@@ -496,7 +496,7 @@ def _handle_ssh_list(
                     parts = pub_path.read_text(encoding="utf-8").strip().split()
                     key_type = parts[0].removeprefix("ssh-") if parts else "?"
                     blob = base64.b64decode(parts[1]) if len(parts) > 1 else b""
-                    comment = parts[2] if len(parts) > 2 else pub_path.stem
+                    comment = " ".join(parts[2:]) if len(parts) > 2 else pub_path.stem
                     digest = base64.b64encode(hashlib.sha256(blob).digest()).rstrip(b"=")
                     fingerprint = f"SHA256:{digest.decode()}"
                 except Exception:
