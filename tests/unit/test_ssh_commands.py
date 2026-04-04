@@ -312,7 +312,7 @@ class TestHandleSshAddKey:
 
         out = capsys.readouterr().out
         assert "deploy-gitlab" in out
-        assert "tk-side:myproj deploy-gitlab" in out
+        assert "tk-side:myproj:deploy-gitlab" in out
 
     def test_auto_numbering_key_1(self, tmp_path: Path) -> None:
         """Without --name, first key is key-1."""
@@ -356,7 +356,7 @@ class TestHandleSshAddKey:
 
         assert len(captured_cmds) == 1
         args = dict(zip(captured_cmds[0][1::2], captured_cmds[0][2::2], strict=False))
-        assert args["-C"] == "tk-side:proj deploy"
+        assert args["-C"] == "tk-side:proj:deploy"
 
     def test_existing_key_refuses_overwrite(self, tmp_path: Path) -> None:
         """Refuses to overwrite an existing key file."""
@@ -603,19 +603,19 @@ class TestHandleSshList:
         with pytest.raises(SystemExit, match="No keys registered"):
             _handle_ssh_list(project="ghost", cfg=cfg)
 
-    def test_multiword_comment(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        """Side-key comments like 'tk-side:proj keyname' are preserved in full."""
+    def test_side_key_comment(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        """Side-key comments like 'tk-side:proj:keyname' are shown correctly."""
         cfg = _mock_cfg(tmp_path)
         priv = tmp_path / "id_ed25519_dbus"
         pub = tmp_path / "id_ed25519_dbus.pub"
         priv.touch()
-        _make_pub_file(pub, comment="tk-side:terok terok-dbus")
+        _make_pub_file(pub, comment="tk-side:terok:terok-dbus")
 
         _write_keys_json(cfg, {"terok": [{"private_key": str(priv), "public_key": str(pub)}]})
         _handle_ssh_list(cfg=cfg)
 
         out = capsys.readouterr().out
-        assert "tk-side:terok terok-dbus" in out
+        assert "tk-side:terok:terok-dbus" in out
 
     def test_missing_pub_file(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         """Missing .pub file shows '(pub missing)' instead of crashing."""

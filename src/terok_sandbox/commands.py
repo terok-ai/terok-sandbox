@@ -421,7 +421,7 @@ def _handle_ssh_add_key(
             "Use a different --name or remove the existing key first."
         )
 
-    comment = f"tk-side:{project} {key_name}"
+    comment = f"tk-side:{project}:{key_name}"
     generate_keypair(key_type, priv_path, pub_path, comment)
 
     try:
