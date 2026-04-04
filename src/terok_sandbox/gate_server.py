@@ -39,7 +39,7 @@ from .config import SandboxConfig
 # ---------- Constants ----------
 
 _DEFAULT_PORT = 9418
-_UNIT_VERSION = 5
+_UNIT_VERSION = 6
 """Bump when the systemd unit templates change.  ``ensure_server_reachable``
 checks the installed version and refuses to start tasks if it is stale."""
 
@@ -240,7 +240,7 @@ def install_systemd_units(cfg: SandboxConfig | None = None) -> None:
     variables = {
         "PORT": str(_get_port(cfg)),
         "GATE_BASE_PATH": str(_get_gate_base_path(cfg)),
-        "TOKEN_FILE": str(token_file_path()),
+        "TOKEN_FILE": str(token_file_path(cfg)),
         "UNIT_VERSION": str(_UNIT_VERSION),
         "TEROK_GATE_BIN": gate_bin,
     }
