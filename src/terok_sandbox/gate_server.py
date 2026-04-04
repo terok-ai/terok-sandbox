@@ -39,7 +39,7 @@ from .config import SandboxConfig
 # ---------- Constants ----------
 
 _DEFAULT_PORT = 9418
-_UNIT_VERSION = 4
+_UNIT_VERSION = 5
 """Bump when the systemd unit templates change.  ``ensure_server_reachable``
 checks the installed version and refuses to start tasks if it is stale."""
 
