@@ -96,8 +96,11 @@ class CredentialDB:
     def create_proxy_token(
         self, project: str, task: str, credential_set: str, provider: str
     ) -> str:
-        """Create a per-task, per-provider phantom token."""
-        token = secrets.token_hex(16)
+        """Create a per-task, per-provider phantom token.
+
+        Token format: ``terok-p-<32 hex chars>``.
+        """
+        token = f"terok-p-{secrets.token_hex(16)}"
         self._conn.execute(
             "INSERT INTO proxy_tokens (token, project, task, credential_set, provider)"
             " VALUES (?, ?, ?, ?, ?)",
