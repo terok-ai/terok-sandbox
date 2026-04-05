@@ -4,7 +4,7 @@ build-backend = "poetry_dynamic_versioning.backend"
 
 [tool.poetry]
 name = "terok-sandbox"
-version = "0.0.33"
+version = "0.0.34"
 description = "Hardened Podman container runner with gate server and shield integration"
 readme = "README.md"
 license = "Apache-2.0"
@@ -24,7 +24,7 @@ packages = [
 
 [tool.poetry.dependencies]
 python = ">=3.12,<4.0"
-terok-shield = {url = "https://github.com/terok-ai/terok-shield/releases/download/v0.6.2/terok_shield-0.6.2-py3-none-any.whl"}
+terok-shield = {url = "https://github.com/terok-ai/terok-shield/releases/download/v0.6.3/terok_shield-0.6.3-py3-none-any.whl"}
 platformdirs = ">=4.0"
 aiohttp = ">=3.9"
 cryptography = ">=43.0"
