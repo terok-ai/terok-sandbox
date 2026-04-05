@@ -178,7 +178,8 @@ class TestPhantomTokenLifecycle:
         """Token is created, resolvable, then revoked on task end."""
         # Task starts → token created
         token = db.create_proxy_token("myproject", "task-42", "default", "claude")
-        assert len(token) == 32
+        assert token.startswith("terok-p-")
+        assert len(token) == 8 + 32  # prefix + hex
 
         # Token resolves to the right credential set and provider
         info = db.lookup_proxy_token(token)

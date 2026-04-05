@@ -3,13 +3,16 @@
 
 """Token CRUD for gate server per-task authentication.
 
-Each task gets a random 128-bit hex token scoped to its project.  Tokens are
-stored in ``state_root()/gate/tokens.json`` and read by the standalone gate
-server process (which receives the file path via ``--token-file``).
+Each task gets a prefixed random 128-bit hex token scoped to its project.
+Tokens are stored in ``state_root()/gate/tokens.json`` and read by the
+standalone gate server process (which receives the file path via
+``--token-file``).
+
+Token format: ``terok-g-<32 hex chars>`` (e.g. ``terok-g-a1b2c3…``).
 
 File format::
 
-    {"<token_hex>": {"project": "<project_id>", "task": "<task_id>"}}
+    {"terok-g-<hex>": {"project": "<project_id>", "task": "<task_id>"}}
 """
 
 from __future__ import annotations
@@ -37,7 +40,7 @@ def create_token(project_id: str, task_id: str, cfg: SandboxConfig | None = None
     Uses ``secrets.token_hex(16)`` for cryptographic randomness.
     Atomic write via ``tempfile`` + ``os.replace()``.
     """
-    token = secrets.token_hex(16)
+    token = f"terok-g-{secrets.token_hex(16)}"
     path = token_file_path(cfg)
     with _token_lock(path):
         tokens = _read_tokens(path)

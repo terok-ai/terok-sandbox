@@ -67,7 +67,8 @@ class TestProxyTokens:
     def test_create_and_lookup(self, db: CredentialDB) -> None:
         """Create a token, look it up, verify fields."""
         token = db.create_proxy_token("proj1", "task-42", "default", "claude")
-        assert len(token) == 32  # hex(16 bytes)
+        assert token.startswith("terok-p-")
+        assert len(token) == 8 + 32  # prefix + hex(16 bytes)
         info = db.lookup_proxy_token(token)
         assert info == {
             "project": "proj1",
