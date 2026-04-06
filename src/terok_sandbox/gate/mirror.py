@@ -37,7 +37,7 @@ from .._util import effective_ssh_key_name
 
 logger = logging.getLogger(__name__)
 
-# ---------- Staleness dataclass ----------
+# ---------- Vocabulary ----------
 
 
 class GateSyncResult(TypedDict):
@@ -80,148 +80,6 @@ class GateStalenessInfo:
     commits_ahead: int | None  # None if couldn't determine
     last_checked: str  # ISO timestamp
     error: str | None
-
-
-# ---------- Private helpers ----------
-
-
-def _git_env_with_ssh(
-    *,
-    project_id: str,
-    ssh_host_dir: Path | None,
-    ssh_key_name: str | None,
-) -> dict:
-    """Return an env that forces git to use the project's SSH key directly.
-
-    Builds ``GIT_SSH_COMMAND`` from the private key file — no SSH config file
-    required.  The credential proxy handles container-side SSH auth; this
-    helper only covers host-side gate operations (clone, fetch).
-
-    Falls back to the unmodified env when no key file is found (e.g. HTTPS
-    upstreams that need no SSH at all).
-    """
-    from ..config import SandboxConfig
-
-    env = os.environ.copy()
-    ssh_dir = ssh_host_dir or (SandboxConfig().ssh_keys_dir / project_id)
-    eff_name = effective_ssh_key_name(project_id, ssh_key_name=ssh_key_name, key_type="ed25519")
-    key_path = Path(ssh_dir) / eff_name
-    if key_path.is_file():
-        ssh_cmd = [
-            "ssh",
-            "-o",
-            "IdentitiesOnly=yes",
-            "-o",
-            f"IdentityFile={key_path}",
-            "-o",
-            "StrictHostKeyChecking=no",
-        ]
-        env["GIT_SSH_COMMAND"] = shlex.join(ssh_cmd)
-        # Clear SSH_AUTH_SOCK so agent identities are not considered
-        env["SSH_AUTH_SOCK"] = ""
-    return env
-
-
-def _clone_gate_mirror(upstream_url: str, gate_dir: Path, env: dict) -> None:
-    """Clone the upstream repository as a bare mirror into *gate_dir*."""
-    cmd = ["git", "clone", "--mirror", upstream_url, str(gate_dir)]
-    try:
-        subprocess.run(cmd, check=True, env=env)
-    except FileNotFoundError:
-        raise SystemExit("git not found on host; please install git")
-    except subprocess.CalledProcessError as e:
-        raise SystemExit(f"git clone --mirror failed: {e}")
-
-
-def _get_upstream_head(upstream_url: str, branch: str, env: dict) -> dict | None:
-    """Query upstream HEAD ref using git ls-remote (cheap, no object download).
-
-    Returns:
-        Dict with keys: commit_hash, ref_name, upstream_url
-        or None if query fails.
-    """
-    try:
-        cmd = ["git", "ls-remote", upstream_url, f"refs/heads/{branch}"]
-        result = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=30)
-
-        if result.returncode != 0:
-            return None
-
-        line = result.stdout.strip()
-        if not line:
-            return None
-
-        parts = line.split("\t")
-        if len(parts) >= 2:
-            return {
-                "commit_hash": parts[0],
-                "ref_name": parts[1],
-                "upstream_url": upstream_url,
-            }
-        return None
-    except (
-        subprocess.CalledProcessError,
-        subprocess.TimeoutExpired,
-        FileNotFoundError,
-        OSError,
-    ) as exc:
-        logger.debug(f"_get_upstream_head({branch}) failed: {exc}")
-        return None
-
-
-def _get_gate_branch_head(gate_dir: Path, branch: str, env: dict) -> str | None:
-    """Get the commit hash for a specific branch in the gate.
-
-    Returns:
-        Commit hash string or None if not found.
-    """
-    try:
-        if not gate_dir.exists():
-            return None
-
-        cmd = ["git", "-C", str(gate_dir), "rev-parse", f"refs/heads/{branch}"]
-        result = subprocess.run(cmd, capture_output=True, text=True, env=env)
-
-        if result.returncode == 0:
-            return result.stdout.strip()
-        return None
-    except (
-        subprocess.CalledProcessError,
-        subprocess.TimeoutExpired,
-        FileNotFoundError,
-        OSError,
-    ) as exc:
-        logger.debug(f"_get_gate_branch_head({branch}) failed: {exc}")
-        return None
-
-
-def _count_commits_range(gate_dir: Path, from_ref: str, to_ref: str, env: dict) -> int | None:
-    """Count commits reachable from *to_ref* but not from *from_ref*.
-
-    Uses ``git rev-list --count from..to``.  Returns ``None`` when the
-    count cannot be determined (e.g. refs not yet fetched).
-    """
-    try:
-        cmd = [
-            "git",
-            "-C",
-            str(gate_dir),
-            "rev-list",
-            "--count",
-            f"{from_ref}..{to_ref}",
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True, env=env)
-        if result.returncode == 0:
-            return int(result.stdout.strip())
-        return None
-    except (
-        subprocess.CalledProcessError,
-        subprocess.TimeoutExpired,
-        FileNotFoundError,
-        OSError,
-    ) as exc:
-        logger.debug(f"_count_commits_range({from_ref}..{to_ref}) failed: {exc}")
-        return None
 
 
 # ---------- GitGate class (Repository + Gateway pattern) ----------
@@ -505,3 +363,145 @@ class GitGate:
 
         except Exception:
             return None
+
+
+# ---------- Private helpers ----------
+
+
+def _git_env_with_ssh(
+    *,
+    project_id: str,
+    ssh_host_dir: Path | None,
+    ssh_key_name: str | None,
+) -> dict:
+    """Return an env that forces git to use the project's SSH key directly.
+
+    Builds ``GIT_SSH_COMMAND`` from the private key file — no SSH config file
+    required.  The credential proxy handles container-side SSH auth; this
+    helper only covers host-side gate operations (clone, fetch).
+
+    Falls back to the unmodified env when no key file is found (e.g. HTTPS
+    upstreams that need no SSH at all).
+    """
+    from ..config import SandboxConfig
+
+    env = os.environ.copy()
+    ssh_dir = ssh_host_dir or (SandboxConfig().ssh_keys_dir / project_id)
+    eff_name = effective_ssh_key_name(project_id, ssh_key_name=ssh_key_name, key_type="ed25519")
+    key_path = Path(ssh_dir) / eff_name
+    if key_path.is_file():
+        ssh_cmd = [
+            "ssh",
+            "-o",
+            "IdentitiesOnly=yes",
+            "-o",
+            f"IdentityFile={key_path}",
+            "-o",
+            "StrictHostKeyChecking=no",
+        ]
+        env["GIT_SSH_COMMAND"] = shlex.join(ssh_cmd)
+        # Clear SSH_AUTH_SOCK so agent identities are not considered
+        env["SSH_AUTH_SOCK"] = ""
+    return env
+
+
+def _clone_gate_mirror(upstream_url: str, gate_dir: Path, env: dict) -> None:
+    """Clone the upstream repository as a bare mirror into *gate_dir*."""
+    cmd = ["git", "clone", "--mirror", upstream_url, str(gate_dir)]
+    try:
+        subprocess.run(cmd, check=True, env=env)
+    except FileNotFoundError:
+        raise SystemExit("git not found on host; please install git")
+    except subprocess.CalledProcessError as e:
+        raise SystemExit(f"git clone --mirror failed: {e}")
+
+
+def _get_upstream_head(upstream_url: str, branch: str, env: dict) -> dict | None:
+    """Query upstream HEAD ref using git ls-remote (cheap, no object download).
+
+    Returns:
+        Dict with keys: commit_hash, ref_name, upstream_url
+        or None if query fails.
+    """
+    try:
+        cmd = ["git", "ls-remote", upstream_url, f"refs/heads/{branch}"]
+        result = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=30)
+
+        if result.returncode != 0:
+            return None
+
+        line = result.stdout.strip()
+        if not line:
+            return None
+
+        parts = line.split("\t")
+        if len(parts) >= 2:
+            return {
+                "commit_hash": parts[0],
+                "ref_name": parts[1],
+                "upstream_url": upstream_url,
+            }
+        return None
+    except (
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+        FileNotFoundError,
+        OSError,
+    ) as exc:
+        logger.debug(f"_get_upstream_head({branch}) failed: {exc}")
+        return None
+
+
+def _get_gate_branch_head(gate_dir: Path, branch: str, env: dict) -> str | None:
+    """Get the commit hash for a specific branch in the gate.
+
+    Returns:
+        Commit hash string or None if not found.
+    """
+    try:
+        if not gate_dir.exists():
+            return None
+
+        cmd = ["git", "-C", str(gate_dir), "rev-parse", f"refs/heads/{branch}"]
+        result = subprocess.run(cmd, capture_output=True, text=True, env=env)
+
+        if result.returncode == 0:
+            return result.stdout.strip()
+        return None
+    except (
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+        FileNotFoundError,
+        OSError,
+    ) as exc:
+        logger.debug(f"_get_gate_branch_head({branch}) failed: {exc}")
+        return None
+
+
+def _count_commits_range(gate_dir: Path, from_ref: str, to_ref: str, env: dict) -> int | None:
+    """Count commits reachable from *to_ref* but not from *from_ref*.
+
+    Uses ``git rev-list --count from..to``.  Returns ``None`` when the
+    count cannot be determined (e.g. refs not yet fetched).
+    """
+    try:
+        cmd = [
+            "git",
+            "-C",
+            str(gate_dir),
+            "rev-list",
+            "--count",
+            f"{from_ref}..{to_ref}",
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, env=env)
+        if result.returncode == 0:
+            return int(result.stdout.strip())
+        return None
+    except (
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+        FileNotFoundError,
+        OSError,
+    ) as exc:
+        logger.debug(f"_count_commits_range({from_ref}..{to_ref}) failed: {exc}")
+        return None

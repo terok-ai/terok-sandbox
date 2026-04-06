@@ -84,7 +84,38 @@ class DoctorCheck:
 
 
 # ---------------------------------------------------------------------------
-# Sandbox-level checks
+# Sandbox-level check assembly
+# ---------------------------------------------------------------------------
+
+
+def sandbox_doctor_checks(
+    *,
+    proxy_port: int | None = None,
+    ssh_agent_port: int | None = None,
+    desired_shield_state: str | None = None,
+) -> list[DoctorCheck]:
+    """Return sandbox-level health checks for in-container diagnostics.
+
+    Args:
+        proxy_port: Credential proxy TCP port (skip check if ``None``).
+        ssh_agent_port: SSH agent TCP port (skip check if ``None``).
+        desired_shield_state: Expected shield state from ``shield_desired_state``
+            file (``"up"``, ``"down"``, ``"down_all"``, or ``None`` to skip).
+
+    Returns:
+        List of :class:`DoctorCheck` instances ready for orchestration.
+    """
+    checks: list[DoctorCheck] = []
+    if proxy_port is not None:
+        checks.append(_make_proxy_check(proxy_port))
+    if ssh_agent_port is not None:
+        checks.append(_make_ssh_agent_check(ssh_agent_port))
+    checks.append(_make_shield_check(desired_shield_state))
+    return checks
+
+
+# ---------------------------------------------------------------------------
+# Check factories (in assembly order)
 # ---------------------------------------------------------------------------
 
 
@@ -174,29 +205,3 @@ def _make_shield_check(desired_state: str | None) -> DoctorCheck:
         fix_cmd=[],  # fix is handled by the orchestrator via shield Python API
         fix_description="Restore shield to desired state (up/down).",
     )
-
-
-def sandbox_doctor_checks(
-    *,
-    proxy_port: int | None = None,
-    ssh_agent_port: int | None = None,
-    desired_shield_state: str | None = None,
-) -> list[DoctorCheck]:
-    """Return sandbox-level health checks for in-container diagnostics.
-
-    Args:
-        proxy_port: Credential proxy TCP port (skip check if ``None``).
-        ssh_agent_port: SSH agent TCP port (skip check if ``None``).
-        desired_shield_state: Expected shield state from ``shield_desired_state``
-            file (``"up"``, ``"down"``, ``"down_all"``, or ``None`` to skip).
-
-    Returns:
-        List of :class:`DoctorCheck` instances ready for orchestration.
-    """
-    checks: list[DoctorCheck] = []
-    if proxy_port is not None:
-        checks.append(_make_proxy_check(proxy_port))
-    if ssh_agent_port is not None:
-        checks.append(_make_ssh_agent_check(ssh_agent_port))
-    checks.append(_make_shield_check(desired_shield_state))
-    return checks

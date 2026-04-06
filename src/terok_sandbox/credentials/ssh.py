@@ -25,33 +25,7 @@ from typing import TypedDict
 from .._util import effective_ssh_key_name, ensure_dir_writable, render_template
 from ..config import SandboxConfig
 
-
-def generate_keypair(key_type: str, priv_path: Path, pub_path: Path, comment: str) -> None:
-    """Generate an SSH keypair via ``ssh-keygen``.
-
-    Removes any stale half-existing files first, then invokes
-    ``ssh-keygen`` with the given *comment* embedded in the public key.
-    """
-    for p in (priv_path, pub_path):
-        p.unlink(missing_ok=True)
-
-    cmd = [
-        "ssh-keygen",
-        "-t",
-        key_type,
-        "-f",
-        str(priv_path),
-        "-N",
-        "",
-        "-C",
-        comment,
-    ]
-    try:
-        subprocess.run(cmd, check=True)
-    except FileNotFoundError:
-        raise SystemExit("ssh-keygen not found. Please install OpenSSH client tools.")
-    except subprocess.CalledProcessError as e:
-        raise SystemExit(f"ssh-keygen failed: {e}")
+# ---------- Vocabulary ----------
 
 
 class SSHInitResult(TypedDict):
@@ -62,6 +36,9 @@ class SSHInitResult(TypedDict):
     public_key: str
     config_path: str
     key_name: str
+
+
+# ---------- Public API ----------
 
 
 class SSHManager:
@@ -213,40 +190,32 @@ class SSHManager:
             raise SystemExit(f"Failed to write SSH config at {cfg_path}: {e}")
 
 
-# ---------------------------------------------------------------------------
-# Module-private helpers (extracted to reduce cognitive complexity)
-# ---------------------------------------------------------------------------
+def generate_keypair(key_type: str, priv_path: Path, pub_path: Path, comment: str) -> None:
+    """Generate an SSH keypair via ``ssh-keygen``.
 
-
-def _try_render_user_template(template_path: Path | None, variables: dict[str, str]) -> str | None:
-    """Render the user-provided SSH config template, if configured.
-
-    Raises ``SystemExit`` if the template path is configured but the file
-    is missing or rendering fails — explicit misconfiguration should fail
-    fast rather than silently falling back to the packaged template.
+    Removes any stale half-existing files first, then invokes
+    ``ssh-keygen`` with the given *comment* embedded in the public key.
     """
-    if not template_path:
-        return None
-    p = Path(template_path)
-    if not p.is_file():
-        raise SystemExit(f"SSH config template not found: {p}")
-    try:
-        return render_template(p, variables)
-    except Exception as exc:
-        raise SystemExit(f"Failed to render SSH config template {p}: {exc}") from exc
+    for p in (priv_path, pub_path):
+        p.unlink(missing_ok=True)
 
-
-def _try_render_packaged_template(variables: dict[str, str]) -> str | None:
-    """Attempt to render the bundled SSH config template from package resources."""
+    cmd = [
+        "ssh-keygen",
+        "-t",
+        key_type,
+        "-f",
+        str(priv_path),
+        "-N",
+        "",
+        "-C",
+        comment,
+    ]
     try:
-        raw = (
-            resources.files("terok_sandbox") / "resources" / "templates" / "ssh_config.template"
-        ).read_text()
-    except Exception:
-        return None
-    for k, v in variables.items():
-        raw = raw.replace(f"{{{{{k}}}}}", v)
-    return raw
+        subprocess.run(cmd, check=True)
+    except FileNotFoundError:
+        raise SystemExit("ssh-keygen not found. Please install OpenSSH client tools.")
+    except subprocess.CalledProcessError as e:
+        raise SystemExit(f"ssh-keygen failed: {e}")
 
 
 def update_ssh_keys_json(keys_json_path: Path, project_id: str, result: SSHInitResult) -> None:
@@ -297,6 +266,42 @@ def update_ssh_keys_json(keys_json_path: Path, project_id: str, result: SSHInitR
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
+
+
+# ---------------------------------------------------------------------------
+# Private helpers
+# ---------------------------------------------------------------------------
+
+
+def _try_render_user_template(template_path: Path | None, variables: dict[str, str]) -> str | None:
+    """Render the user-provided SSH config template, if configured.
+
+    Raises ``SystemExit`` if the template path is configured but the file
+    is missing or rendering fails — explicit misconfiguration should fail
+    fast rather than silently falling back to the packaged template.
+    """
+    if not template_path:
+        return None
+    p = Path(template_path)
+    if not p.is_file():
+        raise SystemExit(f"SSH config template not found: {p}")
+    try:
+        return render_template(p, variables)
+    except Exception as exc:
+        raise SystemExit(f"Failed to render SSH config template {p}: {exc}") from exc
+
+
+def _try_render_packaged_template(variables: dict[str, str]) -> str | None:
+    """Attempt to render the bundled SSH config template from package resources."""
+    try:
+        raw = (
+            resources.files("terok_sandbox") / "resources" / "templates" / "ssh_config.template"
+        ).read_text()
+    except Exception:
+        return None
+    for k, v in variables.items():
+        raw = raw.replace(f"{{{{{k}}}}}", v)
+    return raw
 
 
 def _harden_permissions(target_dir: Path, priv_path: Path, pub_path: Path, cfg_path: Path) -> None:

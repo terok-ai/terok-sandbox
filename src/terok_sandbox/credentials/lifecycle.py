@@ -25,13 +25,7 @@ from pathlib import Path
 from .._util._logging import log_warning
 from ..config import SandboxConfig
 
-
-def _cfg(cfg: SandboxConfig | None = None) -> SandboxConfig:
-    """Return *cfg* or a default :class:`SandboxConfig`."""
-    return cfg or SandboxConfig()
-
-
-# ---------- Data classes ----------
+# ---------- Vocabulary ----------
 
 
 @dataclass(frozen=True)
@@ -63,45 +57,132 @@ class CredentialProxyStatus:
     """Provider names with stored credentials."""
 
 
-# ---------- PID file helpers ----------
+# ---------- Public API ----------
 
 
-def _pid_file(cfg: SandboxConfig | None = None) -> Path:
-    """Return the PID file path for the managed proxy daemon."""
-    return _cfg(cfg).proxy_pid_file_path
+def ensure_proxy_reachable(cfg: SandboxConfig | None = None) -> None:
+    """Verify the credential proxy is running and its TCP ports are up.
+
+    For **systemd** socket activation the service may not have started yet
+    (e.g. after a fresh boot).  This function triggers a start via
+    ``systemctl --user start`` and waits for the HTTP and SSH agent TCP
+    ports to become reachable via ``/-/health`` and raw TCP probes.
+
+    For **daemon** mode the ``/-/health`` endpoint is probed on the TCP port.
+
+    Raises ``SystemExit`` with an actionable message if the proxy is
+    unreachable.  Called before task creation when credential proxy is enabled.
+    """
+    c = _cfg(cfg)
+
+    if not is_socket_active() and not is_daemon_running(cfg):
+        hint = (
+            "  terokctl credentials install   (systemd socket activation)\n"
+            "  terokctl credentials start      (manual daemon)"
+        )
+        raise SystemExit(
+            "Credential proxy is not reachable.\n"
+            "\n"
+            "The credential proxy injects real API credentials into container\n"
+            "requests without exposing secrets to the container filesystem.\n"
+            "\n"
+            f"Start it with:\n{hint}\n"
+            f"\n"
+            f"Socket: {c.proxy_socket_path}\n"
+            f"DB:     {c.proxy_db_path}\n"
+        )
+
+    # Systemd socket activation: the socket unit is active but the service
+    # may be idle.  Explicitly start the service so the TCP ports come up.
+    if is_socket_active():
+        subprocess.run(
+            ["systemctl", "--user", "start", _SERVICE_UNIT],
+            check=False,
+            timeout=10,
+        )
+
+    if not _wait_for_ready(c.proxy_port):
+        raise SystemExit(
+            f"Credential proxy service started but TCP port {c.proxy_port} "
+            "is not reachable. Check: journalctl --user -u terok-credential-proxy"
+        )
+
+    if not _wait_for_tcp_port(c.ssh_agent_port):
+        raise SystemExit(
+            f"Credential proxy service started but SSH agent port {c.ssh_agent_port} "
+            "is not reachable. Check: journalctl --user -u terok-credential-proxy"
+        )
 
 
-def _is_managed_proxy(pid: int, cfg: SandboxConfig | None = None) -> bool:
-    """Return whether *pid* was started with the expected PID file argument."""
-    cmdline_path = Path(f"/proc/{pid}/cmdline")
-    if not cmdline_path.is_file():
-        return False
-    try:
-        raw = cmdline_path.read_bytes()
-    except OSError:
-        return False
-    args = raw.rstrip(b"\x00").split(b"\x00")
-    args_str = [a.decode("utf-8", errors="ignore") for a in args]
-    expected = f"--pid-file={_pid_file(cfg)}"
-    return expected in args_str
+def get_proxy_status(cfg: SandboxConfig | None = None) -> CredentialProxyStatus:
+    """Return the current credential proxy status.
+
+    Populates route count from the routes JSON (0 if missing/invalid) and
+    credential provider names from the database (empty if DB doesn't exist).
+    """
+    c = _cfg(cfg)
+
+    routes_count = 0
+    if c.proxy_routes_path.is_file():
+        try:
+            import json
+
+            routes_count = len(json.loads(c.proxy_routes_path.read_text()))
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    creds: tuple[str, ...] = ()
+    if c.proxy_db_path.is_file():
+        try:
+            from .db import CredentialDB
+
+            db = CredentialDB(c.proxy_db_path)
+            try:
+                creds = tuple(db.list_credentials("default"))
+            finally:
+                db.close()
+        except Exception as exc:  # noqa: BLE001
+            log_warning(f"Failed to read credential DB for status: {exc}")
+
+    # Systemd takes precedence: when units are installed, report mode="systemd"
+    # even if the socket is inactive — the daemon's running state is ignored so
+    # operators see the correct activation path and don't get mixed signals.
+    if is_socket_installed():
+        mode = "systemd"
+        running = is_service_active()
+        healthy = _probe_proxy(c.proxy_port) if running else False
+    elif is_daemon_running(cfg):
+        mode = "daemon"
+        running = True
+        healthy = _probe_proxy(c.proxy_port)
+    else:
+        mode = "none"
+        running = False
+        healthy = False
+
+    return CredentialProxyStatus(
+        mode=mode,
+        running=running,
+        healthy=healthy,
+        socket_path=c.proxy_socket_path,
+        db_path=c.proxy_db_path,
+        routes_path=c.proxy_routes_path,
+        routes_configured=routes_count,
+        credentials_stored=creds,
+    )
 
 
-# ---------- Systemd helpers ----------
-
-_UNIT_VERSION = 4
-"""Bump when the systemd unit templates change."""
-
-_SOCKET_UNIT = "terok-credential-proxy.socket"
-"""Name of the systemd socket unit file."""
-
-_SERVICE_UNIT = "terok-credential-proxy.service"
-"""Name of the systemd service unit file."""
+def get_proxy_port(cfg: SandboxConfig | None = None) -> int:
+    """Return the configured credential proxy TCP port."""
+    return _cfg(cfg).proxy_port
 
 
-def _systemd_unit_dir() -> Path:
-    """Return the systemd user unit directory."""
-    xdg = os.environ.get("XDG_CONFIG_HOME")
-    return (Path(xdg) if xdg else Path.home() / ".config") / "systemd" / "user"
+def get_ssh_agent_port(cfg: SandboxConfig | None = None) -> int:
+    """Return the configured SSH agent proxy TCP port."""
+    return _cfg(cfg).ssh_agent_port
+
+
+# ---------- Systemd lifecycle ----------
 
 
 def is_systemd_available() -> bool:
@@ -154,21 +235,6 @@ def is_service_active() -> bool:
         return result.stdout.strip() == "active"
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
-
-
-def _proxy_exec_prefix() -> list[str]:
-    """Return the command prefix for launching the credential proxy server.
-
-    Uses ``sys.executable -m terok_sandbox.credentials.proxy`` so the
-    server runs under the same Python that owns the installed package —
-    works in pipx, venvs, and bare installs without requiring the
-    ``terok-credential-proxy`` console script on ``$PATH``.  That entry
-    point (defined in pyproject.toml) remains available for direct CLI
-    use by standalone sandbox users.
-    """
-    import sys as _sys
-
-    return [_sys.executable, "-m", "terok_sandbox.credentials.proxy"]
 
 
 def install_systemd_units(cfg: SandboxConfig | None = None) -> None:
@@ -235,51 +301,7 @@ def uninstall_systemd_units(cfg: SandboxConfig | None = None) -> None:  # noqa: 
     subprocess.run(["systemctl", "--user", "daemon-reload"], check=False, timeout=10)
 
 
-# ---------- Health probing ----------
-
-_HEALTH_PATH = "/-/health"
-"""Server-side readiness endpoint (no auth, no DB access)."""
-
-
-def _probe_proxy(port: int, *, timeout: float = 2.0) -> bool:
-    """Return ``True`` if the proxy's health endpoint responds 200.
-
-    Uses :mod:`http.client` (stdlib only) to hit the TCP port.
-    ``http.client.HTTPConnection`` is restricted to HTTP — no ``file://``
-    or custom-scheme risk, so no Bandit B310 suppression needed.
-    """
-    import http.client
-
-    conn: http.client.HTTPConnection | None = None
-    try:
-        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
-        conn.request("GET", _HEALTH_PATH)
-        resp = conn.getresponse()
-        resp.read()  # drain body before connection reuse/close
-        return resp.status == 200
-    except (OSError, http.client.HTTPException, ValueError):
-        return False
-    finally:
-        if conn is not None:
-            conn.close()
-
-
-def _wait_for_ready(port: int, *, timeout: float = 5.0, interval: float = 0.2) -> bool:
-    """Poll the health endpoint until it responds 200 or *timeout* expires.
-
-    Returns ``True`` when the proxy is ready, ``False`` on timeout.
-    """
-    import time
-
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if _probe_proxy(port, timeout=min(1.0, interval)):
-            return True
-        time.sleep(interval)
-    return False
-
-
-# ---------- Public API ----------
+# ---------- Daemon lifecycle ----------
 
 
 def start_daemon(cfg: SandboxConfig | None = None) -> None:
@@ -400,72 +422,104 @@ def is_daemon_running(cfg: SandboxConfig | None = None) -> bool:
         return False
 
 
-def get_proxy_port(cfg: SandboxConfig | None = None) -> int:
-    """Return the configured credential proxy TCP port."""
-    return _cfg(cfg).proxy_port
+# ---------- Private helpers ----------
 
 
-def get_ssh_agent_port(cfg: SandboxConfig | None = None) -> int:
-    """Return the configured SSH agent proxy TCP port."""
-    return _cfg(cfg).ssh_agent_port
+def _cfg(cfg: SandboxConfig | None = None) -> SandboxConfig:
+    """Return *cfg* or a default :class:`SandboxConfig`."""
+    return cfg or SandboxConfig()
 
 
-def get_proxy_status(cfg: SandboxConfig | None = None) -> CredentialProxyStatus:
-    """Return the current credential proxy status.
+_UNIT_VERSION = 4
+"""Bump when the systemd unit templates change."""
 
-    Populates route count from the routes JSON (0 if missing/invalid) and
-    credential provider names from the database (empty if DB doesn't exist).
+_SOCKET_UNIT = "terok-credential-proxy.socket"
+"""Name of the systemd socket unit file."""
+
+_SERVICE_UNIT = "terok-credential-proxy.service"
+"""Name of the systemd service unit file."""
+
+_HEALTH_PATH = "/-/health"
+"""Server-side readiness endpoint (no auth, no DB access)."""
+
+
+def _pid_file(cfg: SandboxConfig | None = None) -> Path:
+    """Return the PID file path for the managed proxy daemon."""
+    return _cfg(cfg).proxy_pid_file_path
+
+
+def _is_managed_proxy(pid: int, cfg: SandboxConfig | None = None) -> bool:
+    """Return whether *pid* was started with the expected PID file argument."""
+    cmdline_path = Path(f"/proc/{pid}/cmdline")
+    if not cmdline_path.is_file():
+        return False
+    try:
+        raw = cmdline_path.read_bytes()
+    except OSError:
+        return False
+    args = raw.rstrip(b"\x00").split(b"\x00")
+    args_str = [a.decode("utf-8", errors="ignore") for a in args]
+    expected = f"--pid-file={_pid_file(cfg)}"
+    return expected in args_str
+
+
+def _systemd_unit_dir() -> Path:
+    """Return the systemd user unit directory."""
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    return (Path(xdg) if xdg else Path.home() / ".config") / "systemd" / "user"
+
+
+def _proxy_exec_prefix() -> list[str]:
+    """Return the command prefix for launching the credential proxy server.
+
+    Uses ``sys.executable -m terok_sandbox.credentials.proxy`` so the
+    server runs under the same Python that owns the installed package —
+    works in pipx, venvs, and bare installs without requiring the
+    ``terok-credential-proxy`` console script on ``$PATH``.  That entry
+    point (defined in pyproject.toml) remains available for direct CLI
+    use by standalone sandbox users.
     """
-    c = _cfg(cfg)
+    import sys as _sys
 
-    routes_count = 0
-    if c.proxy_routes_path.is_file():
-        try:
-            import json
+    return [_sys.executable, "-m", "terok_sandbox.credentials.proxy"]
 
-            routes_count = len(json.loads(c.proxy_routes_path.read_text()))
-        except (json.JSONDecodeError, OSError):
-            pass
 
-    creds: tuple[str, ...] = ()
-    if c.proxy_db_path.is_file():
-        try:
-            from .db import CredentialDB
+def _probe_proxy(port: int, *, timeout: float = 2.0) -> bool:
+    """Return ``True`` if the proxy's health endpoint responds 200.
 
-            db = CredentialDB(c.proxy_db_path)
-            try:
-                creds = tuple(db.list_credentials("default"))
-            finally:
-                db.close()
-        except Exception as exc:  # noqa: BLE001
-            log_warning(f"Failed to read credential DB for status: {exc}")
+    Uses :mod:`http.client` (stdlib only) to hit the TCP port.
+    ``http.client.HTTPConnection`` is restricted to HTTP — no ``file://``
+    or custom-scheme risk, so no Bandit B310 suppression needed.
+    """
+    import http.client
 
-    # Systemd takes precedence: when units are installed, report mode="systemd"
-    # even if the socket is inactive — the daemon's running state is ignored so
-    # operators see the correct activation path and don't get mixed signals.
-    if is_socket_installed():
-        mode = "systemd"
-        running = is_service_active()
-        healthy = _probe_proxy(c.proxy_port) if running else False
-    elif is_daemon_running(cfg):
-        mode = "daemon"
-        running = True
-        healthy = _probe_proxy(c.proxy_port)
-    else:
-        mode = "none"
-        running = False
-        healthy = False
+    conn: http.client.HTTPConnection | None = None
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+        conn.request("GET", _HEALTH_PATH)
+        resp = conn.getresponse()
+        resp.read()  # drain body before connection reuse/close
+        return resp.status == 200
+    except (OSError, http.client.HTTPException, ValueError):
+        return False
+    finally:
+        if conn is not None:
+            conn.close()
 
-    return CredentialProxyStatus(
-        mode=mode,
-        running=running,
-        healthy=healthy,
-        socket_path=c.proxy_socket_path,
-        db_path=c.proxy_db_path,
-        routes_path=c.proxy_routes_path,
-        routes_configured=routes_count,
-        credentials_stored=creds,
-    )
+
+def _wait_for_ready(port: int, *, timeout: float = 5.0, interval: float = 0.2) -> bool:
+    """Poll the health endpoint until it responds 200 or *timeout* expires.
+
+    Returns ``True`` when the proxy is ready, ``False`` on timeout.
+    """
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _probe_proxy(port, timeout=min(1.0, interval)):
+            return True
+        time.sleep(interval)
+    return False
 
 
 def _wait_for_tcp_port(port: int, timeout: float = 5.0) -> bool:
@@ -483,57 +537,3 @@ def _wait_for_tcp_port(port: int, timeout: float = 5.0) -> bool:
             sock.close()
         time.sleep(0.2)
     return False
-
-
-def ensure_proxy_reachable(cfg: SandboxConfig | None = None) -> None:
-    """Verify the credential proxy is running and its TCP ports are up.
-
-    For **systemd** socket activation the service may not have started yet
-    (e.g. after a fresh boot).  This function triggers a start via
-    ``systemctl --user start`` and waits for the HTTP and SSH agent TCP
-    ports to become reachable via ``/-/health`` and raw TCP probes.
-
-    For **daemon** mode the ``/-/health`` endpoint is probed on the TCP port.
-
-    Raises ``SystemExit`` with an actionable message if the proxy is
-    unreachable.  Called before task creation when credential proxy is enabled.
-    """
-    c = _cfg(cfg)
-
-    if not is_socket_active() and not is_daemon_running(cfg):
-        hint = (
-            "  terokctl credentials install   (systemd socket activation)\n"
-            "  terokctl credentials start      (manual daemon)"
-        )
-        raise SystemExit(
-            "Credential proxy is not reachable.\n"
-            "\n"
-            "The credential proxy injects real API credentials into container\n"
-            "requests without exposing secrets to the container filesystem.\n"
-            "\n"
-            f"Start it with:\n{hint}\n"
-            f"\n"
-            f"Socket: {c.proxy_socket_path}\n"
-            f"DB:     {c.proxy_db_path}\n"
-        )
-
-    # Systemd socket activation: the socket unit is active but the service
-    # may be idle.  Explicitly start the service so the TCP ports come up.
-    if is_socket_active():
-        subprocess.run(
-            ["systemctl", "--user", "start", _SERVICE_UNIT],
-            check=False,
-            timeout=10,
-        )
-
-    if not _wait_for_ready(c.proxy_port):
-        raise SystemExit(
-            f"Credential proxy service started but TCP port {c.proxy_port} "
-            "is not reachable. Check: journalctl --user -u terok-credential-proxy"
-        )
-
-    if not _wait_for_tcp_port(c.ssh_agent_port):
-        raise SystemExit(
-            f"Credential proxy service started but SSH agent port {c.ssh_agent_port} "
-            "is not reachable. Check: journalctl --user -u terok-credential-proxy"
-        )

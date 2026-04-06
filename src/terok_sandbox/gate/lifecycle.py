@@ -47,116 +47,7 @@ _SOCKET_UNIT = "terok-gate.socket"
 """Name of the systemd socket unit file."""
 
 
-# ---------- Config helpers ----------
-
-
-def _cfg(cfg: SandboxConfig | None = None) -> SandboxConfig:
-    """Return *cfg* or a default :class:`SandboxConfig`."""
-    return cfg or SandboxConfig()
-
-
-def _get_port(cfg: SandboxConfig | None = None) -> int:
-    """Return the configured gate server port (default 9418)."""
-    return _cfg(cfg).gate_port
-
-
-def _get_gate_base_path(cfg: SandboxConfig | None = None) -> Path:
-    """Return the base path for the gate server (where gate repos live)."""
-    return _cfg(cfg).gate_base_path
-
-
-def _pid_file(cfg: SandboxConfig | None = None) -> Path:
-    """Return the path to the PID file for the managed daemon."""
-    return _cfg(cfg).pid_file_path
-
-
-def _systemd_unit_dir() -> Path:
-    """Return the systemd user unit directory."""
-    xdg = os.environ.get("XDG_CONFIG_HOME")
-    return (Path(xdg) if xdg else Path.home() / ".config") / "systemd" / "user"
-
-
-# ---------- Private helpers ----------
-
-
-def _installed_unit_version() -> int | None:
-    """Return the version stamp from the installed socket unit, or ``None``."""
-    unit_file = _systemd_unit_dir() / _SOCKET_UNIT
-    if not unit_file.is_file():
-        return None
-    try:
-        for line in unit_file.read_text(encoding="utf-8").splitlines():
-            if line.startswith("# terok-gate-version:"):
-                return int(line.split(":", 1)[1].strip())
-    except (ValueError, OSError):
-        pass
-    return None
-
-
-def _installed_base_path() -> Path | None:
-    """Parse the ``--base-path=...`` baked into the installed service unit.
-
-    Returns ``None`` if the service unit is missing or unparseable.
-    """
-    service_file = _systemd_unit_dir() / "terok-gate@.service"
-    if not service_file.is_file():
-        return None
-    try:
-        for line in service_file.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if line.startswith("ExecStart=") and "--base-path=" in line:
-                for token in line.split():
-                    if token.startswith("--base-path="):
-                        return Path(token.split("=", 1)[1])
-    except OSError:
-        pass
-    return None
-
-
-def _base_path_diverged(cfg: SandboxConfig | None = None) -> str | None:
-    """Return a warning if the installed base path differs from current config.
-
-    Returns ``None`` when paths match or when units are not installed.
-    """
-    installed = _installed_base_path()
-    if installed is None:
-        return None
-    expected = _get_gate_base_path(cfg)
-    if installed.resolve() == expected.resolve():
-        return None
-    return (
-        f"Installed gate base path diverges from current config.\n"
-        f"  Installed: {installed}\n"
-        f"  Expected:  {expected}"
-    )
-
-
-def _is_managed_server(pid: int) -> bool:
-    """Return whether *pid* was started with the expected PID file argument.
-
-    Reads ``/proc/<pid>/cmdline`` and checks that the ``--pid-file=<path>``
-    flag matches :func:`_pid_file`.  This guards against PID reuse (a stale
-    PID file pointing at an unrelated process) but does **not** verify the
-    executable name — callers should not assume the binary identity is
-    confirmed.
-    """
-    cmdline_path = Path(f"/proc/{pid}/cmdline")
-    if not cmdline_path.is_file():
-        return False
-    try:
-        raw = cmdline_path.read_bytes()
-    except OSError:
-        return False
-    args = raw.rstrip(b"\x00").split(b"\x00")
-    if len(args) < 2:
-        return False
-    args_str = [a.decode("utf-8", errors="ignore") for a in args]
-    # Verify our PID file is among the arguments
-    expected_pid_flag = f"--pid-file={_pid_file()}"
-    return expected_pid_flag in args_str
-
-
-# ---------- Data classes ----------
+# ---------- Vocabulary ----------
 
 
 @dataclass(frozen=True)
@@ -174,6 +65,92 @@ class GateServerStatus:
 
 
 # ---------- Public API ----------
+
+
+def ensure_server_reachable(cfg: SandboxConfig | None = None) -> None:
+    """Verify the gate server is running and configured correctly.
+
+    Raises ``SystemExit`` if the server is down, systemd units are outdated,
+    or the installed base path diverges from the current configuration.
+    Called before task creation to fail early with an actionable message.
+    """
+    server_status = get_server_status(cfg)
+    if server_status.running:
+        if server_status.mode == "systemd":
+            installed = _installed_unit_version()
+            if installed is None or installed < _UNIT_VERSION:
+                installed_label = "unversioned" if installed is None else f"v{installed}"
+                raise SystemExit(
+                    "Gate server systemd units are outdated "
+                    f"(installed {installed_label}, expected v{_UNIT_VERSION})."
+                )
+            path_warning = _base_path_diverged(cfg)
+            if path_warning:
+                raise SystemExit(path_warning)
+        return
+
+    msg = (
+        "Gate server is not running.\n"
+        "\n"
+        "The gate server serves git repos to task containers over the network,\n"
+        "replacing the previous volume-mount approach.\n"
+        "\n"
+    )
+    if is_systemd_available():
+        msg += "Recommended: install and start the systemd socket.\n"
+    else:
+        msg += "Start the gate daemon.\n"
+    raise SystemExit(msg)
+
+
+def get_server_status(cfg: SandboxConfig | None = None) -> GateServerStatus:
+    """Return the current gate server status."""
+    port = _get_port(cfg)
+
+    if is_socket_installed():
+        if is_socket_active():
+            return GateServerStatus(mode="systemd", running=True, port=port)
+        # Socket installed but inactive — check if the daemon fallback is running
+        if is_daemon_running(cfg):
+            return GateServerStatus(mode="daemon", running=True, port=port)
+        return GateServerStatus(mode="systemd", running=False, port=port)
+
+    if is_daemon_running(cfg):
+        return GateServerStatus(mode="daemon", running=True, port=port)
+
+    return GateServerStatus(mode="none", running=False, port=port)
+
+
+def check_units_outdated(cfg: SandboxConfig | None = None) -> str | None:
+    """Return a warning string if installed systemd units are stale, else ``None``.
+
+    Checks both the unit version stamp and the baked ``--base-path`` against
+    the current configuration.  Useful for ``gate-server status`` and
+    ``sickbay`` to surface upgrade hints without blocking task creation
+    (that's ``ensure_server_reachable``'s job).
+    """
+    if not is_socket_installed():
+        return None
+    installed = _installed_unit_version()
+    if installed is None or installed < _UNIT_VERSION:
+        installed_label = "unversioned" if installed is None else f"v{installed}"
+        return (
+            f"Systemd units are outdated (installed {installed_label}, expected v{_UNIT_VERSION})."
+        )
+    return _base_path_diverged(cfg)
+
+
+def get_gate_base_path(cfg: SandboxConfig | None = None) -> Path:
+    """Return the gate base path (public API)."""
+    return _get_gate_base_path(cfg)
+
+
+def get_gate_server_port(cfg: SandboxConfig | None = None) -> int:
+    """Return the configured gate server port."""
+    return _get_port(cfg)
+
+
+# ---------- Systemd lifecycle ----------
 
 
 def is_systemd_available() -> bool:
@@ -279,6 +256,9 @@ def uninstall_systemd_units(cfg: SandboxConfig | None = None) -> None:  # noqa: 
     subprocess.run(["systemctl", "--user", "daemon-reload"], check=False, timeout=10)
 
 
+# ---------- Daemon lifecycle ----------
+
+
 def start_daemon(port: int | None = None, cfg: SandboxConfig | None = None) -> None:
     """Start a ``terok-gate`` daemon process (non-systemd fallback).
 
@@ -343,84 +323,107 @@ def is_daemon_running(cfg: SandboxConfig | None = None) -> bool:
         return False
 
 
-def get_server_status(cfg: SandboxConfig | None = None) -> GateServerStatus:
-    """Return the current gate server status."""
-    port = _get_port(cfg)
-
-    if is_socket_installed():
-        if is_socket_active():
-            return GateServerStatus(mode="systemd", running=True, port=port)
-        # Socket installed but inactive — check if the daemon fallback is running
-        if is_daemon_running(cfg):
-            return GateServerStatus(mode="daemon", running=True, port=port)
-        return GateServerStatus(mode="systemd", running=False, port=port)
-
-    if is_daemon_running(cfg):
-        return GateServerStatus(mode="daemon", running=True, port=port)
-
-    return GateServerStatus(mode="none", running=False, port=port)
+# ---------- Private helpers ----------
 
 
-def check_units_outdated(cfg: SandboxConfig | None = None) -> str | None:
-    """Return a warning string if installed systemd units are stale, else ``None``.
+def _cfg(cfg: SandboxConfig | None = None) -> SandboxConfig:
+    """Return *cfg* or a default :class:`SandboxConfig`."""
+    return cfg or SandboxConfig()
 
-    Checks both the unit version stamp and the baked ``--base-path`` against
-    the current configuration.  Useful for ``gate-server status`` and
-    ``sickbay`` to surface upgrade hints without blocking task creation
-    (that's ``ensure_server_reachable``'s job).
-    """
-    if not is_socket_installed():
+
+def _get_port(cfg: SandboxConfig | None = None) -> int:
+    """Return the configured gate server port (default 9418)."""
+    return _cfg(cfg).gate_port
+
+
+def _get_gate_base_path(cfg: SandboxConfig | None = None) -> Path:
+    """Return the base path for the gate server (where gate repos live)."""
+    return _cfg(cfg).gate_base_path
+
+
+def _pid_file(cfg: SandboxConfig | None = None) -> Path:
+    """Return the path to the PID file for the managed daemon."""
+    return _cfg(cfg).pid_file_path
+
+
+def _systemd_unit_dir() -> Path:
+    """Return the systemd user unit directory."""
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    return (Path(xdg) if xdg else Path.home() / ".config") / "systemd" / "user"
+
+
+def _installed_unit_version() -> int | None:
+    """Return the version stamp from the installed socket unit, or ``None``."""
+    unit_file = _systemd_unit_dir() / _SOCKET_UNIT
+    if not unit_file.is_file():
         return None
-    installed = _installed_unit_version()
-    if installed is None or installed < _UNIT_VERSION:
-        installed_label = "unversioned" if installed is None else f"v{installed}"
-        return (
-            f"Systemd units are outdated (installed {installed_label}, expected v{_UNIT_VERSION})."
-        )
-    return _base_path_diverged(cfg)
+    try:
+        for line in unit_file.read_text(encoding="utf-8").splitlines():
+            if line.startswith("# terok-gate-version:"):
+                return int(line.split(":", 1)[1].strip())
+    except (ValueError, OSError):
+        pass
+    return None
 
 
-def get_gate_base_path(cfg: SandboxConfig | None = None) -> Path:
-    """Return the gate base path (public API)."""
-    return _get_gate_base_path(cfg)
+def _installed_base_path() -> Path | None:
+    """Parse the ``--base-path=...`` baked into the installed service unit.
 
-
-def get_gate_server_port(cfg: SandboxConfig | None = None) -> int:
-    """Return the configured gate server port."""
-    return _get_port(cfg)
-
-
-def ensure_server_reachable(cfg: SandboxConfig | None = None) -> None:
-    """Verify the gate server is running and configured correctly.
-
-    Raises ``SystemExit`` if the server is down, systemd units are outdated,
-    or the installed base path diverges from the current configuration.
-    Called before task creation to fail early with an actionable message.
+    Returns ``None`` if the service unit is missing or unparseable.
     """
-    server_status = get_server_status(cfg)
-    if server_status.running:
-        if server_status.mode == "systemd":
-            installed = _installed_unit_version()
-            if installed is None or installed < _UNIT_VERSION:
-                installed_label = "unversioned" if installed is None else f"v{installed}"
-                raise SystemExit(
-                    "Gate server systemd units are outdated "
-                    f"(installed {installed_label}, expected v{_UNIT_VERSION})."
-                )
-            path_warning = _base_path_diverged(cfg)
-            if path_warning:
-                raise SystemExit(path_warning)
-        return
+    service_file = _systemd_unit_dir() / "terok-gate@.service"
+    if not service_file.is_file():
+        return None
+    try:
+        for line in service_file.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line.startswith("ExecStart=") and "--base-path=" in line:
+                for token in line.split():
+                    if token.startswith("--base-path="):
+                        return Path(token.split("=", 1)[1])
+    except OSError:
+        pass
+    return None
 
-    msg = (
-        "Gate server is not running.\n"
-        "\n"
-        "The gate server serves git repos to task containers over the network,\n"
-        "replacing the previous volume-mount approach.\n"
-        "\n"
+
+def _base_path_diverged(cfg: SandboxConfig | None = None) -> str | None:
+    """Return a warning if the installed base path differs from current config.
+
+    Returns ``None`` when paths match or when units are not installed.
+    """
+    installed = _installed_base_path()
+    if installed is None:
+        return None
+    expected = _get_gate_base_path(cfg)
+    if installed.resolve() == expected.resolve():
+        return None
+    return (
+        f"Installed gate base path diverges from current config.\n"
+        f"  Installed: {installed}\n"
+        f"  Expected:  {expected}"
     )
-    if is_systemd_available():
-        msg += "Recommended: install and start the systemd socket.\n"
-    else:
-        msg += "Start the gate daemon.\n"
-    raise SystemExit(msg)
+
+
+def _is_managed_server(pid: int) -> bool:
+    """Return whether *pid* was started with the expected PID file argument.
+
+    Reads ``/proc/<pid>/cmdline`` and checks that the ``--pid-file=<path>``
+    flag matches :func:`_pid_file`.  This guards against PID reuse (a stale
+    PID file pointing at an unrelated process) but does **not** verify the
+    executable name — callers should not assume the binary identity is
+    confirmed.
+    """
+    cmdline_path = Path(f"/proc/{pid}/cmdline")
+    if not cmdline_path.is_file():
+        return False
+    try:
+        raw = cmdline_path.read_bytes()
+    except OSError:
+        return False
+    args = raw.rstrip(b"\x00").split(b"\x00")
+    if len(args) < 2:
+        return False
+    args_str = [a.decode("utf-8", errors="ignore") for a in args]
+    # Verify our PID file is among the arguments
+    expected_pid_flag = f"--pid-file={_pid_file()}"
+    return expected_pid_flag in args_str
