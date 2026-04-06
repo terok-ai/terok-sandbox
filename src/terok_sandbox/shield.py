@@ -97,6 +97,15 @@ def up(container: str, task_dir: Path, cfg: SandboxConfig | None = None) -> None
     make_shield(task_dir, cfg).up(container)
 
 
+def block(container: str, task_dir: Path, cfg: SandboxConfig | None = None) -> None:
+    """Total network blackout — drop all traffic, log for forensics.
+
+    Unlike :func:`up` and :func:`down`, this ignores ``shield_bypass``
+    because panic overrides all safety bypasses.
+    """
+    make_shield(task_dir, cfg).block(container)
+
+
 def state(container: str, task_dir: Path, cfg: SandboxConfig | None = None) -> ShieldState:
     """Return the live shield state for a running container.
 
