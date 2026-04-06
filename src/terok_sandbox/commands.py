@@ -65,7 +65,7 @@ def _handle_gate_start(
     *, port: int | None = None, daemon: bool = False, cfg: SandboxConfig | None = None
 ) -> None:
     """Start the gate server (systemd preferred, daemon fallback)."""
-    from .gate_server import install_systemd_units, is_systemd_available, start_daemon
+    from .gate.lifecycle import install_systemd_units, is_systemd_available, start_daemon
 
     if is_systemd_available() and not daemon:
         install_systemd_units(cfg=cfg)
@@ -77,7 +77,7 @@ def _handle_gate_start(
 
 def _handle_gate_stop(*, cfg: SandboxConfig | None = None) -> None:
     """Stop the gate server."""
-    from .gate_server import get_server_status, stop_daemon, uninstall_systemd_units
+    from .gate.lifecycle import get_server_status, stop_daemon, uninstall_systemd_units
 
     status = get_server_status(cfg=cfg)
     if status.mode == "systemd":
@@ -92,7 +92,7 @@ def _handle_gate_stop(*, cfg: SandboxConfig | None = None) -> None:
 
 def _handle_gate_status(*, cfg: SandboxConfig | None = None) -> None:
     """Show gate server status."""
-    from .gate_server import check_units_outdated, get_gate_base_path, get_server_status
+    from .gate.lifecycle import check_units_outdated, get_gate_base_path, get_server_status
 
     status = get_server_status(cfg=cfg)
     print(f"Mode:      {status.mode}")
@@ -193,7 +193,7 @@ SHIELD_COMMANDS: tuple[CommandDef, ...] = (
 
 def _handle_proxy_start() -> None:
     """Start the credential proxy daemon."""
-    from .credential_proxy_lifecycle import get_proxy_status, start_daemon
+    from .credentials.lifecycle import get_proxy_status, start_daemon
 
     status = get_proxy_status()
     if status.running:
@@ -205,7 +205,7 @@ def _handle_proxy_start() -> None:
 
 def _handle_proxy_stop() -> None:
     """Stop the credential proxy daemon."""
-    from .credential_proxy_lifecycle import is_daemon_running, stop_daemon
+    from .credentials.lifecycle import is_daemon_running, stop_daemon
 
     if not is_daemon_running():
         print("Credential proxy is not running.")
@@ -216,7 +216,7 @@ def _handle_proxy_stop() -> None:
 
 def _handle_proxy_status() -> None:
     """Show credential proxy status."""
-    from .credential_proxy_lifecycle import get_proxy_status
+    from .credentials.lifecycle import get_proxy_status
 
     status = get_proxy_status()
     state = "running" if status.running else "stopped"
@@ -232,7 +232,7 @@ def _handle_proxy_status() -> None:
 
 def _handle_proxy_install() -> None:
     """Install and start systemd socket activation for the credential proxy."""
-    from .credential_proxy_lifecycle import install_systemd_units, is_systemd_available
+    from .credentials.lifecycle import install_systemd_units, is_systemd_available
 
     if not is_systemd_available():
         print("Error: systemd user services are not available on this host.")
@@ -243,7 +243,7 @@ def _handle_proxy_install() -> None:
 
 def _handle_proxy_uninstall() -> None:
     """Remove credential proxy systemd units."""
-    from .credential_proxy_lifecycle import is_systemd_available, uninstall_systemd_units
+    from .credentials.lifecycle import is_systemd_available, uninstall_systemd_units
 
     if not is_systemd_available():
         print("Error: systemd user services are not available. Nothing to uninstall.")
@@ -304,7 +304,7 @@ def _handle_ssh_import(
     from pathlib import Path
 
     from .config import SandboxConfig as _SandboxConfig
-    from .ssh import SSHInitResult, update_ssh_keys_json
+    from .credentials.ssh import SSHInitResult, update_ssh_keys_json
 
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", project):
         raise SystemExit(
@@ -379,7 +379,7 @@ def _handle_ssh_add_key(
     import re
 
     from .config import SandboxConfig as _SandboxConfig
-    from .ssh import (
+    from .credentials.ssh import (
         SSHInitResult,
         _harden_permissions,
         _next_key_number,
@@ -595,7 +595,7 @@ def _handle_doctor(*, cfg: SandboxConfig | None = None) -> None:
     import sys
 
     from .config import SandboxConfig as _SandboxConfig
-    from .credential_proxy_lifecycle import get_proxy_port, get_ssh_agent_port
+    from .credentials.lifecycle import get_proxy_port, get_ssh_agent_port
     from .doctor import sandbox_doctor_checks
 
     if cfg is None:

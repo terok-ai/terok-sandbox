@@ -12,8 +12,8 @@ from unittest.mock import MagicMock
 import pytest
 from aiohttp import web
 
-from terok_sandbox.credential_db import CredentialDB
-from terok_sandbox.credential_proxy.server import (
+from terok_sandbox.credentials.db import CredentialDB
+from terok_sandbox.credentials.proxy.server import (
     _KEY_CLIENT,
     _KEY_ROUTES,
     _KEY_TOKEN_DB,
@@ -295,7 +295,7 @@ class TestStaticPhantomMarker:
         """Static marker token resolves to Claude credential (returns 502 since upstream is down)."""
         from aiohttp.test_utils import TestClient, TestServer
 
-        from terok_sandbox.credential_proxy.constants import PHANTOM_CREDENTIALS_MARKER
+        from terok_sandbox.credentials.proxy.constants import PHANTOM_CREDENTIALS_MARKER
 
         app = _static_marker_env
         async with TestClient(TestServer(app)) as client:
@@ -310,7 +310,7 @@ class TestStaticPhantomMarker:
         """Static marker returns 502 (no credential) when Claude has no stored credentials."""
         from aiohttp.test_utils import TestClient, TestServer
 
-        from terok_sandbox.credential_proxy.constants import PHANTOM_CREDENTIALS_MARKER
+        from terok_sandbox.credentials.proxy.constants import PHANTOM_CREDENTIALS_MARKER
 
         db = CredentialDB(tmp_path / "test.db")
         db.close()  # empty DB
@@ -969,7 +969,7 @@ class TestRunMultiSiteSelection:
 
         with (
             patch(
-                "terok_sandbox.credential_proxy.server._systemd_sockets",
+                "terok_sandbox.credentials.proxy.server._systemd_sockets",
                 return_value=(mock_unix, mock_tcp),
             ),
             patch("aiohttp.web_runner.SockSite", _TrackingSockSite),
@@ -1010,7 +1010,7 @@ class TestRunMultiSiteSelection:
 
         with (
             patch(
-                "terok_sandbox.credential_proxy.server._systemd_sockets",
+                "terok_sandbox.credentials.proxy.server._systemd_sockets",
                 return_value=(None, None),
             ),
             patch("aiohttp.web_runner.UnixSite", _TrackingUnixSite),

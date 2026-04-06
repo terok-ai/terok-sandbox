@@ -22,23 +22,8 @@ from importlib import resources
 from pathlib import Path
 from typing import TypedDict
 
-from ._util import ensure_dir_writable, render_template
-from .config import SandboxConfig
-
-
-def effective_ssh_key_name(
-    project_id: str, *, ssh_key_name: str | None = None, key_type: str = "ed25519"
-) -> str:
-    """Return the SSH key filename to use.
-
-    Precedence:
-      1. Explicit *ssh_key_name* (from project config)
-      2. Derived default: ``id_<type>_<project_id>``
-    """
-    if ssh_key_name:
-        return ssh_key_name
-    algo = "ed25519" if key_type == "ed25519" else "rsa"
-    return f"id_{algo}_{project_id}"
+from .._util import effective_ssh_key_name, ensure_dir_writable, render_template
+from ..config import SandboxConfig
 
 
 def generate_keypair(key_type: str, priv_path: Path, pub_path: Path, comment: str) -> None:

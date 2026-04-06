@@ -4,12 +4,16 @@
 
 """terok-sandbox: hardened Podman container runner with gate and shield integration.
 
-Public API for standalone use and integration with terok.
+Delegates to domain subsystems:
 
-The primary configuration type is :class:`SandboxConfig`:
-
-    >>> from terok_sandbox import SandboxConfig
-    >>> cfg = SandboxConfig(gate_port=9418)
+- :mod:`~.gate` — authenticated git serving: HTTP server, token CRUD, upstream
+  mirror management, systemd/daemon lifecycle.
+- :mod:`~.credentials` — secret injection: reverse proxy with phantom tokens,
+  SSH keypair provisioning, SQLite credential store, systemd/daemon lifecycle.
+- :mod:`~.shield` — egress firewall adapter (delegates to terok-shield).
+- :mod:`~.runtime` — Podman CLI wrapper (state queries, GPU, log streaming).
+- :mod:`~.sandbox` — facade composing the above behind :class:`SandboxConfig`.
+- :mod:`~.commands` — CLI command registry and handler implementations.
 """
 
 __version__: str = "0.0.0"  # placeholder; replaced at build time
@@ -35,13 +39,10 @@ from .commands import (
 from .config import SandboxConfig
 
 # -- Credential DB -----------------------------------------------------------
-from .credential_db import CredentialDB
-
-# -- Credential constants ----------------------------------------------------
-from .credential_proxy.constants import PHANTOM_CREDENTIALS_MARKER
+from .credentials.db import CredentialDB
 
 # -- Credential proxy lifecycle ----------------------------------------------
-from .credential_proxy_lifecycle import (
+from .credentials.lifecycle import (
     CredentialProxyStatus,
     ensure_proxy_reachable,
     get_proxy_port,
@@ -58,11 +59,17 @@ from .credential_proxy_lifecycle import (
     uninstall_systemd_units as uninstall_proxy_systemd,
 )
 
+# -- Credential constants ----------------------------------------------------
+from .credentials.proxy.constants import PHANTOM_CREDENTIALS_MARKER
+
+# -- SSH ---------------------------------------------------------------------
+from .credentials.ssh import SSHManager, generate_keypair, update_ssh_keys_json
+
 # -- Doctor (container health checks) ----------------------------------------
 from .doctor import CheckVerdict, DoctorCheck, sandbox_doctor_checks
 
 # -- Gate server -------------------------------------------------------------
-from .gate_server import (
+from .gate.lifecycle import (
     GateServerStatus,
     check_units_outdated,
     ensure_server_reachable,
@@ -77,11 +84,11 @@ from .gate_server import (
     uninstall_systemd_units,
 )
 
-# -- Gate tokens -------------------------------------------------------------
-from .gate_tokens import create_token, revoke_token_for_task
-
 # -- Git gate ----------------------------------------------------------------
-from .git_gate import GateStalenessInfo, GitGate
+from .gate.mirror import GateStalenessInfo, GitGate
+
+# -- Gate tokens -------------------------------------------------------------
+from .gate.tokens import create_token, revoke_token_for_task
 
 # -- Paths -------------------------------------------------------------------
 from .paths import credentials_root, umbrella_config_root
@@ -122,9 +129,6 @@ from .shield import (
     status,
     up,
 )
-
-# -- SSH ---------------------------------------------------------------------
-from .ssh import SSHManager, generate_keypair, update_ssh_keys_json
 
 __all__ = [
     # Config

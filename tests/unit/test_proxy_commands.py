@@ -11,9 +11,9 @@ from unittest.mock import patch
 import pytest
 
 from terok_sandbox.commands import _handle_proxy_start, _handle_proxy_status, _handle_proxy_stop
-from terok_sandbox.credential_proxy_lifecycle import CredentialProxyStatus
+from terok_sandbox.credentials.lifecycle import CredentialProxyStatus
 
-_LIFECYCLE = "terok_sandbox.credential_proxy_lifecycle"
+_LIFECYCLE = "terok_sandbox.credentials.lifecycle"
 
 
 class TestProxyStart:

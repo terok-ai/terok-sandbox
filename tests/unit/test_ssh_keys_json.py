@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from terok_sandbox.ssh import SSHInitResult, update_ssh_keys_json
+from terok_sandbox.credentials.ssh import SSHInitResult, update_ssh_keys_json
 
 
 def _result(priv: str = "/k/priv", pub: str = "/k/pub") -> SSHInitResult:

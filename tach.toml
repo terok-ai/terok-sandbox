@@ -12,156 +12,156 @@ exact = true
 forbid_circular_dependencies = true
 ignore_type_checking_imports = true
 
-# ── Module Boundaries ───────────────────────────────────────────────
+# ── Layers ─────────────────────────────────────────────────
 #
-# Dependency flow:
-#   _util (standalone) ← paths ← config ← {all sandbox modules}
-#   gate (standalone HTTP server, zero internal imports)
+# Strict ordering: higher layers may import from lower layers
+# (implicit), never the reverse.  Same-layer imports require
+# explicit depends_on.
 #
-# ssh depends on _util + config; git_gate depends on ssh + config.
-# shield, gate_server, gate_tokens, runtime depend on config and/or _util.
+#   surface      CLI, command registry, sandbox facade
+#   core         Business logic: shield, gate mgmt, credential mgmt, runtime
+#   foundation   Pure data, standalone helpers, isolated servers
 
-# Vendored utilities — standalone, no internal deps
+layers = ["surface", "core", "foundation"]
+
+# ── Foundation ─────────────────────────────────────────────
+# Zero-dependency primitives, standalone servers, pure data.
+
+# Vendored utilities — importable by anything without declaration
 [[modules]]
 path = "terok_sandbox._util"
-depends_on = []
+layer = "foundation"
+utility = true
 
-# Gate server — standalone HTTP server, zero internal imports
-[[modules]]
-path = "terok_sandbox.gate"
-depends_on = []
-
-# Platform-aware path resolution — standalone, no internal deps
+# Platform-aware path resolution — standalone
 [[modules]]
 path = "terok_sandbox.paths"
+layer = "foundation"
 depends_on = []
 
-# Configuration dataclass — depends on paths for defaults
+# Configuration dataclass — same-layer dep on paths
 [[modules]]
 path = "terok_sandbox.config"
+layer = "foundation"
 depends_on = [
     "terok_sandbox.paths",
-]
-
-# Container runtime — depends on _util for logging/YAML
-[[modules]]
-path = "terok_sandbox.runtime"
-depends_on = [
-    "terok_sandbox._util",
-]
-
-# Shield adapter — depends on config
-[[modules]]
-path = "terok_sandbox.shield"
-depends_on = [
-    "terok_sandbox.config",
-]
-
-# Gate token CRUD — depends on config
-[[modules]]
-path = "terok_sandbox.gate_tokens"
-depends_on = [
-    "terok_sandbox.config",
-]
-
-# Gate server lifecycle — depends on config, _util, gate_tokens, gate
-[[modules]]
-path = "terok_sandbox.gate_server"
-depends_on = [
-    "terok_sandbox._util",
-    "terok_sandbox.config",
-    "terok_sandbox.gate",
-    "terok_sandbox.gate_tokens",
-]
-
-# SSH key management — depends on _util, config
-[[modules]]
-path = "terok_sandbox.ssh"
-depends_on = [
-    "terok_sandbox._util",
-    "terok_sandbox.config",
-]
-
-# Git gate mirror management — depends on ssh, config
-[[modules]]
-path = "terok_sandbox.git_gate"
-depends_on = [
-    "terok_sandbox.config",
-    "terok_sandbox.ssh",
-]
-
-# Credential DB — standalone, no internal deps
-[[modules]]
-path = "terok_sandbox.credential_db"
-depends_on = []
-
-# Credential proxy server — standalone, zero terok imports
-[[modules]]
-path = "terok_sandbox.credential_proxy"
-depends_on = []
-
-# Credential proxy lifecycle — depends on config, credential_db, _util
-[[modules]]
-path = "terok_sandbox.credential_proxy_lifecycle"
-depends_on = [
-    "terok_sandbox._util",
-    "terok_sandbox.config",
-    "terok_sandbox.credential_db",
-    "terok_sandbox.credential_proxy",
-]
-
-# Sandbox facade — composes shield, gate, runtime, SSH
-[[modules]]
-path = "terok_sandbox.sandbox"
-depends_on = [
-    "terok_sandbox.config",
-    "terok_sandbox.gate_server",
-    "terok_sandbox.gate_tokens",
-    "terok_sandbox.runtime",
-    "terok_sandbox.shield",
-    "terok_sandbox.ssh",
 ]
 
 # Health check protocol + sandbox-level diagnostics — standalone
 [[modules]]
 path = "terok_sandbox.doctor"
+layer = "foundation"
 depends_on = []
 
-# Command registry — defines all sandbox CLI commands
+# Credential DB — standalone SQLite store
+[[modules]]
+path = "terok_sandbox.credentials.db"
+layer = "foundation"
+depends_on = []
+
+# Credential proxy server — standalone, zero terok imports
+[[modules]]
+path = "terok_sandbox.credentials.proxy"
+layer = "foundation"
+depends_on = []
+
+# Credentials package root — standalone
+[[modules]]
+path = "terok_sandbox.credentials"
+layer = "foundation"
+depends_on = []
+
+# Gate standalone HTTP server — zero internal imports
+[[modules]]
+path = "terok_sandbox.gate.server"
+layer = "foundation"
+depends_on = []
+
+# Gate package root — same-layer dep on gate.server (__main__.py re-export)
+[[modules]]
+path = "terok_sandbox.gate"
+layer = "foundation"
+depends_on = [
+    "terok_sandbox.gate.server",
+]
+
+# ── Core ───────────────────────────────────────────────────
+# Business logic.  Foundation imports are implicit via layers.
+# Only same-layer (core↔core) deps need explicit declaration.
+
+# Container runtime
+[[modules]]
+path = "terok_sandbox.runtime"
+layer = "core"
+depends_on = []
+
+# Shield adapter
+[[modules]]
+path = "terok_sandbox.shield"
+layer = "core"
+depends_on = []
+
+# Gate token CRUD
+[[modules]]
+path = "terok_sandbox.gate.tokens"
+layer = "core"
+depends_on = []
+
+# Gate server lifecycle — same-layer dep on gate.tokens
+[[modules]]
+path = "terok_sandbox.gate.lifecycle"
+layer = "core"
+depends_on = [
+    "terok_sandbox.gate.tokens",
+]
+
+# SSH key management
+[[modules]]
+path = "terok_sandbox.credentials.ssh"
+layer = "core"
+depends_on = []
+
+# Git gate mirror management
+[[modules]]
+path = "terok_sandbox.gate.mirror"
+layer = "core"
+depends_on = []
+
+# Credential proxy lifecycle
+[[modules]]
+path = "terok_sandbox.credentials.lifecycle"
+layer = "core"
+depends_on = []
+
+# ── Surface ────────────────────────────────────────────────
+# Orchestration + CLI.  Core and foundation imports are implicit.
+# Only same-layer (surface↔surface) deps need explicit declaration.
+
+# Sandbox facade
+[[modules]]
+path = "terok_sandbox.sandbox"
+layer = "surface"
+depends_on = []
+
+# Command registry
 [[modules]]
 path = "terok_sandbox.commands"
-depends_on = [
-    "terok_sandbox.config",
-    "terok_sandbox.credential_proxy_lifecycle",
-    "terok_sandbox.doctor",
-    "terok_sandbox.gate_server",
-    "terok_sandbox.shield",
-    "terok_sandbox.ssh",
-]
+layer = "surface"
+depends_on = []
 
-# CLI entry point — wires command registry to argparse
+# CLI entry point — same-layer dep on commands
 [[modules]]
 path = "terok_sandbox.cli"
+layer = "surface"
 depends_on = [
     "terok_sandbox.commands",
 ]
 
-# Package root — public API re-exports
+# Package root — same-layer deps on surface peers
 [[modules]]
 path = "terok_sandbox"
+layer = "surface"
 depends_on = [
     "terok_sandbox.commands",
-    "terok_sandbox.config",
-    "terok_sandbox.doctor",
-    "terok_sandbox.credential_db",
-    "terok_sandbox.credential_proxy",
-    "terok_sandbox.credential_proxy_lifecycle",
-    "terok_sandbox.gate_server",
-    "terok_sandbox.gate_tokens",
-    "terok_sandbox.git_gate",
-    "terok_sandbox.paths",
-    "terok_sandbox.runtime",
     "terok_sandbox.sandbox",
-    "terok_sandbox.shield",
-    "terok_sandbox.ssh",
 ]

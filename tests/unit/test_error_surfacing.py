@@ -150,7 +150,7 @@ class TestGetUpstreamHead:
     )
     def test_returns_none_on_exception(self, exception: Exception) -> None:
         """_get_upstream_head returns None when subprocess.run raises."""
-        from terok_sandbox.git_gate import _get_upstream_head
+        from terok_sandbox.gate.mirror import _get_upstream_head
 
         with unittest.mock.patch("subprocess.run", side_effect=exception):
             result = _get_upstream_head("git@example.com:repo.git", "main", {})
@@ -158,7 +158,7 @@ class TestGetUpstreamHead:
 
     def test_returns_none_on_nonzero_exit(self) -> None:
         """_get_upstream_head returns None when git ls-remote exits non-zero."""
-        from terok_sandbox.git_gate import _get_upstream_head
+        from terok_sandbox.gate.mirror import _get_upstream_head
 
         mock_result = unittest.mock.Mock(returncode=1, stdout="", stderr="error")
         with unittest.mock.patch("subprocess.run", return_value=mock_result):
@@ -167,7 +167,7 @@ class TestGetUpstreamHead:
 
     def test_returns_none_on_empty_output(self) -> None:
         """_get_upstream_head returns None when git ls-remote returns no output."""
-        from terok_sandbox.git_gate import _get_upstream_head
+        from terok_sandbox.gate.mirror import _get_upstream_head
 
         mock_result = unittest.mock.Mock(returncode=0, stdout="")
         with unittest.mock.patch("subprocess.run", return_value=mock_result):
@@ -176,7 +176,7 @@ class TestGetUpstreamHead:
 
     def test_returns_dict_on_success(self) -> None:
         """_get_upstream_head returns a dict with commit_hash on success."""
-        from terok_sandbox.git_gate import _get_upstream_head
+        from terok_sandbox.gate.mirror import _get_upstream_head
 
         mock_result = unittest.mock.Mock(
             returncode=0,
@@ -205,7 +205,7 @@ class TestGetGateBranchHead:
     )
     def test_returns_none_on_exception(self, exception: Exception) -> None:
         """_get_gate_branch_head returns None when subprocess.run raises."""
-        from terok_sandbox.git_gate import _get_gate_branch_head
+        from terok_sandbox.gate.mirror import _get_gate_branch_head
 
         mock_path = unittest.mock.Mock()
         mock_path.exists.return_value = True
@@ -215,14 +215,14 @@ class TestGetGateBranchHead:
 
     def test_returns_none_when_gate_dir_missing(self) -> None:
         """_get_gate_branch_head returns None when gate_dir does not exist."""
-        from terok_sandbox.git_gate import _get_gate_branch_head
+        from terok_sandbox.gate.mirror import _get_gate_branch_head
 
         result = _get_gate_branch_head(MOCK_GATE_DIR, "main", {})
         assert result is None
 
     def test_returns_hash_on_success(self, tmp_path: Path) -> None:
         """_get_gate_branch_head returns the commit hash on success."""
-        from terok_sandbox.git_gate import _get_gate_branch_head
+        from terok_sandbox.gate.mirror import _get_gate_branch_head
 
         mock_result = unittest.mock.Mock(returncode=0, stdout="abc123\n")
         with unittest.mock.patch("subprocess.run", return_value=mock_result):
@@ -245,7 +245,7 @@ class TestCountCommitsRange:
     )
     def test_returns_none_on_exception(self, exception: Exception) -> None:
         """_count_commits_range returns None when subprocess.run raises."""
-        from terok_sandbox.git_gate import _count_commits_range
+        from terok_sandbox.gate.mirror import _count_commits_range
 
         with unittest.mock.patch("subprocess.run", side_effect=exception):
             result = _count_commits_range(MOCK_GATE_DIR, "abc", "def", {})
@@ -253,7 +253,7 @@ class TestCountCommitsRange:
 
     def test_returns_none_on_nonzero_exit(self) -> None:
         """_count_commits_range returns None when git rev-list exits non-zero."""
-        from terok_sandbox.git_gate import _count_commits_range
+        from terok_sandbox.gate.mirror import _count_commits_range
 
         mock_result = unittest.mock.Mock(returncode=128, stdout="")
         with unittest.mock.patch("subprocess.run", return_value=mock_result):
@@ -262,7 +262,7 @@ class TestCountCommitsRange:
 
     def test_returns_count_on_success(self) -> None:
         """_count_commits_range returns an integer count on success."""
-        from terok_sandbox.git_gate import _count_commits_range
+        from terok_sandbox.gate.mirror import _count_commits_range
 
         mock_result = unittest.mock.Mock(returncode=0, stdout="7\n")
         with unittest.mock.patch("subprocess.run", return_value=mock_result):
@@ -306,7 +306,7 @@ class TestGateDirRemovalWarning:
 
     def test_rmtree_failure_logs_warning(self, tmp_path: Path) -> None:
         """Failed gate dir removal logs a warning and continues."""
-        from terok_sandbox.git_gate import GitGate
+        from terok_sandbox.gate.mirror import GitGate
 
         gate_dir = tmp_path / "gate" / "myproject.git"
         gate_dir.mkdir(parents=True)
@@ -318,8 +318,8 @@ class TestGateDirRemovalWarning:
 
         with (
             unittest.mock.patch("shutil.rmtree", side_effect=PermissionError("nope")),
-            unittest.mock.patch("terok_sandbox.git_gate._clone_gate_mirror"),
-            unittest.mock.patch("terok_sandbox.git_gate.logger") as mock_logger,
+            unittest.mock.patch("terok_sandbox.gate.mirror._clone_gate_mirror"),
+            unittest.mock.patch("terok_sandbox.gate.mirror.logger") as mock_logger,
         ):
             try:
                 gate.sync(force_reinit=True)
@@ -364,16 +364,14 @@ class TestCredentialProxyStatusDbFailure:
     def test_db_exception_logs_warning(self, tmp_path: Path) -> None:
         """Corrupted DB triggers log_warning and returns empty credentials."""
         from terok_sandbox import SandboxConfig
-        from terok_sandbox.credential_proxy_lifecycle import get_proxy_status
+        from terok_sandbox.credentials.lifecycle import get_proxy_status
 
         cfg = SandboxConfig(state_dir=tmp_path)
         # Create a corrupt DB file
         cfg.proxy_db_path.parent.mkdir(parents=True, exist_ok=True)
         cfg.proxy_db_path.write_text("not a sqlite db")
 
-        with unittest.mock.patch(
-            "terok_sandbox.credential_proxy_lifecycle.log_warning"
-        ) as mock_warn:
+        with unittest.mock.patch("terok_sandbox.credentials.lifecycle.log_warning") as mock_warn:
             get_proxy_status(cfg)
         mock_warn.assert_called_once()
         assert "credential db" in mock_warn.call_args[0][0].lower()

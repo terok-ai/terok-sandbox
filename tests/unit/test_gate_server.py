@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from terok_sandbox.gate_server import (
+from terok_sandbox.gate.lifecycle import (
     _UNIT_VERSION,
     GateServerStatus,
     _base_path_diverged,
@@ -71,7 +71,7 @@ def patched_unit_dir(files: dict[str, str] | None = None) -> Iterator[Path]:
         for name, content in (files or {}).items():
             (unit_dir / name).write_text(content)
         with unittest.mock.patch(
-            "terok_sandbox.gate_server._systemd_unit_dir",
+            "terok_sandbox.gate.lifecycle._systemd_unit_dir",
             return_value=unit_dir,
         ):
             yield unit_dir
@@ -82,12 +82,12 @@ def patched_install_env(unit_dir: Path) -> Iterator[None]:
     """Patch the standard paths used by install/uninstall/start tests."""
     with (
         unittest.mock.patch(
-            "terok_sandbox.gate_server._systemd_unit_dir",
+            "terok_sandbox.gate.lifecycle._systemd_unit_dir",
             return_value=unit_dir,
         ),
-        unittest.mock.patch("terok_sandbox.gate_server._get_port", return_value=GATE_PORT),
+        unittest.mock.patch("terok_sandbox.gate.lifecycle._get_port", return_value=GATE_PORT),
         unittest.mock.patch(
-            "terok_sandbox.gate_server._get_gate_base_path",
+            "terok_sandbox.gate.lifecycle._get_gate_base_path",
             return_value=GATE_BASE_PATH,
         ),
         unittest.mock.patch(
@@ -104,11 +104,11 @@ def patched_daemon_paths(base: Path) -> Iterator[Path]:
     pid_file = base / "gate-server.pid"
     with (
         unittest.mock.patch(
-            "terok_sandbox.gate_server._get_gate_base_path",
+            "terok_sandbox.gate.lifecycle._get_gate_base_path",
             return_value=base / "gate",
         ),
         unittest.mock.patch(
-            "terok_sandbox.gate_server._pid_file",
+            "terok_sandbox.gate.lifecycle._pid_file",
             return_value=pid_file,
         ),
         unittest.mock.patch(
@@ -180,7 +180,7 @@ class TestBasePathDiverged:
         files = unit_file_contents(base_path=GATE_BASE_PATH)
         with patched_unit_dir(files):
             with unittest.mock.patch(
-                "terok_sandbox.gate_server._get_gate_base_path",
+                "terok_sandbox.gate.lifecycle._get_gate_base_path",
                 return_value=GATE_BASE_PATH,
             ):
                 assert _base_path_diverged() is None
@@ -189,7 +189,7 @@ class TestBasePathDiverged:
         files = unit_file_contents(base_path=Path("/old/gate"))
         with patched_unit_dir(files):
             with unittest.mock.patch(
-                "terok_sandbox.gate_server._get_gate_base_path",
+                "terok_sandbox.gate.lifecycle._get_gate_base_path",
                 return_value=Path("/new/gate"),
             ):
                 warning = _base_path_diverged()
@@ -230,7 +230,7 @@ class TestSocketInstalled:
 
     def test_socket_not_installed(self) -> None:
         with unittest.mock.patch(
-            "terok_sandbox.gate_server._systemd_unit_dir",
+            "terok_sandbox.gate.lifecycle._systemd_unit_dir",
             return_value=MISSING_PATH,
         ):
             assert not is_socket_installed()
@@ -342,7 +342,7 @@ class TestDaemon:
 
     def test_stop_daemon_no_pidfile(self) -> None:
         with unittest.mock.patch(
-            "terok_sandbox.gate_server._pid_file",
+            "terok_sandbox.gate.lifecycle._pid_file",
             return_value=MISSING_PATH / "pid",
         ):
             stop_daemon()
@@ -358,11 +358,11 @@ class TestDaemon:
             pid_file = write_pid_file(Path(td))
             with (
                 unittest.mock.patch(
-                    "terok_sandbox.gate_server._pid_file",
+                    "terok_sandbox.gate.lifecycle._pid_file",
                     return_value=pid_file,
                 ),
                 unittest.mock.patch(
-                    "terok_sandbox.gate_server._is_managed_server",
+                    "terok_sandbox.gate.lifecycle._is_managed_server",
                     return_value=managed,
                 ),
                 unittest.mock.patch("os.kill") as mock_kill,
@@ -379,7 +379,7 @@ class TestIsDaemonRunning:
 
     def test_no_pidfile(self) -> None:
         with unittest.mock.patch(
-            "terok_sandbox.gate_server._pid_file",
+            "terok_sandbox.gate.lifecycle._pid_file",
             return_value=MISSING_PATH / "pid",
         ):
             assert not is_daemon_running()
@@ -404,11 +404,11 @@ class TestIsDaemonRunning:
             pid_file = write_pid_file(Path(td), pid)
             patches = [
                 unittest.mock.patch(
-                    "terok_sandbox.gate_server._pid_file",
+                    "terok_sandbox.gate.lifecycle._pid_file",
                     return_value=pid_file,
                 ),
                 unittest.mock.patch(
-                    "terok_sandbox.gate_server._is_managed_server",
+                    "terok_sandbox.gate.lifecycle._is_managed_server",
                     return_value=managed,
                 ),
                 unittest.mock.patch("os.kill", side_effect=kill_side_effect),
@@ -436,14 +436,14 @@ class TestIsManagedServer:
             fake_cmdline.write_bytes(cmdline)
             patches = [
                 unittest.mock.patch(
-                    "terok_sandbox.gate_server.Path",
+                    "terok_sandbox.gate.lifecycle.Path",
                     return_value=fake_cmdline,
                 ),
             ]
             if pid_file is not None:
                 patches.append(
                     unittest.mock.patch(
-                        "terok_sandbox.gate_server._pid_file",
+                        "terok_sandbox.gate.lifecycle._pid_file",
                         return_value=pid_file,
                     )
                 )
@@ -506,18 +506,18 @@ class TestGetServerStatus:
     ) -> None:
         with (
             unittest.mock.patch(
-                "terok_sandbox.gate_server.is_socket_installed",
+                "terok_sandbox.gate.lifecycle.is_socket_installed",
                 return_value=socket_installed,
             ),
             unittest.mock.patch(
-                "terok_sandbox.gate_server.is_socket_active",
+                "terok_sandbox.gate.lifecycle.is_socket_active",
                 return_value=socket_active,
             ),
             unittest.mock.patch(
-                "terok_sandbox.gate_server.is_daemon_running",
+                "terok_sandbox.gate.lifecycle.is_daemon_running",
                 return_value=daemon_running,
             ),
-            unittest.mock.patch("terok_sandbox.gate_server._get_port", return_value=GATE_PORT),
+            unittest.mock.patch("terok_sandbox.gate.lifecycle._get_port", return_value=GATE_PORT),
         ):
             assert get_server_status() == expected
 
@@ -553,15 +553,15 @@ class TestEnsureServerReachable:
     ) -> None:
         with (
             unittest.mock.patch(
-                "terok_sandbox.gate_server.get_server_status",
+                "terok_sandbox.gate.lifecycle.get_server_status",
                 return_value=status,
             ),
             unittest.mock.patch(
-                "terok_sandbox.gate_server.is_systemd_available",
+                "terok_sandbox.gate.lifecycle.is_systemd_available",
                 return_value=systemd_available,
             ),
             unittest.mock.patch(
-                "terok_sandbox.gate_server._installed_unit_version",
+                "terok_sandbox.gate.lifecycle._installed_unit_version",
                 return_value=unit_version,
             ),
         ):
@@ -577,7 +577,7 @@ class TestInstalledUnitVersion:
 
     def test_no_file(self) -> None:
         with unittest.mock.patch(
-            "terok_sandbox.gate_server._systemd_unit_dir",
+            "terok_sandbox.gate.lifecycle._systemd_unit_dir",
             return_value=MISSING_PATH,
         ):
             assert _installed_unit_version() is None
@@ -616,11 +616,11 @@ class TestCheckUnitsOutdated:
     ) -> None:
         with (
             unittest.mock.patch(
-                "terok_sandbox.gate_server.is_socket_installed",
+                "terok_sandbox.gate.lifecycle.is_socket_installed",
                 return_value=socket_installed,
             ),
             unittest.mock.patch(
-                "terok_sandbox.gate_server._installed_unit_version",
+                "terok_sandbox.gate.lifecycle._installed_unit_version",
                 return_value=version,
             ),
         ):
@@ -635,15 +635,15 @@ class TestCheckUnitsOutdated:
         """Current units + divergent base path → warning string."""
         with (
             unittest.mock.patch(
-                "terok_sandbox.gate_server.is_socket_installed",
+                "terok_sandbox.gate.lifecycle.is_socket_installed",
                 return_value=True,
             ),
             unittest.mock.patch(
-                "terok_sandbox.gate_server._installed_unit_version",
+                "terok_sandbox.gate.lifecycle._installed_unit_version",
                 return_value=_UNIT_VERSION,
             ),
             unittest.mock.patch(
-                "terok_sandbox.gate_server._base_path_diverged",
+                "terok_sandbox.gate.lifecycle._base_path_diverged",
                 return_value="paths diverge",
             ),
         ):
@@ -682,15 +682,15 @@ class TestEnsureReachableBasePath:
     def test_base_path_divergence_blocks(self) -> None:
         with (
             unittest.mock.patch(
-                "terok_sandbox.gate_server.get_server_status",
+                "terok_sandbox.gate.lifecycle.get_server_status",
                 return_value=make_status("systemd", running=True),
             ),
             unittest.mock.patch(
-                "terok_sandbox.gate_server._installed_unit_version",
+                "terok_sandbox.gate.lifecycle._installed_unit_version",
                 return_value=_UNIT_VERSION,
             ),
             unittest.mock.patch(
-                "terok_sandbox.gate_server._base_path_diverged",
+                "terok_sandbox.gate.lifecycle._base_path_diverged",
                 return_value="Installed: /old\n  Expected: /new",
             ),
         ):
@@ -702,22 +702,22 @@ class TestPublicApi:
     """Tests for the thin public API wrappers."""
 
     def test_get_gate_base_path_forwards_cfg(self) -> None:
-        from terok_sandbox.gate_server import get_gate_base_path
+        from terok_sandbox.gate.lifecycle import get_gate_base_path
 
         cfg = unittest.mock.sentinel.cfg
         with unittest.mock.patch(
-            "terok_sandbox.gate_server._get_gate_base_path",
+            "terok_sandbox.gate.lifecycle._get_gate_base_path",
             return_value=GATE_BASE_PATH,
         ) as mock:
             assert get_gate_base_path(cfg) == GATE_BASE_PATH
         mock.assert_called_once_with(cfg)
 
     def test_get_gate_server_port_forwards_cfg(self) -> None:
-        from terok_sandbox.gate_server import get_gate_server_port
+        from terok_sandbox.gate.lifecycle import get_gate_server_port
 
         cfg = unittest.mock.sentinel.cfg
         with unittest.mock.patch(
-            "terok_sandbox.gate_server._get_port",
+            "terok_sandbox.gate.lifecycle._get_port",
             return_value=GATE_PORT,
         ) as mock:
             assert get_gate_server_port(cfg) == GATE_PORT

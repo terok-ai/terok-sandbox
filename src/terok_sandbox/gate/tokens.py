@@ -26,7 +26,7 @@ import tempfile
 from collections.abc import Iterator
 from pathlib import Path
 
-from .config import SandboxConfig
+from ..config import SandboxConfig
 
 
 def token_file_path(cfg: SandboxConfig | None = None) -> Path:

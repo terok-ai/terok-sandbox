@@ -34,7 +34,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import SandboxConfig
+from ..config import SandboxConfig
 
 # ---------- Constants ----------
 
@@ -223,8 +223,8 @@ def install_systemd_units(cfg: SandboxConfig | None = None) -> None:
 
     import terok_sandbox.gate
 
-    from ._util import render_template
-    from .gate_tokens import token_file_path
+    from .._util import render_template
+    from .tokens import token_file_path
 
     gate_bin = shutil.which("terok-gate")
     if not gate_bin:
@@ -286,7 +286,7 @@ def start_daemon(port: int | None = None, cfg: SandboxConfig | None = None) -> N
     If ``TEROK_GATE_ADMIN_TOKEN`` is set in the environment, it is
     forwarded to the daemon for host-level access to all repos.
     """
-    from .gate_tokens import token_file_path
+    from .tokens import token_file_path
 
     effective_port = port or _get_port(cfg)
     gate_base = _get_gate_base_path(cfg)

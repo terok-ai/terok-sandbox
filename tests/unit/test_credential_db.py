@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from terok_sandbox.credential_db import CredentialDB
+from terok_sandbox.credentials.db import CredentialDB
 
 
 @pytest.fixture()

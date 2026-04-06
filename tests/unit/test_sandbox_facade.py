@@ -81,16 +81,18 @@ class TestSandbox:
         assert url.startswith("http://")
 
     def test_ensure_gate_delegates(self) -> None:
-        with patch("terok_sandbox.gate_server.ensure_server_reachable") as mock:
+        with patch("terok_sandbox.gate.lifecycle.ensure_server_reachable") as mock:
             s = Sandbox()
             s.ensure_gate()
             mock.assert_called_once_with(s.config)
 
     def test_gate_status_delegates(self) -> None:
-        from terok_sandbox.gate_server import GateServerStatus
+        from terok_sandbox.gate.lifecycle import GateServerStatus
 
         mock_status = GateServerStatus(mode="none", running=False, port=9418)
-        with patch("terok_sandbox.gate_server.get_server_status", return_value=mock_status) as mock:
+        with patch(
+            "terok_sandbox.gate.lifecycle.get_server_status", return_value=mock_status
+        ) as mock:
             s = Sandbox()
             result = s.gate_status()
             assert result == mock_status

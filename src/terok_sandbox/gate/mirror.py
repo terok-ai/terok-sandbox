@@ -33,7 +33,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TypedDict
 
-from .ssh import effective_ssh_key_name
+from .._util import effective_ssh_key_name
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +100,7 @@ def _git_env_with_ssh(
     Falls back to the unmodified env when no key file is found (e.g. HTTPS
     upstreams that need no SSH at all).
     """
-    from .config import SandboxConfig
+    from ..config import SandboxConfig
 
     env = os.environ.copy()
     ssh_dir = ssh_host_dir or (SandboxConfig().ssh_keys_dir / project_id)

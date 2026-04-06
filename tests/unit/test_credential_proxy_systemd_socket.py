@@ -9,7 +9,7 @@ import os
 import socket
 from unittest.mock import patch
 
-from terok_sandbox.credential_proxy.server import _systemd_sockets
+from terok_sandbox.credentials.proxy.server import _systemd_sockets
 
 
 class TestSystemdSockets:

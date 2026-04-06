@@ -154,8 +154,8 @@ class TestGateHandlerCfgPassthrough:
         from terok_sandbox.commands import _handle_gate_start
 
         with (
-            patch("terok_sandbox.gate_server.is_systemd_available", return_value=True),
-            patch("terok_sandbox.gate_server.install_systemd_units") as mock_install,
+            patch("terok_sandbox.gate.lifecycle.is_systemd_available", return_value=True),
+            patch("terok_sandbox.gate.lifecycle.install_systemd_units") as mock_install,
         ):
             _handle_gate_start(cfg=sentinel.CFG)
         mock_install.assert_called_once_with(cfg=sentinel.CFG)
@@ -167,8 +167,8 @@ class TestGateHandlerCfgPassthrough:
         from terok_sandbox.commands import _handle_gate_start
 
         with (
-            patch("terok_sandbox.gate_server.is_systemd_available", return_value=False),
-            patch("terok_sandbox.gate_server.start_daemon") as mock_start,
+            patch("terok_sandbox.gate.lifecycle.is_systemd_available", return_value=False),
+            patch("terok_sandbox.gate.lifecycle.start_daemon") as mock_start,
         ):
             _handle_gate_start(port=1234, cfg=sentinel.CFG)
         mock_start.assert_called_once_with(port=1234, cfg=sentinel.CFG)
@@ -178,12 +178,14 @@ class TestGateHandlerCfgPassthrough:
         from unittest.mock import sentinel
 
         from terok_sandbox.commands import _handle_gate_stop
-        from terok_sandbox.gate_server import GateServerStatus
+        from terok_sandbox.gate.lifecycle import GateServerStatus
 
         mock_status = GateServerStatus(mode="systemd", running=True, port=9418)
         with (
-            patch("terok_sandbox.gate_server.get_server_status", return_value=mock_status) as m_st,
-            patch("terok_sandbox.gate_server.uninstall_systemd_units") as m_uninstall,
+            patch(
+                "terok_sandbox.gate.lifecycle.get_server_status", return_value=mock_status
+            ) as m_st,
+            patch("terok_sandbox.gate.lifecycle.uninstall_systemd_units") as m_uninstall,
         ):
             _handle_gate_stop(cfg=sentinel.CFG)
         m_st.assert_called_once_with(cfg=sentinel.CFG)
@@ -194,12 +196,14 @@ class TestGateHandlerCfgPassthrough:
         from unittest.mock import sentinel
 
         from terok_sandbox.commands import _handle_gate_stop
-        from terok_sandbox.gate_server import GateServerStatus
+        from terok_sandbox.gate.lifecycle import GateServerStatus
 
         mock_status = GateServerStatus(mode="daemon", running=True, port=9418)
         with (
-            patch("terok_sandbox.gate_server.get_server_status", return_value=mock_status) as m_st,
-            patch("terok_sandbox.gate_server.stop_daemon") as m_stop,
+            patch(
+                "terok_sandbox.gate.lifecycle.get_server_status", return_value=mock_status
+            ) as m_st,
+            patch("terok_sandbox.gate.lifecycle.stop_daemon") as m_stop,
         ):
             _handle_gate_stop(cfg=sentinel.CFG)
         m_st.assert_called_once_with(cfg=sentinel.CFG)
@@ -210,16 +214,18 @@ class TestGateHandlerCfgPassthrough:
         from unittest.mock import sentinel
 
         from terok_sandbox.commands import _handle_gate_status
-        from terok_sandbox.gate_server import GateServerStatus
+        from terok_sandbox.gate.lifecycle import GateServerStatus
 
         mock_status = GateServerStatus(mode="none", running=False, port=9418)
         with (
             patch(
-                "terok_sandbox.gate_server.get_server_status", return_value=mock_status
+                "terok_sandbox.gate.lifecycle.get_server_status", return_value=mock_status
             ) as m_status,
-            patch("terok_sandbox.gate_server.get_gate_base_path", return_value="/t/gate") as m_bp,
             patch(
-                "terok_sandbox.gate_server.check_units_outdated", return_value=None
+                "terok_sandbox.gate.lifecycle.get_gate_base_path", return_value="/t/gate"
+            ) as m_bp,
+            patch(
+                "terok_sandbox.gate.lifecycle.check_units_outdated", return_value=None
             ) as m_outdated,
         ):
             _handle_gate_status(cfg=sentinel.CFG)
@@ -230,15 +236,15 @@ class TestGateHandlerCfgPassthrough:
     def test_gate_status_prints_hint_on_outdated(self) -> None:
         """_handle_gate_status appends CLI-specific remediation hint to stderr."""
         from terok_sandbox.commands import _handle_gate_status
-        from terok_sandbox.gate_server import GateServerStatus
+        from terok_sandbox.gate.lifecycle import GateServerStatus
 
         mock_status = GateServerStatus(mode="systemd", running=True, port=9418)
         stderr = StringIO()
         with (
-            patch("terok_sandbox.gate_server.get_server_status", return_value=mock_status),
-            patch("terok_sandbox.gate_server.get_gate_base_path", return_value="/t/gate"),
+            patch("terok_sandbox.gate.lifecycle.get_server_status", return_value=mock_status),
+            patch("terok_sandbox.gate.lifecycle.get_gate_base_path", return_value="/t/gate"),
             patch(
-                "terok_sandbox.gate_server.check_units_outdated",
+                "terok_sandbox.gate.lifecycle.check_units_outdated",
                 return_value="Systemd units are outdated (installed v1, expected v4).",
             ),
             patch("sys.stderr", stderr),
@@ -253,13 +259,13 @@ class TestGateCLI:
     """Verify gate subcommand dispatch."""
 
     def test_gate_status_runs(self) -> None:
-        from terok_sandbox.gate_server import GateServerStatus
+        from terok_sandbox.gate.lifecycle import GateServerStatus
 
         mock_status = GateServerStatus(mode="none", running=False, port=9418)
         with (
-            patch("terok_sandbox.gate_server.get_server_status", return_value=mock_status),
-            patch("terok_sandbox.gate_server.get_gate_base_path", return_value="/tmp/gate"),
-            patch("terok_sandbox.gate_server.check_units_outdated", return_value=None),
+            patch("terok_sandbox.gate.lifecycle.get_server_status", return_value=mock_status),
+            patch("terok_sandbox.gate.lifecycle.get_gate_base_path", return_value="/tmp/gate"),
+            patch("terok_sandbox.gate.lifecycle.check_units_outdated", return_value=None),
         ):
             out, _, rc = _run_cli("gate", "status")
         assert rc == 0

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from terok_sandbox.git_gate import _git_env_with_ssh
+from terok_sandbox.gate.mirror import _git_env_with_ssh
 
 
 class TestGitEnvWithSsh:

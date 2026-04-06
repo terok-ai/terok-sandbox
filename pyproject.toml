@@ -55,7 +55,7 @@ mkdocs-terok = {url = "https://github.com/terok-ai/mkdocs-terok/releases/downloa
 [tool.poetry.scripts]
 terok-sandbox = "terok_sandbox.cli:main"
 terok-gate = "terok_sandbox.gate.server:main"
-terok-credential-proxy = "terok_sandbox.credential_proxy.server:main"
+terok-credential-proxy = "terok_sandbox.credentials.proxy.server:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests/unit", "tests/integration"]

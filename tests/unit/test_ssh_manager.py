@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from terok_sandbox import SandboxConfig
-from terok_sandbox.ssh import SSHManager, effective_ssh_key_name
+from terok_sandbox.credentials.ssh import SSHManager, effective_ssh_key_name
 
 
 class TestSSHManagerConstructor:

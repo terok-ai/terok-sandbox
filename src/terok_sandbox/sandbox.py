@@ -21,8 +21,8 @@ from .config import SandboxConfig
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from .gate_server import GateServerStatus
-    from .ssh import SSHManager
+    from .credentials.ssh import SSHManager
+    from .gate.lifecycle import GateServerStatus
 
 # ---------------------------------------------------------------------------
 # Container run specification
@@ -113,13 +113,13 @@ class Sandbox:
 
     def ensure_gate(self) -> None:
         """Verify the gate server is running; raise ``SystemExit`` if not."""
-        from .gate_server import ensure_server_reachable
+        from .gate.lifecycle import ensure_server_reachable
 
         ensure_server_reachable(self._cfg)
 
     def create_token(self, project_id: str, task_id: str) -> str:
         """Create a task-scoped gate access token."""
-        from .gate_tokens import create_token
+        from .gate.tokens import create_token
 
         return create_token(task_id, project_id, self._cfg)
 
@@ -132,7 +132,7 @@ class Sandbox:
 
     def gate_status(self) -> GateServerStatus:
         """Return the current gate server status."""
-        from .gate_server import get_server_status
+        from .gate.lifecycle import get_server_status
 
         return get_server_status(self._cfg)
 
@@ -257,6 +257,6 @@ class Sandbox:
 
     def init_ssh(self, project_id: str) -> SSHManager:
         """Create an SSH manager for *project_id*."""
-        from .ssh import SSHManager
+        from .credentials.ssh import SSHManager
 
         return SSHManager(project_id=project_id)

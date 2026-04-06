@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from terok_sandbox.config import SandboxConfig
-from terok_sandbox.credential_proxy_lifecycle import (
+from terok_sandbox.credentials.lifecycle import (
     CredentialProxyStatus,
     _is_managed_proxy,
     _pid_file,
@@ -131,7 +131,7 @@ class TestStartDaemon:
 
         cmd = mock_popen.call_args[0][0]
         assert cmd[0] == sys.executable
-        assert cmd[1:3] == ["-m", "terok_sandbox.credential_proxy"]
+        assert cmd[1:3] == ["-m", "terok_sandbox.credentials.proxy"]
         assert any("--socket-path=" in a for a in cmd)
         assert any("--pid-file=" in a for a in cmd)
 
@@ -187,7 +187,7 @@ class TestStopDaemon:
         pidfile.write_text("42")
 
         with (
-            patch("terok_sandbox.credential_proxy_lifecycle._is_managed_proxy", return_value=True),
+            patch("terok_sandbox.credentials.lifecycle._is_managed_proxy", return_value=True),
             patch("os.kill") as mock_kill,
         ):
             stop_daemon(cfg)
@@ -203,7 +203,7 @@ class TestStopDaemon:
         pidfile.write_text("99999999")
 
         with (
-            patch("terok_sandbox.credential_proxy_lifecycle._is_managed_proxy", return_value=True),
+            patch("terok_sandbox.credentials.lifecycle._is_managed_proxy", return_value=True),
             patch("os.kill", side_effect=ProcessLookupError),
         ):
             stop_daemon(cfg)
@@ -226,7 +226,7 @@ class TestIsDaemonRunning:
         pidfile.write_text("42")
 
         with (
-            patch("terok_sandbox.credential_proxy_lifecycle._is_managed_proxy", return_value=True),
+            patch("terok_sandbox.credentials.lifecycle._is_managed_proxy", return_value=True),
             patch("os.kill"),
         ):  # signal 0 succeeds
             assert is_daemon_running(cfg) is True
@@ -238,9 +238,7 @@ class TestIsDaemonRunning:
         pidfile.parent.mkdir(parents=True, exist_ok=True)
         pidfile.write_text("42")
 
-        with patch(
-            "terok_sandbox.credential_proxy_lifecycle._is_managed_proxy", return_value=False
-        ):
+        with patch("terok_sandbox.credentials.lifecycle._is_managed_proxy", return_value=False):
             assert is_daemon_running(cfg) is False
 
     def test_stale_pid(self, tmp_path: Path) -> None:
@@ -251,13 +249,13 @@ class TestIsDaemonRunning:
         pidfile.write_text("99999999")
 
         with (
-            patch("terok_sandbox.credential_proxy_lifecycle._is_managed_proxy", return_value=True),
+            patch("terok_sandbox.credentials.lifecycle._is_managed_proxy", return_value=True),
             patch("os.kill", side_effect=ProcessLookupError),
         ):
             assert is_daemon_running(cfg) is False
 
 
-_LIFECYCLE = "terok_sandbox.credential_proxy_lifecycle"
+_LIFECYCLE = "terok_sandbox.credentials.lifecycle"
 
 
 def _no_systemd():
@@ -319,7 +317,7 @@ class TestGetProxyStatus:
 
     def test_lists_stored_credentials(self, tmp_path: Path) -> None:
         """credentials_stored lists providers from the credential DB."""
-        from terok_sandbox.credential_db import CredentialDB
+        from terok_sandbox.credentials.db import CredentialDB
 
         cfg = _make_cfg(tmp_path)
         db = CredentialDB(cfg.proxy_db_path)
@@ -674,7 +672,7 @@ class TestInstallSystemdUnits:
         assert (unit_dir / "terok-credential-proxy.service").is_file()
         # Service template should reference python -m, not a standalone binary
         svc = (unit_dir / "terok-credential-proxy.service").read_text()
-        assert "-m terok_sandbox.credential_proxy" in svc
+        assert "-m terok_sandbox.credentials.proxy" in svc
         # Verify systemctl was called
         calls = [c.args[0] for c in mock_run.call_args_list]
         assert ["systemctl", "--user", "daemon-reload"] in calls

@@ -20,8 +20,8 @@ from cryptography.hazmat.primitives.serialization import (
     PublicFormat,
 )
 
-from terok_sandbox.credential_db import CredentialDB
-from terok_sandbox.credential_proxy.ssh_agent import (
+from terok_sandbox.credentials.db import CredentialDB
+from terok_sandbox.credentials.proxy.ssh_agent import (
     SSH_AGENT_FAILURE,
     SSH_AGENT_IDENTITIES_ANSWER,
     SSH_AGENT_RSA_SHA2_256,

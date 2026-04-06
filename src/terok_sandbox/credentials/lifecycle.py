@@ -22,8 +22,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from ._util._logging import log_warning
-from .config import SandboxConfig
+from .._util._logging import log_warning
+from ..config import SandboxConfig
 
 
 def _cfg(cfg: SandboxConfig | None = None) -> SandboxConfig:
@@ -159,7 +159,7 @@ def is_service_active() -> bool:
 def _proxy_exec_prefix() -> list[str]:
     """Return the command prefix for launching the credential proxy server.
 
-    Uses ``sys.executable -m terok_sandbox.credential_proxy`` so the
+    Uses ``sys.executable -m terok_sandbox.credentials.proxy`` so the
     server runs under the same Python that owns the installed package —
     works in pipx, venvs, and bare installs without requiring the
     ``terok-credential-proxy`` console script on ``$PATH``.  That entry
@@ -168,21 +168,21 @@ def _proxy_exec_prefix() -> list[str]:
     """
     import sys as _sys
 
-    return [_sys.executable, "-m", "terok_sandbox.credential_proxy"]
+    return [_sys.executable, "-m", "terok_sandbox.credentials.proxy"]
 
 
 def install_systemd_units(cfg: SandboxConfig | None = None) -> None:
     """Render and install systemd socket+service units, then enable+start the socket."""
-    import terok_sandbox.credential_proxy
+    import terok_sandbox.credentials.proxy
 
-    from ._util import render_template
+    from .._util import render_template
 
     c = _cfg(cfg)
     unit_dir = _systemd_unit_dir()
     unit_dir.mkdir(parents=True, exist_ok=True)
 
     resource_dir = (
-        Path(terok_sandbox.credential_proxy.__file__).resolve().parent / "resources" / "systemd"
+        Path(terok_sandbox.credentials.proxy.__file__).resolve().parent / "resources" / "systemd"
     )
     variables = {
         "SOCKET_PATH": str(c.proxy_socket_path),
@@ -430,7 +430,7 @@ def get_proxy_status(cfg: SandboxConfig | None = None) -> CredentialProxyStatus:
     creds: tuple[str, ...] = ()
     if c.proxy_db_path.is_file():
         try:
-            from .credential_db import CredentialDB
+            from .db import CredentialDB
 
             db = CredentialDB(c.proxy_db_path)
             try:

@@ -20,8 +20,8 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from terok_sandbox.credential_db import CredentialDB
-from terok_sandbox.credential_proxy.server import _build_app
+from terok_sandbox.credentials.db import CredentialDB
+from terok_sandbox.credentials.proxy.server import _build_app
 
 pytestmark = pytest.mark.needs_credential_proxy
 
