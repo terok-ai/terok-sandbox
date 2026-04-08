@@ -2581,13 +2581,13 @@ tomli-w = ">=1.0,<2.0"
 
 [[package]]
 name = "terok-shield"
-version = "0.6.11"
+version = "0.6.12"
 description = "nftables-based egress firewalling for Podman containers"
 optional = false
 python-versions = ">=3.12,<4.0"
 groups = ["main"]
 files = [
-    {file = "terok_shield-0.6.11-py3-none-any.whl", hash = "sha256:4fb045a7405ab7a969e1fcb6b70de0782733149f6170f585fc5b9b3af95ca1c9"},
+    {file = "terok_shield-0.6.12-py3-none-any.whl", hash = "sha256:449d147535cdd5603aa63520eaf3377d643e6c1f656444e71633d1c82daa2a76"},
 ]
 
 [package.dependencies]
@@ -2596,7 +2596,7 @@ PyYAML = ">=6.0"
 
 [package.source]
 type = "url"
-url = "https://github.com/terok-ai/terok-shield/releases/download/v0.6.11/terok_shield-0.6.11-py3-none-any.whl"
+url = "https://github.com/terok-ai/terok-shield/releases/download/v0.6.12/terok_shield-0.6.12-py3-none-any.whl"
 
 [[package]]
 name = "tomli"
@@ -2978,4 +2978,4 @@ propcache = ">=0.2.1"
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<4.0"
-content-hash = "ff0758ea7ba74682e7e7c7143bb21ebec09f743968cc57af8dab9a640752366e"
+content-hash = "70f02099bc2edbc9f4a49e9a4677e119e6827928c649190dbd23adff3fed904e"
