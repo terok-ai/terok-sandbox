@@ -1,6 +1,8 @@
 # Default SSH config template used by terok-sandbox for container SSH setup.
 # Supported tokens:
 #   {{KEY_NAME}}       → key filename (without .pub), expected to live in ~/.ssh
+#   {{IDENTITY_FILE}}  → absolute path to the private key on the host
+#   {{SCOPE}}          → credential scope name
 
 Host *
   IdentitiesOnly yes

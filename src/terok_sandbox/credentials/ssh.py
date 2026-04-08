@@ -173,7 +173,7 @@ class SSHManager:
         variables = {
             "KEY_NAME": key_name,
             "IDENTITY_FILE": str(priv_path),
-            "PROJECT_ID": scope,
+            "SCOPE": scope,
         }
         user_config = _try_render_user_template(config_template, variables)
         config_text = (
