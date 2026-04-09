@@ -658,9 +658,7 @@ def _remove_keys_from_json(keys_json_path: Path, removals: list[KeyRow]) -> None
             if not isinstance(entries, list):
                 continue
             mapping[scope] = [
-                e
-                for e in entries
-                if isinstance(e, dict) and e.get("private_key") not in remove_set
+                e for e in entries if isinstance(e, dict) and e.get("private_key") not in remove_set
             ]
             if not mapping[scope]:
                 del mapping[scope]
