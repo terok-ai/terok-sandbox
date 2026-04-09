@@ -27,11 +27,11 @@ from tests.constants import MOCK_BASE
 
 MOCK_CREDENTIALS_DIR = MOCK_BASE / "credentials"
 
-_UMBRELLA_SEP = "terok" + os.sep + "sandbox"
-"""Expected umbrella path segment for sandbox roots (``terok/sandbox``)."""
+_NAMESPACE_SEP = "terok" + os.sep + "sandbox"
+"""Expected namespace path segment for sandbox roots (``terok/sandbox``)."""
 
-_CRED_UMBRELLA_SEP = "terok" + os.sep + "credentials"
-"""Expected umbrella path segment for credentials root (``terok/credentials``)."""
+_CRED_NAMESPACE_SEP = "terok" + os.sep + "credentials"
+"""Expected namespace path segment for credentials root (``terok/credentials``)."""
 
 
 class TestConfigRoot:
@@ -52,7 +52,7 @@ class TestConfigRoot:
         """Default path nests under the terok/ umbrella."""
         with unittest.mock.patch.dict(os.environ, {}, clear=True):
             result = config_root()
-            assert _UMBRELLA_SEP in str(result)
+            assert _NAMESPACE_SEP in str(result)
 
     def test_root_user_fallback(self):
         """When running as root, falls back to /etc/terok/sandbox."""
@@ -81,7 +81,7 @@ class TestStateRoot:
         """Default path nests under the terok/ umbrella."""
         with unittest.mock.patch.dict(os.environ, {}, clear=True):
             result = state_root()
-            assert _UMBRELLA_SEP in str(result)
+            assert _NAMESPACE_SEP in str(result)
 
     def test_root_user_fallback(self):
         """When running as root, falls back to /var/lib/terok/sandbox."""
@@ -110,7 +110,7 @@ class TestRuntimeRoot:
         """Default path nests under the terok/ umbrella."""
         with unittest.mock.patch.dict(os.environ, {}, clear=True):
             result = runtime_root()
-            assert _UMBRELLA_SEP in str(result)
+            assert _NAMESPACE_SEP in str(result)
 
     def test_root_user_fallback(self):
         """When running as root, falls back to /run/terok/sandbox."""
@@ -139,7 +139,7 @@ class TestCredentialsRoot:
         """Default path nests under the terok/ umbrella."""
         with unittest.mock.patch.dict(os.environ, {}, clear=True):
             result = credentials_root()
-            assert _CRED_UMBRELLA_SEP in str(result)
+            assert _CRED_NAMESPACE_SEP in str(result)
 
     def test_env_override_with_tilde(self):
         """TEROK_CREDENTIALS_DIR supports ~ expansion."""
@@ -190,7 +190,7 @@ class TestUmbrellaConfigRoot:
 # Umbrella resolver tests
 # ---------------------------------------------------------------------------
 
-_UMBRELLA_ROOT = "terok"
+_NAMESPACE_ROOT = "terok"
 
 
 @pytest.fixture(autouse=True)
@@ -280,14 +280,14 @@ class TestUmbrellaStateDir:
         """Empty subdir returns the bare terok/ data root."""
         with unittest.mock.patch.dict(os.environ, {}, clear=True):
             result = umbrella_state_dir()
-            assert result.name == _UMBRELLA_ROOT
+            assert result.name == _NAMESPACE_ROOT
 
     def test_subdir_appended(self):
         """Subdir is appended to the umbrella root."""
         with unittest.mock.patch.dict(os.environ, {}, clear=True):
             result = umbrella_state_dir("agent")
             assert result.name == "agent"
-            assert result.parent.name == _UMBRELLA_ROOT
+            assert result.parent.name == _NAMESPACE_ROOT
 
     def test_env_var_override(self):
         """Specific env var takes precedence over platform default."""
@@ -334,14 +334,14 @@ class TestUmbrellaConfigDir:
         """Empty subdir returns the bare terok/ config root."""
         with unittest.mock.patch.dict(os.environ, {}, clear=True):
             result = umbrella_config_dir()
-            assert result.name == _UMBRELLA_ROOT
+            assert result.name == _NAMESPACE_ROOT
 
     def test_subdir_appended(self):
         """Subdir is appended to the config umbrella root."""
         with unittest.mock.patch.dict(os.environ, {}, clear=True):
             result = umbrella_config_dir("agent")
             assert result.name == "agent"
-            assert result.parent.name == _UMBRELLA_ROOT
+            assert result.parent.name == _NAMESPACE_ROOT
 
     def test_env_var_override(self):
         """Specific env var takes precedence over platform default."""
@@ -365,14 +365,14 @@ class TestUmbrellaRuntimeDir:
         """Empty subdir returns the bare terok/ runtime root."""
         with unittest.mock.patch.dict(os.environ, {}, clear=True):
             result = umbrella_runtime_dir()
-            assert result.name == _UMBRELLA_ROOT
+            assert result.name == _NAMESPACE_ROOT
 
     def test_subdir_appended(self):
         """Subdir is appended to the runtime umbrella root."""
         with unittest.mock.patch.dict(os.environ, {}, clear=True):
             result = umbrella_runtime_dir("sandbox")
             assert result.name == "sandbox"
-            assert result.parent.name == _UMBRELLA_ROOT
+            assert result.parent.name == _NAMESPACE_ROOT
 
     def test_env_var_override(self):
         """Specific env var takes precedence."""

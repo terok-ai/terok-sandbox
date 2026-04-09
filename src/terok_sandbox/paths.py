@@ -22,7 +22,7 @@ except ImportError:  # optional dependency
     _user_config_dir = _user_data_dir = None  # type: ignore[assignment]
 
 
-_UMBRELLA = "terok"
+_NAMESPACE = "terok"
 
 _TEROK_ROOT_ENV = "TEROK_ROOT"
 """Env var overriding the umbrella state root for all ecosystem packages."""
@@ -80,10 +80,10 @@ def _config_file_path() -> Path:
     if env:
         return Path(env).expanduser()
     if _is_root():
-        return Path("/etc") / _UMBRELLA / "config.yml"
+        return Path("/etc") / _NAMESPACE / "config.yml"
     if _user_config_dir is not None:
-        return Path(_user_config_dir(_UMBRELLA)) / "config.yml"
-    return Path.home() / ".config" / _UMBRELLA / "config.yml"
+        return Path(_user_config_dir(_NAMESPACE)) / "config.yml"
+    return Path.home() / ".config" / _NAMESPACE / "config.yml"
 
 
 def _umbrella_root() -> Path | None:
@@ -117,11 +117,11 @@ def _safe_subdir(base: Path, subdir: str) -> Path:
 def _platform_state_base() -> Path:
     """Return the platform-default state base (no config override)."""
     if _is_root():
-        return Path("/var/lib") / _UMBRELLA
+        return Path("/var/lib") / _NAMESPACE
     if _user_data_dir is not None:
-        return Path(_user_data_dir(_UMBRELLA))
+        return Path(_user_data_dir(_NAMESPACE))
     xdg = os.getenv("XDG_DATA_HOME")
-    return Path(xdg) / _UMBRELLA if xdg else Path.home() / ".local" / "share" / _UMBRELLA
+    return Path(xdg) / _NAMESPACE if xdg else Path.home() / ".local" / "share" / _NAMESPACE
 
 
 def umbrella_state_dir(subdir: str = "", env_var: str | None = None) -> Path:
@@ -155,11 +155,11 @@ def umbrella_config_dir(subdir: str = "", env_var: str | None = None) -> Path:
             return Path(val).expanduser()
     base: Path
     if _is_root():
-        base = Path("/etc") / _UMBRELLA
+        base = Path("/etc") / _NAMESPACE
     elif _user_config_dir is not None:
-        base = Path(_user_config_dir(_UMBRELLA))
+        base = Path(_user_config_dir(_NAMESPACE))
     else:
-        base = Path.home() / ".config" / _UMBRELLA
+        base = Path.home() / ".config" / _NAMESPACE
     return _safe_subdir(base, subdir)
 
 
@@ -176,17 +176,17 @@ def umbrella_runtime_dir(subdir: str = "", env_var: str | None = None) -> Path:
             return Path(val).expanduser()
     base: Path
     if _is_root():
-        base = Path("/run") / _UMBRELLA
+        base = Path("/run") / _NAMESPACE
     else:
         xdg_runtime = os.getenv("XDG_RUNTIME_DIR")
         if xdg_runtime:
-            base = Path(xdg_runtime) / _UMBRELLA
+            base = Path(xdg_runtime) / _NAMESPACE
         else:
             xdg_state = os.getenv("XDG_STATE_HOME")
             base = (
-                Path(xdg_state) / _UMBRELLA
+                Path(xdg_state) / _NAMESPACE
                 if xdg_state
-                else Path.home() / ".local" / "state" / _UMBRELLA
+                else Path.home() / ".local" / "state" / _NAMESPACE
             )
     return _safe_subdir(base, subdir)
 
