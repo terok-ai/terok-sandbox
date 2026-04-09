@@ -35,6 +35,7 @@ from .commands import (
     SHIELD_COMMANDS,
     SSH_COMMANDS,
     CommandDef,
+    KeyRow,
 )
 from .config import SandboxConfig
 
@@ -205,6 +206,7 @@ __all__ = [
     "uninstall_proxy_systemd",
     # Command registry
     "CommandDef",
+    "KeyRow",
     "DOCTOR_COMMANDS",
     "GATE_COMMANDS",
     "PROXY_COMMANDS",

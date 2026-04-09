@@ -15,12 +15,26 @@ Shield commands are delegated to terok-shield's own registry —
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
+
+from ._util import sanitize_tty
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from pathlib import Path
 
     from .config import SandboxConfig
+
+
+class KeyRow(NamedTuple):
+    """One registered SSH key, fully resolved for display and matching."""
+
+    scope: str
+    comment: str
+    key_type: str
+    fingerprint: str
+    private_key: str
+    public_key: str
 
 
 @dataclass(frozen=True)
@@ -221,11 +235,13 @@ def _handle_proxy_status() -> None:
     status = get_proxy_status()
     state = "running" if status.running else "stopped"
     print(f"Status: {state}")
-    print(f"Socket: {status.socket_path}")
-    print(f"DB:     {status.db_path}")
-    print(f"Routes: {status.routes_path} ({status.routes_configured} configured)")
+    print(f"Socket: {sanitize_tty(str(status.socket_path))}")
+    print(f"DB:     {sanitize_tty(str(status.db_path))}")
+    print(
+        f"Routes: {sanitize_tty(str(status.routes_path))} ({status.routes_configured} configured)"
+    )
     if status.credentials_stored:
-        print(f"Credentials: {', '.join(status.credentials_stored)}")
+        print(f"Credentials: {', '.join(sanitize_tty(c) for c in status.credentials_stored)}")
     else:
         print("Credentials: none stored")
 
@@ -290,6 +306,93 @@ PROXY_COMMANDS: tuple[CommandDef, ...] = (
 # ---------------------------------------------------------------------------
 
 
+def _build_key_rows(cfg: SandboxConfig) -> list[KeyRow]:
+    """Load ssh-keys.json and resolve each entry into a displayable row.
+
+    Shared by ``list`` and ``remove-key`` so both present identical
+    information.  Returns an empty list when no keys are registered.
+    """
+    import base64
+    import hashlib
+    import json
+    from pathlib import Path
+
+    keys_path = cfg.ssh_keys_json_path
+    if not keys_path.is_file():
+        return []
+
+    try:
+        data = json.loads(keys_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"Cannot read {keys_path}: {exc}") from exc
+
+    if not isinstance(data, dict):
+        raise SystemExit(f"Cannot read {keys_path}: expected top-level JSON object")
+
+    rows: list[KeyRow] = []
+    for scope in sorted(data):
+        entries = data[scope]
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            pub_path = Path(entry.get("public_key", ""))
+            priv_path = entry.get("private_key", "")
+            if pub_path.is_file():
+                try:
+                    parts = pub_path.read_text(encoding="utf-8").strip().split()
+                    key_type = parts[0].removeprefix("ssh-") if parts else "?"
+                    blob = base64.b64decode(parts[1]) if len(parts) > 1 else b""
+                    comment = " ".join(parts[2:]) if len(parts) > 2 else pub_path.stem
+                    digest = base64.b64encode(hashlib.sha256(blob).digest()).rstrip(b"=")
+                    fingerprint = f"SHA256:{digest.decode()}"
+                except Exception:
+                    key_type, comment, fingerprint = "?", pub_path.stem, "(error)"
+            else:
+                key_type, comment, fingerprint = "?", Path(priv_path).stem, "(pub missing)"
+            rows.append(KeyRow(scope, comment, key_type, fingerprint, priv_path, str(pub_path)))
+    return rows
+
+
+def _print_key_table(rows: list[KeyRow], *, numbered: bool = False) -> None:
+    """Print a formatted table of SSH key rows.
+
+    All untrusted fields are sanitized before display to prevent
+    terminal escape injection from crafted key comments or paths.
+
+    Args:
+        rows: Key rows to display.
+        numbered: Prefix each row with a 1-based index for interactive selection.
+    """
+    if not rows:
+        print("No SSH keys registered.")
+        return
+
+    headers = ("SCOPE", "KEY", "TYPE", "FINGERPRINT", "PATH")
+    # Sanitize untrusted fields before computing widths and formatting
+    display = [
+        tuple(
+            sanitize_tty(f) for f in (r.scope, r.comment, r.key_type, r.fingerprint, r.private_key)
+        )
+        for r in rows
+    ]
+    widths = [max(len(h), *(len(d[i]) for d in display)) for i, h in enumerate(headers)]
+
+    if numbered:
+        idx_w = len(str(len(display)))
+        prefix_w = idx_w + 2  # "N) " or "   "
+        fmt = f"{{:<{prefix_w}}}" + "  ".join(f"{{:<{w}}}" for w in widths)
+        print(fmt.format("", *headers))
+        for i, d in enumerate(display, 1):
+            print(fmt.format(f"{i})", *d))
+    else:
+        fmt = "  ".join(f"{{:<{w}}}" for w in widths)
+        print(fmt.format(*headers))
+        for d in display:
+            print(fmt.format(*d))
+
+
 def _handle_ssh_import(
     *,
     scope: str,
@@ -351,13 +454,13 @@ def _handle_ssh_import(
     priv_dst = _unique_dst(priv_src)
     pub_dst = _unique_dst(pub_src)
 
-    print(f"Copying private key: {priv_src}")
-    print(f"              → {priv_dst}")
+    print(f"Copying private key: {sanitize_tty(str(priv_src))}")
+    print(f"              → {sanitize_tty(str(priv_dst))}")
     shutil.copy2(str(priv_src), str(priv_dst))
     os.chmod(priv_dst, 0o600)
 
-    print(f"Copying public key:  {pub_src}")
-    print(f"              → {pub_dst}")
+    print(f"Copying public key:  {sanitize_tty(str(pub_src))}")
+    print(f"              → {sanitize_tty(str(pub_dst))}")
     shutil.copy2(str(pub_src), str(pub_dst))
 
     result = SSHInitResult(
@@ -369,7 +472,7 @@ def _handle_ssh_import(
     )
     keys_path = cfg.ssh_keys_json_path
     update_ssh_keys_json(keys_path, scope, result)
-    print(f"Registered key for scope '{scope}': {priv_dst}")
+    print(f"Registered key for scope '{sanitize_tty(scope)}': {sanitize_tty(str(priv_dst))}")
 
 
 def _handle_ssh_add_key(
@@ -446,16 +549,16 @@ def _handle_ssh_add_key(
     )
     update_ssh_keys_json(cfg.ssh_keys_json_path, scope, result)
 
-    print(f"SSH key generated for scope '{scope}':")
-    print(f"  name:        {key_name}")
-    print(f"  private key: {priv_path}")
-    print(f"  public key:  {pub_path}")
-    print(f"  comment:     {comment}")
+    print(f"SSH key generated for scope '{sanitize_tty(scope)}':")
+    print(f"  name:        {sanitize_tty(key_name)}")
+    print(f"  private key: {sanitize_tty(str(priv_path))}")
+    print(f"  public key:  {sanitize_tty(str(pub_path))}")
+    print(f"  comment:     {sanitize_tty(comment)}")
     try:
         pub_text = pub_path.read_text(encoding="utf-8", errors="ignore").strip()
         if pub_text:
             print("Public key (add as deploy key):")
-            print(f"  {pub_text}")
+            print(f"  {sanitize_tty(pub_text)}")
     except Exception:
         pass
 
@@ -490,66 +593,237 @@ def _handle_ssh_list(
     cfg: SandboxConfig | None = None,
 ) -> None:
     """List SSH keys registered in the auth proxy's key store."""
-    import base64
-    import hashlib
-    import json
-    from pathlib import Path
-
     from .config import SandboxConfig as _SandboxConfig
 
     if cfg is None:
         cfg = _SandboxConfig()
 
-    keys_path = cfg.ssh_keys_json_path
-    if not keys_path.is_file():
-        print("No SSH keys registered.")
-        return
+    rows = _build_key_rows(cfg)
+    if scope:
+        filtered = [r for r in rows if r.scope == scope]
+        if not filtered:
+            raise SystemExit(f"No keys registered for scope {scope!r}")
+        rows = filtered
 
+    _print_key_table(rows)
+
+
+def _remove_keys_from_json(keys_json_path: Path, removals: list[KeyRow]) -> None:
+    """Delete key entries from ssh-keys.json, removing empty scopes.
+
+    Matches by ``private_key`` path — the stable identifier across
+    renames of the public key or comment changes.  Uses the same
+    ``fcntl.flock`` concurrency guard as :func:`update_ssh_keys_json`.
+    """
+    import fcntl
+    import json
+    import os
+
+    remove_set = {r.private_key for r in removals}
+
+    fd = os.open(str(keys_json_path), os.O_RDWR | os.O_CREAT, 0o600)
     try:
-        data = json.loads(keys_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise SystemExit(f"Cannot read {keys_path}: {exc}") from exc
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        chunks: list[bytes] = []
+        while chunk := os.read(fd, 8192):
+            chunks.append(chunk)
+        raw = b"".join(chunks)
+        try:
+            parsed = json.loads(raw) if raw.strip() else {}
+        except json.JSONDecodeError as exc:
+            raise SystemExit(f"Cannot read {keys_json_path}: {exc}") from exc
+        if not isinstance(parsed, dict):
+            raise SystemExit(f"Cannot read {keys_json_path}: expected top-level JSON object")
+        mapping: dict = parsed
 
-    if not data:
-        print("No SSH keys registered.")
-        return
+        for scope in list(mapping):
+            entries = mapping[scope]
+            if not isinstance(entries, list):
+                continue
+            mapping[scope] = [
+                e for e in entries if isinstance(e, dict) and e.get("private_key") not in remove_set
+            ]
+            if not mapping[scope]:
+                del mapping[scope]
 
-    if scope and scope in data:
-        scopes = {scope: data[scope]}
-    elif scope:
-        raise SystemExit(f"No keys registered for scope {scope!r}")
-    else:
-        scopes = data
+        data = (json.dumps(mapping, indent=2) + "\n").encode("utf-8")
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.ftruncate(fd, 0)
+        os.write(fd, data)
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
-    rows: list[tuple[str, str, str, str, str]] = []
-    for sid in sorted(scopes):
-        for entry in scopes[sid]:
-            pub_path = Path(entry.get("public_key", ""))
-            priv_path = entry.get("private_key", "")
-            if pub_path.is_file():
-                try:
-                    parts = pub_path.read_text(encoding="utf-8").strip().split()
-                    key_type = parts[0].removeprefix("ssh-") if parts else "?"
-                    blob = base64.b64decode(parts[1]) if len(parts) > 1 else b""
-                    comment = " ".join(parts[2:]) if len(parts) > 2 else pub_path.stem
-                    digest = base64.b64encode(hashlib.sha256(blob).digest()).rstrip(b"=")
-                    fingerprint = f"SHA256:{digest.decode()}"
-                except Exception:
-                    key_type, comment, fingerprint = "?", pub_path.stem, "(error)"
-            else:
-                key_type, comment, fingerprint = "?", Path(priv_path).stem, "(pub missing)"
-            rows.append((sid, comment, key_type, fingerprint, priv_path))
 
-    if not rows:
-        print("No SSH keys registered.")
-        return
+def _delete_key_files(rows: list[KeyRow], cfg: SandboxConfig) -> tuple[int, list[str]]:
+    """Remove private and public key files from disk.
 
-    headers = ("SCOPE", "KEY", "TYPE", "FINGERPRINT", "PATH")
-    widths = [max(len(h), *(len(r[i]) for r in rows)) for i, h in enumerate(headers)]
-    fmt = "  ".join(f"{{:<{w}}}" for w in widths)
-    print(fmt.format(*headers))
+    Paths are validated against ``cfg.ssh_keys_dir`` to prevent a
+    tampered ``ssh-keys.json`` from steering deletions outside the
+    managed key directory (CWE-73).
+
+    Continues past per-file failures so partial cleanup still completes.
+    The registry has already been updated by the time this runs, so
+    leaving a stale file is better than aborting mid-deletion.
+
+    Returns:
+        Tuple of (files deleted, list of error messages for failed deletions).
+    """
+    from pathlib import Path
+
+    base = cfg.ssh_keys_dir.resolve()
+    deleted = 0
+    errors: list[str] = []
     for row in rows:
-        print(fmt.format(*row))
+        for p in (row.private_key, row.public_key):
+            path = Path(p)
+            try:
+                resolved = path.resolve(strict=True)
+            except (FileNotFoundError, OSError):
+                continue
+            if not resolved.is_file():
+                continue
+            if not resolved.is_relative_to(base):
+                errors.append(f"Refusing to delete outside managed dir: {resolved}")
+                continue
+            try:
+                resolved.unlink()
+                deleted += 1
+            except OSError as exc:
+                errors.append(f"{resolved}: {exc}")
+    return deleted, errors
+
+
+def _filter_key_rows(
+    rows: list[KeyRow],
+    *,
+    scope: str | None = None,
+    name: str | None = None,
+    fingerprint: str | None = None,
+) -> list[KeyRow]:
+    """Narrow key rows by scope (exact), name (glob), and fingerprint (prefix)."""
+    from fnmatch import fnmatch
+
+    if scope:
+        rows = [r for r in rows if r.scope == scope]
+    if name:
+        rows = [r for r in rows if fnmatch(r.comment, name)]
+    if fingerprint:
+        # Accept both "SHA256:..." and raw prefix
+        fp = fingerprint.removeprefix("SHA256:")
+        rows = [r for r in rows if r.fingerprint.removeprefix("SHA256:").startswith(fp)]
+    return rows
+
+
+def _prompt_file_action(*, delete_files: bool, keep_files: bool, yes: bool = False) -> bool:
+    """Determine whether to delete key files, prompting if neither flag is set.
+
+    Raises:
+        SystemExit: If both ``--delete-files`` and ``--keep-files`` are set.
+    """
+    if delete_files and keep_files:
+        raise SystemExit("Cannot use both --delete-files and --keep-files.")
+    if delete_files:
+        return True
+    if keep_files or yes:
+        return False
+    try:
+        answer = input("Also delete key files from disk? [y/N]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+    return answer in ("y", "yes")
+
+
+def _handle_ssh_remove_key(
+    *,
+    scope: str | None = None,
+    name: str | None = None,
+    fingerprint: str | None = None,
+    yes: bool = False,
+    delete_files: bool = False,
+    keep_files: bool = False,
+    cfg: SandboxConfig | None = None,
+) -> None:
+    """Remove SSH keys from the auth proxy's key store.
+
+    Two modes: interactive selection when called without filters, or
+    direct matching when any of ``--scope``, ``--name``, or
+    ``--fingerprint`` is provided.
+    """
+    from .config import SandboxConfig as _SandboxConfig
+
+    if cfg is None:
+        cfg = _SandboxConfig()
+
+    all_rows = _build_key_rows(cfg)
+    if not all_rows:
+        raise SystemExit("No SSH keys registered.")
+
+    has_filters = any((scope, name, fingerprint))
+
+    if has_filters:
+        # Parameterized mode — filter and confirm
+        candidates = _filter_key_rows(all_rows, scope=scope, name=name, fingerprint=fingerprint)
+        if not candidates:
+            raise SystemExit("No keys match the given filters.")
+        if not yes:
+            n = len(candidates)
+            if n > 1:
+                print(f"Multiple keys match ({n}):\n")
+            _print_key_table(candidates)
+            prompt = f"\nRemove all {n} keys? [y/N]: " if n > 1 else "\nRemove this key? [y/N]: "
+            try:
+                answer = input(prompt).strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                raise SystemExit("Aborted.") from None
+            if answer not in ("y", "yes"):
+                raise SystemExit("Aborted.")
+    else:
+        # Interactive mode — numbered list, user picks
+        if yes:
+            raise SystemExit("Cannot use --yes without at least one filter flag.")
+        _print_key_table(all_rows, numbered=True)
+        print()
+        try:
+            selection = input("Select key(s) to remove (number, comma-separated, or 'all'): ")
+        except (EOFError, KeyboardInterrupt):
+            print()
+            raise SystemExit("Aborted.") from None
+        selection = selection.strip().lower()
+        if not selection:
+            raise SystemExit("Aborted.")
+        if selection == "all":
+            candidates = list(all_rows)
+        else:
+            indices: list[int] = []
+            for part in selection.split(","):
+                part = part.strip()
+                if not part.isdigit() or not (1 <= int(part) <= len(all_rows)):
+                    raise SystemExit(
+                        f"Invalid selection {part!r}. "
+                        f"Enter a number 1–{len(all_rows)}, comma-separated, or 'all'."
+                    )
+                indices.append(int(part) - 1)
+            candidates = [all_rows[i] for i in dict.fromkeys(indices)]
+
+    # Determine file action
+    do_delete = _prompt_file_action(delete_files=delete_files, keep_files=keep_files, yes=yes)
+
+    # Execute removal
+    _remove_keys_from_json(cfg.ssh_keys_json_path, candidates)
+    files_deleted, file_errors = _delete_key_files(candidates, cfg) if do_delete else (0, [])
+
+    n = len(candidates)
+    msg = f"Removed {n} key{'s' if n != 1 else ''} from registry."
+    if files_deleted:
+        msg += f" Deleted {files_deleted} file{'s' if files_deleted != 1 else ''} from disk."
+    elif not do_delete:
+        msg += " Key files kept on disk."
+    print(msg)
+    for err in file_errors:
+        print(f"  Warning: could not delete {err}", file=__import__("sys").stderr)
 
 
 SSH_COMMANDS: tuple[CommandDef, ...] = (
@@ -616,6 +890,47 @@ SSH_COMMANDS: tuple[CommandDef, ...] = (
                 help="Allow creating a new credential scope",
                 action="store_true",
                 dest="create_scope",
+            ),
+        ),
+    ),
+    CommandDef(
+        name="remove-key",
+        help="Remove SSH keys from the auth proxy's key store",
+        handler=_handle_ssh_remove_key,
+        group="ssh",
+        args=(
+            ArgDef(
+                name="--scope",
+                help="Filter by credential scope (exact match)",
+                default=None,
+            ),
+            ArgDef(
+                name="--name",
+                help="Filter by key name/comment (supports glob wildcards)",
+                default=None,
+            ),
+            ArgDef(
+                name="--fingerprint",
+                help="Filter by fingerprint prefix (min 8 chars recommended)",
+                default=None,
+            ),
+            ArgDef(
+                name="--yes",
+                help="Skip confirmation prompts",
+                action="store_true",
+                dest="yes",
+            ),
+            ArgDef(
+                name="--delete-files",
+                help="Delete key files from disk (skip prompt)",
+                action="store_true",
+                dest="delete_files",
+            ),
+            ArgDef(
+                name="--keep-files",
+                help="Keep key files on disk (skip prompt)",
+                action="store_true",
+                dest="keep_files",
             ),
         ),
     ),

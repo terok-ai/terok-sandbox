@@ -68,9 +68,9 @@ class TestCommandRegistry:
         names = {cmd.name for cmd in SHIELD_COMMANDS}
         assert {"setup", "status"} <= names
 
-    def test_ssh_has_import(self) -> None:
+    def test_ssh_has_import_and_remove(self) -> None:
         names = {cmd.name for cmd in SSH_COMMANDS}
-        assert "import" in names
+        assert {"import", "remove-key"} <= names
 
 
 # ---------------------------------------------------------------------------
