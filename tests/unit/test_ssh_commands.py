@@ -1047,8 +1047,9 @@ class TestHandleSshRemoveKey:
         cfg = _mock_cfg(tmp_path)
         pairs = _populate_keys(tmp_path, cfg, count=1)
 
-        with patch("builtins.input", return_value="y"):
-            _handle_ssh_remove_key(scope="scope-0", yes=True, delete_files=True, cfg=cfg)
+        # First 'y' confirms removal, second 'y' confirms file deletion
+        with patch("builtins.input", side_effect=["y", "y"]):
+            _handle_ssh_remove_key(scope="scope-0", cfg=cfg)
 
         assert not pairs[0][0].exists()
         assert not pairs[0][1].exists()
@@ -1058,8 +1059,9 @@ class TestHandleSshRemoveKey:
         cfg = _mock_cfg(tmp_path)
         pairs = _populate_keys(tmp_path, cfg, count=1)
 
-        with patch("builtins.input", return_value="n"):
-            _handle_ssh_remove_key(scope="scope-0", yes=True, cfg=cfg)
+        # First 'y' confirms removal, second 'n' keeps files
+        with patch("builtins.input", side_effect=["y", "n"]):
+            _handle_ssh_remove_key(scope="scope-0", cfg=cfg)
 
         assert pairs[0][0].is_file()
         assert pairs[0][1].is_file()
