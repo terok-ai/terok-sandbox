@@ -39,7 +39,11 @@ class CredentialProxyStatus:
     """Whether the proxy is active (systemd socket listening or daemon alive)."""
 
     healthy: bool
-    """Whether the proxy responded to an HTTP health check."""
+    """Whether the proxy is healthy for its current activation mode.
+
+    HTTP-probe based when the systemd service is active; socket-liveness
+    based when the service is idle but the socket is listening.
+    """
 
     socket_path: Path
     """Configured Unix socket path."""
@@ -149,8 +153,10 @@ def get_proxy_status(cfg: SandboxConfig | None = None) -> CredentialProxyStatus:
     # operators see the correct activation path and don't get mixed signals.
     if is_socket_installed():
         mode = "systemd"
-        running = is_service_active()
-        healthy = _probe_proxy(c.proxy_port) if running else False
+        socket_up = is_socket_active()
+        service_up = is_service_active()
+        running = socket_up or service_up
+        healthy = _probe_proxy(c.proxy_port) if service_up else socket_up
     elif is_daemon_running(cfg):
         mode = "daemon"
         running = True
