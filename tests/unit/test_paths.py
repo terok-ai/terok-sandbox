@@ -15,7 +15,10 @@ from terok_sandbox.paths import (
     credentials_root,
     runtime_root,
     state_root,
+    umbrella_config_dir,
     umbrella_config_root,
+    umbrella_runtime_dir,
+    umbrella_state_dir,
 )
 from tests.constants import MOCK_BASE
 
@@ -178,3 +181,134 @@ class TestUmbrellaConfigRoot:
             unittest.mock.patch("terok_sandbox.paths._is_root", return_value=True),
         ):
             assert umbrella_config_root() == Path("/etc/terok")
+
+
+# ---------------------------------------------------------------------------
+# Umbrella resolver tests
+# ---------------------------------------------------------------------------
+
+_UMBRELLA_ROOT = "terok"
+
+
+class TestUmbrellaStateDir:
+    """Tests for umbrella_state_dir()."""
+
+    def test_no_subdir_returns_umbrella_root(self):
+        """Empty subdir returns the bare terok/ data root."""
+        with unittest.mock.patch.dict(os.environ, {}, clear=True):
+            result = umbrella_state_dir()
+            assert result.name == _UMBRELLA_ROOT
+
+    def test_subdir_appended(self):
+        """Subdir is appended to the umbrella root."""
+        with unittest.mock.patch.dict(os.environ, {}, clear=True):
+            result = umbrella_state_dir("agent")
+            assert result.name == "agent"
+            assert result.parent.name == _UMBRELLA_ROOT
+
+    def test_env_var_override(self):
+        """Specific env var takes precedence over platform default."""
+        with unittest.mock.patch.dict(os.environ, {"MY_STATE": str(MOCK_BASE / "custom-state")}):
+            assert umbrella_state_dir("agent", "MY_STATE") == MOCK_BASE / "custom-state"
+
+    def test_env_var_none_ignored(self):
+        """When env_var is None, no env lookup is performed."""
+        with unittest.mock.patch.dict(os.environ, {}, clear=True):
+            result = umbrella_state_dir("sandbox")
+            assert isinstance(result, Path)
+
+    def test_root_user(self):
+        """Root user gets /var/lib/terok/<subdir>."""
+        with (
+            unittest.mock.patch.dict(os.environ, {}, clear=True),
+            unittest.mock.patch("terok_sandbox.paths._is_root", return_value=True),
+        ):
+            assert umbrella_state_dir("sandbox") == Path("/var/lib/terok/sandbox")
+            assert umbrella_state_dir() == Path("/var/lib/terok")
+
+    def test_tilde_expansion(self):
+        """Env var values with ~ are expanded."""
+        with unittest.mock.patch.dict(os.environ, {"MY_STATE": "~/terok-data"}):
+            result = umbrella_state_dir("x", "MY_STATE")
+            assert "~" not in str(result)
+            assert result.is_absolute()
+
+
+class TestUmbrellaConfigDir:
+    """Tests for umbrella_config_dir()."""
+
+    def test_no_subdir_returns_umbrella_root(self):
+        """Empty subdir returns the bare terok/ config root."""
+        with unittest.mock.patch.dict(os.environ, {}, clear=True):
+            result = umbrella_config_dir()
+            assert result.name == _UMBRELLA_ROOT
+
+    def test_subdir_appended(self):
+        """Subdir is appended to the config umbrella root."""
+        with unittest.mock.patch.dict(os.environ, {}, clear=True):
+            result = umbrella_config_dir("agent")
+            assert result.name == "agent"
+            assert result.parent.name == _UMBRELLA_ROOT
+
+    def test_env_var_override(self):
+        """Specific env var takes precedence over platform default."""
+        with unittest.mock.patch.dict(os.environ, {"MY_CFG": str(MOCK_BASE / "custom-cfg")}):
+            assert umbrella_config_dir("agent", "MY_CFG") == MOCK_BASE / "custom-cfg"
+
+    def test_root_user(self):
+        """Root user gets /etc/terok/<subdir>."""
+        with (
+            unittest.mock.patch.dict(os.environ, {}, clear=True),
+            unittest.mock.patch("terok_sandbox.paths._is_root", return_value=True),
+        ):
+            assert umbrella_config_dir("sandbox") == Path("/etc/terok/sandbox")
+            assert umbrella_config_dir() == Path("/etc/terok")
+
+
+class TestUmbrellaRuntimeDir:
+    """Tests for umbrella_runtime_dir()."""
+
+    def test_no_subdir_returns_umbrella_root(self):
+        """Empty subdir returns the bare terok/ runtime root."""
+        with unittest.mock.patch.dict(os.environ, {}, clear=True):
+            result = umbrella_runtime_dir()
+            assert result.name == _UMBRELLA_ROOT
+
+    def test_subdir_appended(self):
+        """Subdir is appended to the runtime umbrella root."""
+        with unittest.mock.patch.dict(os.environ, {}, clear=True):
+            result = umbrella_runtime_dir("sandbox")
+            assert result.name == "sandbox"
+            assert result.parent.name == _UMBRELLA_ROOT
+
+    def test_env_var_override(self):
+        """Specific env var takes precedence."""
+        with unittest.mock.patch.dict(os.environ, {"MY_RUN": str(MOCK_BASE / "custom-run")}):
+            assert umbrella_runtime_dir("x", "MY_RUN") == MOCK_BASE / "custom-run"
+
+    def test_root_user(self):
+        """Root user gets /run/terok/<subdir>."""
+        with (
+            unittest.mock.patch.dict(os.environ, {}, clear=True),
+            unittest.mock.patch("terok_sandbox.paths._is_root", return_value=True),
+        ):
+            assert umbrella_runtime_dir("sandbox") == Path("/run/terok/sandbox")
+            assert umbrella_runtime_dir() == Path("/run/terok")
+
+    def test_xdg_runtime_dir_fallback(self):
+        """XDG_RUNTIME_DIR is used when available (non-root)."""
+        with (
+            unittest.mock.patch.dict(os.environ, {"XDG_RUNTIME_DIR": "/run/user/1000"}, clear=True),
+            unittest.mock.patch("terok_sandbox.paths._is_root", return_value=False),
+        ):
+            assert umbrella_runtime_dir("sandbox") == Path("/run/user/1000/terok/sandbox")
+
+    def test_xdg_state_home_fallback(self):
+        """XDG_STATE_HOME is used when XDG_RUNTIME_DIR is absent."""
+        with (
+            unittest.mock.patch.dict(
+                os.environ, {"XDG_STATE_HOME": str(MOCK_BASE / "state-home")}, clear=True
+            ),
+            unittest.mock.patch("terok_sandbox.paths._is_root", return_value=False),
+        ):
+            assert umbrella_runtime_dir("sandbox") == MOCK_BASE / "state-home" / "terok" / "sandbox"

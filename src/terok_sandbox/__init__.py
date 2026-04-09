@@ -92,7 +92,13 @@ from .gate.mirror import GateStalenessInfo, GitGate
 from .gate.tokens import create_token, revoke_token_for_task
 
 # -- Paths -------------------------------------------------------------------
-from .paths import credentials_root, umbrella_config_root
+from .paths import (
+    credentials_root,
+    umbrella_config_dir,
+    umbrella_config_root,
+    umbrella_runtime_dir,
+    umbrella_state_dir,
+)
 
 # -- Runtime -----------------------------------------------------------------
 from .runtime import (
@@ -136,7 +142,10 @@ __all__ = [
     # Config
     "SandboxConfig",
     "credentials_root",
+    "umbrella_config_dir",
     "umbrella_config_root",
+    "umbrella_runtime_dir",
+    "umbrella_state_dir",
     # Runtime
     "GpuConfigError",
     "bypass_network_args",
