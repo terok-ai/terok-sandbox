@@ -39,8 +39,10 @@ def warn_user(component: str, message: str) -> None:
     """Print a structured warning to stderr and log it."""
     import sys
 
+    from ._sanitize import sanitize_tty
+
     try:
-        print(f"Warning [{component}]: {message}", file=sys.stderr)
+        print(f"Warning [{sanitize_tty(component)}]: {sanitize_tty(message)}", file=sys.stderr)
     except Exception:
         pass
     log_warning(f"[{component}] {message}")

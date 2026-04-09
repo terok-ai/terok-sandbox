@@ -335,16 +335,18 @@ def _next_key_number(scope_dir: Path, algo: str) -> int:
 
 def _print_init_summary(target_dir: Path, priv_path: Path, pub_path: Path, cfg_path: Path) -> None:
     """Print a human-readable summary of the initialized SSH directory."""
+    from .._util import sanitize_tty
+
     print("SSH directory initialized:")
-    print(f"  dir:         {target_dir}")
-    print(f"  private key: {priv_path}")
-    print(f"  public key:  {pub_path}")
-    print(f"  config:      {cfg_path}")
+    print(f"  dir:         {sanitize_tty(str(target_dir))}")
+    print(f"  private key: {sanitize_tty(str(priv_path))}")
+    print(f"  public key:  {sanitize_tty(str(pub_path))}")
+    print(f"  config:      {sanitize_tty(str(cfg_path))}")
     try:
         if pub_path.exists():
             pub_key_text = pub_path.read_text(encoding="utf-8", errors="ignore").strip()
             if pub_key_text:
                 print("Public key:")
-                print(f"  {pub_key_text}")
+                print(f"  {sanitize_tty(pub_key_text)}")
     except Exception:
         pass

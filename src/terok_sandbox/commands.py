@@ -17,6 +17,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple
 
+from ._util import sanitize_tty
+
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
@@ -233,11 +235,13 @@ def _handle_proxy_status() -> None:
     status = get_proxy_status()
     state = "running" if status.running else "stopped"
     print(f"Status: {state}")
-    print(f"Socket: {status.socket_path}")
-    print(f"DB:     {status.db_path}")
-    print(f"Routes: {status.routes_path} ({status.routes_configured} configured)")
+    print(f"Socket: {sanitize_tty(str(status.socket_path))}")
+    print(f"DB:     {sanitize_tty(str(status.db_path))}")
+    print(
+        f"Routes: {sanitize_tty(str(status.routes_path))} ({status.routes_configured} configured)"
+    )
     if status.credentials_stored:
-        print(f"Credentials: {', '.join(status.credentials_stored)}")
+        print(f"Credentials: {', '.join(sanitize_tty(c) for c in status.credentials_stored)}")
     else:
         print("Credentials: none stored")
 
@@ -351,27 +355,6 @@ def _build_key_rows(cfg: SandboxConfig) -> list[KeyRow]:
     return rows
 
 
-def _sanitize_tty(s: str) -> str:
-    """Strip terminal control characters from untrusted strings before display.
-
-    SSH key comments, paths, and scope names originate from user-editable
-    files (public keys, ssh-keys.json).  Printing them raw allows ANSI/OSC
-    escape injection (CWE-150).  This replaces C0/C1 control characters
-    with their hex escape representation while preserving printable text.
-    """
-    import unicodedata
-
-    out: list[str] = []
-    for ch in s:
-        if ch in ("\n", "\r", "\t"):
-            out.append(" ")
-        elif unicodedata.category(ch).startswith("C"):
-            out.append(f"\\x{ord(ch):02x}")
-        else:
-            out.append(ch)
-    return "".join(out)
-
-
 def _print_key_table(rows: list[KeyRow], *, numbered: bool = False) -> None:
     """Print a formatted table of SSH key rows.
 
@@ -390,7 +373,7 @@ def _print_key_table(rows: list[KeyRow], *, numbered: bool = False) -> None:
     # Sanitize untrusted fields before computing widths and formatting
     display = [
         tuple(
-            _sanitize_tty(f) for f in (r.scope, r.comment, r.key_type, r.fingerprint, r.private_key)
+            sanitize_tty(f) for f in (r.scope, r.comment, r.key_type, r.fingerprint, r.private_key)
         )
         for r in rows
     ]
@@ -471,13 +454,13 @@ def _handle_ssh_import(
     priv_dst = _unique_dst(priv_src)
     pub_dst = _unique_dst(pub_src)
 
-    print(f"Copying private key: {priv_src}")
-    print(f"              → {priv_dst}")
+    print(f"Copying private key: {sanitize_tty(str(priv_src))}")
+    print(f"              → {sanitize_tty(str(priv_dst))}")
     shutil.copy2(str(priv_src), str(priv_dst))
     os.chmod(priv_dst, 0o600)
 
-    print(f"Copying public key:  {pub_src}")
-    print(f"              → {pub_dst}")
+    print(f"Copying public key:  {sanitize_tty(str(pub_src))}")
+    print(f"              → {sanitize_tty(str(pub_dst))}")
     shutil.copy2(str(pub_src), str(pub_dst))
 
     result = SSHInitResult(
@@ -489,7 +472,7 @@ def _handle_ssh_import(
     )
     keys_path = cfg.ssh_keys_json_path
     update_ssh_keys_json(keys_path, scope, result)
-    print(f"Registered key for scope '{scope}': {priv_dst}")
+    print(f"Registered key for scope '{sanitize_tty(scope)}': {sanitize_tty(str(priv_dst))}")
 
 
 def _handle_ssh_add_key(
@@ -566,16 +549,16 @@ def _handle_ssh_add_key(
     )
     update_ssh_keys_json(cfg.ssh_keys_json_path, scope, result)
 
-    print(f"SSH key generated for scope '{scope}':")
-    print(f"  name:        {key_name}")
-    print(f"  private key: {priv_path}")
-    print(f"  public key:  {pub_path}")
-    print(f"  comment:     {comment}")
+    print(f"SSH key generated for scope '{sanitize_tty(scope)}':")
+    print(f"  name:        {sanitize_tty(key_name)}")
+    print(f"  private key: {sanitize_tty(str(priv_path))}")
+    print(f"  public key:  {sanitize_tty(str(pub_path))}")
+    print(f"  comment:     {sanitize_tty(comment)}")
     try:
         pub_text = pub_path.read_text(encoding="utf-8", errors="ignore").strip()
         if pub_text:
             print("Public key (add as deploy key):")
-            print(f"  {pub_text}")
+            print(f"  {sanitize_tty(pub_text)}")
     except Exception:
         pass
 
