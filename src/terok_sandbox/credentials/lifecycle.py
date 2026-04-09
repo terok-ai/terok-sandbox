@@ -39,7 +39,11 @@ class CredentialProxyStatus:
     """Whether the proxy is active (systemd socket listening or daemon alive)."""
 
     healthy: bool
-    """Whether the proxy responded to an HTTP health check."""
+    """Whether the proxy is healthy for its current activation mode.
+
+    HTTP-probe based when the systemd service is active; socket-liveness
+    based when the service is idle but the socket is listening.
+    """
 
     socket_path: Path
     """Configured Unix socket path."""
