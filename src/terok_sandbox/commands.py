@@ -254,7 +254,7 @@ def _handle_proxy_install() -> None:
         print("Error: systemd user services are not available on this host.")
         raise SystemExit(1)
     install_systemd_units()
-    print("Credential proxy systemd socket installed and started.")
+    print("Credential proxy installed via systemd socket activation.")
 
 
 def _handle_proxy_uninstall() -> None:
