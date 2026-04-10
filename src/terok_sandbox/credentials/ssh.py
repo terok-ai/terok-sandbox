@@ -313,9 +313,9 @@ def _harden_permissions(target_dir: Path, priv_path: Path, pub_path: Path, cfg_p
     if priv_path.exists():
         os.chmod(priv_path, 0o600)
     if pub_path.exists():
-        os.chmod(pub_path, 0o644)
+        os.chmod(pub_path, 0o600)
     if cfg_path.exists():
-        os.chmod(cfg_path, 0o644)
+        os.chmod(cfg_path, 0o600)
 
 
 def _next_key_number(scope_dir: Path, algo: str) -> int:
