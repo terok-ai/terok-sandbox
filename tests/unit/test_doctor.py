@@ -77,10 +77,11 @@ class TestProxyCheck:
         assert verdict.severity == "error"
         assert "unreachable" in verdict.detail
 
-    def test_probe_cmd_contains_port(self) -> None:
+    def test_probe_cmd_uses_health_endpoint(self) -> None:
         check = _make_proxy_check(PROXY_PORT)
         cmd_str = " ".join(check.probe_cmd)
         assert str(PROXY_PORT) in cmd_str
+        assert "/-/health" in cmd_str
         assert "wget" in cmd_str
 
     def test_category_is_network(self) -> None:

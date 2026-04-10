@@ -421,7 +421,9 @@ def _build_app(db_path: str, routes_path: str) -> web.Application:
     app[_KEY_TOKEN_DB] = _TokenDB(db_path)
     app.on_startup.append(_on_startup)
     app.on_cleanup.append(_on_cleanup)
-    app.router.add_get("/-/health", _handle_health)
+    from .constants import HEALTH_PATH
+
+    app.router.add_get(HEALTH_PATH, _handle_health)
     app.router.add_route("*", "/{tail:.*}", _handle_request)
     return app
 
