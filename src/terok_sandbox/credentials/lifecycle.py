@@ -24,6 +24,7 @@ from pathlib import Path
 
 from .._util._logging import log_warning
 from ..config import SandboxConfig
+from .proxy.constants import HEALTH_PATH as _HEALTH_PATH
 
 # ---------- Vocabulary ----------
 
@@ -457,9 +458,6 @@ _SOCKET_UNIT = "terok-credential-proxy.socket"
 
 _SERVICE_UNIT = "terok-credential-proxy.service"
 """Name of the systemd service unit file."""
-
-_HEALTH_PATH = "/-/health"
-"""Server-side readiness endpoint (no auth, no DB access)."""
 
 
 def _pid_file(cfg: SandboxConfig | None = None) -> Path:

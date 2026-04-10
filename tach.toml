@@ -47,11 +47,13 @@ depends_on = [
     "terok_sandbox.paths",
 ]
 
-# Health check protocol + sandbox-level diagnostics — standalone
+# Health check protocol + sandbox-level diagnostics
 [[modules]]
 path = "terok_sandbox.doctor"
 layer = "foundation"
-depends_on = []
+depends_on = [
+    "terok_sandbox.credentials.proxy",
+]
 
 # Credential DB — standalone SQLite store
 [[modules]]

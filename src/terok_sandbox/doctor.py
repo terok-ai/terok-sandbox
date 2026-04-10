@@ -121,7 +121,9 @@ def sandbox_doctor_checks(
 
 def _make_proxy_check(proxy_port: int) -> DoctorCheck:
     """Check that the credential proxy is reachable from inside the container."""
-    url = f"http://host.containers.internal:{proxy_port}/-/health"
+    from .credentials.proxy.constants import HEALTH_PATH
+
+    url = f"http://host.containers.internal:{proxy_port}{HEALTH_PATH}"
 
     def _eval(rc: int, stdout: str, stderr: str) -> CheckVerdict:
         """Evaluate wget probe exit code."""

@@ -17,3 +17,7 @@
 #: letting Claude Code read the token from the file instead, subscription
 #: mode works correctly.  The proxy must then accept this static file token.
 PHANTOM_CREDENTIALS_MARKER = "terok-proxy-phantom-token:credential-proxy-handles-real-auth"
+
+#: Unauthenticated health-check path served by the credential proxy.
+#: Used by the server, lifecycle probes, and sickbay doctor checks.
+HEALTH_PATH = "/-/health"
