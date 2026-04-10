@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
     from .credentials.ssh import SSHManager
     from .gate.lifecycle import GateServerStatus
+    from .runtime import ContainerRemoveResult
 
 # ---------------------------------------------------------------------------
 # Container run specification
@@ -247,11 +248,16 @@ class Sandbox:
 
         return wait_for_exit(container, timeout)
 
-    def stop(self, containers: list[str]) -> None:
-        """Best-effort stop and remove containers."""
+    def stop(self, containers: list[str]) -> list[ContainerRemoveResult]:
+        """Best-effort stop and remove *containers* via ``podman rm -f``.
+
+        Returns one :class:`~.runtime.ContainerRemoveResult` per entry in
+        *containers*.  Inspect ``removed`` and ``error`` on each result to
+        determine whether the container was successfully removed.
+        """
         from .runtime import stop_task_containers
 
-        stop_task_containers(containers)
+        return stop_task_containers(containers)
 
     # -- SSH ----------------------------------------------------------------
 

@@ -16,8 +16,30 @@ import re
 import socket
 import subprocess
 from collections.abc import Callable
+from dataclasses import dataclass
 
 from ._util import log_debug, log_warning
+
+# ---------- Container removal result ----------
+
+
+@dataclass(frozen=True)
+class ContainerRemoveResult:
+    """Per-container outcome from :func:`stop_task_containers`."""
+
+    name: str
+    """Container name that was targeted."""
+
+    removed: bool
+    """Whether the container is confirmed absent (includes already-gone)."""
+
+    error: str | None = None
+    """Human-readable reason when *removed* is ``False``."""
+
+
+_CONTAINER_REMOVE_TIMEOUT = 120
+"""Per-container timeout (seconds) for ``podman rm -f``."""
+
 
 # ---------- User namespace ----------
 
@@ -158,25 +180,56 @@ def is_container_running(cname: str) -> bool:
     return out.lower() == "true"
 
 
-def stop_task_containers(container_names: list[str]) -> None:
+def stop_task_containers(container_names: list[str]) -> list[ContainerRemoveResult]:
     """Best-effort ``podman rm -f`` of the given containers.
 
-    Ignores all errors so that task deletion succeeds even when podman is
-    absent or the containers are already gone.
+    Always attempts every container regardless of individual failures.
+    Returns a per-container :class:`ContainerRemoveResult` so the caller
+    can decide how to present successes and failures.
+
+    A container that is already absent (``"no such container"``) counts as
+    *removed* — the goal is achieved.
     """
+    results: list[ContainerRemoveResult] = []
     for name in container_names:
         try:
             log_debug(f"stop_containers: podman rm -f {name} (start)")
-            subprocess.run(
+            proc = subprocess.run(
                 ["podman", "rm", "-f", name],
                 check=False,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=120,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=_CONTAINER_REMOVE_TIMEOUT,
             )
-            log_debug(f"stop_containers: podman rm -f {name} (done)")
+            if proc.returncode == 0:
+                log_debug(f"stop_containers: podman rm -f {name} (done)")
+                results.append(ContainerRemoveResult(name=name, removed=True))
+            elif "no such container" in (proc.stderr or "").lower():
+                log_debug(f"stop_containers: {name} already absent")
+                results.append(ContainerRemoveResult(name=name, removed=True))
+            else:
+                reason = (proc.stderr or "").strip() or f"exit code {proc.returncode}"
+                log_debug(f"stop_containers: {name} failed: {reason}")
+                results.append(ContainerRemoveResult(name=name, removed=False, error=reason))
+        except subprocess.TimeoutExpired:
+            log_debug(f"stop_containers: {name} timed out")
+            results.append(
+                ContainerRemoveResult(
+                    name=name,
+                    removed=False,
+                    error=f"timed out after {_CONTAINER_REMOVE_TIMEOUT}s",
+                )
+            )
+        except FileNotFoundError:
+            log_debug(f"stop_containers: podman not found for {name}")
+            results.append(
+                ContainerRemoveResult(name=name, removed=False, error="podman not found")
+            )
         except Exception as exc:
-            log_debug(f"stop_containers: podman rm -f {name} failed: {exc}")
+            log_debug(f"stop_containers: {name} failed: {exc}")
+            results.append(ContainerRemoveResult(name=name, removed=False, error=str(exc)))
+    return results
 
 
 def gpu_run_args(*, enabled: bool = False) -> list[str]:

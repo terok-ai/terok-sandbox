@@ -103,6 +103,7 @@ from .paths import (
 
 # -- Runtime -----------------------------------------------------------------
 from .runtime import (
+    ContainerRemoveResult,
     GpuConfigError,
     bypass_network_args,
     find_free_port,
@@ -148,6 +149,7 @@ __all__ = [
     "namespace_runtime_dir",
     "namespace_state_dir",
     # Runtime
+    "ContainerRemoveResult",
     "GpuConfigError",
     "bypass_network_args",
     "find_free_port",
