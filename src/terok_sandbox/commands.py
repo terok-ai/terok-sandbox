@@ -373,7 +373,7 @@ def _print_key_table(rows: list[KeyRow], *, numbered: bool = False) -> None:
     # Sanitize untrusted fields before computing widths and formatting
     display = [
         tuple(
-            sanitize_tty(f) for f in (r.scope, r.comment, r.key_type, r.fingerprint, r.private_key)
+            sanitize_tty(f) for f in (r.scope, r.comment, r.key_type, r.fingerprint, r.public_key)
         )
         for r in rows
     ]
