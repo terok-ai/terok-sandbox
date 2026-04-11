@@ -167,6 +167,7 @@ async def _handle_request(request: web.Request) -> web.StreamResponse:
     # 1. Validate phantom token
     phantom = _extract_phantom_token(request)
     if not phantom:
+        _logger.warning("%s %s -> 401 Missing authentication", request.method, request.path)
         return web.Response(status=401, text="Missing authentication")
 
     token_info = token_db.lookup_token(phantom)
@@ -190,12 +191,16 @@ async def _handle_request(request: web.Request) -> web.StreamResponse:
                 "provider": "claude",
             }
         else:
+            _logger.warning("%s %s -> 401 Invalid token", request.method, request.path)
             return web.Response(status=401, text="Invalid token")
 
     # 2. Route by token's provider
     provider = token_info["provider"]
     route = routes.get(provider)
     if route is None:
+        _logger.warning(
+            "%s %s -> 404 No route for provider: %s", request.method, request.path, provider
+        )
         return web.Response(status=404, text=f"No route for provider: {provider}")
     rest = request.path
 
@@ -465,7 +470,7 @@ async def _run_multi(
 
     from aiohttp.web_runner import AppRunner, SockSite, TCPSite, UnixSite
 
-    runner = AppRunner(app)
+    runner = AppRunner(app, access_log=_logger)
     await runner.setup()
     ssh_server = None
     try:
