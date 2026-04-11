@@ -38,6 +38,7 @@ from .commands import (
     KeyRow,
 )
 from .config import SandboxConfig
+from .config_stack import ConfigScope, ConfigStack
 
 # -- Credential DB -----------------------------------------------------------
 from .credentials.db import CredentialDB
@@ -142,6 +143,8 @@ from .shield import (
 
 __all__ = [
     # Config
+    "ConfigScope",
+    "ConfigStack",
     "SandboxConfig",
     "credentials_root",
     "namespace_config_dir",
