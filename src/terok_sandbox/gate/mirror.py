@@ -272,6 +272,13 @@ class GitGate:
                     capture_output=True,
                     timeout=30,
                 )
+                # Remove untracked/ignored files so the cache stays pristine.
+                subprocess.run(
+                    ["git", "-C", str(cache_dir), "clean", "-ffdx"],
+                    check=True,
+                    capture_output=True,
+                    timeout=30,
+                )
             return True
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
             logger.warning("Clone cache refresh failed (non-fatal): %s", exc)
