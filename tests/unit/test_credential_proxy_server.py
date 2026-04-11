@@ -210,8 +210,10 @@ def _proxy_env(tmp_path: Path):
     db = CredentialDB(tmp_path / "test.db")
     db.store_credential("default", "claude", {"access_token": "sk-real"})
     db.store_credential("default", "empty", {"type": "oauth"})  # no token fields
+    db.store_credential("default", "orphan", {"access_token": "sk-orphan"})
     claude_token = db.create_proxy_token("proj", "t1", "default", "claude")
     empty_token = db.create_proxy_token("proj", "t1", "default", "empty")
+    orphan_token = db.create_proxy_token("proj", "t1", "default", "orphan")
     db.close()
 
     routes = tmp_path / "routes.json"
@@ -224,6 +226,7 @@ def _proxy_env(tmp_path: Path):
                     "auth_prefix": "Bearer ",
                 },
                 "empty": {"upstream": "http://127.0.0.1:1"},
+                # "orphan" intentionally omitted — no route
             }
         )
     )
@@ -232,6 +235,7 @@ def _proxy_env(tmp_path: Path):
     return app, {
         "claude": claude_token,
         "empty": empty_token,
+        "orphan": orphan_token,
     }
 
 
@@ -280,6 +284,21 @@ class TestHandlerEdgeCases:
             async with TestClient(TestServer(app)) as client:
                 await client.get("/v1/messages", headers={"Authorization": "Bearer fake"})
         assert any("GET /v1/messages" in r.message and "401" in r.message for r in caplog.records)
+
+    async def test_no_route_logs_warning(self, _proxy_env, caplog) -> None:
+        """Valid token with no matching route logs a WARNING."""
+        import logging
+
+        from aiohttp.test_utils import TestClient, TestServer
+
+        app, tokens = _proxy_env
+        with caplog.at_level(logging.WARNING, logger="terok-credential-proxy"):
+            async with TestClient(TestServer(app)) as client:
+                resp = await client.get(
+                    "/v1/x", headers={"Authorization": f"Bearer {tokens['orphan']}"}
+                )
+        assert resp.status == 404
+        assert any("404" in r.message and "orphan" in r.message for r in caplog.records)
 
     async def test_empty_credential_returns_502(self, _proxy_env) -> None:
         """Credential with no usable token field returns 502."""
