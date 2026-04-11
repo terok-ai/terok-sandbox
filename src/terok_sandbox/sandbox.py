@@ -104,7 +104,10 @@ class VolumeSpec:
 
     def to_mount_arg(self) -> str:
         """Format as a ``-v`` flag value for ``podman run``."""
-        relabel = _SHARING_TO_RELABEL.get(self.sharing, "z")
+        try:
+            relabel = _SHARING_TO_RELABEL[self.sharing]
+        except KeyError:
+            raise ValueError(f"Unknown sharing mode: {self.sharing!r}") from None
         return f"{self.host_path}:{self.container_path}:{relabel}"
 
 
@@ -333,7 +336,7 @@ class Sandbox:
 
         Fires *hooks.post_start* after a successful start.
         """
-        subprocess.run(["podman", "start", container_name], check=True, capture_output=True)
+        self._exec_podman(["podman", "start", container_name])
         if hooks and hooks.post_start:
             hooks.post_start()
 
@@ -344,11 +347,7 @@ class Sandbox:
         contents of *src* into *dest* inside the container.  The container
         must be in the *created* (not running) state.
         """
-        subprocess.run(
-            ["podman", "cp", f"{src}/.", f"{container_name}:{dest}"],
-            check=True,
-            capture_output=True,
-        )
+        self._exec_podman(["podman", "cp", f"{src}/.", f"{container_name}:{dest}"])
 
     # -- Runtime ------------------------------------------------------------
 
