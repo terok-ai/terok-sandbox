@@ -341,13 +341,14 @@ class Sandbox:
             hooks.post_start()
 
     def copy_to(self, container_name: str, src: Path, dest: str) -> None:
-        """Copy a host directory into a stopped container.
+        """Copy a host path into a stopped container.
 
-        Uses ``podman cp src/. container:dest`` to recursively copy the
-        contents of *src* into *dest* inside the container.  The container
-        must be in the *created* (not running) state.
+        For directories, copies the *contents* of *src* into *dest*
+        (``podman cp src/. container:dest``).  For files, copies the file
+        directly (``podman cp src container:dest``).
         """
-        self._exec_podman(["podman", "cp", f"{src}/.", f"{container_name}:{dest}"])
+        src_arg = f"{src}/." if src.is_dir() else str(src)
+        self._exec_podman(["podman", "cp", src_arg, f"{container_name}:{dest}"])
 
     # -- Runtime ------------------------------------------------------------
 

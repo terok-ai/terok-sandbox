@@ -358,15 +358,25 @@ class TestSandboxSealed:
 class TestSandboxCopyTo:
     """Verify copy_to delegates to podman cp."""
 
-    def test_copy_to_invokes_podman_cp(self) -> None:
+    def test_copy_to_directory(self, tmp_path: Path) -> None:
+        """Directories use the src/. form to copy contents."""
+        src = tmp_path / "config"
+        src.mkdir()
         with patch("subprocess.run") as mock_run:
-            Sandbox().copy_to("my-ctr", Path("/host/src"), "/dest")
+            Sandbox().copy_to("my-ctr", src, "/dest")
 
-        mock_run.assert_called_once_with(
-            ["podman", "cp", "/host/src/.", "my-ctr:/dest"],
-            check=True,
-            capture_output=True,
-        )
+        cmd = mock_run.call_args[0][0]
+        assert cmd == ["podman", "cp", f"{src}/.", "my-ctr:/dest"]
+
+    def test_copy_to_file(self, tmp_path: Path) -> None:
+        """Files are copied directly without the /. suffix."""
+        src = tmp_path / "prompt.txt"
+        src.write_text("hello")
+        with patch("subprocess.run") as mock_run:
+            Sandbox().copy_to("my-ctr", src, "/dest/prompt.txt")
+
+        cmd = mock_run.call_args[0][0]
+        assert cmd == ["podman", "cp", str(src), "my-ctr:/dest/prompt.txt"]
 
 
 class TestSandboxStart:
