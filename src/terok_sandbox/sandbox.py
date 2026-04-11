@@ -57,6 +57,29 @@ class LifecycleHooks:
 
 
 @dataclass(frozen=True)
+class VolumeSpec:
+    """Typed description of a host↔container directory binding.
+
+    Replaces raw volume strings (``"host:container:z"``) with structured data
+    so the sandbox can decide *how* to materialise each binding — as a bind
+    mount (shared mode) or a ``podman cp`` injection (sealed mode).
+    """
+
+    host_path: Path
+    """Absolute host-side path to mount or copy in."""
+
+    container_path: str
+    """Absolute path inside the container (e.g. ``"/workspace"``)."""
+
+    relabel: str = "z"
+    """SELinux relabel flag: ``"z"`` (shared) or ``"Z"`` (private unshared)."""
+
+    def to_mount_arg(self) -> str:
+        """Format as a ``-v`` flag value for ``podman run``."""
+        return f"{self.host_path}:{self.container_path}:{self.relabel}"
+
+
+@dataclass(frozen=True)
 class RunSpec:
     """Everything needed for a single ``podman run`` invocation."""
 
@@ -69,8 +92,8 @@ class RunSpec:
     env: dict[str, str]
     """Environment variables injected into the container."""
 
-    volumes: tuple[str, ...]
-    """Volume mount strings (``host:container[:opts]``)."""
+    volumes: tuple[VolumeSpec, ...]
+    """Host↔container directory bindings (mounted or injected per *sealed*)."""
 
     command: tuple[str, ...]
     """Command to execute inside the container."""
@@ -86,6 +109,9 @@ class RunSpec:
 
     unrestricted: bool = True
     """When False, adds ``--security-opt no-new-privileges``."""
+
+    sealed: bool = False
+    """When True, volumes are injected via ``podman cp`` instead of bind-mounted."""
 
 
 # ---------------------------------------------------------------------------
@@ -153,27 +179,19 @@ class Sandbox:
 
     # -- Container launch ---------------------------------------------------
 
-    def run(self, spec: RunSpec, *, hooks: LifecycleHooks | None = None) -> None:
-        """Launch a detached container from *spec*.
+    def _build_cmd(self, spec: RunSpec, verb: str = "run") -> list[str]:
+        """Assemble the ``podman`` command line for *spec*.
 
-        Assembles and executes the ``podman run`` command, handling user
-        namespace mapping, shield or bypass networking, GPU device args,
-        environment and volume injection, CDI error detection, and lifecycle
-        hook callbacks.
+        *verb* selects the podman sub-command — ``"run"`` (detached) or
+        ``"create"`` (created but not started).  Everything else (userns,
+        shield, GPU, volumes, env, image, entrypoint) is identical.
 
-        Fires *hooks.pre_start* before ``podman run`` and *hooks.post_start*
-        after a successful launch.  Raises :class:`~.runtime.GpuConfigError`
-        when the launch fails due to NVIDIA CDI misconfiguration.
+        In **sealed** mode the volume specs are omitted from the command
+        (they are injected via :meth:`copy_to` between create and start).
         """
-        from .runtime import (
-            bypass_network_args,
-            check_gpu_error,
-            gpu_run_args,
-            podman_userns_args,
-            redact_env_args,
-        )
+        from .runtime import bypass_network_args, gpu_run_args, podman_userns_args
 
-        cmd: list[str] = ["podman", "run", "-d"]
+        cmd: list[str] = ["podman", verb] + (["-d"] if verb == "run" else [])
         cmd += podman_userns_args()
 
         if not spec.unrestricted:
@@ -201,18 +219,22 @@ class Sandbox:
 
         if spec.extra_args:
             cmd += list(spec.extra_args)
-        for vol in spec.volumes:
-            cmd += ["-v", vol]
+
+        # Sealed containers receive their directories via podman cp, not mounts.
+        if not spec.sealed:
+            for vol in spec.volumes:
+                cmd += ["-v", vol.to_mount_arg()]
+
         for k, v in spec.env.items():
             cmd += ["-e", f"{k}={v}"]
 
         cmd += ["--name", spec.container_name, "-w", "/workspace", spec.image]
         cmd += list(spec.command)
+        return cmd
 
-        print("$", shlex.join(redact_env_args(cmd)))
-
-        if hooks and hooks.pre_start:
-            hooks.pre_start()
+    def _exec_podman(self, cmd: list[str]) -> None:
+        """Run a podman command, translating failures to SystemExit."""
+        from .runtime import check_gpu_error
 
         try:
             subprocess.run(cmd, check=True, capture_output=True)
@@ -224,8 +246,80 @@ class Sandbox:
             msg = f"Container launch failed:\n{stderr.strip()}" if stderr else str(exc)
             raise SystemExit(msg) from exc
 
+    def run(self, spec: RunSpec, *, hooks: LifecycleHooks | None = None) -> None:
+        """Launch a detached container from *spec*.
+
+        In **shared** mode (default), assembles and executes a single
+        ``podman run -d`` with bind mounts.
+
+        In **sealed** mode (``spec.sealed``), splits into create → inject →
+        start: the container is created without volumes, directories are
+        copied in via ``podman cp``, and the container is then started.
+
+        Fires *hooks.pre_start* before creation and *hooks.post_start*
+        after a successful start.  Raises :class:`~.runtime.GpuConfigError`
+        when the launch fails due to NVIDIA CDI misconfiguration.
+        """
+        from .runtime import redact_env_args
+
+        if spec.sealed:
+            self.create(spec, hooks=hooks)
+            for vol in spec.volumes:
+                if vol.host_path.exists():
+                    self.copy_to(spec.container_name, vol.host_path, vol.container_path)
+            self.start(spec.container_name, hooks=hooks)
+            return
+
+        cmd = self._build_cmd(spec, verb="run")
+        print("$", shlex.join(redact_env_args(cmd)))
+
+        if hooks and hooks.pre_start:
+            hooks.pre_start()
+
+        self._exec_podman(cmd)
+
         if hooks and hooks.post_start:
             hooks.post_start()
+
+    def create(self, spec: RunSpec, *, hooks: LifecycleHooks | None = None) -> str:
+        """Create a container without starting it.
+
+        Returns the container name.  Fires *hooks.pre_start* before
+        ``podman create``.  The container can then receive injected files
+        via :meth:`copy_to` before being started with :meth:`start`.
+        """
+        from .runtime import redact_env_args
+
+        cmd = self._build_cmd(spec, verb="create")
+        print("$", shlex.join(redact_env_args(cmd)))
+
+        if hooks and hooks.pre_start:
+            hooks.pre_start()
+
+        self._exec_podman(cmd)
+        return spec.container_name
+
+    def start(self, container_name: str, *, hooks: LifecycleHooks | None = None) -> None:
+        """Start a previously created container.
+
+        Fires *hooks.post_start* after a successful start.
+        """
+        subprocess.run(["podman", "start", container_name], check=True, capture_output=True)
+        if hooks and hooks.post_start:
+            hooks.post_start()
+
+    def copy_to(self, container_name: str, src: Path, dest: str) -> None:
+        """Copy a host directory into a stopped container.
+
+        Uses ``podman cp src/. container:dest`` to recursively copy the
+        contents of *src* into *dest* inside the container.  The container
+        must be in the *created* (not running) state.
+        """
+        subprocess.run(
+            ["podman", "cp", f"{src}/.", f"{container_name}:{dest}"],
+            check=True,
+            capture_output=True,
+        )
 
     # -- Runtime ------------------------------------------------------------
 

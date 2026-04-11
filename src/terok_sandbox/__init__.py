@@ -123,7 +123,7 @@ from .runtime import (
 )
 
 # -- Facade ------------------------------------------------------------------
-from .sandbox import READY_MARKER, LifecycleHooks, RunSpec, Sandbox
+from .sandbox import READY_MARKER, LifecycleHooks, RunSpec, Sandbox, VolumeSpec
 
 # -- Shield ------------------------------------------------------------------
 from .shield import (
@@ -238,6 +238,7 @@ __all__ = [
     "LifecycleHooks",
     "RunSpec",
     "Sandbox",
+    "VolumeSpec",
     # Doctor (container health checks)
     "CheckVerdict",
     "DoctorCheck",

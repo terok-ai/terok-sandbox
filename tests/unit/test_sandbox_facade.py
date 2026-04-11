@@ -12,8 +12,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from terok_sandbox.runtime import GpuConfigError, check_gpu_error, redact_env_args
-from terok_sandbox.sandbox import READY_MARKER, LifecycleHooks, RunSpec, Sandbox
-from tests.constants import MOCK_TASK_DIR
+from terok_sandbox.sandbox import READY_MARKER, LifecycleHooks, RunSpec, Sandbox, VolumeSpec
+from tests.constants import MOCK_BASE, MOCK_TASK_DIR
+
+MOCK_HOST_DIR = MOCK_BASE / "host-dir"
 
 
 def _make_spec(**overrides) -> RunSpec:
@@ -22,7 +24,7 @@ def _make_spec(**overrides) -> RunSpec:
         "container_name": "test-ctr",
         "image": "alpine:latest",
         "env": {"A": "1"},
-        "volumes": ("/host:/ctr",),
+        "volumes": (VolumeSpec(MOCK_HOST_DIR, "/ctr"),),
         "command": ("bash",),
         "task_dir": MOCK_TASK_DIR,
     }
@@ -249,6 +251,140 @@ class TestSandbox:
             s = Sandbox()
             with pytest.raises(GpuConfigError):
                 s.run(_make_spec())
+
+
+class TestVolumeSpec:
+    """Verify VolumeSpec dataclass."""
+
+    def test_to_mount_arg_default_relabel(self) -> None:
+        vol = VolumeSpec(Path("/host/data"), "/container/data")
+        assert vol.to_mount_arg() == "/host/data:/container/data:z"
+
+    def test_to_mount_arg_private_relabel(self) -> None:
+        vol = VolumeSpec(Path("/host/ws"), "/workspace", relabel="Z")
+        assert vol.to_mount_arg() == "/host/ws:/workspace:Z"
+
+    def test_frozen(self) -> None:
+        vol = VolumeSpec(Path("/a"), "/b")
+        with pytest.raises(AttributeError):
+            vol.host_path = Path("/c")  # type: ignore[misc]
+
+
+class TestSandboxSealed:
+    """Verify sealed isolation mode (create → copy → start)."""
+
+    def test_sealed_run_uses_create_copy_start(self, tmp_path: Path) -> None:
+        """Sealed mode calls create, copy_to for each volume, then start."""
+        # Create a real host dir with a marker file so copy_to triggers
+        host_dir = tmp_path / "config"
+        host_dir.mkdir()
+        (host_dir / "marker.txt").write_text("hello")
+
+        spec = _make_spec(
+            sealed=True,
+            volumes=(VolumeSpec(host_dir, "/home/dev/.terok", relabel="Z"),),
+        )
+
+        with (
+            patch.object(Sandbox, "create") as mock_create,
+            patch.object(Sandbox, "copy_to") as mock_copy,
+            patch.object(Sandbox, "start") as mock_start,
+        ):
+            s = Sandbox()
+            s.run(spec)
+
+        mock_create.assert_called_once()
+        mock_copy.assert_called_once_with("test-ctr", host_dir, "/home/dev/.terok")
+        mock_start.assert_called_once()
+
+    def test_sealed_run_skips_missing_host_dirs(self, tmp_path: Path) -> None:
+        """Sealed mode skips copy_to when host_path doesn't exist."""
+        missing = tmp_path / "nonexistent"
+        spec = _make_spec(
+            sealed=True,
+            volumes=(VolumeSpec(missing, "/home/dev/.config"),),
+        )
+
+        with (
+            patch.object(Sandbox, "create"),
+            patch.object(Sandbox, "copy_to") as mock_copy,
+            patch.object(Sandbox, "start"),
+        ):
+            Sandbox().run(spec)
+
+        mock_copy.assert_not_called()
+
+    def test_sealed_create_omits_volume_flags(self) -> None:
+        """podman create in sealed mode has no -v flags."""
+        spec = _make_spec(sealed=True)
+
+        with (
+            patch("subprocess.run") as mock_run,
+            patch("builtins.print"),
+            patch("terok_sandbox.shield.pre_start", return_value=[]),
+        ):
+            Sandbox().create(spec)
+
+        cmd = mock_run.call_args[0][0]
+        assert cmd[:2] == ["podman", "create"]
+        assert "-v" not in cmd
+
+    def test_shared_run_includes_volume_flags(self) -> None:
+        """podman run in shared mode includes -v flags from VolumeSpec."""
+        spec = _make_spec(sealed=False)
+
+        with (
+            patch("subprocess.run") as mock_run,
+            patch("builtins.print"),
+            patch("terok_sandbox.shield.pre_start", return_value=[]),
+        ):
+            Sandbox().run(spec)
+
+        cmd = mock_run.call_args[0][0]
+        assert "-v" in cmd
+        vol_idx = cmd.index("-v")
+        assert cmd[vol_idx + 1] == f"{MOCK_HOST_DIR}:/ctr:z"
+
+
+class TestSandboxCopyTo:
+    """Verify copy_to delegates to podman cp."""
+
+    def test_copy_to_invokes_podman_cp(self) -> None:
+        with patch("subprocess.run") as mock_run:
+            Sandbox().copy_to("my-ctr", Path("/host/src"), "/dest")
+
+        mock_run.assert_called_once_with(
+            ["podman", "cp", "/host/src/.", "my-ctr:/dest"],
+            check=True,
+            capture_output=True,
+        )
+
+
+class TestSandboxStart:
+    """Verify start delegates to podman start."""
+
+    def test_start_invokes_podman_start(self) -> None:
+        with patch("subprocess.run") as mock_run:
+            Sandbox().start("my-ctr")
+
+        mock_run.assert_called_once_with(
+            ["podman", "start", "my-ctr"],
+            check=True,
+            capture_output=True,
+        )
+
+    def test_start_fires_post_start_hook(self) -> None:
+        hook_called = False
+
+        def on_post_start() -> None:
+            nonlocal hook_called
+            hook_called = True
+
+        hooks = LifecycleHooks(post_start=on_post_start)
+        with patch("subprocess.run"):
+            Sandbox().start("my-ctr", hooks=hooks)
+
+        assert hook_called
 
 
 class TestLifecycleHooks:
