@@ -238,7 +238,7 @@ class GitGate:
         if cache_dir is None:
             return False
 
-        gate_file_url = f"file://{self._gate_path}"
+        gate_file_url = self._gate_path.resolve().as_uri()
         try:
             cache_dir.parent.mkdir(parents=True, exist_ok=True)
 

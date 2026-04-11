@@ -67,7 +67,7 @@ class TestRefreshCloneCache:
         mock_run.assert_called_once()
         cmd = mock_run.call_args[0][0]
         assert cmd[0:2] == ["git", "clone"]
-        assert f"file://{gate_dir}" in cmd
+        assert cmd[2].startswith("file:///") and str(gate_dir.name) in cmd[2]
         assert str(cache_base / "proj") in cmd
 
     def test_fetches_when_cache_exists(self, tmp_path: Path) -> None:
