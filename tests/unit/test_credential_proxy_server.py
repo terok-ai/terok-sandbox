@@ -248,6 +248,18 @@ class TestHandlerEdgeCases:
             resp = await client.get("/v1/messages")
             assert resp.status == 401
 
+    async def test_missing_auth_logs_warning(self, _proxy_env, caplog) -> None:
+        """Missing auth header logs a WARNING with method and path."""
+        import logging
+
+        from aiohttp.test_utils import TestClient, TestServer
+
+        app, _tokens = _proxy_env
+        with caplog.at_level(logging.WARNING, logger="terok-credential-proxy"):
+            async with TestClient(TestServer(app)) as client:
+                await client.get("/v1/messages")
+        assert any("GET /v1/messages" in r.message and "401" in r.message for r in caplog.records)
+
     async def test_invalid_token_401(self, _proxy_env) -> None:
         """Request with bad phantom token returns 401."""
         from aiohttp.test_utils import TestClient, TestServer
@@ -256,6 +268,18 @@ class TestHandlerEdgeCases:
         async with TestClient(TestServer(app)) as client:
             resp = await client.get("/v1/messages", headers={"Authorization": "Bearer fake"})
             assert resp.status == 401
+
+    async def test_invalid_token_logs_warning(self, _proxy_env, caplog) -> None:
+        """Invalid phantom token logs a WARNING with method and path."""
+        import logging
+
+        from aiohttp.test_utils import TestClient, TestServer
+
+        app, _tokens = _proxy_env
+        with caplog.at_level(logging.WARNING, logger="terok-credential-proxy"):
+            async with TestClient(TestServer(app)) as client:
+                await client.get("/v1/messages", headers={"Authorization": "Bearer fake"})
+        assert any("GET /v1/messages" in r.message and "401" in r.message for r in caplog.records)
 
     async def test_empty_credential_returns_502(self, _proxy_env) -> None:
         """Credential with no usable token field returns 502."""
