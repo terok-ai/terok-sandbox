@@ -89,13 +89,16 @@ class TestRefreshCloneCache:
             result = gate._refresh_clone_cache()
 
         assert result is True
-        assert mock_run.call_count == 2
+        assert mock_run.call_count == 3
         # First call: set-url
         set_url_cmd = mock_run.call_args_list[0][0][0]
         assert "set-url" in set_url_cmd
         # Second call: fetch
         fetch_cmd = mock_run.call_args_list[1][0][0]
         assert "fetch" in fetch_cmd
+        # Third call: reset --hard to update working tree
+        reset_cmd = mock_run.call_args_list[2][0][0]
+        assert "reset" in reset_cmd and "--hard" in reset_cmd
 
     def test_failure_returns_false(self, tmp_path: Path) -> None:
         """Subprocess failures are caught and return False."""

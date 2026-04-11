@@ -264,6 +264,14 @@ class GitGate:
                     capture_output=True,
                     timeout=120,
                 )
+                # Update working tree to match fetched HEAD — the cache is
+                # copied as-is into task workspaces, so stale files matter.
+                subprocess.run(
+                    ["git", "-C", str(cache_dir), "reset", "--hard", "origin/HEAD"],
+                    check=True,
+                    capture_output=True,
+                    timeout=30,
+                )
             return True
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
             logger.warning("Clone cache refresh failed (non-fatal): %s", exc)
