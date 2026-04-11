@@ -4,7 +4,7 @@ build-backend = "poetry_dynamic_versioning.backend"
 
 [tool.poetry]
 name = "terok-sandbox"
-version = "0.0.55"
+version = "0.0.56"
 description = "Hardened Podman container runner with gate server and shield integration"
 readme = "README.md"
 license = "Apache-2.0"
