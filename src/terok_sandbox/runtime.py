@@ -194,7 +194,12 @@ def get_container_rw_size(cname: str) -> int | None:
             timeout=60,
         ).strip()
         return int(out) if out else None
-    except (subprocess.CalledProcessError, FileNotFoundError, ValueError):
+    except (
+        subprocess.CalledProcessError,
+        FileNotFoundError,
+        subprocess.TimeoutExpired,
+        ValueError,
+    ):
         return None
 
 
@@ -227,7 +232,9 @@ def _parse_human_size(text: str) -> int | None:
     except ValueError:
         return None
     unit = m.group(2).upper()
-    multiplier = _SIZE_UNITS.get(unit, 1)
+    multiplier = _SIZE_UNITS.get(unit)
+    if multiplier is None:
+        return None
     return int(value * multiplier)
 
 
@@ -255,7 +262,7 @@ def get_container_rw_sizes(name_prefix: str) -> dict[str, int]:
             text=True,
             timeout=120,
         )
-    except (subprocess.CalledProcessError, FileNotFoundError):
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
         return {}
 
     result: dict[str, int] = {}
