@@ -10,10 +10,12 @@ simply groups them behind a shared :class:`SandboxConfig`.
 
 from __future__ import annotations
 
+import io
 import shlex
 import subprocess
+import tarfile
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
 from .config import SandboxConfig
@@ -264,12 +266,15 @@ class Sandbox:
         cmd += list(spec.command)
         return cmd
 
-    def _exec_podman(self, cmd: list[str]) -> None:
+    def _exec_podman(self, cmd: list[str], *, input: bytes | None = None) -> None:
         """Run a podman command, translating failures to SystemExit."""
         from .runtime import check_gpu_error
 
+        kwargs: dict = {"check": True, "capture_output": True}
+        if input is not None:
+            kwargs["input"] = input
         try:
-            subprocess.run(cmd, check=True, capture_output=True)
+            subprocess.run(cmd, **kwargs)
         except FileNotFoundError:
             raise SystemExit("podman not found; please install podman")
         except subprocess.CalledProcessError as exc:
@@ -296,9 +301,10 @@ class Sandbox:
 
         if spec.sealed:
             self.create(spec, hooks=hooks)
-            for vol in spec.volumes:
-                if vol.host_path.exists():
-                    self.copy_to(spec.container_name, vol.host_path, vol.container_path)
+            present = tuple(v for v in spec.volumes if v.host_path.exists())
+            self._ensure_parents(spec.container_name, present)
+            for vol in present:
+                self.copy_to(spec.container_name, vol.host_path, vol.container_path)
             self.start(spec.container_name, hooks=hooks)
             return
 
@@ -339,6 +345,40 @@ class Sandbox:
         self._exec_podman(["podman", "start", container_name])
         if hooks and hooks.post_start:
             hooks.post_start()
+
+    def _ensure_parents(self, container_name: str, volumes: tuple[VolumeSpec, ...]) -> None:
+        """Create parent directories inside a stopped container.
+
+        Bind mounts auto-create mount points; ``podman cp`` does not.
+        Injects a tar archive containing directory entries for every
+        ancestor of every volume target, so subsequent ``copy_to`` calls
+        succeed regardless of the container image layout.
+        """
+        dirs: set[str] = set()
+        for vol in volumes:
+            target = PurePosixPath(vol.container_path)
+            dirs.add(str(target).lstrip("/"))
+            for ancestor in target.parents:
+                if str(ancestor) != "/":
+                    dirs.add(str(ancestor).lstrip("/"))
+
+        if not dirs:
+            return
+
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tar:
+            for d in sorted(dirs):
+                info = tarfile.TarInfo(name=d)
+                info.type = tarfile.DIRTYPE
+                info.mode = 0o755
+                info.uid = 1000
+                info.gid = 1000
+                tar.addfile(info)
+
+        self._exec_podman(
+            ["podman", "cp", "-", f"{container_name}:/"],
+            input=buf.getvalue(),
+        )
 
     def copy_to(self, container_name: str, src: Path, dest: str) -> None:
         """Copy a host path into a stopped container.

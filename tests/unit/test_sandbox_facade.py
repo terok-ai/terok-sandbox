@@ -296,6 +296,7 @@ class TestSandboxSealed:
 
         with (
             patch.object(Sandbox, "create") as mock_create,
+            patch.object(Sandbox, "_ensure_parents") as mock_ensure,
             patch.object(Sandbox, "copy_to") as mock_copy,
             patch.object(Sandbox, "start") as mock_start,
         ):
@@ -303,6 +304,7 @@ class TestSandboxSealed:
             s.run(spec)
 
         mock_create.assert_called_once()
+        mock_ensure.assert_called_once()
         mock_copy.assert_called_once_with("test-ctr", host_dir, "/home/dev/.terok")
         mock_start.assert_called_once()
 
@@ -316,12 +318,50 @@ class TestSandboxSealed:
 
         with (
             patch.object(Sandbox, "create"),
+            patch.object(Sandbox, "_ensure_parents"),
             patch.object(Sandbox, "copy_to") as mock_copy,
             patch.object(Sandbox, "start"),
         ):
             Sandbox().run(spec)
 
         mock_copy.assert_not_called()
+
+    def test_ensure_parents_creates_directory_tree(self) -> None:
+        """_ensure_parents injects a tar with all ancestor directories."""
+        import tarfile as _tarfile
+
+        volumes = (
+            VolumeSpec(Path("/a"), "/home/dev/.config/gh"),
+            VolumeSpec(Path("/b"), "/workspace"),
+        )
+
+        with patch.object(Sandbox, "_exec_podman") as mock_exec:
+            Sandbox()._ensure_parents("ctr", volumes)
+
+        mock_exec.assert_called_once()
+        cmd = mock_exec.call_args[0][0]
+        assert cmd == ["podman", "cp", "-", "ctr:/"]
+
+        # Verify the tar payload contains expected directories
+        tar_bytes = mock_exec.call_args[1]["input"]
+        with _tarfile.open(fileobj=__import__("io").BytesIO(tar_bytes), mode="r") as tar:
+            names = sorted(m.name for m in tar.getmembers())
+            assert "home" in names
+            assert "home/dev" in names
+            assert "home/dev/.config" in names
+            assert "home/dev/.config/gh" in names
+            assert "workspace" in names
+            # All entries are directories owned by uid 1000
+            for m in tar.getmembers():
+                assert m.isdir()
+                assert m.uid == 1000
+
+    def test_ensure_parents_noop_for_empty_volumes(self) -> None:
+        """_ensure_parents does nothing when there are no volumes."""
+        with patch.object(Sandbox, "_exec_podman") as mock_exec:
+            Sandbox()._ensure_parents("ctr", ())
+
+        mock_exec.assert_not_called()
 
     def test_sealed_create_omits_volume_flags(self) -> None:
         """podman create in sealed mode has no -v flags."""
