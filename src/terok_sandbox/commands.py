@@ -4,7 +4,7 @@
 """Command registry for terok-sandbox.
 
 Follows the same :class:`CommandDef` / :class:`ArgDef` pattern as
-``terok_shield.registry``.  Higher-level consumers (terok, terok-agent)
+``terok_shield.registry``.  Higher-level consumers (terok, terok-executor)
 can import ``COMMANDS`` to build their own CLI frontends without
 duplicating argument definitions or handler logic.
 

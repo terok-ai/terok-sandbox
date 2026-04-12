@@ -18,7 +18,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 # ---------------------------------------------------------------------------
-# Shared protocol types — imported by terok-agent and terok
+# Shared protocol types — imported by terok-executor and terok
 # ---------------------------------------------------------------------------
 
 
