@@ -180,6 +180,101 @@ def is_container_running(cname: str) -> bool:
     return out.lower() == "true"
 
 
+def get_container_rw_size(cname: str) -> int | None:
+    """Return the writable-layer size in bytes for *cname*, or ``None``.
+
+    Uses ``podman container inspect --size`` which computes the overlay
+    diff on the fly — expect a brief pause for large containers.
+    """
+    try:
+        out = subprocess.check_output(
+            ["podman", "container", "inspect", "--size", "-f", "{{.SizeRw}}", cname],
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=60,
+        ).strip()
+        return int(out) if out else None
+    except (
+        subprocess.CalledProcessError,
+        FileNotFoundError,
+        subprocess.TimeoutExpired,
+        ValueError,
+    ):
+        return None
+
+
+_SIZE_RE = re.compile(r"([\d.]+)\s*([a-zA-Z]+)")
+
+_SIZE_UNITS: dict[str, int] = {
+    "B": 1,
+    "KB": 1_000,
+    "MB": 1_000_000,
+    "GB": 1_000_000_000,
+    "TB": 1_000_000_000_000,
+    "KIB": 1 << 10,
+    "MIB": 1 << 20,
+    "GIB": 1 << 30,
+    "TIB": 1 << 40,
+}
+
+
+def _parse_human_size(text: str) -> int | None:
+    """Best-effort parse of podman's human-readable size strings.
+
+    Handles forms like ``"12.5MB (virtual 1.23GB)"`` — extracts only
+    the first number (the writable layer, before "virtual").
+    """
+    m = _SIZE_RE.search(text)
+    if not m:
+        return None
+    try:
+        value = float(m.group(1))
+    except ValueError:
+        return None
+    unit = m.group(2).upper()
+    multiplier = _SIZE_UNITS.get(unit)
+    if multiplier is None:
+        return None
+    return int(value * multiplier)
+
+
+def get_container_rw_sizes(name_prefix: str) -> dict[str, int]:
+    """Return ``{container_name: rw_bytes}`` for all containers matching *name_prefix*.
+
+    Uses a single ``podman ps --size`` call — the ``--size`` flag is
+    expensive (podman computes overlay diffs), but one bulk call beats
+    N individual inspects.
+    """
+    try:
+        out = subprocess.check_output(
+            [
+                "podman",
+                "ps",
+                "-a",
+                "--size",
+                "--filter",
+                f"name=^{name_prefix}-",
+                "--format",
+                "{{.Names}}\t{{.Size}}",
+                "--no-trunc",
+            ],
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=120,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+        return {}
+
+    result: dict[str, int] = {}
+    for line in out.strip().splitlines():
+        parts = line.split("\t", 1)
+        if len(parts) == 2:
+            parsed = _parse_human_size(parts[1])
+            if parsed is not None:
+                result[parts[0]] = parsed
+    return result
+
+
 def stop_task_containers(container_names: list[str]) -> list[ContainerRemoveResult]:
     """Best-effort ``podman rm -f`` of the given containers.
 
