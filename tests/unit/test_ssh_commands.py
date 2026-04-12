@@ -329,7 +329,7 @@ class TestHandleSshAddKey:
 
         out = capsys.readouterr().out
         assert "deploy-gitlab" in out
-        assert "tk-side:myproj:deploy-gitlab" in out
+        assert "tk-main:myproj" in out
 
     def test_auto_numbering_key_1(self, tmp_path: Path) -> None:
         """Without --name, first key is key-1."""
@@ -367,8 +367,8 @@ class TestHandleSshAddKey:
 
         assert (cfg.ssh_keys_dir / "proj" / "id_rsa_my-key").is_file()
 
-    def test_comment_format(self, tmp_path: Path) -> None:
-        """ssh-keygen is called with the correct tk-side: comment."""
+    def test_first_key_gets_tk_main_comment(self, tmp_path: Path) -> None:
+        """First key in a new scope gets tk-main: comment, not tk-side:."""
         cfg = _mock_cfg(tmp_path)
         captured_cmds: list[list[str]] = []
 
@@ -381,7 +381,24 @@ class TestHandleSshAddKey:
 
         assert len(captured_cmds) == 1
         args = dict(zip(captured_cmds[0][1::2], captured_cmds[0][2::2], strict=False))
-        assert args["-C"] == "tk-side:proj:deploy"
+        assert args["-C"] == "tk-main:proj"
+
+    def test_second_key_gets_tk_side_comment(self, tmp_path: Path) -> None:
+        """Subsequent keys in an existing scope get tk-side: comment."""
+        cfg = _mock_cfg(tmp_path)
+        captured_cmds: list[list[str]] = []
+
+        def _capture(cmd, **_kwargs):
+            captured_cmds.append(list(cmd))
+            _fake_keygen(tmp_path)(cmd)
+
+        with patch("terok_sandbox.credentials.ssh.subprocess.run", side_effect=_capture):
+            _handle_ssh_add_key(scope="proj", name="deploy", create_scope=True, cfg=cfg)
+            _handle_ssh_add_key(scope="proj", name="gitlab", cfg=cfg)
+
+        assert len(captured_cmds) == 2
+        args_second = dict(zip(captured_cmds[1][1::2], captured_cmds[1][2::2], strict=False))
+        assert args_second["-C"] == "tk-side:proj:gitlab"
 
     def test_existing_key_refuses_overwrite(self, tmp_path: Path) -> None:
         """Refuses to overwrite an existing key file."""

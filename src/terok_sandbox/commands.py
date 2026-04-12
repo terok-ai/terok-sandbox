@@ -532,7 +532,8 @@ def _handle_ssh_add_key(
             "Use a different --name or remove the existing key first."
         )
 
-    comment = f"tk-side:{scope}:{key_name}"
+    scope_has_keys = _scope_has_keys(cfg.ssh_keys_json_path, scope)
+    comment = f"tk-side:{scope}:{key_name}" if scope_has_keys else f"tk-main:{scope}"
     generate_keypair(key_type, priv_path, pub_path, comment)
 
     try:
@@ -561,6 +562,20 @@ def _handle_ssh_add_key(
             print(f"  {sanitize_tty(pub_text)}")
     except Exception:
         pass
+
+
+def _scope_has_keys(keys_json_path: Path, scope: str) -> bool:
+    """Return *True* if *scope* already owns at least one key in ``ssh-keys.json``."""
+    import json
+
+    if not keys_json_path.is_file():
+        return False
+    try:
+        mapping = json.loads(keys_json_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    entries = mapping.get(scope)
+    return bool(entries) and isinstance(entries, list) and len(entries) > 0
 
 
 def _validate_scope_exists(scope: str, create_scope: bool, cfg: SandboxConfig) -> None:
