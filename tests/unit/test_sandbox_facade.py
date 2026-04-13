@@ -58,6 +58,18 @@ class TestRunSpec:
         spec = _make_spec(unrestricted=False)
         assert spec.unrestricted is False
 
+    def test_resource_limits_default_none(self) -> None:
+        """Memory and CPU limits default to None (unlimited)."""
+        spec = _make_spec()
+        assert spec.memory_limit is None
+        assert spec.cpu_limit is None
+
+    def test_resource_limits_carry_through(self) -> None:
+        """Explicit limits survive the frozen dataclass round-trip."""
+        spec = _make_spec(memory_limit="4g", cpu_limit="2.0")
+        assert spec.memory_limit == "4g"
+        assert spec.cpu_limit == "2.0"
+
 
 class TestReadyMarker:
     """Verify READY_MARKER constant."""
@@ -258,6 +270,45 @@ class TestSandbox:
             s = Sandbox()
             with pytest.raises(GpuConfigError):
                 s.run(_make_spec())
+
+    def test_memory_limit_in_podman_cmd(self) -> None:
+        """--memory flag appears in the assembled podman command."""
+        with (
+            patch("subprocess.run") as mock_run,
+            patch("builtins.print"),
+            patch("terok_sandbox.shield.pre_start", return_value=[]),
+        ):
+            Sandbox().run(_make_spec(memory_limit="4g"))
+
+        cmd = mock_run.call_args[0][0]
+        idx = cmd.index("--memory")
+        assert cmd[idx + 1] == "4g"
+
+    def test_cpu_limit_in_podman_cmd(self) -> None:
+        """--cpus flag appears in the assembled podman command."""
+        with (
+            patch("subprocess.run") as mock_run,
+            patch("builtins.print"),
+            patch("terok_sandbox.shield.pre_start", return_value=[]),
+        ):
+            Sandbox().run(_make_spec(cpu_limit="2.0"))
+
+        cmd = mock_run.call_args[0][0]
+        idx = cmd.index("--cpus")
+        assert cmd[idx + 1] == "2.0"
+
+    def test_no_limits_omits_flags(self) -> None:
+        """Neither --memory nor --cpus appear when limits are None."""
+        with (
+            patch("subprocess.run") as mock_run,
+            patch("builtins.print"),
+            patch("terok_sandbox.shield.pre_start", return_value=[]),
+        ):
+            Sandbox().run(_make_spec())
+
+        cmd = mock_run.call_args[0][0]
+        assert "--memory" not in cmd
+        assert "--cpus" not in cmd
 
 
 class TestVolumeSpec:

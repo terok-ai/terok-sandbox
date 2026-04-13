@@ -138,6 +138,12 @@ class RunSpec:
     gpu_enabled: bool = False
     """Whether to pass GPU device args to podman."""
 
+    memory_limit: str | None = None
+    """Podman ``--memory`` value (e.g. ``"4g"``, ``"512m"``).  ``None`` = unlimited."""
+
+    cpu_limit: str | None = None
+    """Podman ``--cpus`` value (e.g. ``"2.0"``, ``"0.5"``).  ``None`` = unlimited."""
+
     extra_args: tuple[str, ...] = ()
     """Additional podman run arguments (e.g. port publishing)."""
 
@@ -250,6 +256,11 @@ class Sandbox:
                 )
 
         cmd += gpu_run_args(enabled=spec.gpu_enabled)
+
+        if spec.memory_limit:
+            cmd += ["--memory", spec.memory_limit]
+        if spec.cpu_limit:
+            cmd += ["--cpus", spec.cpu_limit]
 
         if spec.extra_args:
             cmd += list(spec.extra_args)
