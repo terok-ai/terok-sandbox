@@ -25,9 +25,9 @@ packages = [
 [tool.poetry.dependencies]
 python = ">=3.12,<4.0"
 terok-shield = {url = "https://github.com/terok-ai/terok-shield/releases/download/v0.6.18/terok_shield-0.6.18-py3-none-any.whl"}
-platformdirs = ">=4.0"
+platformdirs = ">=4.9.6"
 aiohttp = ">=3.9"
-cryptography = ">=43.0"
+cryptography = ">=46.0.7"
 
 [tool.poetry.group.dev.dependencies]
 ruff = ">=0.8"
