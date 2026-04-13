@@ -257,9 +257,9 @@ class Sandbox:
 
         cmd += gpu_run_args(enabled=spec.gpu_enabled)
 
-        if spec.memory_limit:
+        if spec.memory_limit is not None:
             cmd += ["--memory", spec.memory_limit]
-        if spec.cpu_limit:
+        if spec.cpu_limit is not None:
             cmd += ["--cpus", spec.cpu_limit]
 
         if spec.extra_args:
