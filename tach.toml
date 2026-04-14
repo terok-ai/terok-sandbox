@@ -47,12 +47,19 @@ depends_on = [
     "terok_sandbox.config_stack",
 ]
 
-# Configuration dataclass — same-layer dep on paths
+# Shared port registry — depends on paths for configurable registry dir
+[[modules]]
+path = "terok_sandbox.port_registry"
+layer = "foundation"
+depends_on = ["terok_sandbox.paths"]
+
+# Configuration dataclass — same-layer dep on paths + port_registry
 [[modules]]
 path = "terok_sandbox.config"
 layer = "foundation"
 depends_on = [
     "terok_sandbox.paths",
+    "terok_sandbox.port_registry",
 ]
 
 # Health check protocol + sandbox-level diagnostics

@@ -62,7 +62,13 @@ def make_mock_shield(
 @pytest.mark.parametrize(
     ("cfg_kwargs", "expected_profiles", "expected_port", "audit_enabled"),
     [
-        pytest.param({}, ("dev-standard",), GATE_PORT, True, id="defaults"),
+        pytest.param(
+            {"gate_port": GATE_PORT, "proxy_port": 18731, "ssh_agent_port": 18732},
+            ("dev-standard",),
+            GATE_PORT,
+            True,
+            id="defaults",
+        ),
         pytest.param(
             {
                 "shield_profiles": ("custom-a", "custom-b"),
@@ -75,7 +81,12 @@ def make_mock_shield(
             id="custom-values",
         ),
         pytest.param(
-            {"shield_profiles": ("single-profile",)},
+            {
+                "shield_profiles": ("single-profile",),
+                "gate_port": GATE_PORT,
+                "proxy_port": 18731,
+                "ssh_agent_port": 18732,
+            },
             ("single-profile",),
             GATE_PORT,
             True,

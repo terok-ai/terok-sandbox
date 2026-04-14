@@ -54,6 +54,21 @@ from .paths import (
     namespace_config_root,
     namespace_runtime_dir,
     namespace_state_dir,
+    port_registry_dir,
+)
+
+# -- Port registry -----------------------------------------------------------
+from .port_registry import (
+    PORT_RANGE,
+    SERVICE_GATE,
+    SERVICE_PROXY,
+    SERVICE_SSH_AGENT,
+    PortRegistry,
+    ServicePorts,
+    claim_port,
+    release_port,
+    reset_cache as reset_port_cache,
+    resolve_service_ports,
 )
 from .runtime import (
     ContainerRemoveResult,
@@ -262,6 +277,7 @@ __all__ = [
     "namespace_config_root",
     "namespace_runtime_dir",
     "namespace_state_dir",
+    "port_registry_dir",
     # Runtime
     "ContainerRemoveResult",
     "GpuConfigError",
@@ -357,6 +373,17 @@ __all__ = [
     "SSHManager",
     "generate_keypair",
     "update_ssh_keys_json",
+    # Port registry
+    "PORT_RANGE",
+    "PortRegistry",
+    "SERVICE_GATE",
+    "SERVICE_PROXY",
+    "SERVICE_SSH_AGENT",
+    "ServicePorts",
+    "claim_port",
+    "release_port",
+    "reset_port_cache",
+    "resolve_service_ports",
     # Meta
     "__version__",
 ]
