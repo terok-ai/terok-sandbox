@@ -15,10 +15,12 @@ A module-level singleton (:data:`_default`) provides the convenience API
 
 from __future__ import annotations
 
-import getpass
 import json
 import os
+import pwd
 import socket
+import stat
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -33,6 +35,9 @@ SERVICE_SSH_AGENT = "ssh_agent"
 
 _LOCALHOST = "127.0.0.1"
 _CLAIMS_FILENAME = "port-claims.json"
+
+_MAX_CLAIM_FILE_BYTES = 16_384  # 16 KiB — plenty for port claims
+_MAX_CLAIM_FILES = 256  # sane upper bound for user claim files
 
 
 def _resolve_port_range() -> range:
@@ -227,14 +232,24 @@ class PortRegistry:
 
         Own claim file is skipped — same-user port stability is managed
         via the per-user backup (``port-claims.json``) and socket bind.
+
+        Non-regular files (symlinks, FIFOs) and oversized files are skipped
+        to defend against hostile entries in the shared directory.
         """
         taken: set[int] = set()
         own = f"{_username()}.json"
+        scanned = 0
         try:
             for path in self.registry_dir.iterdir():
                 if path.name == own or not path.name.endswith(".json"):
                     continue
+                scanned += 1
+                if scanned > _MAX_CLAIM_FILES:
+                    break
                 try:
+                    st = path.lstat()
+                    if not stat.S_ISREG(st.st_mode) or st.st_size > _MAX_CLAIM_FILE_BYTES:
+                        continue
                     data = json.loads(path.read_text())
                     if isinstance(data, dict):
                         taken.update(v for v in data.values() if isinstance(v, int))
@@ -245,37 +260,56 @@ class PortRegistry:
         return taken
 
     def _write_shared_claims(self, *, remove: set[str] | None = None) -> None:
-        """Merge current session claims into the user's shared claim file (atomic).
+        """Merge current session claims into the user's shared claim file.
 
+        Uses ``mkstemp`` + ``os.replace`` for atomic, symlink-safe writes.
         Keys in *remove* are deleted from the persisted file (used by release).
         """
         target = self.registry_dir / f"{_username()}.json"
         existing: dict[str, int] = {}
         try:
-            existing = json.loads(target.read_text())
-            if not isinstance(existing, dict):
-                existing = {}
+            if not target.is_symlink():
+                existing = json.loads(target.read_text())
+                if not isinstance(existing, dict):
+                    existing = {}
         except (OSError, ValueError, TypeError):
             pass
         merged = {**existing, **self._held}
         for key in remove or ():
             merged.pop(key, None)
-        tmp = target.with_suffix(".tmp")
         try:
-            tmp.write_text(json.dumps(merged))
-            tmp.rename(target)
+            fd, tmp_name = tempfile.mkstemp(dir=self.registry_dir, suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w") as f:
+                    json.dump(merged, f)
+                os.replace(tmp_name, target)
+            except BaseException:
+                Path(tmp_name).unlink(missing_ok=True)
+                raise
         except OSError:
             pass  # best-effort — worst case, another user may briefly collide
 
     def _ensure_dir(self) -> None:
-        """Create the shared claims directory with sticky-bit permissions."""
+        """Create the shared claims directory with sticky-bit permissions.
+
+        Only applies ``chmod 1777`` to newly created directories — never
+        widens permissions on pre-existing paths.  Refuses symlinked paths.
+        """
         if self._dir_ensured:
             return
-        self.registry_dir.mkdir(parents=True, exist_ok=True)
+        if self.registry_dir.is_symlink():
+            raise SystemExit(f"Refusing to use symlinked port registry dir: {self.registry_dir}")
+        created = False
         try:
-            os.chmod(self.registry_dir, 0o1777)  # nosec B103 — intentional: shared multi-user dir
-        except PermissionError:
-            pass  # pre-provisioned by admin — already writable
+            self.registry_dir.mkdir(parents=True, exist_ok=False)
+            created = True
+        except FileExistsError:
+            pass
+        if created:
+            try:
+                os.chmod(self.registry_dir, 0o1777)  # nosec B103 — shared multi-user dir
+            except PermissionError:
+                pass  # pre-provisioned by admin — already writable
         self._dir_ensured = True
 
 
@@ -318,12 +352,23 @@ def _save_ports(state_dir: Path, ports: dict[str, int]) -> None:
 
 
 def _username() -> str:
-    """Return the current OS username for per-user claim files."""
-    return getpass.getuser()
+    """Return the current OS username from the effective UID (non-spoofable).
+
+    Uses ``pwd.getpwuid`` rather than ``getpass.getuser`` so that the
+    result cannot be influenced by ``$USER`` / ``$LOGNAME`` env vars.
+    """
+    return pwd.getpwuid(os.geteuid()).pw_name
 
 
 def _is_port_free(port: int) -> bool:
-    """Return True if *port* can be bound on localhost."""
+    """Return True if *port* can be bound on localhost.
+
+    .. note:: There is an inherent TOCTOU window between this check and
+       the actual service bind.  The file-based claim prevents coordination
+       races between terok users; the OS ``bind()`` is the true reservation.
+       Holding the socket open is not feasible because the allocating CLI
+       process exits before the service process binds.
+    """
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         try:
             s.bind((_LOCALHOST, port))

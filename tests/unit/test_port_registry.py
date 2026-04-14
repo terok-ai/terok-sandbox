@@ -254,6 +254,37 @@ def test_fresh_instance_independent(fresh_registry: PortRegistry) -> None:
     assert "gate" not in reg._default._held
 
 
+def test_symlink_registry_dir_rejected(tmp_path: Path) -> None:
+    """Registry dir that is a symlink → SystemExit."""
+    real = tmp_path / "real-dir"
+    real.mkdir()
+    link = tmp_path / "symlinked-ports"
+    link.symlink_to(real)
+    registry = PortRegistry(link, reg.PORT_RANGE)
+    with pytest.raises(SystemExit, match="symlinked"):
+        registry.claim("gate")
+
+
+def test_symlink_claim_file_skipped(tmp_path: Path) -> None:
+    """Symlink posing as another user's claim file is silently skipped."""
+    # Target lives outside the registry dir to isolate the symlink test
+    target = tmp_path / "decoy.json"
+    target.write_text(json.dumps({"gate": 18700}))
+    link = reg._default.registry_dir / "bob.json"
+    link.symlink_to(target)
+    # Symlink is not a regular file → 18700 is NOT treated as taken
+    port = reg.claim_port("gate", preferred=18700)
+    assert port == 18700
+
+
+def test_oversized_claim_file_skipped() -> None:
+    """Oversized claim file in shared dir is silently skipped."""
+    big = reg._default.registry_dir / "bob.json"
+    big.write_text("x" * 20_000)  # > 16 KiB limit
+    port = reg.claim_port("gate", preferred=18700)
+    assert port == 18700
+
+
 def test_auto_clamps_out_of_range_preferred() -> None:
     """Auto-allocation ignores a preferred port outside PORT_RANGE."""
     port = reg.claim_port("gate", preferred=50000)
