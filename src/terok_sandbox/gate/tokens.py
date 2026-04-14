@@ -74,15 +74,17 @@ class TokenStore:
             self._write(tokens)
 
     def _read(self) -> dict[str, dict[str, str]]:
-        """Load tokens.json.  Returns ``{}`` on missing or corrupt file."""
+        """Load tokens.json.  Returns ``{}`` when the file does not exist.
+
+        Raises on I/O or parse errors to prevent silent data loss — a
+        subsequent ``_write()`` would overwrite all existing tokens with
+        whatever the caller accumulated in memory.
+        """
         if not self._path.is_file():
             return {}
-        try:
-            data = json.loads(self._path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            return {}
+        data = json.loads(self._path.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
-            return {}
+            raise ValueError(f"Token file is not a JSON object: {self._path}")
         return {
             tok: info
             for tok, info in data.items()
