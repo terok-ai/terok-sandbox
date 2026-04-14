@@ -40,7 +40,7 @@ def _is_root() -> bool:
 # Shared config reader (Podman model: all packages read one config.yml)
 # ---------------------------------------------------------------------------
 
-_config_paths_cache: dict[str, str] | None = None
+_config_section_cache: dict[str, dict[str, str]] = {}
 
 
 def _config_file_paths() -> list[tuple[str, Path]]:
@@ -66,29 +66,33 @@ def _config_file_paths() -> list[tuple[str, Path]]:
     return result
 
 
-def _read_config_paths() -> dict[str, str]:
-    """Read ``paths:`` from layered terok configs (cached, fail-silent).
+def read_config_section(section: str) -> dict[str, str]:
+    """Read a top-level section from layered terok configs (cached, fail-silent).
 
     Merges system and user config files via :class:`ConfigStack` — user
-    values override system defaults at the leaf level.  Only the ``paths``
-    section is read; other keys are package-specific and ignored here.
+    values override system defaults at the leaf level.
     """
-    global _config_paths_cache  # noqa: PLW0603
-    if _config_paths_cache is not None:
-        return _config_paths_cache
+    if section in _config_section_cache:
+        return _config_section_cache[section]
 
-    _config_paths_cache = {}
+    result: dict[str, str] = {}
     try:
         from .config_stack import ConfigStack, load_yaml_scope
 
         stack = ConfigStack()
         for label, path in _config_file_paths():
             stack.push(load_yaml_scope(label, path))
-        paths = stack.resolve_section("paths")
-        _config_paths_cache = {k: str(v) for k, v in paths.items() if v}
+        merged = stack.resolve_section(section)
+        result = {k: str(v) for k, v in merged.items() if v is not None}
     except Exception:  # noqa: BLE001 — fail-silent; bad config should not crash path resolution
         pass
-    return _config_paths_cache
+    _config_section_cache[section] = result
+    return result
+
+
+def _read_config_paths() -> dict[str, str]:
+    """Read ``paths:`` section — convenience wrapper."""
+    return read_config_section("paths")
 
 
 def _namespace_root() -> Path | None:
@@ -215,6 +219,25 @@ def state_root() -> Path:
     → ``~/.local/share/terok/sandbox``.
     """
     return namespace_state_dir("sandbox", "TEROK_SANDBOX_STATE_DIR")
+
+
+def port_registry_dir() -> Path:
+    """Shared port registry directory (file-based multi-user isolation).
+
+    Priority: ``TEROK_PORT_REGISTRY_DIR`` env var
+    → ``config.yml`` ``paths.port_registry_dir``
+    → ``/tmp/terok-ports``.
+
+    Admins on multi-user hosts can point this at a persistent directory
+    (e.g. ``/var/lib/terok/ports``) so that port claims survive reboots.
+    """
+    env = os.getenv("TEROK_PORT_REGISTRY_DIR")
+    if env:
+        return Path(env).expanduser()
+    val = _read_config_paths().get("port_registry_dir")
+    if val:
+        return Path(val).expanduser().resolve()
+    return Path("/tmp/terok-ports")  # nosec B108 — intentional shared registry
 
 
 def runtime_root() -> Path:

@@ -52,7 +52,9 @@ def test_import_config():
     cfg = SandboxConfig()
     assert isinstance(cfg.state_dir, Path)
     assert isinstance(cfg.gate_port, int)
-    assert cfg.gate_port == 9418
+    from terok_sandbox.port_registry import PORT_RANGE
+
+    assert cfg.gate_port in PORT_RANGE
 
 
 def test_import_shield():

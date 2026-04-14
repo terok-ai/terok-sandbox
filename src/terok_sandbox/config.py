@@ -48,14 +48,14 @@ class SandboxConfig:
     credentials_dir: Path = field(default_factory=_credentials_root)
     """Shared credentials directory (DB, routes, env mounts)."""
 
-    gate_port: int = 9418
-    """HTTP port for the gate server."""
+    gate_port: int | None = None
+    """HTTP port for the gate server (``None`` = auto-allocate via registry)."""
 
-    proxy_port: int = 18731
-    """TCP port for the credential proxy (container access)."""
+    proxy_port: int | None = None
+    """TCP port for the credential proxy (``None`` = auto-allocate via registry)."""
 
-    ssh_agent_port: int = 18732
-    """TCP port for the SSH agent proxy (container access)."""
+    ssh_agent_port: int | None = None
+    """TCP port for the SSH agent proxy (``None`` = auto-allocate via registry)."""
 
     shield_profiles: tuple[str, ...] = ("dev-standard",)
     """Shield egress firewall profile names."""
@@ -65,6 +65,27 @@ class SandboxConfig:
 
     shield_bypass: bool = False
     """DANGEROUS: when True, the egress firewall is completely disabled."""
+
+    def __post_init__(self) -> None:
+        """Auto-resolve ``None`` ports via the shared port registry."""
+        if self.gate_port is None or self.proxy_port is None or self.ssh_agent_port is None:
+            from .port_registry import resolve_service_ports
+
+            ports = resolve_service_ports(
+                self.gate_port,
+                self.proxy_port,
+                self.ssh_agent_port,
+                gate_explicit=self.gate_port is not None,
+                proxy_explicit=self.proxy_port is not None,
+                ssh_explicit=self.ssh_agent_port is not None,
+                state_dir=self.state_dir,
+            )
+            if self.gate_port is None:
+                object.__setattr__(self, "gate_port", ports.gate)
+            if self.proxy_port is None:
+                object.__setattr__(self, "proxy_port", ports.proxy)
+            if self.ssh_agent_port is None:
+                object.__setattr__(self, "ssh_agent_port", ports.ssh_agent)
 
     @property
     def gate_base_path(self) -> Path:

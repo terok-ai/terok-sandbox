@@ -196,9 +196,9 @@ _NAMESPACE_ROOT = "terok"
 @pytest.fixture(autouse=True)
 def _reset_config_cache():
     """Clear the config paths cache between tests."""
-    _paths_mod._config_paths_cache = None
+    _paths_mod._config_section_cache.clear()
     yield
-    _paths_mod._config_paths_cache = None
+    _paths_mod._config_section_cache.clear()
 
 
 class TestConfigFilePaths:
