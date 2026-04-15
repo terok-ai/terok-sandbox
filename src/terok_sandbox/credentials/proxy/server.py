@@ -502,7 +502,10 @@ async def _run_multi(
                 path.unlink()
             path.parent.mkdir(parents=True, exist_ok=True)
             _logger.info("Listening on %s", path)
-            await UnixSite(runner, str(path)).start()
+            from ..._util._selinux import socket_selinux_context
+
+            with socket_selinux_context():
+                await UnixSite(runner, str(path)).start()
 
         if sd_tcp:
             _logger.info("Using systemd-inherited TCP socket")

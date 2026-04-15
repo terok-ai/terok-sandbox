@@ -446,10 +446,12 @@ async def start_ssh_agent_server(
 
     if socket_path:
         from terok_sandbox._util._net import harden_socket, prepare_socket_path
+        from terok_sandbox._util._selinux import socket_selinux_context
 
         path = Path(socket_path)
         prepare_socket_path(path)
-        server = await asyncio.start_unix_server(_on_connect, path=str(path))
+        with socket_selinux_context():
+            server = await asyncio.start_unix_server(_on_connect, path=str(path))
         harden_socket(path)
         _logger.info("SSH agent proxy listening on %s", path)
     elif host is not None and port is not None:

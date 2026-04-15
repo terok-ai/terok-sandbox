@@ -496,10 +496,29 @@ def _create_unix_server(
         pass
     socket_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Set SELinux socket creation context so the kernel socket object
+    # carries terok_socket_t — required for container_t connectto.
+    # Inlined to preserve this module's zero-external-import boundary.
+    _selinux_old_ctx = None
+    try:
+        import selinux as _se  # type: ignore[import-untyped]
+
+        _selinux_old_ctx = _se.getsockcreatecon()[1]
+        _se.setsockcreatecon("system_u:object_r:terok_socket_t:s0")
+    except (ImportError, OSError):
+        pass
+
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.bind(str(socket_path))
     os.chmod(socket_path, 0o600)
     sock.listen(5)
+
+    try:
+        import selinux as _se  # type: ignore[import-untyped]
+
+        _se.setsockcreatecon(_selinux_old_ctx)
+    except (ImportError, OSError):
+        pass
 
     server = _ThreadingHTTPServer(("localhost", 0), handler_class, bind_and_activate=False)
     server.socket.close()

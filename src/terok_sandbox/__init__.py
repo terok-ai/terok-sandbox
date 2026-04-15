@@ -24,6 +24,15 @@ from importlib.metadata import PackageNotFoundError, version as _meta_version
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ._util._selinux import (
+    SELINUX_SOCKET_TYPE,
+    install_policy as install_selinux_policy,
+    is_policy_installed as is_selinux_policy_installed,
+    is_selinux_enabled,
+    is_selinux_enforcing,
+    policy_source_path as selinux_policy_source,
+    uninstall_policy as uninstall_selinux_policy,
+)
 from .commands import (
     COMMANDS as SANDBOX_COMMANDS,
     DOCTOR_COMMANDS,
@@ -393,6 +402,14 @@ __all__ = [
     "release_port",
     "reset_port_cache",
     "resolve_service_ports",
+    # SELinux
+    "SELINUX_SOCKET_TYPE",
+    "install_selinux_policy",
+    "is_selinux_enabled",
+    "is_selinux_enforcing",
+    "is_selinux_policy_installed",
+    "selinux_policy_source",
+    "uninstall_selinux_policy",
     # Meta
     "__version__",
 ]

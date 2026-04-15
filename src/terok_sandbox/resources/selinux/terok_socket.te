@@ -1,0 +1,23 @@
+policy_module(terok_socket, 1.0)
+
+# Targeted SELinux policy for terok service sockets.
+#
+# Defines ``terok_socket_t`` — a custom type that terok host services
+# apply to their Unix sockets via ``setsockcreatecon()`` so that
+# rootless Podman containers (``container_t``) can connect.
+#
+# Without this policy, SELinux denies ``container_t → unconfined_t``
+# ``unix_stream_socket { connectto }`` — which is correct by design
+# (Dan Walsh, Podman #23972).  This module narrows the exception to
+# terok sockets only.
+#
+# Install:  sudo terok setup selinux
+# Remove:   sudo semodule -r terok_socket
+
+gen_require(`
+    type container_t;
+')
+
+type terok_socket_t;
+
+allow container_t terok_socket_t:unix_stream_socket connectto;
