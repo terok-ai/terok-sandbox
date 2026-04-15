@@ -129,7 +129,7 @@ class TestInstallPolicy:
             calls.append(cmd)
             # Create expected output files so unlink works
             if cmd[0] == "checkmodule":
-                Path(cmd[3]).touch()
+                Path(cmd[4]).touch()
             elif cmd[0] == "semodule_package":
                 Path(cmd[2]).touch()
             return subprocess.CompletedProcess(cmd, 0)
@@ -161,8 +161,8 @@ class TestInstallPolicy:
 
         def _fake_run(cmd: list[str], **_kw: object) -> subprocess.CompletedProcess[str]:
             if cmd[0] == "checkmodule":
-                artifact_dirs.append(str(Path(cmd[3]).parent))
-                Path(cmd[3]).touch()
+                artifact_dirs.append(str(Path(cmd[4]).parent))
+                Path(cmd[4]).touch()
             elif cmd[0] == "semodule_package":
                 Path(cmd[2]).touch()
             return subprocess.CompletedProcess(cmd, 0)

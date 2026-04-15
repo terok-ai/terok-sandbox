@@ -131,6 +131,14 @@ def install_policy() -> None:
     except PermissionError:
         artifact_dir = tempfile.mkdtemp(prefix="terok-selinux-")
         mod_path = Path(artifact_dir) / te_path.with_suffix(".mod").name
+    except OSError as exc:
+        import errno
+
+        if exc.errno == errno.EROFS:
+            artifact_dir = tempfile.mkdtemp(prefix="terok-selinux-")
+            mod_path = Path(artifact_dir) / te_path.with_suffix(".mod").name
+        else:
+            raise
 
     pp_path = mod_path.with_suffix(".pp")
 
