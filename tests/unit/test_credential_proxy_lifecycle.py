@@ -428,14 +428,14 @@ class TestEnsureProxyReachable:
         ):
             mgr.ensure_reachable()
 
-    def test_raises_when_ssh_agent_port_unreachable(self, tmp_path: Path) -> None:
-        """Service started but SSH agent port never comes up → SystemExit."""
+    def test_raises_when_neither_socket_nor_tcp_reachable(self, tmp_path: Path) -> None:
+        """Service started but neither Unix socket nor TCP responds → SystemExit."""
         mgr = _make_mgr(tmp_path)
         with (
             patch.object(CredentialProxyManager, "is_socket_active", return_value=True),
             patch(f"{_LIFECYCLE}.subprocess"),
-            patch.object(CredentialProxyManager, "_wait_for_ready", return_value=True),
-            patch.object(CredentialProxyManager, "_wait_for_tcp_port", return_value=False),
+            patch.object(CredentialProxyManager, "_wait_for_unix_socket", return_value=False),
+            patch.object(CredentialProxyManager, "_wait_for_ready", return_value=False),
             pytest.raises(SystemExit, match="not reachable"),
         ):
             mgr.ensure_reachable()

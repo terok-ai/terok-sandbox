@@ -130,6 +130,16 @@ class SandboxConfig:
         return self.credentials_dir / "routes.json"
 
     @property
+    def gate_socket_path(self) -> Path:
+        """Return the Unix socket path for the gate server."""
+        return self.runtime_dir / "gate-server.sock"
+
+    @property
+    def ssh_agent_socket_path(self) -> Path:
+        """Return the Unix socket path for the SSH agent proxy."""
+        return self.runtime_dir / "ssh-agent.sock"
+
+    @property
     def clone_cache_base_path(self) -> Path:
         """Return the base directory for per-scope non-bare clone caches."""
         return self.state_dir / "clone-cache"

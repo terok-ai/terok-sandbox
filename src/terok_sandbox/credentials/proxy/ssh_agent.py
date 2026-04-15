@@ -414,18 +414,26 @@ async def _handle_connection(
 
 
 async def start_ssh_agent_server(
-    db_path: str, keys_file: str, host: str, port: int
+    db_path: str,
+    keys_file: str,
+    host: str | None = None,
+    port: int | None = None,
+    socket_path: str | None = None,
 ) -> asyncio.Server:
-    """Start the SSH agent TCP server.
+    """Start the SSH agent server on TCP, a Unix socket, or both.
 
     Args:
         db_path: Path to the credential proxy sqlite3 database (for phantom token lookups).
         keys_file: Path to ``ssh-keys.json`` mapping credential scopes to key file paths.
-        host: Bind address (typically ``"127.0.0.1"``).
+        host: Bind address for TCP (typically ``"127.0.0.1"``).
         port: TCP port to listen on.
+        socket_path: Unix socket path to listen on.
 
     Returns:
         The running :class:`asyncio.Server` — caller is responsible for closing it.
+
+    Raises:
+        ValueError: If neither TCP (host+port) nor socket_path is provided.
     """
     from .server import _TokenDB
 
@@ -436,6 +444,20 @@ async def start_ssh_agent_server(
         """Handle an incoming SSH agent connection."""
         await _handle_connection(reader, writer, token_db, key_cache)
 
-    server = await asyncio.start_server(_on_connect, host, port)
-    _logger.info("SSH agent proxy listening on %s:%d", host, port)
+    if socket_path:
+        path = Path(socket_path)
+        if path.exists():
+            import stat
+
+            if not stat.S_ISSOCK(path.lstat().st_mode):
+                raise RuntimeError(f"Refusing to remove non-socket path: {path}")
+            path.unlink()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        server = await asyncio.start_unix_server(_on_connect, path=str(path))
+        _logger.info("SSH agent proxy listening on %s", path)
+    elif host is not None and port is not None:
+        server = await asyncio.start_server(_on_connect, host, port)
+        _logger.info("SSH agent proxy listening on %s:%d", host, port)
+    else:
+        raise ValueError("Either socket_path or host+port must be provided")
     return server

@@ -116,14 +116,14 @@ class CredentialProxyManager:
     # -- Public API ----------------------------------------------------------
 
     def ensure_reachable(self) -> None:
-        """Verify the credential proxy is running and its TCP ports are up.
+        """Verify the credential proxy is running and reachable.
 
-        For **systemd** socket activation the service may not have started yet
-        (e.g. after a fresh boot).  This function triggers a start via
-        ``systemctl --user start`` and waits for the HTTP and SSH agent TCP
-        ports to become reachable via ``/-/health`` and raw TCP probes.
+        Probes the Unix socket first — if the proxy socket accepts connections,
+        the service is alive.  Falls back to TCP health probing for setups
+        that only expose TCP ports.
 
-        For **daemon** mode the ``/-/health`` endpoint is probed on the TCP port.
+        For **systemd** socket activation the service may not have started yet.
+        This function triggers a start via ``systemctl --user start`` and waits.
 
         Raises :class:`ProxyUnreachableError` if the proxy is unreachable.
         Called before task creation when credential proxy is enabled.
@@ -135,7 +135,7 @@ class CredentialProxyManager:
             )
 
         # Systemd socket activation: the socket unit is active but the service
-        # may be idle.  Explicitly start the service so the TCP ports come up.
+        # may be idle.  Explicitly start the service so listeners come up.
         if self.is_socket_active():
             subprocess.run(
                 ["systemctl", "--user", "start", _SERVICE_UNIT],
@@ -143,17 +143,17 @@ class CredentialProxyManager:
                 timeout=10,
             )
 
+        # Prefer Unix socket probe (works for both socket and TCP modes).
+        if self._wait_for_unix_socket(self._cfg.proxy_socket_path):
+            return
+
+        # Fallback: TCP health probe (legacy / TCP-only setups).
         if not self._wait_for_ready(self._cfg.proxy_port):
             raise SystemExit(
-                f"Credential proxy service started but TCP port {self._cfg.proxy_port} "
-                "is not reachable. Check: journalctl --user -u terok-credential-proxy"
-            )
-
-        if not self._wait_for_tcp_port(self._cfg.ssh_agent_port):
-            raise SystemExit(
-                f"Credential proxy service started but SSH agent port "
-                f"{self._cfg.ssh_agent_port} "
-                "is not reachable. Check: journalctl --user -u terok-credential-proxy"
+                "Credential proxy service started but is not reachable.\n"
+                f"Socket: {self._cfg.proxy_socket_path}\n"
+                f"TCP:    127.0.0.1:{self._cfg.proxy_port}\n"
+                "Check: journalctl --user -u terok-credential-proxy"
             )
 
     def get_status(self) -> CredentialProxyStatus:
@@ -524,5 +524,19 @@ class CredentialProxyManager:
                     return True
             finally:
                 sock.close()
+            time.sleep(0.2)
+        return False
+
+    @staticmethod
+    def _wait_for_unix_socket(path: Path, timeout: float = 5.0) -> bool:
+        """Wait up to *timeout* seconds for a Unix socket to accept connections."""
+        import time
+
+        from .._util._net import probe_unix_socket
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if probe_unix_socket(path, timeout=min(1.0, 0.2)):
+                return True
             time.sleep(0.2)
         return False

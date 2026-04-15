@@ -462,6 +462,7 @@ async def _run_multi(
     sock_path: str,
     port: int | None,
     ssh_agent_port: int | None = None,
+    ssh_agent_socket_path: str | None = None,
     ssh_keys_file: str | None = None,
     db_path: str | None = None,
 ) -> None:
@@ -510,14 +511,16 @@ async def _run_multi(
             _logger.info("Listening on 127.0.0.1:%d", port)
             await TCPSite(runner, "127.0.0.1", port).start()
 
-        if ssh_agent_port is not None and ssh_keys_file and db_path:
+        has_ssh = (ssh_agent_port or ssh_agent_socket_path) and ssh_keys_file and db_path
+        if has_ssh:
             from .ssh_agent import start_ssh_agent_server
 
             ssh_server = await start_ssh_agent_server(
                 db_path=db_path,
                 keys_file=ssh_keys_file,
-                host="127.0.0.1",
+                host="127.0.0.1" if ssh_agent_port else None,
                 port=ssh_agent_port,
+                socket_path=ssh_agent_socket_path,
             )
 
         await asyncio.Event().wait()  # Block until cancelled
@@ -559,6 +562,11 @@ def main() -> None:
         help="TCP port for the SSH agent proxy (signs with host-side keys)",
     )
     parser.add_argument(
+        "--ssh-agent-socket-path",
+        default=None,
+        help="Unix socket path for the SSH agent proxy",
+    )
+    parser.add_argument(
         "--ssh-keys-file",
         default=None,
         help="Path to ssh-keys.json mapping credential scopes to key file paths",
@@ -570,8 +578,12 @@ def main() -> None:
     parser.add_argument("--log-file", default=None, help="Append log output to this file")
     args = parser.parse_args()
 
-    if bool(args.ssh_agent_port) != bool(args.ssh_keys_file):
-        parser.error("--ssh-agent-port and --ssh-keys-file must be provided together")
+    has_ssh_transport = args.ssh_agent_port or args.ssh_agent_socket_path
+    if bool(has_ssh_transport) != bool(args.ssh_keys_file):
+        parser.error(
+            "SSH agent transport (--ssh-agent-port/--ssh-agent-socket-path) "
+            "and --ssh-keys-file must be provided together"
+        )
 
     log_level = getattr(logging, args.log_level.upper(), logging.INFO)
     log_fmt = "%(asctime)s %(name)s %(levelname)s %(message)s"
@@ -603,6 +615,7 @@ def main() -> None:
                 sock_path=args.socket_path,
                 port=args.port,
                 ssh_agent_port=args.ssh_agent_port,
+                ssh_agent_socket_path=args.ssh_agent_socket_path,
                 ssh_keys_file=args.ssh_keys_file,
                 db_path=args.db_path,
             )

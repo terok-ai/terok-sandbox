@@ -115,6 +115,12 @@ class GateServerManager:
             msg += "Start the gate daemon.\n"
         raise SystemExit(msg)
 
+    def is_socket_reachable(self) -> bool:
+        """Check whether the gate Unix socket accepts connections."""
+        from .._util._net import probe_unix_socket
+
+        return probe_unix_socket(self._cfg.gate_socket_path)
+
     def get_status(self) -> GateServerStatus:
         """Return the current gate server status."""
         port = self._cfg.gate_port
@@ -125,6 +131,10 @@ class GateServerManager:
             if self.is_daemon_running():
                 return GateServerStatus(mode="daemon", running=True, port=port)
             return GateServerStatus(mode="systemd", running=False, port=port)
+
+        # Socket-mode foreground server (no systemd, no daemon PID file).
+        if self.is_socket_reachable():
+            return GateServerStatus(mode="daemon", running=True, port=port)
 
         if self.is_daemon_running():
             return GateServerStatus(mode="daemon", running=True, port=port)
