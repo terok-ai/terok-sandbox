@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import pwd
+import re
 import socket
 import stat
 import tempfile
@@ -107,43 +108,76 @@ class PortRegistry:
         if self._service_ports is not None:
             return self._service_ports
 
+        # Priority chain for port preferences (highest wins):
+        #   1. Explicit config (user pinned via config file)
+        #   2. Installed systemd units (ground truth for running services)
+        #   3. Saved claims file (persisted from a previous session)
+        #   4. Fresh auto-allocation
+        installed = _read_installed_ports()
         saved = _load_saved_ports(state_dir) if state_dir else {}
 
-        # Prefer previously saved ports when no explicit preference is given.
+        # Track which services got their preference from installed units
+        # or saved claims so claim() can trust the port (our service IS
+        # the listener).  Both sources are our own prior allocations —
+        # installed units are authoritative, saved file is a fallback for
+        # non-systemd hosts or cleaned-up units.
+        gate_trusted = proxy_trusted = ssh_trusted = False
         if not gate_explicit and gate_pref is None:
-            gate_pref = saved.get(SERVICE_GATE)
+            if SERVICE_GATE in installed:
+                gate_pref = installed[SERVICE_GATE]
+                gate_trusted = True
+            elif SERVICE_GATE in saved:
+                gate_pref = saved[SERVICE_GATE]
+                gate_trusted = True
         if not proxy_explicit and proxy_pref is None:
-            proxy_pref = saved.get(SERVICE_PROXY)
+            if SERVICE_PROXY in installed:
+                proxy_pref = installed[SERVICE_PROXY]
+                proxy_trusted = True
+            elif SERVICE_PROXY in saved:
+                proxy_pref = saved[SERVICE_PROXY]
+                proxy_trusted = True
         if not ssh_explicit and ssh_pref is None:
-            ssh_pref = saved.get(SERVICE_SSH_AGENT)
+            if SERVICE_SSH_AGENT in installed:
+                ssh_pref = installed[SERVICE_SSH_AGENT]
+                ssh_trusted = True
+            elif SERVICE_SSH_AGENT in saved:
+                ssh_pref = saved[SERVICE_SSH_AGENT]
+                ssh_trusted = True
 
         claimed: list[str] = []
         try:
-            gate = self.claim(SERVICE_GATE, gate_pref, explicit=gate_explicit)
+            gate = self.claim(SERVICE_GATE, gate_pref, explicit=gate_explicit, trusted=gate_trusted)
             claimed.append(SERVICE_GATE)
-            proxy = self.claim(SERVICE_PROXY, proxy_pref, explicit=proxy_explicit)
+            proxy = self.claim(
+                SERVICE_PROXY, proxy_pref, explicit=proxy_explicit, trusted=proxy_trusted
+            )
             claimed.append(SERVICE_PROXY)
-            ssh = self.claim(SERVICE_SSH_AGENT, ssh_pref, explicit=ssh_explicit)
+            ssh = self.claim(
+                SERVICE_SSH_AGENT, ssh_pref, explicit=ssh_explicit, trusted=ssh_trusted
+            )
             claimed.append(SERVICE_SSH_AGENT)
         except SystemExit:
             for key in claimed:
                 self.release(key)
             raise
 
-        # Fail-closed: if a saved port was displaced (not explicitly overridden),
-        # containers are broken — the user must resolve the conflict.
+        # Fail-closed: if a saved/installed port was displaced (not
+        # explicitly overridden), containers are broken — the user must
+        # resolve the conflict.
+        expected_ports = {**saved, **installed}  # installed wins over saved
         explicits = {
             SERVICE_GATE: gate_explicit,
             SERVICE_PROXY: proxy_explicit,
             SERVICE_SSH_AGENT: ssh_explicit,
         }
         for key, port in [(SERVICE_GATE, gate), (SERVICE_PROXY, proxy), (SERVICE_SSH_AGENT, ssh)]:
-            expected = saved.get(key)
+            expected = expected_ports.get(key)
             if expected is not None and port != expected and not explicits[key]:
                 for k in (SERVICE_GATE, SERVICE_PROXY, SERVICE_SSH_AGENT):
                     self.release(k)
+                source = "installed service" if key in installed else "previous session"
                 raise SystemExit(
-                    f"Port {expected} ({key}) was previously assigned but is now taken.\n"
+                    f"Port {expected} ({key}) was assigned by {source} but is now taken.\n"
                     f"Existing containers expect this port.\n\n"
                     f"Options:\n"
                     f"  - Resolve the conflict and retry\n"
@@ -165,12 +199,22 @@ class PortRegistry:
         preferred: int | None = None,
         *,
         explicit: bool = False,
+        trusted: bool = False,
     ) -> int:
         """Claim one port via the shared file-based registry.
 
         Reads all users' claim files to avoid collisions, then verifies
         via socket bind that the port is actually free.  The claim is
         persisted to the shared directory so other users can see it.
+
+        When *trusted* is True the port originates from a prior
+        allocation by this user — either an installed systemd unit file
+        (see :func:`_read_installed_ports`) or a saved claims file
+        (``port-claims.json``).  Our own service may be listening, so
+        the ``_is_port_free`` bind check is skipped; other-user
+        collision checks still apply.  The ``trusted`` flag is set by
+        :meth:`resolve_service_ports` during the preference resolution
+        phase.
         """
         if service_key in self._held:
             return self._held[service_key]
@@ -179,7 +223,7 @@ class PortRegistry:
         others = self._read_other_claims()
         own_ports = set(self._held.values())
 
-        if explicit and preferred is not None:
+        if (explicit or trusted) and preferred is not None:
             if not 1 <= preferred <= 65535:
                 raise SystemExit(f"Port {preferred} for {service_key} is not a valid port number")
             if preferred in own_ports:
@@ -188,7 +232,10 @@ class PortRegistry:
                 )
             if preferred in others:
                 raise SystemExit(f"Port {preferred} for {service_key} is claimed by another user")
-            if not _is_port_free(preferred):
+            # Trusted ports (from installed units) skip the bind check:
+            # our own service is the listener.  Explicit config pins
+            # still require a genuinely free port.
+            if explicit and not trusted and not _is_port_free(preferred):
                 raise SystemExit(f"Port {preferred} for {service_key} is unavailable")
             self._held[service_key] = preferred
             self._write_shared_claims()
@@ -354,6 +401,84 @@ def _save_ports(state_dir: Path, ports: dict[str, int]) -> None:
         tmp.rename(target)
     except OSError:
         pass  # non-critical — worst case, ports may change on next restart
+
+
+# ---------------------------------------------------------------------------
+# Installed service introspection
+# ---------------------------------------------------------------------------
+
+_LISTEN_RE = re.compile(r"^ListenStream=127\.0\.0\.1:(\d+)", re.MULTILINE)
+_SSH_PORT_RE = re.compile(r"--ssh-agent-port[= ](\d+)")
+
+_PROXY_SOCKET_UNIT = "terok-credential-proxy.socket"
+_PROXY_SERVICE_UNIT = "terok-credential-proxy.service"
+_GATE_SOCKET_UNIT = "terok-gate.socket"
+
+
+def _read_installed_ports() -> dict[str, int]:
+    """Read ports from installed systemd unit files (ground truth).
+
+    Parses the **rendered** (installed) unit files — not templates — so
+    the returned ports are exactly what the running services are
+    configured to use.  This is authoritative: if a unit file says
+    ``ListenStream=127.0.0.1:18701``, port 18701 belongs to us
+    regardless of what ``_is_port_free()`` reports.
+
+    Returns a dict mapping service keys to ports.  Missing or
+    unreadable unit files are silently skipped — the caller falls back
+    to the saved-claims file or fresh allocation.
+    """
+    try:
+        from ._util import systemd_user_unit_dir
+
+        unit_dir = systemd_user_unit_dir()
+    except SystemExit:
+        return {}  # running as root or XDG traversal — no user units
+
+    ports: dict[str, int] = {}
+
+    # Gate port: ListenStream in gate socket unit
+    gate_socket = unit_dir / _GATE_SOCKET_UNIT
+    if port := _parse_listen_port(gate_socket):
+        ports[SERVICE_GATE] = port
+
+    # Proxy port: ListenStream in proxy socket unit
+    proxy_socket = unit_dir / _PROXY_SOCKET_UNIT
+    if port := _parse_listen_port(proxy_socket):
+        ports[SERVICE_PROXY] = port
+
+    # SSH agent port: --ssh-agent-port in proxy service unit
+    proxy_service = unit_dir / _PROXY_SERVICE_UNIT
+    if port := _parse_ssh_agent_port(proxy_service):
+        ports[SERVICE_SSH_AGENT] = port
+
+    return ports
+
+
+def _parse_listen_port(unit_path: Path) -> int | None:
+    """Extract the TCP port from a ``ListenStream=127.0.0.1:PORT`` directive."""
+    try:
+        text = unit_path.read_text()
+    except OSError:
+        return None
+    match = _LISTEN_RE.search(text)
+    if match:
+        port = int(match.group(1))
+        return port if 1 <= port <= 65535 else None
+    return None
+
+
+def _parse_ssh_agent_port(unit_path: Path) -> int | None:
+    """Extract the SSH agent port from the proxy service ExecStart line."""
+    try:
+        text = unit_path.read_text()
+    except OSError:
+        return None
+    match = _SSH_PORT_RE.search(text)
+    if match:
+        port = int(match.group(1))
+        return port if 1 <= port <= 65535 else None
+    return None
 
 
 # ---------------------------------------------------------------------------
