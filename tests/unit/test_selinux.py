@@ -149,6 +149,41 @@ class TestInstallPolicy:
         assert calls[1][0] == "semodule_package"
         assert calls[2][:2] == ["semodule", "-i"]
 
+    def test_readonly_source_uses_tempdir(self, tmp_path: Path) -> None:
+        """When .te lives in read-only dir, artifacts go to a temp dir."""
+        ro_dir = tmp_path / "readonly"
+        ro_dir.mkdir()
+        te_file = ro_dir / "terok_socket.te"
+        te_file.write_text("policy_module(terok_socket, 1.0)\n")
+        ro_dir.chmod(0o555)
+
+        artifact_dirs: list[str] = []
+
+        def _fake_run(cmd: list[str], **_kw: object) -> subprocess.CompletedProcess[str]:
+            if cmd[0] == "checkmodule":
+                artifact_dirs.append(str(Path(cmd[3]).parent))
+                Path(cmd[3]).touch()
+            elif cmd[0] == "semodule_package":
+                Path(cmd[2]).touch()
+            return subprocess.CompletedProcess(cmd, 0)
+
+        try:
+            with (
+                unittest.mock.patch("shutil.which", return_value="/usr/bin/tool"),
+                unittest.mock.patch(
+                    "terok_sandbox._util._selinux.policy_source_path",
+                    return_value=te_file,
+                ),
+                unittest.mock.patch("subprocess.run", side_effect=_fake_run),
+            ):
+                install_policy()
+        finally:
+            ro_dir.chmod(0o755)
+
+        # Artifacts must NOT be in the read-only source dir
+        assert artifact_dirs, "checkmodule was not called"
+        assert artifact_dirs[0] != str(ro_dir)
+
 
 class TestUninstallPolicy:
     """Verify policy removal."""

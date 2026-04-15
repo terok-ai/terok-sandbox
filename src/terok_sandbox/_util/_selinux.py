@@ -79,7 +79,11 @@ def is_policy_installed() -> bool:
             text=True,
             timeout=10,
         )
-        return any(line.split()[0] == _POLICY_MODULE_NAME for line in result.stdout.splitlines())
+        return any(
+            (tokens := line.split()) and tokens[0] == _POLICY_MODULE_NAME
+            for line in result.stdout.splitlines()
+            if line.strip()
+        )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return False
 
@@ -99,7 +103,13 @@ def install_policy() -> None:
     ``semodule`` on ``PATH``.
 
     Raises :class:`SystemExit` on missing tools or compilation failure.
+
+    Compilation artifacts (``.mod``, ``.pp``) are written next to the
+    ``.te`` source when the directory is writable (editable install),
+    otherwise a temporary directory is used (read-only site-packages).
     """
+    import tempfile
+
     for tool in ("checkmodule", "semodule_package", "semodule"):
         if not shutil.which(tool):
             raise SystemExit(
@@ -111,29 +121,43 @@ def install_policy() -> None:
     if not te_path.is_file():
         raise SystemExit(f"Policy source not found: {te_path}")
 
-    # Compile in a temporary directory next to the source
-    mod_path = te_path.with_suffix(".mod")
-    pp_path = te_path.with_suffix(".pp")
+    # Prefer writing next to the .te source; fall back to a temp dir when
+    # the source lives in read-only site-packages.
+    try:
+        mod_path = te_path.with_suffix(".mod")
+        mod_path.touch()
+        mod_path.unlink()
+        artifact_dir = None
+    except PermissionError:
+        artifact_dir = tempfile.mkdtemp(prefix="terok-selinux-")
+        mod_path = Path(artifact_dir) / te_path.with_suffix(".mod").name
 
-    subprocess.run(
-        ["checkmodule", "-M", "-m", "-o", str(mod_path), str(te_path)],
-        check=True,
-        timeout=30,
-    )
-    subprocess.run(
-        ["semodule_package", "-o", str(pp_path), "-m", str(mod_path)],
-        check=True,
-        timeout=30,
-    )
-    subprocess.run(
-        ["semodule", "-i", str(pp_path)],
-        check=True,
-        timeout=60,
-    )
+    pp_path = mod_path.with_suffix(".pp")
 
-    # Clean up intermediate artifacts
-    for artifact in (mod_path, pp_path):
-        artifact.unlink(missing_ok=True)
+    try:
+        subprocess.run(
+            ["checkmodule", "-M", "-m", "-o", str(mod_path), str(te_path)],
+            check=True,
+            timeout=30,
+        )
+        subprocess.run(
+            ["semodule_package", "-o", str(pp_path), "-m", str(mod_path)],
+            check=True,
+            timeout=30,
+        )
+        subprocess.run(
+            ["semodule", "-i", str(pp_path)],
+            check=True,
+            timeout=60,
+        )
+    finally:
+        if artifact_dir:
+            import shutil as _shutil
+
+            _shutil.rmtree(artifact_dir, ignore_errors=True)
+        else:
+            for artifact in (mod_path, pp_path):
+                artifact.unlink(missing_ok=True)
 
 
 def uninstall_policy() -> None:
