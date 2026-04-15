@@ -528,7 +528,7 @@ class CredentialProxyManager:
         return False
 
     @staticmethod
-    def _wait_for_unix_socket(path: Path, timeout: float = 5.0) -> bool:
+    def _wait_for_unix_socket(path: Path, *, timeout: float = 5.0, interval: float = 0.2) -> bool:
         """Wait up to *timeout* seconds for a Unix socket to accept connections."""
         import time
 
@@ -536,7 +536,7 @@ class CredentialProxyManager:
 
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            if probe_unix_socket(path, timeout=min(1.0, 0.2)):
+            if probe_unix_socket(path, timeout=min(1.0, interval)):
                 return True
-            time.sleep(0.2)
+            time.sleep(interval)
         return False
