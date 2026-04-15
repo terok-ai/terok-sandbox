@@ -578,6 +578,8 @@ def main() -> None:
     parser.add_argument("--log-file", default=None, help="Append log output to this file")
     args = parser.parse_args()
 
+    if args.ssh_agent_port and args.ssh_agent_socket_path:
+        parser.error("--ssh-agent-port and --ssh-agent-socket-path are mutually exclusive")
     has_ssh_transport = args.ssh_agent_port or args.ssh_agent_socket_path
     if bool(has_ssh_transport) != bool(args.ssh_keys_file):
         parser.error(

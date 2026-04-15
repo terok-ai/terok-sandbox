@@ -330,3 +330,124 @@ class TestSSHAgentUnixSocket:
 
         with pytest.raises(ValueError, match="Either socket_path or host\\+port"):
             await start_ssh_agent_server(str(tmp_path / "test.db"), str(keys_file))
+
+
+# ── Gate server: _serve_foreground validation ────────────────────────────
+
+
+class TestServeForeground:
+    """Verify _serve_foreground argument validation."""
+
+    def test_raises_without_socket_or_port(self, tmp_path: Path) -> None:
+        """RuntimeError when neither socket_path nor port is given."""
+        from terok_sandbox.gate.server import _serve_foreground
+
+        with pytest.raises(RuntimeError, match="--socket-path or --port"):
+            _serve_foreground(tmp_path, unittest.mock.Mock())
+
+    def test_pid_file_written(self, tmp_path: Path) -> None:
+        """PID file is created when pid_file is specified."""
+        import os
+        import threading
+
+        from terok_sandbox.gate.server import _serve_foreground
+
+        pid_file = tmp_path / "gate.pid"
+        sock_path = tmp_path / "gate.sock"
+
+        # Run in a thread so we can stop it
+        def _run():
+            _serve_foreground(
+                tmp_path,
+                unittest.mock.Mock(),
+                socket_path=sock_path,
+                pid_file=pid_file,
+            )
+
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+        # Give it a moment to write the PID file
+        import time
+
+        time.sleep(0.2)
+        assert pid_file.exists()
+        assert pid_file.read_text().strip() == str(os.getpid())
+
+
+# ── Gate server: CLI --port sentinel ─────────────────────────────────────
+
+
+class TestGateMainPortDefault:
+    """Verify --port default/sentinel behavior in the gate CLI."""
+
+    def test_port_default_is_none(self) -> None:
+        """Argparse default for --port is None (sentinel), not 9418."""
+
+        from terok_sandbox.gate.server import main
+
+        # Extract the parser by intercepting parse_args
+        with (
+            unittest.mock.patch(
+                "sys.argv",
+                [
+                    "terok-gate",
+                    "--base-path=/tmp/terok-testing/b",
+                    "--token-file=/tmp/terok-testing/t",
+                    "--socket-path=/tmp/terok-testing/s",
+                ],
+            ),
+            unittest.mock.patch("terok_sandbox.gate.server._serve_foreground") as mock_fg,
+        ):
+            main()
+
+        # port should be None (not provided), not 9418
+        _, kwargs = mock_fg.call_args
+        assert kwargs["port"] is None
+
+    def test_explicit_port_passed_through(self) -> None:
+        """Explicit --port 9418 is forwarded, not swallowed."""
+        with (
+            unittest.mock.patch(
+                "sys.argv",
+                [
+                    "terok-gate",
+                    "--base-path=/tmp/terok-testing/b",
+                    "--token-file=/tmp/terok-testing/t",
+                    "--socket-path=/tmp/terok-testing/s",
+                    "--port=9418",
+                ],
+            ),
+            unittest.mock.patch("terok_sandbox.gate.server._serve_foreground") as mock_fg,
+        ):
+            from terok_sandbox.gate.server import main
+
+            main()
+
+        _, kwargs = mock_fg.call_args
+        assert kwargs["port"] == 9418
+
+
+# ── Credential proxy: SSH agent mutual exclusion ─────────────────────────
+
+
+class TestSSHAgentMutualExclusion:
+    """Verify --ssh-agent-port and --ssh-agent-socket-path are mutually exclusive."""
+
+    def test_rejects_both_port_and_socket(self) -> None:
+        """Passing both --ssh-agent-port and --ssh-agent-socket-path is an error."""
+        with unittest.mock.patch(
+            "sys.argv",
+            [
+                "terok-credential-proxy",
+                "--socket-path=/tmp/terok-testing/proxy.sock",
+                "--db-path=/tmp/terok-testing/db",
+                "--routes-file=/tmp/terok-testing/routes.json",
+                "--ssh-agent-port=18732",
+                "--ssh-agent-socket-path=/tmp/terok-testing/ssh.sock",
+                "--ssh-keys-file=/tmp/terok-testing/keys.json",
+            ],
+        ):
+            from terok_sandbox.credentials.proxy.server import main as proxy_main
+
+            with pytest.raises(SystemExit):
+                proxy_main()

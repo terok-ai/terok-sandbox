@@ -32,6 +32,7 @@ import socket
 import stat
 import subprocess
 import sys
+import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from socketserver import ThreadingMixIn
@@ -49,6 +50,7 @@ _ROUTE = re.compile(
 
 _CGI_WAIT_TIMEOUT = 30
 _LISTEN_ADDR = "127.0.0.1"
+_DEFAULT_PORT = 9418
 
 
 def _validate_token_data(data: object) -> dict[str, dict[str, str]]:
@@ -542,8 +544,6 @@ def _serve_foreground(
     signal.signal(signal.SIGTERM, _shutdown)
     signal.signal(signal.SIGINT, _shutdown)
 
-    import threading
-
     threads = [threading.Thread(target=srv.serve_forever, daemon=True) for srv in servers]
     for t in threads:
         t.start()
@@ -582,7 +582,7 @@ def main() -> None:
     )
     parser.add_argument("--base-path", required=True, help="Root directory for git repos")
     parser.add_argument("--token-file", required=True, help="Path to tokens.json")
-    parser.add_argument("--port", type=int, default=9418, help="Listen port (daemon mode)")
+    parser.add_argument("--port", type=int, default=None, help="Listen port (default: 9418)")
     parser.add_argument(
         "--bind",
         default=_LISTEN_ADDR,
@@ -622,12 +622,12 @@ def main() -> None:
             base_path,
             token_store,
             socket_path=Path(args.socket_path),
-            port=args.port if args.port != 9418 else None,
+            port=args.port,
             bind=args.bind,
             pid_file=pid_file,
         )
     elif args.detach:
         pid_file = Path(args.pid_file) if args.pid_file else None
-        _serve_daemon(base_path, token_store, args.port, pid_file, bind=args.bind)
+        _serve_daemon(base_path, token_store, args.port or _DEFAULT_PORT, pid_file, bind=args.bind)
     else:
         parser.error("One of --inetd, --detach, or --socket-path is required")
