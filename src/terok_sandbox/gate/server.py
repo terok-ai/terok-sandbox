@@ -494,6 +494,7 @@ def _create_unix_server(
 
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.bind(str(socket_path))
+    os.chmod(socket_path, 0o600)
     sock.listen(5)
 
     server = _ThreadingHTTPServer(("localhost", 0), handler_class, bind_and_activate=False)
@@ -535,7 +536,15 @@ def _serve_foreground(
 
     if pid_file:
         pid_file.parent.mkdir(parents=True, exist_ok=True)
-        pid_file.write_text(str(os.getpid()))
+        fd = os.open(
+            str(pid_file),
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        try:
+            os.write(fd, str(os.getpid()).encode())
+        finally:
+            os.close(fd)
 
     def _shutdown(*_: object) -> None:
         for srv in servers:

@@ -29,6 +29,7 @@ import asyncio
 import base64
 import json
 import logging
+import os
 import struct
 from pathlib import Path
 
@@ -454,6 +455,7 @@ async def start_ssh_agent_server(
             path.unlink()
         path.parent.mkdir(parents=True, exist_ok=True)
         server = await asyncio.start_unix_server(_on_connect, path=str(path))
+        os.chmod(path, 0o600)
         _logger.info("SSH agent proxy listening on %s", path)
     elif host is not None and port is not None:
         server = await asyncio.start_server(_on_connect, host, port)
