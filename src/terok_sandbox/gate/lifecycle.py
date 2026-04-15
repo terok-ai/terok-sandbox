@@ -62,6 +62,9 @@ class GateServerStatus:
     port: int
     """Configured port."""
 
+    transport: str | None = None
+    """Detected transport: ``"tcp"``, ``"socket"``, or ``None`` if not running."""
+
 
 # ---------- Manager ----------
 
@@ -120,19 +123,32 @@ class GateServerManager:
 
         return probe_unix_socket(self._cfg.gate_socket_path)
 
+    def _detect_transport(self) -> str | None:
+        """Detect the active transport: ``"socket"``, ``"tcp"``, or ``None``."""
+        if self.is_socket_reachable():
+            return "socket"
+        if self.is_daemon_running():
+            return "tcp"
+        return None
+
     def get_status(self) -> GateServerStatus:
         """Return the current gate server status."""
         port = self._cfg.gate_port
+        transport = self._detect_transport()
 
         if self.is_socket_installed():
             if self.is_socket_active():
-                return GateServerStatus(mode="systemd", running=True, port=port)
-            if self.is_daemon_running() or self.is_socket_reachable():
-                return GateServerStatus(mode="daemon", running=True, port=port)
+                return GateServerStatus(
+                    mode="systemd", running=True, port=port, transport=transport or "tcp"
+                )
+            if transport:
+                return GateServerStatus(
+                    mode="daemon", running=True, port=port, transport=transport
+                )
             return GateServerStatus(mode="systemd", running=False, port=port)
 
-        if self.is_daemon_running() or self.is_socket_reachable():
-            return GateServerStatus(mode="daemon", running=True, port=port)
+        if transport:
+            return GateServerStatus(mode="daemon", running=True, port=port, transport=transport)
 
         return GateServerStatus(mode="none", running=False, port=port)
 

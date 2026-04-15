@@ -62,6 +62,9 @@ class CredentialProxyStatus:
     credentials_stored: tuple[str, ...]
     """Provider names with stored credentials."""
 
+    transport: str | None = None
+    """Detected transport: ``"tcp"``, ``"socket"``, or ``None`` if not running."""
+
 
 class ProxyUnreachableError(RuntimeError):
     """Raised when the credential proxy is not reachable.
@@ -203,6 +206,15 @@ class CredentialProxyManager:
             running = False
             healthy = False
 
+        # Detect transport from what's actually reachable.
+        transport: str | None = None
+        if running:
+            from .._util._net import probe_unix_socket
+
+            transport = (
+                "socket" if probe_unix_socket(self._cfg.proxy_socket_path) else "tcp"
+            )
+
         return CredentialProxyStatus(
             mode=mode,
             running=running,
@@ -212,6 +224,7 @@ class CredentialProxyManager:
             routes_path=self._cfg.proxy_routes_path,
             routes_configured=routes_count,
             credentials_stored=creds,
+            transport=transport,
         )
 
     @property
