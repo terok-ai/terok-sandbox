@@ -212,12 +212,9 @@ class CredentialProxyManager:
             running = False
             healthy = False
 
-        # Detect transport from what's actually reachable.
-        transport: str | None = None
-        if running:
-            from .._util._net import probe_unix_socket
-
-            transport = "socket" if probe_unix_socket(self._cfg.proxy_socket_path) else "tcp"
+        # Derive transport from installed unit type (not reachability probe,
+        # since TCP mode also binds a Unix socket).
+        transport = self._installed_transport() if mode == "systemd" else None
 
         return CredentialProxyStatus(
             mode=mode,
@@ -257,39 +254,42 @@ class CredentialProxyManager:
             return False
 
     def is_socket_installed(self) -> bool:
-        """Check whether the ``terok-credential-proxy.socket`` unit file exists."""
-        return (self._systemd_unit_dir() / _SOCKET_UNIT).is_file()
+        """Check whether any proxy systemd unit file exists (TCP or socket mode)."""
+        unit_dir = self._systemd_unit_dir()
+        return (unit_dir / _SOCKET_UNIT).is_file() or (unit_dir / _SOCKET_MODE_SERVICE).is_file()
+
+    def _is_unit_active(self, unit: str) -> bool:
+        """Check whether a systemd unit is active."""
+        try:
+            result = subprocess.run(
+                ["systemctl", "--user", "is-active", unit],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            return result.stdout.strip() == "active"
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return False
 
     def is_socket_active(self) -> bool:
-        """Check whether the ``terok-credential-proxy.socket`` unit is active."""
-        try:
-            result = subprocess.run(
-                ["systemctl", "--user", "is-active", _SOCKET_UNIT],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            return result.stdout.strip() == "active"
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            return False
+        """Check whether the TCP socket unit or socket-mode service is active."""
+        return self._is_unit_active(_SOCKET_UNIT) or self._is_unit_active(_SOCKET_MODE_SERVICE)
 
     def is_service_active(self) -> bool:
-        """Check whether the ``terok-credential-proxy.service`` unit is active.
+        """Check whether the proxy daemon itself is running.
 
-        Unlike :meth:`is_socket_active`, this tells whether the proxy daemon
-        itself is running (TCP ports bound), not just whether the socket is
-        listening.  Does not trigger socket activation.
+        Checks both TCP-mode service and socket-mode service units.
         """
-        try:
-            result = subprocess.run(
-                ["systemctl", "--user", "is-active", _SERVICE_UNIT],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            return result.stdout.strip() == "active"
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            return False
+        return self._is_unit_active(_SERVICE_UNIT) or self._is_unit_active(_SOCKET_MODE_SERVICE)
+
+    def _installed_transport(self) -> str | None:
+        """Detect installed transport from unit files on disk."""
+        unit_dir = self._systemd_unit_dir()
+        if (unit_dir / _SOCKET_MODE_SERVICE).is_file():
+            return "socket"
+        if (unit_dir / _SOCKET_UNIT).is_file():
+            return "tcp"
+        return None
 
     def install_systemd_units(self, *, transport: str = "tcp") -> None:
         """Render and install systemd units, then enable+start.
@@ -363,7 +363,7 @@ class CredentialProxyManager:
 
     def uninstall_systemd_units(self) -> None:
         """Disable+stop all proxy units and remove unit files."""
-        for unit in (_SOCKET_UNIT, _SOCKET_MODE_SERVICE):
+        for unit in (_SOCKET_UNIT, _SERVICE_UNIT, _SOCKET_MODE_SERVICE):
             subprocess.run(
                 ["systemctl", "--user", "disable", "--now", unit],
                 check=False,
