@@ -387,35 +387,43 @@ class GateServerManager:
         return systemd_user_unit_dir()
 
     def _installed_unit_version(self) -> int | None:
-        """Return the version stamp from the installed socket unit, or ``None``."""
-        unit_file = self._systemd_unit_dir() / _SOCKET_UNIT
-        if not unit_file.is_file():
-            return None
-        try:
-            for line in unit_file.read_text(encoding="utf-8").splitlines():
-                if line.startswith("# terok-gate-version:"):
-                    return int(line.split(":", 1)[1].strip())
-        except (ValueError, OSError):
-            pass
+        """Return the version stamp from the installed unit files, or ``None``.
+
+        Checks both TCP (socket unit) and socket-mode (service unit) files.
+        """
+        unit_dir = self._systemd_unit_dir()
+        for name in (_SOCKET_UNIT, _SOCKET_MODE_SERVICE):
+            unit_file = unit_dir / name
+            if not unit_file.is_file():
+                continue
+            try:
+                for line in unit_file.read_text(encoding="utf-8").splitlines():
+                    if line.startswith("# terok-gate-version:"):
+                        return int(line.split(":", 1)[1].strip())
+            except (ValueError, OSError):
+                pass
         return None
 
     def _installed_base_path(self) -> Path | None:
         """Parse the ``--base-path=...`` baked into the installed service unit.
 
-        Returns ``None`` if the service unit is missing or unparseable.
+        Checks both TCP (terok-gate@.service) and socket-mode service files.
+        Returns ``None`` if no service unit is found or unparseable.
         """
-        service_file = self._systemd_unit_dir() / "terok-gate@.service"
-        if not service_file.is_file():
-            return None
-        try:
-            for line in service_file.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if line.startswith("ExecStart=") and "--base-path=" in line:
-                    for token in line.split():
-                        if token.startswith("--base-path="):
-                            return Path(token.split("=", 1)[1])
-        except OSError:
-            pass
+        unit_dir = self._systemd_unit_dir()
+        for name in ("terok-gate@.service", _SOCKET_MODE_SERVICE):
+            service_file = unit_dir / name
+            if not service_file.is_file():
+                continue
+            try:
+                for line in service_file.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if line.startswith("ExecStart=") and "--base-path=" in line:
+                        for token in line.split():
+                            if token.startswith("--base-path="):
+                                return Path(token.split("=", 1)[1])
+            except OSError:
+                pass
         return None
 
     def _base_path_diverged(self) -> str | None:
