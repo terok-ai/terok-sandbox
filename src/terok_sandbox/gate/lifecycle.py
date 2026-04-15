@@ -127,15 +127,11 @@ class GateServerManager:
         if self.is_socket_installed():
             if self.is_socket_active():
                 return GateServerStatus(mode="systemd", running=True, port=port)
-            if self.is_daemon_running():
+            if self.is_daemon_running() or self.is_socket_reachable():
                 return GateServerStatus(mode="daemon", running=True, port=port)
             return GateServerStatus(mode="systemd", running=False, port=port)
 
-        # Socket-mode foreground server (no systemd, no daemon PID file).
-        if self.is_socket_reachable():
-            return GateServerStatus(mode="daemon", running=True, port=port)
-
-        if self.is_daemon_running():
+        if self.is_daemon_running() or self.is_socket_reachable():
             return GateServerStatus(mode="daemon", running=True, port=port)
 
         return GateServerStatus(mode="none", running=False, port=port)

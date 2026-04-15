@@ -113,7 +113,6 @@ class TestHardenSocket:
 
     def test_sets_owner_only(self, tmp_path: Path) -> None:
         """Socket file is restricted to owner-only access."""
-        import os
         import stat
 
         sock_path = tmp_path / "s.sock"
@@ -247,6 +246,23 @@ class TestGateSocketReachability:
             mgr = GateServerManager()
             with (
                 unittest.mock.patch.object(mgr, "is_socket_installed", return_value=False),
+                unittest.mock.patch.object(mgr, "is_socket_reachable", return_value=True),
+            ):
+                status = mgr.get_status()
+        assert status == GateServerStatus(mode="daemon", running=True, port=9418)
+
+    def test_systemd_installed_inactive_socket_reachable(self) -> None:
+        """Foreground socket server detected even when systemd units are installed but inactive."""
+        mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
+        mock_cfg.gate_port = 9418
+        with unittest.mock.patch.object(
+            GateServerManager, "__init__", lambda self, cfg=None: setattr(self, "_cfg", mock_cfg)
+        ):
+            mgr = GateServerManager()
+            with (
+                unittest.mock.patch.object(mgr, "is_socket_installed", return_value=True),
+                unittest.mock.patch.object(mgr, "is_socket_active", return_value=False),
+                unittest.mock.patch.object(mgr, "is_daemon_running", return_value=False),
                 unittest.mock.patch.object(mgr, "is_socket_reachable", return_value=True),
             ):
                 status = mgr.get_status()
