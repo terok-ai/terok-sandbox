@@ -158,6 +158,30 @@ class TestCreateUnixServer:
 # ── Gate lifecycle: socket reachability ──────────────────────────────────
 
 
+class TestWaitForUnixSocket:
+    """Verify the _wait_for_unix_socket retry loop."""
+
+    def test_returns_true_for_immediate_listener(self, tmp_path: Path) -> None:
+        """Succeeds immediately when the socket is already listening."""
+        from terok_sandbox.credentials.lifecycle import CredentialProxyManager
+
+        sock_path = tmp_path / "test.sock"
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.bind(str(sock_path))
+        srv.listen(1)
+        try:
+            assert CredentialProxyManager._wait_for_unix_socket(sock_path, timeout=1.0) is True
+        finally:
+            srv.close()
+
+    def test_returns_false_on_timeout(self, tmp_path: Path) -> None:
+        """Returns False when socket never appears within timeout."""
+        from terok_sandbox.credentials.lifecycle import CredentialProxyManager
+
+        missing = tmp_path / "missing.sock"
+        assert CredentialProxyManager._wait_for_unix_socket(missing, timeout=0.3) is False
+
+
 class TestGateSocketReachability:
     """Verify gate lifecycle socket-mode detection."""
 
@@ -345,6 +369,24 @@ class TestServeForeground:
         with pytest.raises(RuntimeError, match="--socket-path or --port"):
             _serve_foreground(tmp_path, unittest.mock.Mock())
 
+    def test_tcp_server_created(self, tmp_path: Path) -> None:
+        """TCP-only mode creates a listening server on the given port."""
+        import threading
+
+        from terok_sandbox.gate.server import _serve_foreground
+
+        def _run():
+            _serve_foreground(tmp_path, unittest.mock.Mock(), port=0)
+
+        # signal.signal() only works in the main thread — mock it out
+        with unittest.mock.patch("terok_sandbox.gate.server.signal.signal"):
+            t = threading.Thread(target=_run, daemon=True)
+            t.start()
+            import time
+
+            time.sleep(0.3)
+            assert t.is_alive()
+
     def test_pid_file_written(self, tmp_path: Path) -> None:
         """PID file is created when pid_file is specified."""
         import os
@@ -355,7 +397,6 @@ class TestServeForeground:
         pid_file = tmp_path / "gate.pid"
         sock_path = tmp_path / "gate.sock"
 
-        # Run in a thread so we can stop it
         def _run():
             _serve_foreground(
                 tmp_path,
@@ -364,14 +405,14 @@ class TestServeForeground:
                 pid_file=pid_file,
             )
 
-        t = threading.Thread(target=_run, daemon=True)
-        t.start()
-        # Give it a moment to write the PID file
-        import time
+        with unittest.mock.patch("terok_sandbox.gate.server.signal.signal"):
+            t = threading.Thread(target=_run, daemon=True)
+            t.start()
+            import time
 
-        time.sleep(0.2)
-        assert pid_file.exists()
-        assert pid_file.read_text().strip() == str(os.getpid())
+            time.sleep(0.2)
+            assert pid_file.exists()
+            assert pid_file.read_text().strip() == str(os.getpid())
 
 
 # ── Gate server: CLI --port sentinel ─────────────────────────────────────
