@@ -92,14 +92,20 @@ class ProxyUnreachableError(RuntimeError):
 
 # ---------- Constants ----------
 
-_UNIT_VERSION = 4
+_UNIT_VERSION = 5
 """Bump when the systemd unit templates change."""
 
 _SOCKET_UNIT = "terok-credential-proxy.socket"
-"""Name of the systemd socket unit file."""
+"""Name of the systemd socket unit file (TCP mode)."""
 
 _SERVICE_UNIT = "terok-credential-proxy.service"
-"""Name of the systemd service unit file."""
+"""Name of the systemd service unit file (TCP mode)."""
+
+_SOCKET_MODE_SERVICE = "terok-credential-proxy-socket.service"
+"""Name of the systemd service unit for Unix socket mode."""
+
+_ALL_UNIT_NAMES = (_SOCKET_UNIT, _SERVICE_UNIT, _SOCKET_MODE_SERVICE)
+"""All unit file names across both transport modes (for cleanup)."""
 
 
 # ---------- Manager ----------
@@ -287,8 +293,13 @@ class CredentialProxyManager:
         except (FileNotFoundError, subprocess.TimeoutExpired):
             return False
 
-    def install_systemd_units(self) -> None:
-        """Render and install systemd socket+service units, then enable+start the socket."""
+    def install_systemd_units(self, *, transport: str = "tcp") -> None:
+        """Render and install systemd units, then enable+start.
+
+        When *transport* is ``"tcp"`` (default), installs the socket-activated
+        pair (socket + service).  When ``"socket"``, installs a single
+        long-running service that binds Unix sockets only.
+        """
         import terok_sandbox.credentials.proxy
 
         from .._util import render_template
@@ -303,6 +314,7 @@ class CredentialProxyManager:
         )
         variables = {
             "SOCKET_PATH": str(self._cfg.proxy_socket_path),
+            "SSH_AGENT_SOCKET_PATH": str(self._cfg.ssh_agent_socket_path),
             "DB_PATH": str(self._cfg.proxy_db_path),
             "ROUTES_PATH": str(self._cfg.proxy_routes_path),
             "PORT": str(self._cfg.proxy_port),
@@ -312,7 +324,17 @@ class CredentialProxyManager:
             "UNIT_VERSION": str(_UNIT_VERSION),
         }
 
-        for template_name in (_SOCKET_UNIT, _SERVICE_UNIT):
+        # Remove units from the *other* transport mode before installing.
+        self._remove_unit_files()
+
+        if transport == "socket":
+            templates = [_SOCKET_MODE_SERVICE]
+            enable_unit = _SOCKET_MODE_SERVICE
+        else:
+            templates = [_SOCKET_UNIT, _SERVICE_UNIT]
+            enable_unit = _SOCKET_UNIT
+
+        for template_name in templates:
             template_path = resource_dir / template_name
             if not template_path.is_file():
                 raise SystemExit(f"Missing systemd template: {template_path}")
@@ -322,31 +344,35 @@ class CredentialProxyManager:
         self._cfg.proxy_socket_path.parent.mkdir(parents=True, exist_ok=True)
         subprocess.run(["systemctl", "--user", "daemon-reload"], check=True, timeout=10)
         subprocess.run(
-            ["systemctl", "--user", "enable", "--now", _SOCKET_UNIT],
+            ["systemctl", "--user", "enable", "--now", enable_unit],
             check=True,
             timeout=10,
         )
         # Restart to apply updated unit configuration if socket was already active.
         subprocess.run(
-            ["systemctl", "--user", "restart", _SOCKET_UNIT],
+            ["systemctl", "--user", "restart", enable_unit],
             check=True,
             timeout=10,
         )
 
-    def uninstall_systemd_units(self) -> None:
-        """Disable+stop the socket and remove unit files."""
+    def _remove_unit_files(self) -> None:
+        """Remove all proxy unit files from both transport modes."""
         unit_dir = self._systemd_unit_dir()
-
-        subprocess.run(
-            ["systemctl", "--user", "disable", "--now", _SOCKET_UNIT],
-            check=False,
-            timeout=10,
-        )
-
-        for name in (_SOCKET_UNIT, _SERVICE_UNIT):
+        for name in _ALL_UNIT_NAMES:
             unit_file = unit_dir / name
             if unit_file.is_file():
                 unit_file.unlink()
+
+    def uninstall_systemd_units(self) -> None:
+        """Disable+stop all proxy units and remove unit files."""
+        for unit in (_SOCKET_UNIT, _SOCKET_MODE_SERVICE):
+            subprocess.run(
+                ["systemctl", "--user", "disable", "--now", unit],
+                check=False,
+                timeout=10,
+            )
+
+        self._remove_unit_files()
 
         subprocess.run(["systemctl", "--user", "daemon-reload"], check=False, timeout=10)
 

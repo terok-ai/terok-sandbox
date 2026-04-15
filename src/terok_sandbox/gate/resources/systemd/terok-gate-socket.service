@@ -1,0 +1,11 @@
+# terok-gate-version: {{UNIT_VERSION}}
+
+[Unit]
+Description=terok git gate server (Unix socket mode)
+
+[Service]
+Type=simple
+ExecStart={{TEROK_GATE_BIN}} --socket-path={{SOCKET_PATH}} --base-path={{GATE_BASE_PATH}} --token-file={{TOKEN_FILE}}
+
+[Install]
+WantedBy=default.target

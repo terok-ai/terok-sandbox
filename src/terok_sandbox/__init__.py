@@ -156,9 +156,9 @@ def get_server_status(cfg: SandboxConfig | None = None) -> GateServerStatus:
     return GateServerManager(cfg).get_status()
 
 
-def install_systemd_units(cfg: SandboxConfig | None = None) -> None:
+def install_systemd_units(cfg: SandboxConfig | None = None, *, transport: str = "tcp") -> None:
     """Render and install gate server systemd units."""
-    GateServerManager(cfg).install_systemd_units()
+    GateServerManager(cfg).install_systemd_units(transport=transport)
 
 
 def is_daemon_running(cfg: SandboxConfig | None = None) -> bool:
@@ -222,9 +222,9 @@ def get_ssh_agent_port(cfg: SandboxConfig | None = None) -> int:
     return CredentialProxyManager(cfg).ssh_agent_port
 
 
-def install_proxy_systemd(cfg: SandboxConfig | None = None) -> None:
+def install_proxy_systemd(cfg: SandboxConfig | None = None, *, transport: str = "tcp") -> None:
     """Render and install systemd socket+service units."""
-    CredentialProxyManager(cfg).install_systemd_units()
+    CredentialProxyManager(cfg).install_systemd_units(transport=transport)
 
 
 def is_proxy_running(cfg: SandboxConfig | None = None) -> bool:

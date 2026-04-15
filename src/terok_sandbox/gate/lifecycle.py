@@ -38,12 +38,18 @@ from ..config import SandboxConfig
 
 # ---------- Constants ----------
 
-_UNIT_VERSION = 6
+_UNIT_VERSION = 7
 """Bump when the systemd unit templates change.  ``ensure_reachable``
 checks the installed version and refuses to start tasks if it is stale."""
 
 _SOCKET_UNIT = "terok-gate.socket"
-"""Name of the systemd socket unit file."""
+"""Name of the systemd socket unit file (TCP inetd mode)."""
+
+_SOCKET_MODE_SERVICE = "terok-gate-socket.service"
+"""Name of the systemd service unit for Unix socket mode."""
+
+_ALL_UNIT_NAMES = (_SOCKET_UNIT, "terok-gate@.service", _SOCKET_MODE_SERVICE)
+"""All unit file names across both transport modes (for cleanup)."""
 
 
 # ---------- Vocabulary ----------
@@ -218,8 +224,13 @@ class GateServerManager:
         except (FileNotFoundError, subprocess.TimeoutExpired):
             return False
 
-    def install_systemd_units(self) -> None:
-        """Render and install systemd socket+service units, then enable+start the socket."""
+    def install_systemd_units(self, *, transport: str = "tcp") -> None:
+        """Render and install systemd units, then enable+start.
+
+        When *transport* is ``"tcp"`` (default), installs the inetd-style
+        socket+service pair.  When ``"socket"``, installs a single long-running
+        service that binds a Unix socket.
+        """
         import shutil
 
         import terok_sandbox.gate
@@ -240,13 +251,24 @@ class GateServerManager:
         resource_dir = Path(terok_sandbox.gate.__file__).resolve().parent / "resources" / "systemd"
         variables = {
             "PORT": str(self._cfg.gate_port),
+            "SOCKET_PATH": str(self._cfg.gate_socket_path),
             "GATE_BASE_PATH": str(self._cfg.gate_base_path),
             "TOKEN_FILE": str(TokenStore(self._cfg).file_path),
             "UNIT_VERSION": str(_UNIT_VERSION),
             "TEROK_GATE_BIN": gate_bin,
         }
 
-        for template_name in (_SOCKET_UNIT, "terok-gate@.service"):
+        # Remove units from the *other* transport mode before installing.
+        self._remove_unit_files()
+
+        if transport == "socket":
+            templates = [_SOCKET_MODE_SERVICE]
+            enable_unit = _SOCKET_MODE_SERVICE
+        else:
+            templates = [_SOCKET_UNIT, "terok-gate@.service"]
+            enable_unit = _SOCKET_UNIT
+
+        for template_name in templates:
             template_path = resource_dir / template_name
             if not template_path.is_file():
                 raise SystemExit(f"Missing systemd template: {template_path}")
@@ -255,26 +277,31 @@ class GateServerManager:
 
         subprocess.run(["systemctl", "--user", "daemon-reload"], check=True, timeout=10)
         subprocess.run(
-            ["systemctl", "--user", "enable", "--now", _SOCKET_UNIT],
+            ["systemctl", "--user", "enable", "--now", enable_unit],
             check=True,
             timeout=10,
         )
 
-    def uninstall_systemd_units(self) -> None:
-        """Disable+stop the socket and remove unit files."""
+    def _remove_unit_files(self) -> None:
+        """Remove all gate unit files from both transport modes."""
         unit_dir = self._systemd_unit_dir()
-
-        subprocess.run(
-            ["systemctl", "--user", "disable", "--now", _SOCKET_UNIT],
-            check=False,
-            timeout=10,
-        )
-        subprocess.run(["systemctl", "--user", "daemon-reload"], check=False, timeout=10)
-
-        for name in (_SOCKET_UNIT, "terok-gate@.service"):
+        for name in _ALL_UNIT_NAMES:
             unit_file = unit_dir / name
             if unit_file.is_file():
                 unit_file.unlink()
+
+    def uninstall_systemd_units(self) -> None:
+        """Disable+stop all gate units and remove unit files."""
+        # Stop whichever variant is active.
+        for unit in (_SOCKET_UNIT, _SOCKET_MODE_SERVICE):
+            subprocess.run(
+                ["systemctl", "--user", "disable", "--now", unit],
+                check=False,
+                timeout=10,
+            )
+        subprocess.run(["systemctl", "--user", "daemon-reload"], check=False, timeout=10)
+
+        self._remove_unit_files()
 
         subprocess.run(["systemctl", "--user", "daemon-reload"], check=False, timeout=10)
 
