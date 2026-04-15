@@ -12,7 +12,13 @@ from unittest.mock import patch
 import pytest
 
 from terok_sandbox import port_registry as reg
-from terok_sandbox.port_registry import PortRegistry, _is_port_free, _save_ports
+from terok_sandbox.port_registry import (
+    PortRegistry,
+    _is_port_free,
+    _parse_listen_port,
+    _parse_ssh_agent_port,
+    _save_ports,
+)
 
 # Capture real _save_ports before conftest patches it away.
 _real_save_ports = _save_ports
@@ -28,12 +34,17 @@ def _isolated_registry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     ``_is_port_free`` is stubbed to always return True so tests are
     deterministic regardless of host port availability.  Tests that
     need real socket behaviour override this with their own patch.
+
+    ``_read_installed_ports`` is stubbed to return ``{}`` so tests are
+    not affected by whatever systemd units exist on the test host.
+    Tests that exercise installed-port introspection override this.
     """
     registry = tmp_path / "terok-ports"
     registry.mkdir(exist_ok=True)
     monkeypatch.setattr(reg._default, "registry_dir", registry)
     monkeypatch.setattr(reg, "_save_ports", _real_save_ports)
     monkeypatch.setattr(reg, "_is_port_free", lambda _port: True)
+    monkeypatch.setattr(reg, "_read_installed_ports", lambda: {})
     reg.reset_cache()
 
 
@@ -220,7 +231,7 @@ def test_resolve_fails_when_saved_taken(tmp_path: Path) -> None:
         json.dumps({"gate": 18750, "proxy": 18751, "ssh_agent": 18752})
     )
     (reg._default.registry_dir / "bob.json").write_text(json.dumps({"gate": 18750}))
-    with pytest.raises(SystemExit, match="previously assigned"):
+    with pytest.raises(SystemExit, match="claimed by another user"):
         reg.resolve_service_ports(None, None, None, state_dir=state)
 
 
@@ -323,3 +334,243 @@ def test_sandbox_config_explicit_passthrough() -> None:
 
     cfg = SandboxConfig(gate_port=9418, proxy_port=18731, ssh_agent_port=18732)
     assert (cfg.gate_port, cfg.proxy_port, cfg.ssh_agent_port) == (9418, 18731, 18732)
+
+
+# ---------------------------------------------------------------------------
+# Installed service introspection
+# ---------------------------------------------------------------------------
+
+
+class TestParseListenPort:
+    """Tests for _parse_listen_port (gate + proxy socket units)."""
+
+    def test_extracts_port_from_gate_socket(self, tmp_path: Path) -> None:
+        """Parses ListenStream=127.0.0.1:PORT from a gate socket unit."""
+        unit = tmp_path / "terok-gate.socket"
+        unit.write_text("[Socket]\nListenStream=127.0.0.1:18750\nAccept=yes\n")
+        assert _parse_listen_port(unit) == 18750
+
+    def test_extracts_port_from_proxy_socket(self, tmp_path: Path) -> None:
+        """Parses TCP ListenStream from proxy socket (ignores Unix socket line)."""
+        unit = tmp_path / "terok-credential-proxy.socket"
+        unit.write_text(
+            "[Socket]\n"
+            "ListenStream=/run/user/1000/terok/credential-proxy.sock\n"
+            "SocketMode=0600\n"
+            "ListenStream=127.0.0.1:18751\n"
+        )
+        assert _parse_listen_port(unit) == 18751
+
+    def test_missing_file_returns_none(self, tmp_path: Path) -> None:
+        """Non-existent unit file → None."""
+        assert _parse_listen_port(tmp_path / "nonexistent.socket") is None
+
+    def test_no_listen_directive_returns_none(self, tmp_path: Path) -> None:
+        """Unit file without ListenStream → None."""
+        unit = tmp_path / "empty.socket"
+        unit.write_text("[Socket]\nAccept=yes\n")
+        assert _parse_listen_port(unit) is None
+
+    def test_invalid_port_returns_none(self, tmp_path: Path) -> None:
+        """Port number 0 or >65535 → None."""
+        unit = tmp_path / "bad.socket"
+        unit.write_text("[Socket]\nListenStream=127.0.0.1:0\n")
+        assert _parse_listen_port(unit) is None
+
+        unit.write_text("[Socket]\nListenStream=127.0.0.1:99999\n")
+        assert _parse_listen_port(unit) is None
+
+
+class TestParseSshAgentPort:
+    """Tests for _parse_ssh_agent_port (proxy service unit)."""
+
+    def test_extracts_ssh_agent_port(self, tmp_path: Path) -> None:
+        """Parses --ssh-agent-port from ExecStart line."""
+        unit = tmp_path / "terok-credential-proxy.service"
+        unit.write_text(
+            "[Service]\n"
+            "ExecStart=/usr/bin/python3 -m terok_sandbox.credentials.proxy "
+            "--port=18751 --ssh-agent-port=18752 --db-path=/tmp/db\n"
+        )
+        assert _parse_ssh_agent_port(unit) == 18752
+
+    def test_equals_separator(self, tmp_path: Path) -> None:
+        """--ssh-agent-port=PORT (equals sign) is parsed."""
+        unit = tmp_path / "svc.service"
+        unit.write_text("ExecStart=cmd --ssh-agent-port=19000\n")
+        assert _parse_ssh_agent_port(unit) == 19000
+
+    def test_space_separator(self, tmp_path: Path) -> None:
+        """--ssh-agent-port PORT (space) is parsed."""
+        unit = tmp_path / "svc.service"
+        unit.write_text("ExecStart=cmd --ssh-agent-port 19000\n")
+        assert _parse_ssh_agent_port(unit) == 19000
+
+    def test_missing_file_returns_none(self, tmp_path: Path) -> None:
+        """Non-existent service file → None."""
+        assert _parse_ssh_agent_port(tmp_path / "nonexistent.service") is None
+
+    def test_no_flag_returns_none(self, tmp_path: Path) -> None:
+        """Service file without --ssh-agent-port → None."""
+        unit = tmp_path / "svc.service"
+        unit.write_text("ExecStart=cmd --port=18751\n")
+        assert _parse_ssh_agent_port(unit) is None
+
+
+class TestInstalledPortReclaim:
+    """Integration tests: installed systemd unit ports are reclaimed."""
+
+    def test_installed_ports_reclaimed_when_service_listening(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Ports from installed units are reclaimed even when bind() fails.
+
+        This is the core scenario: ``terok setup`` installs services on
+        ports 18750-18752.  Later, ``terok task start`` resolves ports
+        in a new process.  ``_is_port_free()`` would fail because the
+        service is already listening — but installed-port introspection
+        detects they're ours and trusts them.
+        """
+        monkeypatch.setattr(
+            reg,
+            "_read_installed_ports",
+            lambda: {"gate": 18750, "proxy": 18751, "ssh_agent": 18752},
+        )
+        monkeypatch.setattr(reg, "_is_port_free", lambda _p: False)
+
+        ports = reg.resolve_service_ports(None, None, None)
+        assert (ports.gate, ports.proxy, ports.ssh_agent) == (18750, 18751, 18752)
+
+    def test_installed_ports_win_over_saved(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Installed unit ports take priority over saved claims file."""
+        state = tmp_path / "state"
+        state.mkdir()
+        (state / reg._CLAIMS_FILENAME).write_text(
+            json.dumps({"gate": 18800, "proxy": 18801, "ssh_agent": 18802})
+        )
+        monkeypatch.setattr(
+            reg,
+            "_read_installed_ports",
+            lambda: {"gate": 18750, "proxy": 18751, "ssh_agent": 18752},
+        )
+
+        ports = reg.resolve_service_ports(None, None, None, state_dir=state)
+        assert (ports.gate, ports.proxy, ports.ssh_agent) == (18750, 18751, 18752)
+
+    def test_explicit_config_wins_over_installed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Explicit user config takes priority over installed ports."""
+        monkeypatch.setattr(
+            reg,
+            "_read_installed_ports",
+            lambda: {"gate": 18750, "proxy": 18751, "ssh_agent": 18752},
+        )
+        ports = reg.resolve_service_ports(
+            19100,
+            None,
+            None,
+            gate_explicit=True,
+        )
+        assert ports.gate == 19100
+        assert ports.proxy == 18751  # still from installed
+
+    def test_installed_port_rejected_when_taken_by_other_user(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Installed port claimed by another user → SystemExit."""
+        monkeypatch.setattr(
+            reg,
+            "_read_installed_ports",
+            lambda: {"gate": 18750, "proxy": 18751, "ssh_agent": 18752},
+        )
+        (reg._default.registry_dir / "bob.json").write_text(json.dumps({"gate": 18750}))
+        with pytest.raises(SystemExit, match="claimed by another user"):
+            reg.resolve_service_ports(None, None, None)
+
+    def test_partial_installed_ports_fallback(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only gate installed → proxy/ssh fall back to saved or auto."""
+        state = tmp_path / "state"
+        state.mkdir()
+        (state / reg._CLAIMS_FILENAME).write_text(json.dumps({"proxy": 18801}))
+        monkeypatch.setattr(
+            reg,
+            "_read_installed_ports",
+            lambda: {"gate": 18750},
+        )
+
+        ports = reg.resolve_service_ports(None, None, None, state_dir=state)
+        assert ports.gate == 18750  # from installed unit
+        assert ports.proxy == 18801  # from saved file
+        assert ports.ssh_agent is not None  # auto-allocated
+
+    def test_no_installed_ports_falls_through(self) -> None:
+        """No installed units → normal allocation (baseline regression)."""
+        ports = reg.resolve_service_ports(None, None, None)
+        assert len({ports.gate, ports.proxy, ports.ssh_agent}) == 3
+
+    def test_installed_port_displaced_by_other_user_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Installed port can't be claimed (other user) → fail-closed."""
+        state = tmp_path / "state"
+        state.mkdir()
+        monkeypatch.setattr(
+            reg,
+            "_read_installed_ports",
+            lambda: {"gate": 18750, "proxy": 18751, "ssh_agent": 18752},
+        )
+        # Bob holds 18751, so proxy claim fails, and since installed port
+        # was displaced the fail-closed check fires.
+        (reg._default.registry_dir / "bob.json").write_text(json.dumps({"web": 18751}))
+        with pytest.raises(SystemExit, match="claimed by another user"):
+            reg.resolve_service_ports(None, None, None, state_dir=state)
+
+    def test_real_socket_listener_with_installed_port(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End-to-end: real socket listener + installed port introspection.
+
+        Simulates the actual production scenario with a real listener.
+        """
+        import socket as sock
+
+        monkeypatch.setattr(
+            reg,
+            "_read_installed_ports",
+            lambda: {"gate": 18750, "proxy": 18751, "ssh_agent": 18752},
+        )
+        # Use real _is_port_free for this test
+        monkeypatch.setattr(reg, "_is_port_free", _is_port_free)
+
+        listener = sock.socket(sock.AF_INET, sock.SOCK_STREAM)
+        listener.setsockopt(sock.SOL_SOCKET, sock.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 18750))
+        listener.listen(1)
+        try:
+            assert not _is_port_free(18750), "sanity: listener blocks bind"
+            ports = reg.resolve_service_ports(None, None, None)
+            assert ports.gate == 18750, "installed port reclaimed despite listener"
+        finally:
+            listener.close()
+
+    def test_saved_ports_trusted_without_installed_units(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Saved ports are trusted even when no systemd units are installed.
+
+        Covers non-systemd hosts and cases where units were cleaned up
+        but the claims file persists.
+        """
+        state = tmp_path / "state"
+        state.mkdir()
+        (state / reg._CLAIMS_FILENAME).write_text(
+            json.dumps({"gate": 18750, "proxy": 18751, "ssh_agent": 18752})
+        )
+        # No installed units (default stub returns {})
+        monkeypatch.setattr(reg, "_is_port_free", lambda _p: False)
+
+        ports = reg.resolve_service_ports(None, None, None, state_dir=state)
+        assert (ports.gate, ports.proxy, ports.ssh_agent) == (18750, 18751, 18752)
