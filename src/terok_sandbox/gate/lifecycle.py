@@ -148,9 +148,7 @@ class GateServerManager:
                     mode="systemd", running=True, port=port, transport=transport or "tcp"
                 )
             if transport:
-                return GateServerStatus(
-                    mode="daemon", running=True, port=port, transport=transport
-                )
+                return GateServerStatus(mode="daemon", running=True, port=port, transport=transport)
             return GateServerStatus(mode="systemd", running=False, port=port)
 
         if transport:

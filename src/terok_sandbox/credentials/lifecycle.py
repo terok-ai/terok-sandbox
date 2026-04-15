@@ -217,9 +217,7 @@ class CredentialProxyManager:
         if running:
             from .._util._net import probe_unix_socket
 
-            transport = (
-                "socket" if probe_unix_socket(self._cfg.proxy_socket_path) else "tcp"
-            )
+            transport = "socket" if probe_unix_socket(self._cfg.proxy_socket_path) else "tcp"
 
         return CredentialProxyStatus(
             mode=mode,

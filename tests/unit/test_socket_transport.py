@@ -249,7 +249,9 @@ class TestGateSocketReachability:
                 unittest.mock.patch.object(mgr, "is_socket_reachable", return_value=True),
             ):
                 status = mgr.get_status()
-        assert status == GateServerStatus(mode="daemon", running=True, port=9418, transport="socket")
+        assert status == GateServerStatus(
+            mode="daemon", running=True, port=9418, transport="socket"
+        )
 
     def test_systemd_installed_inactive_socket_reachable(self) -> None:
         """Foreground socket server detected even when systemd units are installed but inactive."""
@@ -266,7 +268,9 @@ class TestGateSocketReachability:
                 unittest.mock.patch.object(mgr, "is_socket_reachable", return_value=True),
             ):
                 status = mgr.get_status()
-        assert status == GateServerStatus(mode="daemon", running=True, port=9418, transport="socket")
+        assert status == GateServerStatus(
+            mode="daemon", running=True, port=9418, transport="socket"
+        )
 
     def test_socket_not_reachable_falls_through(self) -> None:
         """get_status falls through to daemon PID check when socket is not reachable."""
