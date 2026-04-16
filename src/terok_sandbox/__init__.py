@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 from ._util._selinux import (
     SELINUX_SOCKET_TYPE,
     install_policy as install_selinux_policy,
+    is_libselinux_available,
     is_policy_installed as is_selinux_policy_installed,
     is_selinux_enabled,
     is_selinux_enforcing,
@@ -405,6 +406,7 @@ __all__ = [
     # SELinux
     "SELINUX_SOCKET_TYPE",
     "install_selinux_policy",
+    "is_libselinux_available",
     "is_selinux_enabled",
     "is_selinux_enforcing",
     "is_selinux_policy_installed",

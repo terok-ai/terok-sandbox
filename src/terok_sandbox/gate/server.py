@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import ctypes
 import json
 import logging
 import os
@@ -33,6 +34,7 @@ import stat
 import subprocess
 import sys
 import threading
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from socketserver import ThreadingMixIn
@@ -477,6 +479,44 @@ def _serve_daemon(
 # ---------------------------------------------------------------------------
 
 
+@contextmanager
+def _selinux_socket_context(selinux_type: str = "terok_socket_t"):
+    """Apply *selinux_type* as the kernel socket-creation context for the block.
+
+    Any ``socket()`` call inside produces a socket whose object SID is
+    *selinux_type* — required for rootless Podman containers
+    (``container_t``) to ``connectto`` it once the matching policy is
+    installed.  The previous context is restored on exit.
+
+    No-op on systems without ``libselinux.so.1``.  Inlined via ctypes
+    rather than shared with ``_util._selinux`` to preserve this module's
+    zero-external-import boundary — the gate server runs as a standalone
+    process, like ``git daemon``.
+    """
+    try:
+        lib = ctypes.CDLL("libselinux.so.1", use_errno=True)
+    except OSError:
+        yield
+        return
+    lib.setsockcreatecon.argtypes = [ctypes.c_char_p]
+    lib.setsockcreatecon.restype = ctypes.c_int
+    lib.getsockcreatecon.argtypes = [ctypes.POINTER(ctypes.c_char_p)]
+    lib.getsockcreatecon.restype = ctypes.c_int
+    lib.freecon.argtypes = [ctypes.c_char_p]
+    lib.freecon.restype = None
+
+    old = ctypes.c_char_p()
+    lib.getsockcreatecon(ctypes.byref(old))
+    prior = old.value
+    if old.value:
+        lib.freecon(old)
+    lib.setsockcreatecon(f"system_u:object_r:{selinux_type}:s0".encode())
+    try:
+        yield
+    finally:
+        lib.setsockcreatecon(prior)
+
+
 def _create_unix_server(
     handler_class: type[BaseHTTPRequestHandler],
     socket_path: Path,
@@ -496,29 +536,11 @@ def _create_unix_server(
         pass
     socket_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Set SELinux socket creation context so the kernel socket object
-    # carries terok_socket_t — required for container_t connectto.
-    # Inlined to preserve this module's zero-external-import boundary.
-    _selinux_old_ctx = None
-    try:
-        import selinux as _se  # type: ignore[import-untyped]
-
-        _selinux_old_ctx = _se.getsockcreatecon()[1]
-        _se.setsockcreatecon("system_u:object_r:terok_socket_t:s0")
-    except (ImportError, OSError):
-        pass
-
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    sock.bind(str(socket_path))
-    os.chmod(socket_path, 0o600)
-    sock.listen(5)
-
-    try:
-        import selinux as _se  # type: ignore[import-untyped]
-
-        _se.setsockcreatecon(_selinux_old_ctx)
-    except (ImportError, OSError):
-        pass
+    with _selinux_socket_context():
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.bind(str(socket_path))
+        os.chmod(socket_path, 0o600)
+        sock.listen(5)
 
     server = _ThreadingHTTPServer(("localhost", 0), handler_class, bind_and_activate=False)
     server.socket.close()

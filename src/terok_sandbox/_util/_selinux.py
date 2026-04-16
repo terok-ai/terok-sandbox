@@ -20,14 +20,19 @@ To work around this without disabling confinement:
 The ``sock_file { write }`` check (file-level access) is separately
 handled by Podman's ``:z`` volume relabeling.
 
+libselinux is loaded via :mod:`ctypes` at call time, so this module has
+no runtime dependency on the ``python3-libselinux`` distribution package
+— ``libselinux.so.1`` from the base ``libselinux`` package is sufficient.
 All functions degrade gracefully on non-SELinux systems.
 """
 
 from __future__ import annotations
 
+import ctypes
 import shutil
 import subprocess
 from contextlib import contextmanager
+from functools import lru_cache
 from importlib.resources import files as _resource_files
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -48,6 +53,9 @@ _POLICY_MODULE_NAME = "terok_socket"
 
 _ENFORCE_PATH = Path("/sys/fs/selinux/enforce")
 """Kernel sysfs node indicating SELinux enforcement state."""
+
+_LIBSELINUX_SONAME = "libselinux.so.1"
+"""Versioned SONAME of libselinux — stable across distro releases."""
 
 
 # ---------- Detection ----------
@@ -88,6 +96,17 @@ def is_policy_installed() -> bool:
         return False
 
 
+def is_libselinux_available() -> bool:
+    """Return ``True`` if ``libselinux.so.1`` can be loaded via ctypes.
+
+    On SELinux-enforcing hosts, a ``False`` return is a silent-failure
+    risk: service sockets would bind without ``terok_socket_t`` labeling,
+    and container clients would be denied ``connectto`` even when the
+    ``terok_socket`` policy module is installed.
+    """
+    return _load_libselinux() is not None
+
+
 # ---------- Policy installation ----------
 
 
@@ -121,8 +140,6 @@ def install_policy() -> None:
     if not te_path.is_file():
         raise SystemExit(f"Policy source not found: {te_path}")
 
-    # Prefer writing next to the .te source; fall back to a temp dir when
-    # the source lives in read-only site-packages.
     try:
         mod_path = te_path.with_suffix(".mod")
         mod_path.touch()
@@ -181,53 +198,28 @@ def uninstall_policy() -> None:
         )
 
 
-# ---------- Socket context management ----------
-
-
-def _try_setsockcreatecon(context: str | None) -> bool:
-    """Attempt to set the socket creation context via libselinux.
-
-    Returns ``True`` if successful, ``False`` if SELinux bindings are
-    unavailable or the call fails.
-    """
-    try:
-        import selinux  # type: ignore[import-untyped]  # system package
-
-        selinux.setsockcreatecon(context)
-    except (ImportError, OSError):
-        return False
-    return True
-
-
-def _try_getsockcreatecon() -> str | None:
-    """Read the current socket creation context, or ``None``."""
-    try:
-        import selinux  # type: ignore[import-untyped]
-
-        _rc, ctx = selinux.getsockcreatecon()
-        return ctx
-    except (ImportError, OSError):
-        return None
+# ---------- Socket context labeling ----------
 
 
 @contextmanager
 def socket_selinux_context(
     selinux_type: str = SELINUX_SOCKET_TYPE,
 ) -> Iterator[None]:
-    """Context manager that sets the SELinux socket creation context.
+    """Apply *selinux_type* as the creation context for sockets bound in this block.
 
-    Wraps ``setsockcreatecon()`` so that any ``socket()`` call within
-    the block creates a socket with *selinux_type* as its kernel SID.
-    Restores the previous context on exit.
+    Any ``socket()`` call within the ``with`` body produces a socket
+    whose kernel SID is *selinux_type*, enabling ``container_t`` clients
+    to ``connectto`` it once the matching policy is installed.  The
+    previous context is restored on exit.
 
-    No-op on non-SELinux systems or when ``libselinux-python3`` is absent.
+    No-op on non-SELinux systems or when ``libselinux.so.1`` is absent.
 
     Usage::
 
         with socket_selinux_context():
             sock = socket.socket(AF_UNIX, SOCK_STREAM)
             sock.bind(str(path))
-        # socket object now carries terok_socket_t — containers can connectto
+        # socket object now carries terok_socket_t
     """
     if not is_selinux_enabled():
         yield
@@ -240,3 +232,54 @@ def socket_selinux_context(
         yield
     finally:
         _try_setsockcreatecon(old)
+
+
+# ---------- libselinux ctypes bindings ----------
+
+
+@lru_cache(maxsize=1)
+def _load_libselinux() -> ctypes.CDLL | None:
+    """Load ``libselinux.so.1`` and configure function prototypes (cached).
+
+    Returns the ``CDLL`` handle, or ``None`` on systems without libselinux
+    (non-SELinux hosts, or the rare SELinux host missing the base package).
+    """
+    try:
+        lib = ctypes.CDLL(_LIBSELINUX_SONAME, use_errno=True)
+    except OSError:
+        return None
+    lib.setsockcreatecon.argtypes = [ctypes.c_char_p]
+    lib.setsockcreatecon.restype = ctypes.c_int
+    lib.getsockcreatecon.argtypes = [ctypes.POINTER(ctypes.c_char_p)]
+    lib.getsockcreatecon.restype = ctypes.c_int
+    lib.freecon.argtypes = [ctypes.c_char_p]
+    lib.freecon.restype = None
+    return lib
+
+
+def _try_setsockcreatecon(context: str | None) -> bool:
+    """Attempt to set the socket creation context.  Pass ``None`` to clear.
+
+    Returns ``True`` on success, ``False`` if libselinux is unavailable
+    or the call returns a non-zero status.
+    """
+    lib = _load_libselinux()
+    if lib is None:
+        return False
+    arg = context.encode() if context is not None else None
+    return lib.setsockcreatecon(arg) == 0
+
+
+def _try_getsockcreatecon() -> str | None:
+    """Read the current socket creation context, or ``None`` if unset or unavailable."""
+    lib = _load_libselinux()
+    if lib is None:
+        return None
+    ptr = ctypes.c_char_p()
+    if lib.getsockcreatecon(ctypes.byref(ptr)) != 0:
+        return None
+    if not ptr.value:
+        return None
+    result = ptr.value.decode()
+    lib.freecon(ptr)
+    return result
