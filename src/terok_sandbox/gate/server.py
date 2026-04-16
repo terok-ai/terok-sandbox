@@ -3,8 +3,9 @@
 
 """Standalone HTTP gate server wrapping ``git http-backend`` with token auth.
 
-This module has **zero terok imports**.  It is a self-contained security
-component equivalent to ``git daemon``: a separate process that serves repos.
+Launched as a separate process — equivalent to ``git daemon`` — so it
+can be supervised independently by systemd and its audit-log lines
+carry their own process identity.
 
 Token validation:
     Each request must carry HTTP Basic Auth with the token as the username
@@ -23,7 +24,6 @@ from __future__ import annotations
 
 import argparse
 import base64
-import ctypes
 import json
 import logging
 import os
@@ -34,10 +34,11 @@ import stat
 import subprocess
 import sys
 import threading
-from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from socketserver import ThreadingMixIn
+
+from .._util._selinux import socket_selinux_context
 
 _logger = logging.getLogger("terok-gate")
 
@@ -479,44 +480,6 @@ def _serve_daemon(
 # ---------------------------------------------------------------------------
 
 
-@contextmanager
-def _selinux_socket_context(selinux_type: str = "terok_socket_t"):
-    """Apply *selinux_type* as the kernel socket-creation context for the block.
-
-    Any ``socket()`` call inside produces a socket whose object SID is
-    *selinux_type* — required for rootless Podman containers
-    (``container_t``) to ``connectto`` it once the matching policy is
-    installed.  The previous context is restored on exit.
-
-    No-op on systems without ``libselinux.so.1``.  Inlined via ctypes
-    rather than shared with ``_util._selinux`` to preserve this module's
-    zero-external-import boundary — the gate server runs as a standalone
-    process, like ``git daemon``.
-    """
-    try:
-        lib = ctypes.CDLL("libselinux.so.1", use_errno=True)
-    except OSError:
-        yield
-        return
-    lib.setsockcreatecon.argtypes = [ctypes.c_char_p]
-    lib.setsockcreatecon.restype = ctypes.c_int
-    lib.getsockcreatecon.argtypes = [ctypes.POINTER(ctypes.c_char_p)]
-    lib.getsockcreatecon.restype = ctypes.c_int
-    lib.freecon.argtypes = [ctypes.c_char_p]
-    lib.freecon.restype = None
-
-    old = ctypes.c_char_p()
-    lib.getsockcreatecon(ctypes.byref(old))
-    prior = old.value
-    if old.value:
-        lib.freecon(old)
-    lib.setsockcreatecon(f"system_u:object_r:{selinux_type}:s0".encode())
-    try:
-        yield
-    finally:
-        lib.setsockcreatecon(prior)
-
-
 def _create_unix_server(
     handler_class: type[BaseHTTPRequestHandler],
     socket_path: Path,
@@ -524,10 +487,10 @@ def _create_unix_server(
     """Create an HTTPServer bound to a Unix domain socket.
 
     Stale socket files are removed if they are actual sockets (not regular
-    files that happen to share the path).  Helpers are inlined to preserve
-    this module's zero-external-import boundary.
+    files that happen to share the path).  The socket is labeled
+    ``terok_socket_t`` via :func:`socket_selinux_context` so that
+    rootless Podman containers (``container_t``) can ``connectto`` it.
     """
-    # Inline prepare_socket_path — remove stale socket, create parents.
     try:
         if not stat.S_ISSOCK(socket_path.lstat().st_mode):
             raise RuntimeError(f"Refusing to remove non-socket path: {socket_path}")
@@ -536,7 +499,7 @@ def _create_unix_server(
         pass
     socket_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with _selinux_socket_context():
+    with socket_selinux_context():
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.bind(str(socket_path))
         os.chmod(socket_path, 0o600)
