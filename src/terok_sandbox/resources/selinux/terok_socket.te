@@ -1,4 +1,4 @@
-policy_module(terok_socket, 1.0)
+module terok_socket 1.0;
 
 # Targeted SELinux policy for terok service sockets.
 #
@@ -11,12 +11,17 @@ policy_module(terok_socket, 1.0)
 # (Dan Walsh, Podman #23972).  This module narrows the exception to
 # terok sockets only.
 #
+# Written in checkmodule-native module syntax (no refpolicy ``m4``
+# macros), so the build path is ``checkmodule -M -m`` → ``semodule_package``
+# → ``semodule -i`` without an m4 preprocessing step.
+#
 # Install:  sudo terok setup selinux
 # Remove:   sudo semodule -r terok_socket
 
-gen_require(`
+require {
     type container_t;
-')
+    class unix_stream_socket connectto;
+}
 
 type terok_socket_t;
 

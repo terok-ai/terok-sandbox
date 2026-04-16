@@ -131,87 +131,16 @@ def policy_source_path() -> Path:
     return Path(str(_resource_files("terok_sandbox.resources.selinux") / "terok_socket.te"))
 
 
-def install_policy() -> None:
-    """Compile and install the ``terok_socket`` SELinux policy module.
+def install_script_path() -> Path:
+    """Return the path to the bundled ``install_policy.sh`` installer.
 
-    Requires root privileges and ``checkmodule``, ``semodule_package``,
-    ``semodule`` on ``PATH``.
-
-    Raises :class:`SystemExit` on missing tools or compilation failure.
-
-    Compilation artifacts (``.mod``, ``.pp``) are written next to the
-    ``.te`` source when the directory is writable (editable install),
-    otherwise a temporary directory is used (read-only site-packages).
+    Installation is delegated to this short, inspectable shell script —
+    which users run with ``sudo bash <path>`` — rather than a Python
+    wrapper.  Running Python as root imports a large dependency graph;
+    a dedicated shell script can be ``cat``-ed and audited in seconds
+    before the privilege escalation.
     """
-    import tempfile
-
-    missing = missing_policy_tools()
-    if missing:
-        raise SystemExit(
-            f"Required tool '{missing[0]}' not found.\n"
-            f"Install: sudo dnf install selinux-policy-devel policycoreutils"
-        )
-
-    te_path = policy_source_path()
-    if not te_path.is_file():
-        raise SystemExit(f"Policy source not found: {te_path}")
-
-    try:
-        mod_path = te_path.with_suffix(".mod")
-        mod_path.touch()
-        mod_path.unlink()
-        artifact_dir = None
-    except PermissionError:
-        artifact_dir = tempfile.mkdtemp(prefix="terok-selinux-")
-        mod_path = Path(artifact_dir) / te_path.with_suffix(".mod").name
-    except OSError as exc:
-        import errno
-
-        if exc.errno == errno.EROFS:
-            artifact_dir = tempfile.mkdtemp(prefix="terok-selinux-")
-            mod_path = Path(artifact_dir) / te_path.with_suffix(".mod").name
-        else:
-            raise
-
-    pp_path = mod_path.with_suffix(".pp")
-
-    try:
-        subprocess.run(
-            ["checkmodule", "-M", "-m", "-o", str(mod_path), str(te_path)],
-            check=True,
-            timeout=30,
-        )
-        subprocess.run(
-            ["semodule_package", "-o", str(pp_path), "-m", str(mod_path)],
-            check=True,
-            timeout=30,
-        )
-        subprocess.run(
-            ["semodule", "-i", str(pp_path)],
-            check=True,
-            timeout=60,
-        )
-    finally:
-        if artifact_dir:
-            import shutil as _shutil
-
-            _shutil.rmtree(artifact_dir, ignore_errors=True)
-        else:
-            for artifact in (mod_path, pp_path):
-                artifact.unlink(missing_ok=True)
-
-
-def uninstall_policy() -> None:
-    """Remove the ``terok_socket`` SELinux policy module.
-
-    No-op if the module is not installed.  Requires root privileges.
-    """
-    if is_policy_installed():
-        subprocess.run(
-            ["semodule", "-r", _POLICY_MODULE_NAME],
-            check=True,
-            timeout=60,
-        )
+    return Path(str(_resource_files("terok_sandbox.resources.selinux") / "install_policy.sh"))
 
 
 # ---------- Socket context labeling ----------

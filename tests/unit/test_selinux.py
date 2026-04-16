@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import ctypes
-import subprocess
 import unittest.mock
 from pathlib import Path
 
@@ -17,7 +16,7 @@ from terok_sandbox._util._selinux import (
     SELINUX_SOCKET_TYPE,
     _try_getsockcreatecon,
     _try_setsockcreatecon,
-    install_policy,
+    install_script_path,
     is_libselinux_available,
     is_policy_installed,
     is_selinux_enabled,
@@ -25,7 +24,6 @@ from terok_sandbox._util._selinux import (
     missing_policy_tools,
     policy_source_path,
     socket_selinux_context,
-    uninstall_policy,
 )
 from tests.constants import MOCK_BASE
 
@@ -168,112 +166,17 @@ class TestMissingPolicyTools:
             assert missing_policy_tools() == ["checkmodule", "semodule_package"]
 
 
-# ---------- Policy installation ----------
+# ---------- Vendored installer script ----------
 
 
-class TestInstallPolicy:
-    """Verify the compile-and-install flow."""
+class TestInstallScriptPath:
+    """Verify the bundled installer shell script is discoverable."""
 
-    def test_missing_tool_fails(self) -> None:
-        """Raise SystemExit when checkmodule is not on PATH."""
-        with unittest.mock.patch("shutil.which", return_value=None):
-            with pytest.raises(SystemExit, match="checkmodule"):
-                install_policy()
-
-    def test_install_calls_semodule(self, tmp_path: Path) -> None:
-        """Full compile + install sequence."""
-        te_file = tmp_path / "terok_socket.te"
-        te_file.write_text("policy_module(terok_socket, 1.0)\n")
-
-        calls: list[list[str]] = []
-
-        def _fake_run(cmd: list[str], **_kw: object) -> subprocess.CompletedProcess[str]:
-            calls.append(cmd)
-            # Create expected output files so unlink works
-            if cmd[0] == "checkmodule":
-                Path(cmd[4]).touch()
-            elif cmd[0] == "semodule_package":
-                Path(cmd[2]).touch()
-            return subprocess.CompletedProcess(cmd, 0)
-
-        with (
-            unittest.mock.patch("shutil.which", return_value="/usr/bin/tool"),
-            unittest.mock.patch(
-                "terok_sandbox._util._selinux.policy_source_path",
-                return_value=te_file,
-            ),
-            unittest.mock.patch("subprocess.run", side_effect=_fake_run),
-        ):
-            install_policy()
-
-        # checkmodule → semodule_package → semodule -i
-        assert calls[0][0] == "checkmodule"
-        assert calls[1][0] == "semodule_package"
-        assert calls[2][:2] == ["semodule", "-i"]
-
-    def test_readonly_source_uses_tempdir(self, tmp_path: Path) -> None:
-        """When .te lives in read-only dir, artifacts go to a temp dir."""
-        ro_dir = tmp_path / "readonly"
-        ro_dir.mkdir()
-        te_file = ro_dir / "terok_socket.te"
-        te_file.write_text("policy_module(terok_socket, 1.0)\n")
-        ro_dir.chmod(0o555)
-
-        artifact_dirs: list[str] = []
-
-        def _fake_run(cmd: list[str], **_kw: object) -> subprocess.CompletedProcess[str]:
-            if cmd[0] == "checkmodule":
-                artifact_dirs.append(str(Path(cmd[4]).parent))
-                Path(cmd[4]).touch()
-            elif cmd[0] == "semodule_package":
-                Path(cmd[2]).touch()
-            return subprocess.CompletedProcess(cmd, 0)
-
-        try:
-            with (
-                unittest.mock.patch("shutil.which", return_value="/usr/bin/tool"),
-                unittest.mock.patch(
-                    "terok_sandbox._util._selinux.policy_source_path",
-                    return_value=te_file,
-                ),
-                unittest.mock.patch("subprocess.run", side_effect=_fake_run),
-            ):
-                install_policy()
-        finally:
-            ro_dir.chmod(0o755)
-
-        # Artifacts must NOT be in the read-only source dir
-        assert artifact_dirs, "checkmodule was not called"
-        assert artifact_dirs[0] != str(ro_dir)
-
-
-class TestUninstallPolicy:
-    """Verify policy removal."""
-
-    def test_uninstall_when_installed(self) -> None:
-        """Calls semodule -r when policy is installed."""
-        with (
-            unittest.mock.patch(
-                "terok_sandbox._util._selinux.is_policy_installed",
-                return_value=True,
-            ),
-            unittest.mock.patch("subprocess.run") as mock_run,
-        ):
-            uninstall_policy()
-        mock_run.assert_called_once()
-        assert mock_run.call_args[0][0][:2] == ["semodule", "-r"]
-
-    def test_noop_when_not_installed(self) -> None:
-        """No-op when policy is not installed."""
-        with (
-            unittest.mock.patch(
-                "terok_sandbox._util._selinux.is_policy_installed",
-                return_value=False,
-            ),
-            unittest.mock.patch("subprocess.run") as mock_run,
-        ):
-            uninstall_policy()
-        mock_run.assert_not_called()
+    def test_script_exists(self) -> None:
+        """install_policy.sh must ship in the resource directory."""
+        path = install_script_path()
+        assert path.is_file()
+        assert path.name == "install_policy.sh"
 
 
 # ---------- Socket context manager ----------

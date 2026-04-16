@@ -26,14 +26,13 @@ from typing import TYPE_CHECKING
 
 from ._util._selinux import (
     SELINUX_SOCKET_TYPE,
-    install_policy as install_selinux_policy,
+    install_script_path as selinux_install_script,
     is_libselinux_available,
     is_policy_installed as is_selinux_policy_installed,
     is_selinux_enabled,
     is_selinux_enforcing,
     missing_policy_tools as missing_selinux_policy_tools,
     policy_source_path as selinux_policy_source,
-    uninstall_policy as uninstall_selinux_policy,
 )
 from .commands import (
     COMMANDS as SANDBOX_COMMANDS,
@@ -406,14 +405,13 @@ __all__ = [
     "resolve_service_ports",
     # SELinux
     "SELINUX_SOCKET_TYPE",
-    "install_selinux_policy",
     "is_libselinux_available",
     "is_selinux_enabled",
     "is_selinux_enforcing",
     "is_selinux_policy_installed",
     "missing_selinux_policy_tools",
+    "selinux_install_script",
     "selinux_policy_source",
-    "uninstall_selinux_policy",
     # Meta
     "__version__",
 ]
