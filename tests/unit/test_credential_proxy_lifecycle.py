@@ -767,3 +767,82 @@ class TestUninstallSystemdUnits:
         # Verify daemon-reload was called
         calls = [c.args[0] for c in mock_run.call_args_list]
         assert ["systemctl", "--user", "daemon-reload"] in calls
+
+
+class TestOrphanUnitSweep:
+    """Verify _sweep_orphan_units removes legacy unit files carrying our marker."""
+
+    def test_legacy_marked_file_removed(self, tmp_path: Path) -> None:
+        """A terok-credential-proxy-* file with our marker but not in the current set is swept."""
+        unit_dir = tmp_path / "systemd-units"
+        unit_dir.mkdir()
+        legacy = unit_dir / "terok-credential-proxy-legacy.service"
+        legacy.write_text("# terok-credential-proxy-version: 3\n[Service]\n")
+        with (
+            patch.object(CredentialProxyManager, "_systemd_unit_dir", return_value=unit_dir),
+            patch("subprocess.run"),
+        ):
+            CredentialProxyManager()._sweep_orphan_units()
+        assert not legacy.exists()
+
+    def test_current_name_skipped(self, tmp_path: Path) -> None:
+        """Current-version filenames are left for the main removal pass."""
+        unit_dir = tmp_path / "systemd-units"
+        unit_dir.mkdir()
+        current = unit_dir / "terok-credential-proxy.socket"
+        current.write_text("# terok-credential-proxy-version: 5\n[Socket]\n")
+        with (
+            patch.object(CredentialProxyManager, "_systemd_unit_dir", return_value=unit_dir),
+            patch("subprocess.run"),
+        ):
+            CredentialProxyManager()._sweep_orphan_units()
+        assert current.exists()
+
+    def test_foreign_file_preserved(self, tmp_path: Path) -> None:
+        """A user-authored file with matching glob but no marker is not touched."""
+        unit_dir = tmp_path / "systemd-units"
+        unit_dir.mkdir()
+        foreign = unit_dir / "terok-credential-proxy-foreign.service"
+        foreign.write_text("[Service]\nExecStart=/bin/true\n")
+        with (
+            patch.object(CredentialProxyManager, "_systemd_unit_dir", return_value=unit_dir),
+            patch("subprocess.run"),
+        ):
+            CredentialProxyManager()._sweep_orphan_units()
+        assert foreign.exists()
+
+    def test_non_matching_glob_preserved(self, tmp_path: Path) -> None:
+        """Files outside our glob are never read, regardless of content."""
+        unit_dir = tmp_path / "systemd-units"
+        unit_dir.mkdir()
+        other = unit_dir / "my-service.service"
+        other.write_text("# terok-credential-proxy-version: 99\n")
+        with (
+            patch.object(CredentialProxyManager, "_systemd_unit_dir", return_value=unit_dir),
+            patch("subprocess.run"),
+        ):
+            CredentialProxyManager()._sweep_orphan_units()
+        assert other.exists()
+
+    def test_disable_invoked_before_unlink(self, tmp_path: Path) -> None:
+        """Each removed unit is systemctl-disabled first (best-effort)."""
+        unit_dir = tmp_path / "systemd-units"
+        unit_dir.mkdir()
+        legacy = unit_dir / "terok-credential-proxy-legacy.service"
+        legacy.write_text("# terok-credential-proxy-version: 3\n[Service]\n")
+        with (
+            patch.object(CredentialProxyManager, "_systemd_unit_dir", return_value=unit_dir),
+            patch("subprocess.run") as mock_run,
+        ):
+            CredentialProxyManager()._sweep_orphan_units()
+        disable_calls = [c.args[0] for c in mock_run.call_args_list if "disable" in c.args[0]]
+        assert any("terok-credential-proxy-legacy.service" in cmd for cmd in disable_calls)
+
+    def test_missing_unit_dir_is_a_noop(self, tmp_path: Path) -> None:
+        """Running on a host with no user systemd dir must not error."""
+        unit_dir = tmp_path / "does-not-exist"
+        with (
+            patch.object(CredentialProxyManager, "_systemd_unit_dir", return_value=unit_dir),
+            patch("subprocess.run"),
+        ):
+            CredentialProxyManager()._sweep_orphan_units()  # must not raise
