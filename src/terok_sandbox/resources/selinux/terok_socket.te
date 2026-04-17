@@ -4,22 +4,25 @@ module terok_socket 1.0;
 #
 # Defines ``terok_socket_t`` — a custom type that terok host services
 # apply to their Unix sockets via ``setsockcreatecon()`` so that
-# rootless Podman containers (``container_t``) can connect.
+# rootless Podman containers (``container_t``) can connect *without*
+# granting container_t broad connectto on unconfined_t sockets.
 #
-# Two rules:
+# Both rules below target the ``domain`` attribute (all process types):
 #
-# 1. Any process that explicitly labels a socket as ``terok_socket_t``
-#    (via ``setsockcreatecon()``) must also be able to create, bind,
-#    and serve it.  Labeling is opt-in: a process has to go out of its
-#    way to request the label, so granting the full listening-socket
-#    permission set to the ``domain`` attribute is not a meaningful
-#    loosening — the security-relevant gate is ``connectto``, which
-#    stays restricted to ``container_t`` below.
+# 1. Server side: any process may ``create``/``bind``/``listen``/etc.
+#    a socket of type ``terok_socket_t``.  Labeling is opt-in — a
+#    process has to deliberately call ``setsockcreatecon()`` — so
+#    this is not a meaningful loosening.  The security-relevant
+#    primitive is ``connectto`` (below).
 #
-# 2. ``container_t`` may ``connectto`` these sockets.  This is the
-#    narrow exception carved out of the default SELinux rule that
-#    blocks ``container_t → non-container-socket connectto``
-#    (Dan Walsh, Podman #23972).
+# 2. Client side: any process may ``connectto`` a ``terok_socket_t``
+#    socket.  This is what carves out the exception to SELinux's
+#    default rule that blocks ``container_t → non-container-socket
+#    connectto``; it equally permits host-side clients (the terok
+#    CLI itself, sickbay, auth tooling) to reach the sockets they
+#    manage.  Types other than ``terok_socket_t`` are unaffected;
+#    ``container_t`` still cannot reach host sockets that have not
+#    opted into this label.
 #
 # Written in checkmodule-native module syntax (no refpolicy ``m4``
 # macros), so the build path is ``checkmodule -M -m`` →
@@ -30,7 +33,6 @@ module terok_socket 1.0;
 
 require {
     attribute domain;
-    type container_t;
     class unix_stream_socket {
         create bind listen accept
         read write getattr getopt setopt shutdown
@@ -43,6 +45,5 @@ type terok_socket_t;
 allow domain terok_socket_t:unix_stream_socket {
     create bind listen accept
     read write getattr getopt setopt shutdown
+    connectto
 };
-
-allow container_t terok_socket_t:unix_stream_socket connectto;
