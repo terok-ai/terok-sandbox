@@ -108,36 +108,30 @@ class TestIsSelinuxEnabled:
 
 
 class TestIsPolicyInstalled:
-    """Verify policy module detection."""
+    """Verify policy type detection via libselinux security_check_context."""
 
     def test_installed(self) -> None:
-        """Module present in semodule -l output."""
-        result = unittest.mock.MagicMock(stdout="terok_socket\nother_module\n")
-        with unittest.mock.patch("subprocess.run", return_value=result):
+        """security_check_context returning 0 means the type is known."""
+        lib = _mock_libselinux()
+        lib.security_check_context.return_value = 0
+        with unittest.mock.patch("ctypes.CDLL", return_value=lib):
             assert is_policy_installed() is True
+        lib.security_check_context.assert_called_once()
+        # Must pass a context containing the terok_socket_t type as bytes.
+        ctx = lib.security_check_context.call_args.args[0]
+        assert b"terok_socket_t" in ctx
 
     def test_not_installed(self) -> None:
-        """Module absent from semodule output."""
-        result = unittest.mock.MagicMock(stdout="other_module\n")
-        with unittest.mock.patch("subprocess.run", return_value=result):
+        """security_check_context returning -1 means the type is not in policy."""
+        lib = _mock_libselinux()
+        lib.security_check_context.return_value = -1
+        with unittest.mock.patch("ctypes.CDLL", return_value=lib):
             assert is_policy_installed() is False
 
-    def test_semodule_missing(self) -> None:
-        """semodule binary not found."""
-        with unittest.mock.patch("subprocess.run", side_effect=FileNotFoundError):
+    def test_libselinux_missing(self) -> None:
+        """No libselinux.so.1 → no way to tell, treat as not installed."""
+        with unittest.mock.patch("ctypes.CDLL", side_effect=OSError("missing")):
             assert is_policy_installed() is False
-
-    def test_partial_name_no_match(self) -> None:
-        """A module whose name contains the target as a substring must not match."""
-        result = unittest.mock.MagicMock(stdout="terok_socket_extra\n")
-        with unittest.mock.patch("subprocess.run", return_value=result):
-            assert is_policy_installed() is False
-
-    def test_priority_prefixed_output(self) -> None:
-        """Handle ``semodule -l`` output with ``priority name type`` columns."""
-        result = unittest.mock.MagicMock(stdout="200 abrt pp\n200 terok_socket pp\n")
-        with unittest.mock.patch("subprocess.run", return_value=result):
-            assert is_policy_installed() is True
 
 
 # ---------- libselinux availability ----------

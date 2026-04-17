@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import ctypes
 import shutil
-import subprocess
 from contextlib import contextmanager
 from functools import lru_cache
 from importlib.resources import files as _resource_files
@@ -47,9 +46,6 @@ SELINUX_SOCKET_TYPE = "terok_socket_t"
 
 _SELINUX_CONTEXT = f"system_u:object_r:{SELINUX_SOCKET_TYPE}:s0"
 """Full SELinux context string for socket creation."""
-
-_POLICY_MODULE_NAME = "terok_socket"
-"""Name of the SELinux policy module (matches the .te filename)."""
 
 _ENFORCE_PATH = Path("/sys/fs/selinux/enforce")
 """Kernel sysfs node indicating SELinux enforcement state."""
@@ -76,23 +72,23 @@ def is_selinux_enabled() -> bool:
 
 
 def is_policy_installed() -> bool:
-    """Return ``True`` if the ``terok_socket`` policy module is loaded.
+    """Return ``True`` if ``terok_socket_t`` is a valid type in the loaded policy.
 
-    Tolerant of both ``semodule -l`` output variants: names-only
-    (``terok_socket``) and priority-prefixed (``200 terok_socket pp``)
-    — a whole-token match against all of stdout handles either without
-    matching substrings like ``terok_socket_extra``.
+    Uses ``libselinux``'s ``security_check_context()``, which succeeds
+    iff the context (and therefore the custom type) is known to the
+    currently loaded policy — a pure userspace query requiring no
+    subprocess and no privileges.
+
+    The previous ``semodule -l`` subprocess approach silently failed
+    for non-root callers on Fedora, where ``/var/lib/selinux/.../active/``
+    is root-readable only.  ``terok sickbay`` and ``terok setup``
+    both run as the user, so they would always report the policy as
+    missing even right after a successful install.
     """
-    try:
-        result = subprocess.run(
-            ["semodule", "-l"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+    lib = _load_libselinux()
+    if lib is None:
         return False
-    return _POLICY_MODULE_NAME in result.stdout.split()
+    return lib.security_check_context(_SELINUX_CONTEXT.encode()) == 0
 
 
 def is_libselinux_available() -> bool:
@@ -195,6 +191,8 @@ def _load_libselinux() -> ctypes.CDLL | None:
     lib.getsockcreatecon.restype = ctypes.c_int
     lib.freecon.argtypes = [ctypes.c_char_p]
     lib.freecon.restype = None
+    lib.security_check_context.argtypes = [ctypes.c_char_p]
+    lib.security_check_context.restype = ctypes.c_int
     return lib
 
 
