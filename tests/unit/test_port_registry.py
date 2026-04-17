@@ -128,10 +128,17 @@ def test_explicit_rejects_other_users_port() -> None:
 
 
 def test_explicit_rejects_self_collision() -> None:
-    """Explicit pin on a port already held in this process → SystemExit."""
+    """Explicit pin on a port already held in this process → SystemExit names holder."""
     reg.claim_port("gate", preferred=19000)
-    with pytest.raises(SystemExit, match="already claimed in this process"):
+    with pytest.raises(SystemExit, match=r"for proxy is already held by gate"):
         reg.claim_port("proxy", preferred=19000, explicit=True)
+
+
+def test_trusted_self_collision_names_holder() -> None:
+    """Trusted re-claim of a port held under another key also names the holder."""
+    reg.claim_port("gate", preferred=19000)
+    with pytest.raises(SystemExit, match=r"for proxy is already held by gate"):
+        reg._default.claim("proxy", preferred=19000, trusted=True)
 
 
 def test_stale_other_user_file_ignored() -> None:

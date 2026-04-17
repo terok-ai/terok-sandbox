@@ -269,8 +269,12 @@ class PortRegistry:
             if not 1 <= preferred <= 65535:
                 raise SystemExit(f"Port {preferred} for {service_key} is not a valid port number")
             if preferred in own_ports:
+                # Same-key re-claim was caught by the early return above;
+                # name the actual holder so the conflict is debuggable.
+                holder = next(k for k, v in self._held.items() if v == preferred)
                 raise SystemExit(
-                    f"Port {preferred} for {service_key} is already claimed in this process"
+                    f"Port {preferred} for {service_key} is already held by "
+                    f"{holder} in this process"
                 )
             if preferred in others:
                 raise SystemExit(f"Port {preferred} for {service_key} is claimed by another user")
