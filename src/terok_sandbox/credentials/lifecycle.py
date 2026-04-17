@@ -301,6 +301,19 @@ class CredentialProxyManager:
         pair (socket + service).  When ``"socket"``, installs a single
         long-running service that binds Unix sockets only.
         """
+        # A TCP install with no resolved port would render ``ListenStream=
+        # 127.0.0.1:None`` into the ``.socket`` template; systemd rejects
+        # that.  Fail early, naming the knobs that resolve it, instead of
+        # emitting a broken unit file.
+        if transport == "tcp" and (
+            self._cfg.proxy_port is None or self._cfg.ssh_agent_port is None
+        ):
+            raise SystemExit(
+                "Cannot install tcp-mode credential-proxy units: no port is set.\n"
+                "Either configure ``services.mode: tcp`` (auto-allocates ports)\n"
+                "or pin ``credential_proxy.port`` / ``credential_proxy.ssh_agent_port`` explicitly."
+            )
+
         import terok_sandbox.credentials.proxy
 
         from .._util import render_template

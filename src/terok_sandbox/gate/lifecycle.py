@@ -241,6 +241,17 @@ class GateServerManager:
         from .._util import render_template
         from .tokens import TokenStore
 
+        # A TCP install with no resolved port would render ``ListenStream=
+        # 127.0.0.1:None`` and systemd would reject the unit.  Fail now,
+        # naming the config knobs that resolve it, rather than emit a
+        # broken unit file.
+        if transport == "tcp" and self._cfg.gate_port is None:
+            raise SystemExit(
+                "Cannot install tcp-mode gate units: no gate port is set.\n"
+                "Either configure ``services.mode: tcp`` (auto-allocates a port)\n"
+                "or pin ``gate_server.port`` explicitly in config.yml."
+            )
+
         gate_bin = shutil.which("terok-gate")
         if not gate_bin:
             raise SystemExit(

@@ -170,8 +170,21 @@ def get_server_status(cfg: SandboxConfig | None = None) -> GateServerStatus:
     return GateServerManager(cfg).get_status()
 
 
-def install_systemd_units(cfg: SandboxConfig | None = None, *, transport: str = "tcp") -> None:
-    """Render and install gate server systemd units."""
+def install_systemd_units(
+    cfg: SandboxConfig | None = None, *, transport: str | None = None
+) -> None:
+    """Render and install gate server systemd units.
+
+    When *transport* is ``None`` (the default), reads ``services.mode``
+    from the layered config so callers that don't thread the transport
+    explicitly (e.g. the TUI's gate-install action) still pick up the
+    user's ``socket`` vs ``tcp`` choice.  Pass an explicit string to
+    override the config.
+    """
+    if transport is None:
+        from .config import _services_mode
+
+        transport = _services_mode()
     GateServerManager(cfg).install_systemd_units(transport=transport)
 
 
@@ -236,8 +249,21 @@ def get_ssh_agent_port(cfg: SandboxConfig | None = None) -> int:
     return CredentialProxyManager(cfg).ssh_agent_port
 
 
-def install_proxy_systemd(cfg: SandboxConfig | None = None, *, transport: str = "tcp") -> None:
-    """Render and install credential proxy systemd units for the selected transport."""
+def install_proxy_systemd(
+    cfg: SandboxConfig | None = None, *, transport: str | None = None
+) -> None:
+    """Render and install credential proxy systemd units for the selected transport.
+
+    When *transport* is ``None`` (the default), reads ``services.mode``
+    from the layered config so callers that don't thread the transport
+    explicitly (e.g. the TUI's proxy-install action) still pick up the
+    user's ``socket`` vs ``tcp`` choice.  Pass an explicit string to
+    override the config.
+    """
+    if transport is None:
+        from .config import _services_mode
+
+        transport = _services_mode()
     CredentialProxyManager(cfg).install_systemd_units(transport=transport)
 
 

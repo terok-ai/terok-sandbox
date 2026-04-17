@@ -564,3 +564,144 @@ class TestSSHAgentMutualExclusion:
 
             with pytest.raises(SystemExit):
                 proxy_main()
+
+
+class TestInstallSystemdPortGuards:
+    """Verify tcp-mode installers refuse to render when the port is unset.
+
+    Prevents the class of bug where ``services.mode: socket`` (which
+    skips port allocation) reaches the tcp install path by mistake and
+    emits ``ListenStream=127.0.0.1:None`` — systemd rejects that.
+    """
+
+    def test_gate_tcp_install_without_port_raises(self) -> None:
+        """GateServerManager.install_systemd_units(transport='tcp') needs gate_port."""
+        mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
+        mock_cfg.gate_port = None
+        with unittest.mock.patch.object(
+            GateServerManager, "__init__", lambda self, cfg=None: setattr(self, "_cfg", mock_cfg)
+        ):
+            mgr = GateServerManager()
+            with pytest.raises(SystemExit, match="no gate port is set"):
+                mgr.install_systemd_units(transport="tcp")
+
+    def test_gate_socket_install_without_port_is_fine(self) -> None:
+        """Socket transport never reads the port — ``None`` must pass the guard."""
+        from terok_sandbox.credentials.proxy.server import main as _unused_main  # noqa: F401
+
+        mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
+        mock_cfg.gate_port = None
+        with unittest.mock.patch.object(
+            GateServerManager, "__init__", lambda self, cfg=None: setattr(self, "_cfg", mock_cfg)
+        ):
+            mgr = GateServerManager()
+            # The full install body would touch systemd; we only care
+            # that the pre-flight guard in the new fail-loud branch does
+            # not fire for socket-transport installs.  Run just enough
+            # of the method to exercise the guard, then short-circuit.
+            with unittest.mock.patch("shutil.which", return_value=None):
+                with pytest.raises(SystemExit, match="terok-gate"):
+                    # shutil.which returning None triggers the *next*
+                    # SystemExit (missing binary) — reaching that proves
+                    # the port guard did not fire.
+                    mgr.install_systemd_units(transport="socket")
+
+    def test_proxy_tcp_install_without_port_raises(self) -> None:
+        """CredentialProxyManager rejects tcp install with no proxy_port."""
+        from terok_sandbox.credentials.lifecycle import CredentialProxyManager
+
+        mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
+        mock_cfg.proxy_port = None
+        mock_cfg.ssh_agent_port = 18732
+        with unittest.mock.patch.object(
+            CredentialProxyManager,
+            "__init__",
+            lambda self, cfg=None: setattr(self, "_cfg", mock_cfg),
+        ):
+            mgr = CredentialProxyManager()
+            with pytest.raises(SystemExit, match="no port is set"):
+                mgr.install_systemd_units(transport="tcp")
+
+    def test_proxy_tcp_install_without_ssh_agent_port_raises(self) -> None:
+        """Same guard fires when only ssh_agent_port is unset."""
+        from terok_sandbox.credentials.lifecycle import CredentialProxyManager
+
+        mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
+        mock_cfg.proxy_port = 18731
+        mock_cfg.ssh_agent_port = None
+        with unittest.mock.patch.object(
+            CredentialProxyManager,
+            "__init__",
+            lambda self, cfg=None: setattr(self, "_cfg", mock_cfg),
+        ):
+            mgr = CredentialProxyManager()
+            with pytest.raises(SystemExit, match="no port is set"):
+                mgr.install_systemd_units(transport="tcp")
+
+
+class TestInstallSystemdTransportResolution:
+    """Verify the top-level wrappers default transport from ``services.mode``."""
+
+    def test_gate_wrapper_resolves_transport_from_config(self) -> None:
+        """``install_systemd_units(transport=None)`` reads services.mode."""
+        from terok_sandbox import install_systemd_units
+
+        with (
+            unittest.mock.patch("terok_sandbox.config._services_mode", return_value="socket"),
+            unittest.mock.patch.object(GateServerManager, "install_systemd_units") as mock_install,
+            unittest.mock.patch.object(GateServerManager, "__init__", lambda self, cfg=None: None),
+        ):
+            install_systemd_units()
+        mock_install.assert_called_once_with(transport="socket")
+
+    def test_gate_wrapper_honours_explicit_transport(self) -> None:
+        """An explicit ``transport=`` argument bypasses the config read."""
+        from terok_sandbox import install_systemd_units
+
+        with (
+            unittest.mock.patch(
+                "terok_sandbox.config._services_mode", return_value="socket"
+            ) as mock_mode,
+            unittest.mock.patch.object(GateServerManager, "install_systemd_units") as mock_install,
+            unittest.mock.patch.object(GateServerManager, "__init__", lambda self, cfg=None: None),
+        ):
+            install_systemd_units(transport="tcp")
+        mock_mode.assert_not_called()
+        mock_install.assert_called_once_with(transport="tcp")
+
+    def test_proxy_wrapper_resolves_transport_from_config(self) -> None:
+        """``install_proxy_systemd(transport=None)`` reads services.mode."""
+        from terok_sandbox import install_proxy_systemd
+        from terok_sandbox.credentials.lifecycle import CredentialProxyManager
+
+        with (
+            unittest.mock.patch("terok_sandbox.config._services_mode", return_value="socket"),
+            unittest.mock.patch.object(
+                CredentialProxyManager, "install_systemd_units"
+            ) as mock_install,
+            unittest.mock.patch.object(
+                CredentialProxyManager, "__init__", lambda self, cfg=None: None
+            ),
+        ):
+            install_proxy_systemd()
+        mock_install.assert_called_once_with(transport="socket")
+
+    def test_proxy_wrapper_honours_explicit_transport(self) -> None:
+        """An explicit ``transport=`` argument bypasses the config read."""
+        from terok_sandbox import install_proxy_systemd
+        from terok_sandbox.credentials.lifecycle import CredentialProxyManager
+
+        with (
+            unittest.mock.patch(
+                "terok_sandbox.config._services_mode", return_value="socket"
+            ) as mock_mode,
+            unittest.mock.patch.object(
+                CredentialProxyManager, "install_systemd_units"
+            ) as mock_install,
+            unittest.mock.patch.object(
+                CredentialProxyManager, "__init__", lambda self, cfg=None: None
+            ),
+        ):
+            install_proxy_systemd(transport="tcp")
+        mock_mode.assert_not_called()
+        mock_install.assert_called_once_with(transport="tcp")
