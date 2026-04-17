@@ -705,3 +705,73 @@ class TestInstallSystemdTransportResolution:
             install_proxy_systemd(transport="tcp")
         mock_mode.assert_not_called()
         mock_install.assert_called_once_with(transport="tcp")
+
+
+class TestGateOrphanUnitSweep:
+    """Verify ``GateServerManager._sweep_orphan_units`` — marker-based cleanup."""
+
+    @staticmethod
+    def _with_unit_dir(unit_dir):
+        return unittest.mock.patch.object(
+            GateServerManager, "_systemd_unit_dir", return_value=unit_dir
+        )
+
+    def test_legacy_marked_file_removed(self, tmp_path):
+        """A terok-gate-* file with our marker but not current name is swept."""
+        unit_dir = tmp_path / "systemd-units"
+        unit_dir.mkdir()
+        legacy = unit_dir / "terok-gate-legacy.service"
+        legacy.write_text("# terok-gate-version: 3\n[Service]\n")
+        with self._with_unit_dir(unit_dir), unittest.mock.patch("subprocess.run"):
+            GateServerManager()._sweep_orphan_units()
+        assert not legacy.exists()
+
+    def test_current_name_skipped(self, tmp_path):
+        """Current-version filenames stay for the main removal pass to handle."""
+        unit_dir = tmp_path / "systemd-units"
+        unit_dir.mkdir()
+        current = unit_dir / "terok-gate.socket"
+        current.write_text("# terok-gate-version: 7\n[Socket]\n")
+        with self._with_unit_dir(unit_dir), unittest.mock.patch("subprocess.run"):
+            GateServerManager()._sweep_orphan_units()
+        assert current.exists()
+
+    def test_foreign_file_preserved(self, tmp_path):
+        """A user-authored file matching the glob but lacking the marker is not touched."""
+        unit_dir = tmp_path / "systemd-units"
+        unit_dir.mkdir()
+        foreign = unit_dir / "terok-gate-custom.service"
+        foreign.write_text("[Service]\nExecStart=/bin/true\n")
+        with self._with_unit_dir(unit_dir), unittest.mock.patch("subprocess.run"):
+            GateServerManager()._sweep_orphan_units()
+        assert foreign.exists()
+
+    def test_non_matching_glob_preserved(self, tmp_path):
+        """Files outside our glob are never read, regardless of content."""
+        unit_dir = tmp_path / "systemd-units"
+        unit_dir.mkdir()
+        other = unit_dir / "unrelated.service"
+        other.write_text("# terok-gate-version: 99\n")
+        with self._with_unit_dir(unit_dir), unittest.mock.patch("subprocess.run"):
+            GateServerManager()._sweep_orphan_units()
+        assert other.exists()
+
+    def test_disable_invoked_before_unlink(self, tmp_path):
+        """Each removed legacy unit is systemctl-disabled first (best-effort)."""
+        unit_dir = tmp_path / "systemd-units"
+        unit_dir.mkdir()
+        legacy = unit_dir / "terok-gate-legacy.service"
+        legacy.write_text("# terok-gate-version: 3\n[Service]\n")
+        with (
+            self._with_unit_dir(unit_dir),
+            unittest.mock.patch("subprocess.run") as mock_run,
+        ):
+            GateServerManager()._sweep_orphan_units()
+        disable_calls = [c.args[0] for c in mock_run.call_args_list if "disable" in c.args[0]]
+        assert any("terok-gate-legacy.service" in cmd for cmd in disable_calls)
+
+    def test_missing_unit_dir_is_a_noop(self, tmp_path):
+        """Running on a host with no user systemd dir must not error."""
+        unit_dir = tmp_path / "does-not-exist"
+        with self._with_unit_dir(unit_dir), unittest.mock.patch("subprocess.run"):
+            GateServerManager()._sweep_orphan_units()  # must not raise

@@ -107,6 +107,25 @@ _SOCKET_MODE_SERVICE = "terok-credential-proxy-socket.service"
 _ALL_UNIT_NAMES = (_SOCKET_UNIT, _SERVICE_UNIT, _SOCKET_MODE_SERVICE)
 """All unit file names across both transport modes (for cleanup)."""
 
+_OWNED_UNIT_GLOB = "terok-credential-proxy*"
+"""Glob pattern matching every name this package has ever installed.
+
+Intentionally broader than ``_ALL_UNIT_NAMES`` so the orphan sweep can
+find units from prior versions with different filenames.  Ownership is
+determined by the ``# terok-credential-proxy-version:`` marker inside
+the file, not by the glob match — a user-authored
+``terok-credential-proxy-extra.service`` without the marker survives
+untouched.
+"""
+
+_OWNED_MARKER_PREFIX = "# terok-credential-proxy-version:"
+"""First-line marker every shipped proxy unit template carries.
+
+The orphan sweep uses this as the ownership check: only files whose
+first line begins with this string were written by this package and
+are safe to remove when their names no longer match the current set.
+"""
+
 
 # ---------- Manager ----------
 
@@ -382,13 +401,50 @@ class CredentialProxyManager:
                 )
 
     def _remove_unit_files(self) -> None:
-        """Stop active units and remove all proxy unit files."""
+        """Stop active units, sweep orphans from prior versions, remove current ones."""
         self._stop_all_units()
+        self._sweep_orphan_units()
         unit_dir = self._systemd_unit_dir()
         for name in _ALL_UNIT_NAMES:
             unit_file = unit_dir / name
             if unit_file.is_file():
                 unit_file.unlink()
+
+    def _sweep_orphan_units(self) -> None:
+        """Disable + remove proxy unit files from prior versions.
+
+        A unit file is considered ours (and eligible for removal) when
+        its first line begins with :data:`_OWNED_MARKER_PREFIX` — every
+        shipped template carries that marker.  Files matching the
+        :data:`_OWNED_UNIT_GLOB` but lacking the marker are left alone
+        (user-authored units that happen to share the naming prefix).
+        Current-version files are skipped here and handled by the
+        subsequent pass in :meth:`_remove_unit_files`.
+
+        This catches legacy filenames from previous releases — e.g. if
+        a future rename changes a unit's filename, the sweep cleans up
+        the old one on the next ``terok setup`` without a manual
+        uninstall step.
+        """
+        unit_dir = self._systemd_unit_dir()
+        if not unit_dir.is_dir():
+            return
+        for candidate in unit_dir.glob(_OWNED_UNIT_GLOB):
+            if candidate.name in _ALL_UNIT_NAMES or not candidate.is_file():
+                continue
+            try:
+                first_line = candidate.read_text(encoding="utf-8").splitlines()[0]
+            except (OSError, IndexError, UnicodeDecodeError):
+                continue
+            if not first_line.startswith(_OWNED_MARKER_PREFIX):
+                continue
+            subprocess.run(
+                ["systemctl", "--user", "disable", "--now", candidate.name],
+                check=False,
+                capture_output=True,
+                timeout=10,
+            )
+            candidate.unlink(missing_ok=True)
 
     def uninstall_systemd_units(self) -> None:
         """Disable+stop all proxy units and remove unit files."""
