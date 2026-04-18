@@ -140,6 +140,22 @@ class _TokenDB:
 
 _AUTH_HEADERS = ("authorization", "x-api-key", "private-token")
 
+# Hop-by-hop headers per RFC 7230 §6.1 — a reverse proxy MUST NOT forward
+# these.  ``Connection`` may name additional hop-by-hop headers; those are
+# stripped dynamically per request.
+_HOP_BY_HOP_HEADERS = frozenset(
+    {
+        "connection",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+    }
+)
+
 
 def _extract_phantom_token(request: web.Request) -> str | None:
     """Extract a phantom token from Authorization or X-Api-Key headers."""
@@ -246,11 +262,14 @@ async def _handle_request(request: web.Request) -> web.StreamResponse:
     if request.query_string:
         upstream_url += f"?{request.query_string}"
 
-    headers = {
-        k: v
-        for k, v in request.headers.items()
-        if k.lower() not in _AUTH_HEADERS and k.lower() != "host"
-    }
+    # Strip auth, host, and RFC 7230 hop-by-hop headers (plus any names the
+    # client listed in its Connection header) before forwarding upstream.
+    dropped = {t.strip().lower() for t in request.headers.get("Connection", "").split(",")}
+    dropped |= _HOP_BY_HOP_HEADERS
+    dropped |= set(_AUTH_HEADERS)
+    dropped.add("host")
+    dropped.discard("")
+    headers = {k: v for k, v in request.headers.items() if k.lower() not in dropped}
     headers[auth_header] = f"{auth_prefix}{real_token}"
     if is_oauth and oauth_beta_header:
         existing = headers.get("anthropic-beta", "")
@@ -336,8 +355,11 @@ async def _do_oauth_refresh(
         timeout=ClientTimeout(total=15),
     ) as resp:
         if resp.status != 200:
-            body = await resp.text()
-            raise RuntimeError(f"Token refresh failed ({resp.status}): {body}")
+            # Do NOT include the response body — token endpoints sometimes
+            # echo the request payload (including the refresh_token and
+            # client_secret) in error responses, and this exception is
+            # logged by ``_refresh_all`` via ``_logger.exception``.
+            raise RuntimeError(f"Token refresh failed (status={resp.status})")
         data = await resp.json()
 
     return {
@@ -504,6 +526,7 @@ async def _run_multi(
             _logger.info("Listening on %s", path)
             import socket as _socket
 
+            from .._util._net import harden_socket
             from .._util._selinux import socket_selinux_context
 
             # Bind+listen synchronously inside the SELinux context — the
@@ -516,6 +539,10 @@ async def _run_multi(
                 sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
                 sock.bind(str(path))
                 sock.listen(128)
+            # Restrict the socket inode to owner-only access (systemd socket
+            # activation already does this via SocketMode=0600; this matches
+            # that hardening for the daemon/foreground path).
+            harden_socket(path)
             await SockSite(runner, sock).start()
 
         if sd_tcp:
@@ -616,7 +643,18 @@ def main() -> None:
     if args.pid_file:
         import os
 
-        Path(args.pid_file).write_text(str(os.getpid()), encoding="utf-8")
+        # Atomic create with O_EXCL + O_NOFOLLOW so a pre-existing file or
+        # planted symlink can't redirect the write.  Fail loudly if the
+        # path already exists — a stale pid file from a previous instance
+        # should be cleared by the lifecycle manager before respawning.
+        pidfile = Path(args.pid_file)
+        pidfile.parent.mkdir(parents=True, exist_ok=True)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(pidfile, flags, 0o600)
+        try:
+            os.write(fd, str(os.getpid()).encode("utf-8"))
+        finally:
+            os.close(fd)
 
     app = _build_app(args.db_path, args.routes_file)
 

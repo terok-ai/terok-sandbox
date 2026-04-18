@@ -654,17 +654,19 @@ class TestRSASign:
         raw_sig, _ = _unpack_string(memoryview(sig_blob), off)
         rsa_key.public_key().verify(raw_sig, data, PKCS1v15(), SHA512())
 
-    def test_rsa_no_flags_uses_ssh_rsa_sha1(self, rsa_key) -> None:
-        """No flags defaults to ssh-rsa with SHA-1 per RFC 4253 §6.6."""
+    def test_rsa_no_flags_defaults_to_sha2_256(self, rsa_key) -> None:
+        """A client that sets no RSA-SHA2 flag gets rsa-sha2-256 — SHA-1 is
+        not offered (OpenSSH 8.7+ rejects SHA-1 signatures and SHA-1 is no
+        longer collision-resistant)."""
         from cryptography.hazmat.primitives.asymmetric.padding import PKCS1v15
-        from cryptography.hazmat.primitives.hashes import SHA1
+        from cryptography.hazmat.primitives.hashes import SHA256
 
         data = b"test"
         sig_blob = _sign(rsa_key, data, 0)
         algo, off = _unpack_string(memoryview(sig_blob), 0)
-        assert algo == b"ssh-rsa"
+        assert algo == b"rsa-sha2-256"
         raw_sig, _ = _unpack_string(memoryview(sig_blob), off)
-        rsa_key.public_key().verify(raw_sig, data, PKCS1v15(), SHA1())  # noqa: S303
+        rsa_key.public_key().verify(raw_sig, data, PKCS1v15(), SHA256())
 
     def test_rsa_sha256_signature_verifies(self, rsa_key) -> None:
         """RSA-SHA2-256 signature verifies against the public key."""

@@ -114,8 +114,10 @@ class TestDoOAuthRefreshExtras:
         session = MagicMock()
         session.post = post
         oauth_cfg = {"token_url": "u", "client_id": "c"}
-        with pytest.raises(RuntimeError, match=r"\(400\)"):
+        with pytest.raises(RuntimeError, match="status=400") as exc:
             await _do_oauth_refresh(session, "p", oauth_cfg, {"refresh_token": "rt"})
+        # The body must NOT leak into the exception (could contain secrets).
+        assert "bad request" not in str(exc.value)
 
     async def test_preserves_old_refresh_token_when_response_omits_it(self) -> None:
         def post(url, json=None, timeout=None):  # noqa: A002

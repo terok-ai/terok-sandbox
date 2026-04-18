@@ -35,7 +35,7 @@ from pathlib import Path
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.asymmetric.padding import PKCS1v15
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
-from cryptography.hazmat.primitives.hashes import SHA1, SHA256, SHA512
+from cryptography.hazmat.primitives.hashes import SHA256, SHA512
 from cryptography.hazmat.primitives.serialization import (
     load_pem_private_key,
     load_ssh_private_key,
@@ -263,14 +263,15 @@ def _sign(key: Ed25519PrivateKey | RSAPrivateKey, data: bytes, flags: int) -> by
         raw_sig = key.sign(data)
         return _pack_string(b"ssh-ed25519") + _pack_string(raw_sig)
 
-    # RSA: choose algorithm based on flags (RFC 8332)
+    # RSA: prefer RFC 8332 RSA-SHA2 algorithms; fall back to SHA-256 when the
+    # client requests no specific hash.  Legacy ssh-rsa (SHA-1) is not offered:
+    # OpenSSH 8.7+ rejects SHA-1 signatures, and SHA-1 is no longer collision
+    # resistant.  Clients still asking for ssh-rsa are served with SHA-256
+    # signatures labelled ``rsa-sha2-256`` (the widest compatible choice).
     if flags & SSH_AGENT_RSA_SHA2_512:
         algo, hash_cls = b"rsa-sha2-512", SHA512()
-    elif flags & SSH_AGENT_RSA_SHA2_256:
-        algo, hash_cls = b"rsa-sha2-256", SHA256()
     else:
-        # ssh-rsa uses SHA-1 per RFC 4253 §6.6
-        algo, hash_cls = b"ssh-rsa", SHA1()  # noqa: S303  # nosec B303 — RFC 4253 §6.6
+        algo, hash_cls = b"rsa-sha2-256", SHA256()
     raw_sig = key.sign(data, PKCS1v15(), hash_cls)
     return _pack_string(algo) + _pack_string(raw_sig)
 
