@@ -192,6 +192,27 @@ class TestStartDaemon:
         ):
             mgr.start_daemon()
 
+    def test_socket_mode_omits_tcp_ports_and_adds_ssh_signer_socket(self, tmp_path: Path) -> None:
+        """In socket mode, ``--port``/``--ssh-signer-port`` are dropped and ``--ssh-signer-socket-path`` is added."""
+        with patch("terok_sandbox.config._services_mode", return_value="socket"):
+            cfg = _make_cfg(tmp_path)
+        mgr = VaultManager(cfg)
+        assert cfg.token_broker_port is None and cfg.ssh_signer_port is None
+
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None
+
+        with (
+            patch("subprocess.Popen", return_value=mock_proc) as mock_popen,
+            patch.object(VaultManager, "_wait_for_unix_socket", return_value=True),
+        ):
+            mgr.start_daemon()
+
+        cmd = mock_popen.call_args[0][0]
+        assert not any(a.startswith("--port=") for a in cmd), cmd
+        assert not any(a.startswith("--ssh-signer-port=") for a in cmd), cmd
+        assert f"--ssh-signer-socket-path={cfg.ssh_signer_socket_path}" in cmd
+
 
 class TestStopDaemon:
     """Verify stop_daemon behaviour."""

@@ -496,12 +496,18 @@ class VaultManager:
             f"--db-path={db_path}",
             f"--routes-file={routes_path}",
             f"--pid-file={pidfile}",
-            f"--port={self._cfg.token_broker_port}",
-            f"--ssh-signer-port={self._cfg.ssh_signer_port}",
             f"--ssh-keys-file={ssh_keys_path}",
             f"--log-file={log_file}",
             f"--log-level={log_level}",
         ]
+        # Transport-specific wiring: in socket mode the token-broker has no
+        # TCP port and the SSH signer listens on a Unix socket instead.
+        if self._cfg.token_broker_port is not None:
+            cmd.append(f"--port={self._cfg.token_broker_port}")
+        if self._cfg.ssh_signer_port is not None:
+            cmd.append(f"--ssh-signer-port={self._cfg.ssh_signer_port}")
+        else:
+            cmd.append(f"--ssh-signer-socket-path={self._cfg.ssh_signer_socket_path}")
 
         # Fork into background so the vault survives shell exit.
         # stderr=PIPE only for the startup-failure detection window.
@@ -512,10 +518,7 @@ class VaultManager:
             start_new_session=True,
         )
 
-        # Poll both endpoints until ready: token-broker via /-/health,
-        # SSH signer via raw TCP (it speaks SSH-agent protocol, not HTTP).
-        broker_ok = self._wait_for_ready(self._cfg.token_broker_port)
-        signer_ok = broker_ok and self._wait_for_tcp_port(self._cfg.ssh_signer_port)
+        broker_ok, signer_ok, broker_detail, signer_detail = self._wait_for_daemon_ready()
         if broker_ok and signer_ok:
             proc.stderr.close()
             return
@@ -531,12 +534,35 @@ class VaultManager:
         proc.stderr.close()
         if not broker_ok:
             raise SystemExit(
-                f"Vault process started but token-broker port "
-                f"{self._cfg.token_broker_port} did not become ready within 5 s."
+                f"Vault process started but token-broker "
+                f"{broker_detail} did not become ready within 5 s."
             )
         raise SystemExit(
-            f"Vault process started but SSH signer port "
-            f"{self._cfg.ssh_signer_port} did not become ready within 5 s."
+            f"Vault process started but SSH signer {signer_detail} did not become ready within 5 s."
+        )
+
+    def _wait_for_daemon_ready(self) -> tuple[bool, bool, str, str]:
+        """Poll broker + signer readiness; return ``(broker_ok, signer_ok, broker_detail, signer_detail)``.
+
+        In socket mode both probes hit Unix sockets; in TCP mode the broker
+        is probed via its health endpoint and the signer via a raw TCP
+        connect.  The ``*_detail`` strings describe the probed endpoint for
+        human-readable timeout errors.
+        """
+        if self._cfg.token_broker_port is None:
+            broker_sock = self._cfg.vault_socket_path
+            signer_sock = self._cfg.ssh_signer_socket_path
+            broker_ok = self._wait_for_unix_socket(broker_sock)
+            signer_ok = broker_ok and self._wait_for_unix_socket(signer_sock)
+            return broker_ok, signer_ok, f"socket {broker_sock}", f"socket {signer_sock}"
+
+        broker_ok = self._wait_for_ready(self._cfg.token_broker_port)
+        signer_ok = broker_ok and self._wait_for_tcp_port(self._cfg.ssh_signer_port)
+        return (
+            broker_ok,
+            signer_ok,
+            f"port {self._cfg.token_broker_port}",
+            f"port {self._cfg.ssh_signer_port}",
         )
 
     def stop_daemon(self) -> None:
