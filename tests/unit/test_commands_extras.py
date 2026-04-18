@@ -78,16 +78,13 @@ class TestHandleShieldStatusHint:
     def test_setup_hint_emitted_on_stderr(self, capsys: pytest.CaptureFixture[str]) -> None:
         env = MagicMock(hooks="missing", health="degraded", needs_setup=True, setup_hint="Run X.")
         cfg = {"mode": "hook", "profiles": ["dev-standard"], "audit_enabled": True}
+        # The handler imports check_environment + status from .shield at runtime,
+        # so patching the shield module is what takes effect.
         with (
-            patch("terok_sandbox.commands.check_environment", return_value=env, create=True),
-            patch("terok_sandbox.commands.status", return_value=cfg, create=True),
+            patch("terok_sandbox.shield.check_environment", return_value=env),
+            patch("terok_sandbox.shield.status", return_value=cfg),
         ):
-            # The handler imports inside its body — patch the actual targets.
-            with (
-                patch("terok_sandbox.shield.check_environment", return_value=env),
-                patch("terok_sandbox.shield.status", return_value=cfg),
-            ):
-                _handle_shield_status()
+            _handle_shield_status()
         captured = capsys.readouterr()
         assert "Run X." in captured.err
 

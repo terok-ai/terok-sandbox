@@ -181,15 +181,14 @@ class VaultManager:
         # Fallback: TCP health probe + SSH signer port (TCP mode only).
         if not self._wait_for_ready(self._cfg.token_broker_port):
             raise SystemExit(
-                f"Vault service started but TCP port {self._cfg.token_broker_port} "
-                "is not reachable. Check: journalctl --user -u terok-vault"
+                f"Vault service started but token-broker TCP port "
+                f"{self._cfg.token_broker_port} is not reachable."
             )
 
         if not self._wait_for_tcp_port(self._cfg.ssh_signer_port):
             raise SystemExit(
-                f"Vault service started but SSH signer port "
-                f"{self._cfg.ssh_signer_port} "
-                "is not reachable. Check: journalctl --user -u terok-vault"
+                f"Vault service started but SSH signer TCP port "
+                f"{self._cfg.ssh_signer_port} is not reachable."
             )
 
     def get_status(self) -> VaultStatus:
@@ -513,8 +512,11 @@ class VaultManager:
             start_new_session=True,
         )
 
-        # Poll the /-/health endpoint until the server is actually ready.
-        if self._wait_for_ready(self._cfg.token_broker_port):
+        # Poll both endpoints until ready: token-broker via /-/health,
+        # SSH signer via raw TCP (it speaks SSH-agent protocol, not HTTP).
+        broker_ok = self._wait_for_ready(self._cfg.token_broker_port)
+        signer_ok = broker_ok and self._wait_for_tcp_port(self._cfg.ssh_signer_port)
+        if broker_ok and signer_ok:
             proc.stderr.close()
             return
 
@@ -527,9 +529,14 @@ class VaultManager:
                 msg += f":\n{stderr}"
             raise SystemExit(msg)
         proc.stderr.close()
+        if not broker_ok:
+            raise SystemExit(
+                f"Vault process started but token-broker port "
+                f"{self._cfg.token_broker_port} did not become ready within 5 s."
+            )
         raise SystemExit(
-            "Vault process started but did not become ready within 5 s.\n"
-            f"Check logs or try: curl http://127.0.0.1:{self._cfg.token_broker_port}{_HEALTH_PATH}"
+            f"Vault process started but SSH signer port "
+            f"{self._cfg.ssh_signer_port} did not become ready within 5 s."
         )
 
     def stop_daemon(self) -> None:

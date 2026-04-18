@@ -98,6 +98,7 @@ class TestStartDaemon:
         with (
             patch("subprocess.Popen", return_value=mock_proc),
             patch.object(VaultManager, "_wait_for_ready", return_value=True),
+            patch.object(VaultManager, "_wait_for_tcp_port", return_value=True),
         ):
             mgr.start_daemon()
 
@@ -119,6 +120,7 @@ class TestStartDaemon:
         with (
             patch("subprocess.Popen", return_value=mock_proc) as mock_popen,
             patch.object(VaultManager, "_wait_for_ready", return_value=True),
+            patch.object(VaultManager, "_wait_for_tcp_port", return_value=True),
         ):
             mgr.start_daemon()
 
@@ -164,6 +166,7 @@ class TestStartDaemon:
         with (
             patch("subprocess.Popen", return_value=mock_proc) as mock_popen,
             patch.object(VaultManager, "_wait_for_ready", return_value=True),
+            patch.object(VaultManager, "_wait_for_tcp_port", return_value=True),
             patch.dict(os.environ, {"TEROK_VAULT_LOG_LEVEL": "DEBUG"}),
         ):
             mgr.start_daemon()
@@ -572,6 +575,7 @@ class TestGetVaultStatusModes:
         mgr = _make_mgr(tmp_path)
         with (
             patch.object(VaultManager, "is_socket_installed", return_value=True),
+            patch.object(VaultManager, "is_socket_active", return_value=False),
             patch.object(VaultManager, "is_service_active", return_value=False),
         ):
             status = mgr.get_status()
@@ -635,6 +639,7 @@ class TestGetVaultStatusModes:
         mgr = _make_mgr(tmp_path)
         with (
             patch.object(VaultManager, "is_socket_installed", return_value=True),
+            patch.object(VaultManager, "is_socket_active", return_value=False),
             patch.object(VaultManager, "is_service_active", return_value=False),
             patch.object(VaultManager, "is_daemon_running", return_value=True),
         ):

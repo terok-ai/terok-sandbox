@@ -301,7 +301,8 @@ class TestParseCgiHeaders:
         stdout = io.BytesIO(b"Content-Type: text/plain\r\nNo-Colon-Line\r\n\r\n")
         _, headers = _parse_cgi_headers(stdout)
         assert ("Content-Type", "text/plain") in headers
-        assert all(":" in v[0] or v[0] == "Content-Type" for v in headers)
+        # The malformed line must not have been parsed as a header at all.
+        assert all(name != "No-Colon-Line" for name, _val in headers)
 
 
 # ---------------------------------------------------------------------------

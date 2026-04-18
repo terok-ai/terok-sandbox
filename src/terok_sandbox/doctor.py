@@ -152,7 +152,7 @@ def _make_ssh_signer_check(ssh_signer_port: int) -> DoctorCheck:
             return CheckVerdict("ok", f"SSH signer reachable at port {ssh_signer_port}")
         return CheckVerdict(
             "error",
-            f"SSH signer unreachable at port {ssh_signer_port} — check host proxy",
+            f"SSH signer unreachable at port {ssh_signer_port} — check host SSH signer",
         )
 
     return DoctorCheck(

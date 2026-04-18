@@ -559,7 +559,7 @@ def main() -> None:
     def _tcp_port(value: str) -> int:
         port = int(value)
         if not 1 <= port <= 65535:
-            raise argparse.ArgumentTypeError("--port must be between 1 and 65535")
+            raise argparse.ArgumentTypeError("port must be between 1 and 65535")
         return port
 
     parser.add_argument(
