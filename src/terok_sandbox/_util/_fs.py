@@ -59,11 +59,18 @@ def write_sensitive_file(path: Path, content: str) -> bool:
 
     Returns ``True`` if the file was created, ``False`` if it already existed.
     Parent directories are created with mode ``0o700``.
+
+    Refuses to operate if *path.parent* is a symbolic link — chmod would
+    otherwise follow the link target.  Opens the file with ``O_NOFOLLOW``
+    so a planted symlink at the final path cannot redirect the write.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
+    if path.parent.is_symlink():
+        raise RuntimeError(f"Refusing to use symlinked directory for sensitive file: {path.parent}")
     os.chmod(path.parent, 0o700)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
     try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow, 0o600)
     except FileExistsError:
         return False
     try:

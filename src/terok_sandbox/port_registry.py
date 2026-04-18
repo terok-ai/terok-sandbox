@@ -456,10 +456,10 @@ def _save_ports(state_dir: Path, ports: dict[str, int]) -> None:
 # ---------------------------------------------------------------------------
 
 _LISTEN_RE = re.compile(r"^ListenStream=127\.0\.0\.1:(\d+)", re.MULTILINE)
-_SSH_PORT_RE = re.compile(r"--ssh-agent-port[= ](\d+)")
+_SSH_PORT_RE = re.compile(r"--ssh-signer-port[= ](\d+)")
 
-_PROXY_SOCKET_UNIT = "terok-credential-proxy.socket"
-_PROXY_SERVICE_UNIT = "terok-credential-proxy.service"
+_PROXY_SOCKET_UNIT = "terok-vault.socket"
+_PROXY_SERVICE_UNIT = "terok-vault.service"
 _GATE_SOCKET_UNIT = "terok-gate.socket"
 
 
@@ -490,14 +490,14 @@ def _read_installed_ports() -> dict[str, int]:
     if port := _parse_listen_port(gate_socket):
         ports[SERVICE_GATE] = port
 
-    # Proxy port: ListenStream in proxy socket unit
+    # Token broker port: ListenStream in vault socket unit
     proxy_socket = unit_dir / _PROXY_SOCKET_UNIT
     if port := _parse_listen_port(proxy_socket):
         ports[SERVICE_PROXY] = port
 
-    # SSH agent port: --ssh-agent-port in proxy service unit
+    # SSH signer port: --ssh-signer-port in vault service unit
     proxy_service = unit_dir / _PROXY_SERVICE_UNIT
-    if port := _parse_ssh_agent_port(proxy_service):
+    if port := _parse_ssh_signer_port(proxy_service):
         ports[SERVICE_SSH_AGENT] = port
 
     return ports
@@ -516,8 +516,8 @@ def _parse_listen_port(unit_path: Path) -> int | None:
     return None
 
 
-def _parse_ssh_agent_port(unit_path: Path) -> int | None:
-    """Extract the SSH agent port from the proxy service ExecStart line."""
+def _parse_ssh_signer_port(unit_path: Path) -> int | None:
+    """Extract the SSH signer port from the vault service ExecStart line."""
     try:
         text = unit_path.read_text()
     except OSError:

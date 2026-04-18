@@ -1,0 +1,10 @@
+# terok-vault-version: {{UNIT_VERSION}}
+
+[Unit]
+Description=terok vault daemon (token broker + SSH signer)
+Requires=terok-vault.socket
+After=terok-vault.socket
+
+[Service]
+Type=simple
+ExecStart={{BIN}} "--socket-path={{SOCKET_PATH}}" "--db-path={{DB_PATH}}" "--routes-file={{ROUTES_PATH}}" "--port={{PORT}}" "--ssh-signer-port={{SSH_SIGNER_PORT}}" "--ssh-keys-file={{SSH_KEYS_FILE}}"

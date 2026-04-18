@@ -10,14 +10,14 @@ import pytest
 from terok_sandbox.doctor import (
     CheckVerdict,
     DoctorCheck,
-    _make_proxy_check,
     _make_shield_check,
-    _make_ssh_agent_check,
+    _make_ssh_signer_check,
+    _make_token_broker_check,
     sandbox_doctor_checks,
 )
 
-PROXY_PORT = 18731
-SSH_AGENT_PORT = 18732
+TOKEN_BROKER_PORT = 18731
+SSH_SIGNER_PORT = 18732
 
 
 class TestCheckVerdict:
@@ -62,52 +62,52 @@ class TestDoctorCheck:
         assert c.host_side is True
 
 
-class TestProxyCheck:
-    """Credential proxy TCP reachability check."""
+class TestTokenBrokerCheck:
+    """Token broker TCP reachability check."""
 
     def test_ok_on_success(self) -> None:
-        check = _make_proxy_check(PROXY_PORT)
+        check = _make_token_broker_check(TOKEN_BROKER_PORT)
         verdict = check.evaluate(0, "", "")
         assert verdict.severity == "ok"
-        assert str(PROXY_PORT) in verdict.detail
+        assert str(TOKEN_BROKER_PORT) in verdict.detail
 
     def test_error_on_failure(self) -> None:
-        check = _make_proxy_check(PROXY_PORT)
+        check = _make_token_broker_check(TOKEN_BROKER_PORT)
         verdict = check.evaluate(4, "", "connection refused")
         assert verdict.severity == "error"
         assert "unreachable" in verdict.detail
 
     def test_probe_cmd_uses_health_endpoint(self) -> None:
-        check = _make_proxy_check(PROXY_PORT)
+        check = _make_token_broker_check(TOKEN_BROKER_PORT)
         cmd_str = " ".join(check.probe_cmd)
-        assert str(PROXY_PORT) in cmd_str
+        assert str(TOKEN_BROKER_PORT) in cmd_str
         assert "/-/health" in cmd_str
         assert "wget" in cmd_str
 
     def test_category_is_network(self) -> None:
-        check = _make_proxy_check(PROXY_PORT)
+        check = _make_token_broker_check(TOKEN_BROKER_PORT)
         assert check.category == "network"
 
 
-class TestSSHAgentCheck:
-    """SSH agent TCP reachability check."""
+class TestSSHSignerCheck:
+    """SSH signer TCP reachability check."""
 
     def test_ok_on_success(self) -> None:
-        check = _make_ssh_agent_check(SSH_AGENT_PORT)
+        check = _make_ssh_signer_check(SSH_SIGNER_PORT)
         verdict = check.evaluate(0, "", "")
         assert verdict.severity == "ok"
-        assert str(SSH_AGENT_PORT) in verdict.detail
+        assert str(SSH_SIGNER_PORT) in verdict.detail
 
     def test_error_on_failure(self) -> None:
-        check = _make_ssh_agent_check(SSH_AGENT_PORT)
+        check = _make_ssh_signer_check(SSH_SIGNER_PORT)
         verdict = check.evaluate(1, "", "timeout")
         assert verdict.severity == "error"
 
     def test_probe_cmd_uses_nc(self) -> None:
-        check = _make_ssh_agent_check(SSH_AGENT_PORT)
+        check = _make_ssh_signer_check(SSH_SIGNER_PORT)
         cmd_str = " ".join(check.probe_cmd)
         assert "nc" in cmd_str
-        assert str(SSH_AGENT_PORT) in cmd_str
+        assert str(SSH_SIGNER_PORT) in cmd_str
 
 
 class TestShieldCheck:
@@ -154,41 +154,41 @@ class TestSandboxDoctorChecks:
 
     def test_all_checks_present(self) -> None:
         checks = sandbox_doctor_checks(
-            proxy_port=PROXY_PORT,
-            ssh_agent_port=SSH_AGENT_PORT,
+            token_broker_port=TOKEN_BROKER_PORT,
+            ssh_signer_port=SSH_SIGNER_PORT,
             desired_shield_state="up",
         )
         labels = {c.label for c in checks}
-        assert "Credential proxy (TCP)" in labels
-        assert "SSH agent (TCP)" in labels
+        assert "Token broker (TCP)" in labels
+        assert "SSH signer (TCP)" in labels
         assert "Shield state" in labels
         assert len(checks) == 3
 
-    def test_skips_proxy_when_none(self) -> None:
+    def test_skips_broker_when_none(self) -> None:
         checks = sandbox_doctor_checks(
-            proxy_port=None,
-            ssh_agent_port=SSH_AGENT_PORT,
+            token_broker_port=None,
+            ssh_signer_port=SSH_SIGNER_PORT,
             desired_shield_state=None,
         )
         labels = {c.label for c in checks}
-        assert "Credential proxy (TCP)" not in labels
-        assert "SSH agent (TCP)" in labels
+        assert "Token broker (TCP)" not in labels
+        assert "SSH signer (TCP)" in labels
 
-    def test_skips_ssh_agent_when_none(self) -> None:
+    def test_skips_ssh_signer_when_none(self) -> None:
         checks = sandbox_doctor_checks(
-            proxy_port=PROXY_PORT,
-            ssh_agent_port=None,
+            token_broker_port=TOKEN_BROKER_PORT,
+            ssh_signer_port=None,
             desired_shield_state=None,
         )
         labels = {c.label for c in checks}
-        assert "SSH agent (TCP)" not in labels
-        assert "Credential proxy (TCP)" in labels
+        assert "SSH signer (TCP)" not in labels
+        assert "Token broker (TCP)" in labels
 
     def test_minimal(self) -> None:
         """With no ports, only shield check remains."""
         checks = sandbox_doctor_checks(
-            proxy_port=None,
-            ssh_agent_port=None,
+            token_broker_port=None,
+            ssh_signer_port=None,
             desired_shield_state=None,
         )
         assert len(checks) == 1
@@ -196,8 +196,8 @@ class TestSandboxDoctorChecks:
 
     def test_all_checks_are_doctor_check_instances(self) -> None:
         checks = sandbox_doctor_checks(
-            proxy_port=PROXY_PORT,
-            ssh_agent_port=SSH_AGENT_PORT,
+            token_broker_port=TOKEN_BROKER_PORT,
+            ssh_signer_port=SSH_SIGNER_PORT,
             desired_shield_state="down",
         )
         for check in checks:

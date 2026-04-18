@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for the systemd socket activation helper in the proxy server."""
+"""Tests for the systemd socket activation helper in the token broker server."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import os
 import socket
 from unittest.mock import patch
 
-from terok_sandbox.credentials.proxy.server import _systemd_sockets
+from terok_sandbox.vault.token_broker import _systemd_sockets
 
 
 class TestSystemdSockets:

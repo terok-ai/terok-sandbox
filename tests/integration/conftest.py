@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""Shared fixtures for credential proxy integration tests.
+"""Shared fixtures for vault integration tests.
 
 Each fixture creates disposable resources (DB, config, sockets) within
-``tmp_path`` — no host-state pollution.
+``tmp_path`` -- no host-state pollution.
 """
 
 from __future__ import annotations

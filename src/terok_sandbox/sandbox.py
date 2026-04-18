@@ -92,7 +92,7 @@ class VolumeSpec:
     translates that into backend-specific flags (e.g. SELinux relabeling for
     Podman).  In sealed mode, sharing semantics can also drive whether a
     directory is injected (private) or skipped (shared config that the
-    credential proxy replaces).
+    vault replaces).
     """
 
     host_path: Path

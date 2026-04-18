@@ -9,7 +9,7 @@ package contributes domain-specific checks; the top-level ``terok sickbay``
 orchestrates execution inside containers via ``podman exec``.
 
 Sandbox-level checks verify host-side service reachability from within a
-container (credential proxy TCP, SSH agent TCP) and shield firewall state.
+container (vault token broker TCP, SSH signer TCP) and shield firewall state.
 """
 
 from __future__ import annotations
@@ -90,15 +90,15 @@ class DoctorCheck:
 
 def sandbox_doctor_checks(
     *,
-    proxy_port: int | None = None,
-    ssh_agent_port: int | None = None,
+    token_broker_port: int | None = None,
+    ssh_signer_port: int | None = None,
     desired_shield_state: str | None = None,
 ) -> list[DoctorCheck]:
     """Return sandbox-level health checks for in-container diagnostics.
 
     Args:
-        proxy_port: Credential proxy TCP port (skip check if ``None``).
-        ssh_agent_port: SSH agent TCP port (skip check if ``None``).
+        token_broker_port: Token broker TCP port (skip check if ``None``).
+        ssh_signer_port: SSH signer TCP port (skip check if ``None``).
         desired_shield_state: Expected shield state from ``shield_desired_state``
             file (``"up"``, ``"down"``, ``"down_all"``, or ``None`` to skip).
 
@@ -106,10 +106,10 @@ def sandbox_doctor_checks(
         List of :class:`DoctorCheck` instances ready for orchestration.
     """
     checks: list[DoctorCheck] = []
-    if proxy_port is not None:
-        checks.append(_make_proxy_check(proxy_port))
-    if ssh_agent_port is not None:
-        checks.append(_make_ssh_agent_check(ssh_agent_port))
+    if token_broker_port is not None:
+        checks.append(_make_token_broker_check(token_broker_port))
+    if ssh_signer_port is not None:
+        checks.append(_make_ssh_signer_check(ssh_signer_port))
     checks.append(_make_shield_check(desired_shield_state))
     return checks
 
@@ -119,52 +119,52 @@ def sandbox_doctor_checks(
 # ---------------------------------------------------------------------------
 
 
-def _make_proxy_check(proxy_port: int) -> DoctorCheck:
-    """Check that the credential proxy is reachable from inside the container."""
-    from .credentials.proxy.constants import HEALTH_PATH
+def _make_token_broker_check(token_broker_port: int) -> DoctorCheck:
+    """Check that the token broker is reachable from inside the container."""
+    from .vault.constants import HEALTH_PATH
 
-    url = f"http://host.containers.internal:{proxy_port}{HEALTH_PATH}"
+    url = f"http://host.containers.internal:{token_broker_port}{HEALTH_PATH}"
 
     def _eval(rc: int, stdout: str, stderr: str) -> CheckVerdict:
         """Evaluate wget probe exit code."""
         if rc == 0:
-            return CheckVerdict("ok", f"proxy reachable at port {proxy_port}")
+            return CheckVerdict("ok", f"token broker reachable at port {token_broker_port}")
         return CheckVerdict(
             "error",
-            f"proxy unreachable at {url} — check host proxy status",
+            f"token broker unreachable at {url} — check host token broker status",
         )
 
     return DoctorCheck(
         category="network",
-        label="Credential proxy (TCP)",
+        label="Token broker (TCP)",
         probe_cmd=["wget", "-q", "--spider", "--timeout=3", url],
         evaluate=_eval,
-        fix_description="Not fixable from container — host-side proxy must be running.",
+        fix_description="Not fixable from container — host-side token broker must be running.",
     )
 
 
-def _make_ssh_agent_check(ssh_agent_port: int) -> DoctorCheck:
-    """Check that the SSH agent proxy is reachable from inside the container."""
+def _make_ssh_signer_check(ssh_signer_port: int) -> DoctorCheck:
+    """Check that the SSH signer is reachable from inside the container."""
 
     def _eval(rc: int, stdout: str, stderr: str) -> CheckVerdict:
         """Evaluate nc probe exit code."""
         if rc == 0:
-            return CheckVerdict("ok", f"SSH agent reachable at port {ssh_agent_port}")
+            return CheckVerdict("ok", f"SSH signer reachable at port {ssh_signer_port}")
         return CheckVerdict(
             "error",
-            f"SSH agent unreachable at port {ssh_agent_port} — check host proxy",
+            f"SSH signer unreachable at port {ssh_signer_port} — check host SSH signer",
         )
 
     return DoctorCheck(
         category="network",
-        label="SSH agent (TCP)",
+        label="SSH signer (TCP)",
         probe_cmd=[
             "bash",
             "-c",
-            f"echo | nc -w2 host.containers.internal {ssh_agent_port}",
+            f"echo | nc -w2 host.containers.internal {ssh_signer_port}",
         ],
         evaluate=_eval,
-        fix_description="Not fixable from container — host-side SSH agent must be running.",
+        fix_description="Not fixable from container — host-side SSH signer must be running.",
     )
 
 

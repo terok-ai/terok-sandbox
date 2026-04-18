@@ -1,15 +1,15 @@
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""Credential proxy lifecycle management.
+"""Vault lifecycle management.
 
-Manages the ``terok-credential-proxy`` daemon: start, stop, status, and
+Manages the ``terok-vault`` daemon: start, stop, status, and
 pre-task health checks.  Supports systemd socket activation (preferred)
 and a manual daemon fallback.
 
 The systemd socket unit listens on both the Unix socket and the TCP
 port used by containers.  A connection to either triggers the service.
-:meth:`CredentialProxyManager.ensure_reachable` also performs an explicit
+:meth:`VaultManager.ensure_reachable` also performs an explicit
 start as a belt-and-suspenders measure before task creation.
 """
 
@@ -25,23 +25,23 @@ from pathlib import Path
 
 from .._util._logging import log_warning
 from ..config import SandboxConfig
-from .proxy.constants import HEALTH_PATH as _HEALTH_PATH
+from .constants import HEALTH_PATH as _HEALTH_PATH
 
 # ---------- Vocabulary ----------
 
 
 @dataclass(frozen=True)
-class CredentialProxyStatus:
-    """Current state of the credential proxy."""
+class VaultStatus:
+    """Current state of the vault."""
 
     mode: str
     """``"systemd"``, ``"daemon"``, or ``"none"``."""
 
     running: bool
-    """Whether the proxy is active (systemd socket listening or daemon alive)."""
+    """Whether the vault is active (systemd socket listening or daemon alive)."""
 
     healthy: bool
-    """Whether the proxy is healthy for its current activation mode.
+    """Whether the vault is healthy for its current activation mode.
 
     HTTP-probe based when the systemd service is active; socket-liveness
     based when the service is idle but the socket is listening.
@@ -54,7 +54,7 @@ class CredentialProxyStatus:
     """Configured credential database path."""
 
     routes_path: Path
-    """Configured proxy routes JSON path."""
+    """Configured routes JSON path."""
 
     routes_configured: int
     """Number of routes in routes.json (0 if missing or invalid)."""
@@ -66,8 +66,8 @@ class CredentialProxyStatus:
     """Detected transport: ``"tcp"``, ``"socket"``, or ``None`` if not running."""
 
 
-class ProxyUnreachableError(RuntimeError):
-    """Raised when the credential proxy is not reachable.
+class VaultUnreachableError(RuntimeError):
+    """Raised when the vault is not reachable.
 
     Carries diagnostic paths so CLI layers can append their own
     remediation hints (specific command names vary by package).
@@ -77,12 +77,12 @@ class ProxyUnreachableError(RuntimeError):
         self.socket_path = socket_path
         self.db_path = db_path
         super().__init__(
-            "Credential proxy is not reachable.\n"
+            "Vault is not reachable.\n"
             "\n"
-            "The credential proxy injects real API credentials into container\n"
+            "The vault injects real API credentials into container\n"
             "requests without exposing secrets to the container filesystem.\n"
             "\n"
-            "Start the credential proxy (socket activation or manual daemon)\n"
+            "Start the vault (socket activation or manual daemon)\n"
             "before creating tasks.\n"
             "\n"
             f"Socket: {socket_path}\n"
@@ -95,31 +95,31 @@ class ProxyUnreachableError(RuntimeError):
 _UNIT_VERSION = 5
 """Bump when the systemd unit templates change."""
 
-_SOCKET_UNIT = "terok-credential-proxy.socket"
+_SOCKET_UNIT = "terok-vault.socket"
 """Name of the systemd socket unit file (TCP mode)."""
 
-_SERVICE_UNIT = "terok-credential-proxy.service"
+_SERVICE_UNIT = "terok-vault.service"
 """Name of the systemd service unit file (TCP mode)."""
 
-_SOCKET_MODE_SERVICE = "terok-credential-proxy-socket.service"
+_SOCKET_MODE_SERVICE = "terok-vault-socket.service"
 """Name of the systemd service unit for Unix socket mode."""
 
 _ALL_UNIT_NAMES = (_SOCKET_UNIT, _SERVICE_UNIT, _SOCKET_MODE_SERVICE)
 """All unit file names across both transport modes (for cleanup)."""
 
-_OWNED_UNIT_GLOB = "terok-credential-proxy*"
+_OWNED_UNIT_GLOB = "terok-vault*"
 """Glob pattern matching every name this package has ever installed.
 
 Intentionally broader than ``_ALL_UNIT_NAMES`` so the orphan sweep can
 find units from prior versions with different filenames.  Ownership is
-determined by the ``# terok-credential-proxy-version:`` marker inside
+determined by the ``# terok-vault-version:`` marker inside
 the file, not by the glob match — a user-authored
-``terok-credential-proxy-extra.service`` without the marker survives
+``terok-vault-extra.service`` without the marker survives
 untouched.
 """
 
-_OWNED_MARKER_PREFIX = "# terok-credential-proxy-version:"
-"""First-line marker every shipped proxy unit template carries.
+_OWNED_MARKER_PREFIX = "# terok-vault-version:"
+"""First-line marker every shipped vault unit template carries.
 
 The orphan sweep uses this as the ownership check: only files whose
 first line begins with this string were written by this package and
@@ -130,8 +130,8 @@ are safe to remove when their names no longer match the current set.
 # ---------- Manager ----------
 
 
-class CredentialProxyManager:
-    """Lifecycle manager for the terok credential proxy.
+class VaultManager:
+    """Lifecycle manager for the terok vault.
 
     Encapsulates configuration, systemd unit management, daemon process
     control, and health probing behind a single object.  Construct with
@@ -145,22 +145,20 @@ class CredentialProxyManager:
     # -- Public API ----------------------------------------------------------
 
     def ensure_reachable(self) -> None:
-        """Verify the credential proxy is running and reachable.
+        """Verify the vault is running and its TCP ports are up.
 
-        Probes the Unix socket first — if the proxy socket accepts connections,
-        the service is alive.  Falls back to TCP health probing for setups
-        that only expose TCP ports.
+        For **systemd** socket activation the service may not have started yet
+        (e.g. after a fresh boot).  This function triggers a start via
+        ``systemctl --user start`` and waits for the HTTP and SSH signer TCP
+        ports to become reachable via ``/-/health`` and raw TCP probes.
 
-        For **systemd** socket activation the service may not have started yet.
-        This function triggers a start via ``systemctl --user start`` and waits.
-
-        Raises :class:`ProxyUnreachableError` if the proxy is unreachable.
-        Called before task creation when credential proxy is enabled.
+        Raises :class:`VaultUnreachableError` if the vault is unreachable.
+        Called before task creation when vault is enabled.
         """
         if not self.is_socket_active() and not self.is_daemon_running():
-            raise ProxyUnreachableError(
-                socket_path=self._cfg.proxy_socket_path,
-                db_path=self._cfg.proxy_db_path,
+            raise VaultUnreachableError(
+                socket_path=self._cfg.vault_socket_path,
+                db_path=self._cfg.db_path,
             )
 
         # Systemd socket activation: the socket unit is active but the service
@@ -175,40 +173,45 @@ class CredentialProxyManager:
                 timeout=10,
             )
 
-        # Prefer Unix socket probe (works for both socket and TCP modes).
-        if self._wait_for_unix_socket(self._cfg.proxy_socket_path):
+        # Prefer Unix socket probe (works in both transport modes — the
+        # vault binds vault.sock regardless of whether TCP ports are bound).
+        if self._wait_for_unix_socket(self._cfg.vault_socket_path):
             return
 
-        # Fallback: TCP health probe (legacy / TCP-only setups).
-        if not self._wait_for_ready(self._cfg.proxy_port):
+        # Fallback: TCP health probe + SSH signer port (TCP mode only).
+        if not self._wait_for_ready(self._cfg.token_broker_port):
             raise SystemExit(
-                "Credential proxy service started but is not reachable.\n"
-                f"Socket: {self._cfg.proxy_socket_path}\n"
-                f"TCP:    127.0.0.1:{self._cfg.proxy_port}\n"
-                "Check: journalctl --user -u terok-credential-proxy"
+                f"Vault service started but token-broker TCP port "
+                f"{self._cfg.token_broker_port} is not reachable."
             )
 
-    def get_status(self) -> CredentialProxyStatus:
-        """Return the current credential proxy status.
+        if not self._wait_for_tcp_port(self._cfg.ssh_signer_port):
+            raise SystemExit(
+                f"Vault service started but SSH signer TCP port "
+                f"{self._cfg.ssh_signer_port} is not reachable."
+            )
+
+    def get_status(self) -> VaultStatus:
+        """Return the current vault status.
 
         Populates route count from the routes JSON (0 if missing/invalid) and
         credential provider names from the database (empty if DB doesn't exist).
         """
         routes_count = 0
-        if self._cfg.proxy_routes_path.is_file():
+        if self._cfg.routes_path.is_file():
             try:
                 import json
 
-                routes_count = len(json.loads(self._cfg.proxy_routes_path.read_text()))
+                routes_count = len(json.loads(self._cfg.routes_path.read_text()))
             except (json.JSONDecodeError, OSError):
                 pass
 
         creds: tuple[str, ...] = ()
-        if self._cfg.proxy_db_path.is_file():
+        if self._cfg.db_path.is_file():
             try:
-                from .db import CredentialDB
+                from ..credentials.db import CredentialDB
 
-                db = CredentialDB(self._cfg.proxy_db_path)
+                db = CredentialDB(self._cfg.db_path)
                 try:
                     creds = tuple(db.list_credentials("default"))
                 finally:
@@ -224,11 +227,11 @@ class CredentialProxyManager:
             socket_up = self.is_socket_active()
             service_up = self.is_service_active()
             running = socket_up or service_up
-            healthy = self._probe(self._cfg.proxy_port) if service_up else socket_up
+            healthy = self._probe(self._cfg.token_broker_port) if service_up else socket_up
         elif self.is_daemon_running():
             mode = "daemon"
             running = True
-            healthy = self._probe(self._cfg.proxy_port)
+            healthy = self._probe(self._cfg.token_broker_port)
         else:
             mode = "none"
             running = False
@@ -238,27 +241,27 @@ class CredentialProxyManager:
         # since TCP mode also binds a Unix socket).
         transport = self._installed_transport() if mode == "systemd" else None
 
-        return CredentialProxyStatus(
+        return VaultStatus(
             mode=mode,
             running=running,
             healthy=healthy,
-            socket_path=self._cfg.proxy_socket_path,
-            db_path=self._cfg.proxy_db_path,
-            routes_path=self._cfg.proxy_routes_path,
+            socket_path=self._cfg.vault_socket_path,
+            db_path=self._cfg.db_path,
+            routes_path=self._cfg.routes_path,
             routes_configured=routes_count,
             credentials_stored=creds,
             transport=transport,
         )
 
     @property
-    def proxy_port(self) -> int:
-        """Return the configured credential proxy TCP port."""
-        return self._cfg.proxy_port
+    def token_broker_port(self) -> int:
+        """Return the configured vault token broker TCP port."""
+        return self._cfg.token_broker_port
 
     @property
-    def ssh_agent_port(self) -> int:
-        """Return the configured SSH agent proxy TCP port."""
-        return self._cfg.ssh_agent_port
+    def ssh_signer_port(self) -> int:
+        """Return the configured vault SSH signer TCP port."""
+        return self._cfg.ssh_signer_port
 
     # -- Systemd lifecycle ---------------------------------------------------
 
@@ -276,7 +279,7 @@ class CredentialProxyManager:
             return False
 
     def is_socket_installed(self) -> bool:
-        """Check whether any proxy systemd unit file exists (TCP or socket mode)."""
+        """Check whether any vault systemd unit file exists (TCP or socket mode)."""
         unit_dir = self._systemd_unit_dir()
         return (unit_dir / _SOCKET_UNIT).is_file() or (unit_dir / _SOCKET_MODE_SERVICE).is_file()
 
@@ -298,9 +301,12 @@ class CredentialProxyManager:
         return self._is_unit_active(_SOCKET_UNIT) or self._is_unit_active(_SOCKET_MODE_SERVICE)
 
     def is_service_active(self) -> bool:
-        """Check whether the proxy daemon itself is running.
+        """Check whether the vault daemon itself is running.
 
         Checks both TCP-mode service and socket-mode service units.
+        Unlike :meth:`is_socket_active`, this tells whether the vault
+        daemon itself is bound (TCP ports bound), not just whether the
+        socket is listening.  Does not trigger socket activation.
         """
         return self._is_unit_active(_SERVICE_UNIT) or self._is_unit_active(_SOCKET_MODE_SERVICE)
 
@@ -325,35 +331,31 @@ class CredentialProxyManager:
         # that.  Fail early, naming the knobs that resolve it, instead of
         # emitting a broken unit file.
         if transport == "tcp" and (
-            self._cfg.proxy_port is None or self._cfg.ssh_agent_port is None
+            self._cfg.token_broker_port is None or self._cfg.ssh_signer_port is None
         ):
             raise SystemExit(
-                "Cannot install tcp-mode credential-proxy units: no port is set.\n"
+                "Cannot install tcp-mode vault units: no port is set.\n"
                 "Either configure ``services.mode: tcp`` (auto-allocates ports)\n"
-                "or pin ``credential_proxy.port`` / ``credential_proxy.ssh_agent_port`` explicitly."
+                "or pin ``vault.token_broker_port`` / ``vault.ssh_signer_port`` explicitly."
             )
 
-        import terok_sandbox.credentials.proxy
+        import terok_sandbox.vault
 
         from .._util import render_template
 
         unit_dir = self._systemd_unit_dir()
         unit_dir.mkdir(parents=True, exist_ok=True)
 
-        resource_dir = (
-            Path(terok_sandbox.credentials.proxy.__file__).resolve().parent
-            / "resources"
-            / "systemd"
-        )
+        resource_dir = Path(terok_sandbox.vault.__file__).resolve().parent / "resources" / "systemd"
         variables = {
-            "SOCKET_PATH": str(self._cfg.proxy_socket_path),
-            "SSH_AGENT_SOCKET_PATH": str(self._cfg.ssh_agent_socket_path),
-            "DB_PATH": str(self._cfg.proxy_db_path),
-            "ROUTES_PATH": str(self._cfg.proxy_routes_path),
-            "PORT": str(self._cfg.proxy_port),
-            "SSH_AGENT_PORT": str(self._cfg.ssh_agent_port),
+            "SOCKET_PATH": str(self._cfg.vault_socket_path),
+            "SSH_SIGNER_SOCKET_PATH": str(self._cfg.ssh_signer_socket_path),
+            "DB_PATH": str(self._cfg.db_path),
+            "ROUTES_PATH": str(self._cfg.routes_path),
+            "PORT": str(self._cfg.token_broker_port),
+            "SSH_SIGNER_PORT": str(self._cfg.ssh_signer_port),
             "SSH_KEYS_FILE": str(self._cfg.ssh_keys_json_path),
-            "BIN": shlex.join(self._proxy_exec_prefix()),
+            "BIN": shlex.join(self._vault_exec_prefix()),
             "UNIT_VERSION": str(_UNIT_VERSION),
         }
 
@@ -374,7 +376,7 @@ class CredentialProxyManager:
             content = render_template(template_path, variables)
             (unit_dir / template_name).write_text(content, encoding="utf-8")
 
-        self._cfg.proxy_socket_path.parent.mkdir(parents=True, exist_ok=True)
+        self._cfg.vault_socket_path.parent.mkdir(parents=True, exist_ok=True)
         subprocess.run(["systemctl", "--user", "daemon-reload"], check=True, timeout=10)
         subprocess.run(
             ["systemctl", "--user", "enable", "--now", enable_unit],
@@ -454,18 +456,18 @@ class CredentialProxyManager:
     # -- Daemon lifecycle ----------------------------------------------------
 
     def start_daemon(self) -> None:
-        """Start the credential proxy as a background daemon.
+        """Start the vault as a background daemon.
 
-        The proxy listens on a Unix socket and reads credentials from a
+        The vault listens on a Unix socket and reads credentials from a
         sqlite3 database.  A routes JSON file must exist at the configured
         path (generated by terok-executor from the YAML registry).
 
-        Writes a PID file to ``runtime_root() / "credential-proxy.pid"``.
+        Writes a PID file to ``runtime_root() / "vault.pid"``.
         """
-        sock_path = self._cfg.proxy_socket_path
-        db_path = self._cfg.proxy_db_path
-        routes_path = self._cfg.proxy_routes_path
-        pidfile = self._cfg.proxy_pid_file_path
+        sock_path = self._cfg.vault_socket_path
+        db_path = self._cfg.db_path
+        routes_path = self._cfg.routes_path
+        pidfile = self._cfg.vault_pid_path
 
         sock_path.parent.mkdir(parents=True, exist_ok=True)
         pidfile.parent.mkdir(parents=True, exist_ok=True)
@@ -483,25 +485,25 @@ class CredentialProxyManager:
         ssh_keys_path = self._cfg.ssh_keys_json_path
         write_sensitive_file(ssh_keys_path, "{}\n")
 
-        log_file = self._cfg.state_dir / "proxy" / "credential-proxy.log"
+        log_file = self._cfg.state_dir / "vault" / "vault.log"
         log_file.parent.mkdir(parents=True, exist_ok=True)
         os.chmod(log_file.parent, 0o700)
 
-        log_level = os.environ.get("TEROK_PROXY_LOG_LEVEL", "INFO")
+        log_level = os.environ.get("TEROK_VAULT_LOG_LEVEL", "INFO")
         cmd = [
-            *self._proxy_exec_prefix(),
+            *self._vault_exec_prefix(),
             f"--socket-path={sock_path}",
             f"--db-path={db_path}",
             f"--routes-file={routes_path}",
             f"--pid-file={pidfile}",
-            f"--port={self._cfg.proxy_port}",
-            f"--ssh-agent-port={self._cfg.ssh_agent_port}",
+            f"--port={self._cfg.token_broker_port}",
+            f"--ssh-signer-port={self._cfg.ssh_signer_port}",
             f"--ssh-keys-file={ssh_keys_path}",
             f"--log-file={log_file}",
             f"--log-level={log_level}",
         ]
 
-        # Fork into background so the proxy survives shell exit.
+        # Fork into background so the vault survives shell exit.
         # stderr=PIPE only for the startup-failure detection window.
         proc = subprocess.Popen(
             cmd,
@@ -510,8 +512,11 @@ class CredentialProxyManager:
             start_new_session=True,
         )
 
-        # Poll the /-/health endpoint until the server is actually ready.
-        if self._wait_for_ready(self._cfg.proxy_port):
+        # Poll both endpoints until ready: token-broker via /-/health,
+        # SSH signer via raw TCP (it speaks SSH-agent protocol, not HTTP).
+        broker_ok = self._wait_for_ready(self._cfg.token_broker_port)
+        signer_ok = broker_ok and self._wait_for_tcp_port(self._cfg.ssh_signer_port)
+        if broker_ok and signer_ok:
             proc.stderr.close()
             return
 
@@ -519,24 +524,29 @@ class CredentialProxyManager:
         ret = proc.poll()
         if ret is not None:
             stderr = (proc.stderr.read() or b"").decode(errors="replace").strip()
-            msg = f"Credential proxy failed to start (exit {ret})"
+            msg = f"Vault failed to start (exit {ret})"
             if stderr:
                 msg += f":\n{stderr}"
             raise SystemExit(msg)
         proc.stderr.close()
+        if not broker_ok:
+            raise SystemExit(
+                f"Vault process started but token-broker port "
+                f"{self._cfg.token_broker_port} did not become ready within 5 s."
+            )
         raise SystemExit(
-            "Credential proxy process started but did not become ready within 5 s.\n"
-            f"Check logs or try: curl http://127.0.0.1:{self._cfg.proxy_port}{_HEALTH_PATH}"
+            f"Vault process started but SSH signer port "
+            f"{self._cfg.ssh_signer_port} did not become ready within 5 s."
         )
 
     def stop_daemon(self) -> None:
-        """Stop the managed proxy daemon by sending SIGTERM."""
-        pidfile = self._cfg.proxy_pid_file_path
+        """Stop the managed vault daemon by sending SIGTERM."""
+        pidfile = self._cfg.vault_pid_path
         if not pidfile.is_file():
             return
         try:
             pid = int(pidfile.read_text().strip())
-            if self._is_managed_proxy(pid):
+            if self._is_managed_vault(pid):
                 os.kill(pid, signal.SIGTERM)
         except (ValueError, ProcessLookupError, PermissionError):
             pass
@@ -545,13 +555,13 @@ class CredentialProxyManager:
                 pidfile.unlink()
 
     def is_daemon_running(self) -> bool:
-        """Check whether the managed proxy daemon is alive via its PID file."""
-        pidfile = self._cfg.proxy_pid_file_path
+        """Check whether the managed vault daemon is alive via its PID file."""
+        pidfile = self._cfg.vault_pid_path
         if not pidfile.is_file():
             return False
         try:
             pid = int(pidfile.read_text().strip())
-            if not self._is_managed_proxy(pid):
+            if not self._is_managed_vault(pid):
                 return False
             os.kill(pid, 0)  # signal 0 = existence check
             return True
@@ -560,7 +570,7 @@ class CredentialProxyManager:
 
     # -- Private helpers -----------------------------------------------------
 
-    def _is_managed_proxy(self, pid: int) -> bool:
+    def _is_managed_vault(self, pid: int) -> bool:
         """Return whether *pid* was started with the expected PID file argument."""
         cmdline_path = Path(f"/proc/{pid}/cmdline")
         if not cmdline_path.is_file():
@@ -571,7 +581,7 @@ class CredentialProxyManager:
             return False
         args = raw.rstrip(b"\x00").split(b"\x00")
         args_str = [a.decode("utf-8", errors="ignore") for a in args]
-        expected = f"--pid-file={self._cfg.proxy_pid_file_path}"
+        expected = f"--pid-file={self._cfg.vault_pid_path}"
         return expected in args_str
 
     @staticmethod
@@ -582,19 +592,19 @@ class CredentialProxyManager:
         return systemd_user_unit_dir()
 
     @staticmethod
-    def _proxy_exec_prefix() -> list[str]:
-        """Return the command prefix for launching the credential proxy server.
+    def _vault_exec_prefix() -> list[str]:
+        """Return the command prefix for launching the vault server.
 
-        Uses ``sys.executable -m terok_sandbox.credentials.proxy`` so the
+        Uses ``sys.executable -m terok_sandbox.vault`` so the
         server runs under the same Python that owns the installed package.
         """
         import sys as _sys
 
-        return [_sys.executable, "-m", "terok_sandbox.credentials.proxy"]
+        return [_sys.executable, "-m", "terok_sandbox.vault"]
 
     @staticmethod
     def _probe(port: int, *, timeout: float = 2.0) -> bool:
-        """Return ``True`` if the proxy's health endpoint responds 200.
+        """Return ``True`` if the vault's health endpoint responds 200.
 
         Uses :mod:`http.client` (stdlib only) to hit the TCP port.
         """
@@ -619,7 +629,7 @@ class CredentialProxyManager:
         probe_timeout = min(1.0, interval)
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            if CredentialProxyManager._probe(port, timeout=probe_timeout):
+            if VaultManager._probe(port, timeout=probe_timeout):
                 return True
             time.sleep(interval)
         return False

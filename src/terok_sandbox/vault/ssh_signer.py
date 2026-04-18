@@ -1,14 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""SSH agent proxy — signs with host-side private keys on behalf of containers.
+"""SSH signer — signs with host-side private keys on behalf of containers.
 
 Implements the `SSH agent protocol`_ over TCP with a phantom-token handshake.
 Containers connect via a socat bridge (``UNIX-LISTEN → TCP``) and set
 ``SSH_AUTH_SOCK`` to the local Unix socket.  Private keys never enter the
-container — the proxy reads them from the host filesystem.
+container — the signer reads them from the host filesystem.
 
-Like :mod:`server`, this module has **zero terok imports**.  It is a
+Like :mod:`token_broker`, this module has **zero terok imports**.  It is a
 self-contained security component that reads phantom tokens from the same
 sqlite3 database and key paths from a JSON sidecar file.
 
@@ -35,7 +35,7 @@ from pathlib import Path
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.asymmetric.padding import PKCS1v15
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
-from cryptography.hazmat.primitives.hashes import SHA1, SHA256, SHA512
+from cryptography.hazmat.primitives.hashes import SHA256, SHA512
 from cryptography.hazmat.primitives.serialization import (
     load_pem_private_key,
     load_ssh_private_key,
@@ -263,14 +263,15 @@ def _sign(key: Ed25519PrivateKey | RSAPrivateKey, data: bytes, flags: int) -> by
         raw_sig = key.sign(data)
         return _pack_string(b"ssh-ed25519") + _pack_string(raw_sig)
 
-    # RSA: choose algorithm based on flags (RFC 8332)
+    # RSA: prefer RFC 8332 RSA-SHA2 algorithms; fall back to SHA-256 when the
+    # client requests no specific hash.  Legacy ssh-rsa (SHA-1) is not offered:
+    # OpenSSH 8.7+ rejects SHA-1 signatures, and SHA-1 is no longer collision
+    # resistant.  Clients still asking for ssh-rsa are served with SHA-256
+    # signatures labelled ``rsa-sha2-256`` (the widest compatible choice).
     if flags & SSH_AGENT_RSA_SHA2_512:
         algo, hash_cls = b"rsa-sha2-512", SHA512()
-    elif flags & SSH_AGENT_RSA_SHA2_256:
-        algo, hash_cls = b"rsa-sha2-256", SHA256()
     else:
-        # ssh-rsa uses SHA-1 per RFC 4253 §6.6
-        algo, hash_cls = b"ssh-rsa", SHA1()  # noqa: S303  # nosec B303 — RFC 4253 §6.6
+        algo, hash_cls = b"rsa-sha2-256", SHA256()
     raw_sig = key.sign(data, PKCS1v15(), hash_cls)
     return _pack_string(algo) + _pack_string(raw_sig)
 
@@ -413,17 +414,17 @@ async def _handle_connection(
 # ---------------------------------------------------------------------------
 
 
-async def start_ssh_agent_server(
+async def start_ssh_signer(
     db_path: str,
     keys_file: str,
     host: str | None = None,
     port: int | None = None,
     socket_path: str | None = None,
 ) -> asyncio.Server:
-    """Start the SSH agent server on TCP, a Unix socket, or both.
+    """Start the SSH signer on TCP, a Unix socket, or both.
 
     Args:
-        db_path: Path to the credential proxy sqlite3 database (for phantom token lookups).
+        db_path: Path to the vault sqlite3 database (for phantom token lookups).
         keys_file: Path to ``ssh-keys.json`` mapping credential scopes to key file paths.
         host: Bind address for TCP (typically ``"127.0.0.1"``).
         port: TCP port to listen on.
@@ -435,7 +436,7 @@ async def start_ssh_agent_server(
     Raises:
         ValueError: If neither TCP (host+port) nor socket_path is provided.
     """
-    from .server import _TokenDB
+    from .token_broker import _TokenDB
 
     token_db = _TokenDB(db_path)
     key_cache = _KeyCache(keys_file)
@@ -462,10 +463,10 @@ async def start_ssh_agent_server(
             sock.listen(128)
         server = await asyncio.start_unix_server(_on_connect, sock=sock)
         harden_socket(path)
-        _logger.info("SSH agent proxy listening on %s", path)
+        _logger.info("SSH signer listening on %s", path)
     elif host is not None and port is not None:
         server = await asyncio.start_server(_on_connect, host, port)
-        _logger.info("SSH agent proxy listening on %s:%d", host, port)
+        _logger.info("SSH signer listening on %s:%d", host, port)
     else:
         raise ValueError("Either socket_path or host+port must be provided")
     return server

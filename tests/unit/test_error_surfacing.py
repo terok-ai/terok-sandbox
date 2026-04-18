@@ -363,25 +363,25 @@ class TestStopTaskContainersLogging:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 2d. credential_proxy_lifecycle — DB read failure logging
+# 2d. vault_lifecycle — DB read failure logging
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-class TestCredentialProxyStatusDbFailure:
-    """Verify log_warning when credential DB read fails in get_proxy_status."""
+class TestVaultStatusDbFailure:
+    """Verify log_warning when credential DB read fails in get_vault_status."""
 
     def test_db_exception_logs_warning(self, tmp_path: Path) -> None:
         """Corrupted DB triggers log_warning and returns empty credentials."""
         from terok_sandbox import SandboxConfig
-        from terok_sandbox.credentials.lifecycle import CredentialProxyManager
+        from terok_sandbox.vault.lifecycle import VaultManager
 
         cfg = SandboxConfig(state_dir=tmp_path)
         # Create a corrupt DB file
-        cfg.proxy_db_path.parent.mkdir(parents=True, exist_ok=True)
-        cfg.proxy_db_path.write_text("not a sqlite db")
+        cfg.db_path.parent.mkdir(parents=True, exist_ok=True)
+        cfg.db_path.write_text("not a sqlite db")
 
-        with unittest.mock.patch("terok_sandbox.credentials.lifecycle.log_warning") as mock_warn:
-            CredentialProxyManager(cfg).get_status()
+        with unittest.mock.patch("terok_sandbox.vault.lifecycle.log_warning") as mock_warn:
+            VaultManager(cfg).get_status()
         mock_warn.assert_called_once()
         assert "credential db" in mock_warn.call_args[0][0].lower()
 

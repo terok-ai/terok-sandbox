@@ -16,9 +16,9 @@ from importlib.metadata import PackageNotFoundError, version as _meta_version
 from .commands import (
     DOCTOR_COMMANDS,
     GATE_COMMANDS,
-    PROXY_COMMANDS,
     SHIELD_COMMANDS,
     SSH_COMMANDS,
+    VAULT_COMMANDS,
     CommandDef,
 )
 
@@ -88,12 +88,12 @@ def main() -> None:
         _wire_command(gate_sub, cmd)
     gate_p.set_defaults(_group_help=gate_p)
 
-    # -- proxy --
-    proxy_p = sub.add_parser("proxy", help="Credential proxy management")
-    proxy_sub = proxy_p.add_subparsers()
-    for cmd in PROXY_COMMANDS:
-        _wire_command(proxy_sub, cmd)
-    proxy_p.set_defaults(_group_help=proxy_p)
+    # -- vault --
+    vault_p = sub.add_parser("vault", help="Vault management")
+    vault_sub = vault_p.add_subparsers()
+    for cmd in VAULT_COMMANDS:
+        _wire_command(vault_sub, cmd)
+    vault_p.set_defaults(_group_help=vault_p)
 
     # -- ssh --
     ssh_p = sub.add_parser("ssh", help="SSH keypair management")

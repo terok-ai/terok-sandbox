@@ -5,7 +5,7 @@
 
 Covers: probe_unix_socket utility, SandboxConfig socket path properties,
 gate server Unix socket factory, gate lifecycle socket reachability,
-and SSH agent server Unix socket mode.
+and SSH signer Unix socket mode.
 """
 
 from __future__ import annotations
@@ -30,13 +30,13 @@ from cryptography.hazmat.primitives.serialization import (
 from terok_sandbox._util._net import harden_socket, prepare_socket_path, probe_unix_socket
 from terok_sandbox.config import SandboxConfig
 from terok_sandbox.credentials.db import CredentialDB
-from terok_sandbox.credentials.proxy.ssh_agent import (
+from terok_sandbox.gate.lifecycle import GateServerManager, GateServerStatus
+from terok_sandbox.vault.ssh_signer import (
     SSH_AGENT_IDENTITIES_ANSWER,
     SSH_AGENTC_REQUEST_IDENTITIES,
     _unpack_string,
-    start_ssh_agent_server,
+    start_ssh_signer,
 )
-from terok_sandbox.gate.lifecycle import GateServerManager, GateServerStatus
 from tests.constants import MOCK_BASE
 
 MOCK_RUNTIME_DIR = MOCK_BASE / "runtime"
@@ -136,10 +136,10 @@ class TestConfigSocketPaths:
         cfg = SandboxConfig(runtime_dir=MOCK_RUNTIME_DIR)
         assert cfg.gate_socket_path == MOCK_RUNTIME_DIR / "gate-server.sock"
 
-    def test_ssh_agent_socket_path(self) -> None:
-        """ssh_agent_socket_path returns runtime_dir / 'ssh-agent.sock'."""
+    def test_ssh_signer_socket_path(self) -> None:
+        """ssh_signer_socket_path returns runtime_dir / 'ssh-agent.sock'."""
         cfg = SandboxConfig(runtime_dir=MOCK_RUNTIME_DIR)
-        assert cfg.ssh_agent_socket_path == MOCK_RUNTIME_DIR / "ssh-agent.sock"
+        assert cfg.ssh_signer_socket_path == MOCK_RUNTIME_DIR / "ssh-agent.sock"
 
 
 # ── Gate server: _create_unix_server ────────────────────────────────────
@@ -214,23 +214,23 @@ class TestWaitForUnixSocket:
 
     def test_returns_true_for_immediate_listener(self, tmp_path: Path) -> None:
         """Succeeds immediately when the socket is already listening."""
-        from terok_sandbox.credentials.lifecycle import CredentialProxyManager
+        from terok_sandbox.vault.lifecycle import VaultManager
 
         sock_path = tmp_path / "test.sock"
         srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         srv.bind(str(sock_path))
         srv.listen(1)
         try:
-            assert CredentialProxyManager._wait_for_unix_socket(sock_path, timeout=1.0) is True
+            assert VaultManager._wait_for_unix_socket(sock_path, timeout=1.0) is True
         finally:
             srv.close()
 
     def test_returns_false_on_timeout(self, tmp_path: Path) -> None:
         """Returns False when socket never appears within timeout."""
-        from terok_sandbox.credentials.lifecycle import CredentialProxyManager
+        from terok_sandbox.vault.lifecycle import VaultManager
 
         missing = tmp_path / "missing.sock"
-        assert CredentialProxyManager._wait_for_unix_socket(missing, timeout=0.3) is False
+        assert VaultManager._wait_for_unix_socket(missing, timeout=0.3) is False
 
 
 class TestGateSocketReachability:
@@ -313,7 +313,7 @@ async def _read_response(reader: asyncio.StreamReader) -> tuple[int, bytes]:
 
 
 @pytest.mark.asyncio()
-class TestSSHAgentUnixSocket:
+class TestSSHSignerUnixSocket:
     """Verify the SSH agent server in Unix socket mode."""
 
     async def test_roundtrip_via_unix_socket(self, tmp_path: Path) -> None:
@@ -331,7 +331,7 @@ class TestSSHAgentUnixSocket:
 
         # Set up DB + keys
         db = CredentialDB(tmp_path / "test.db")
-        token = db.create_proxy_token("proj", "task-1", "proj", "ssh")
+        token = db.create_token("proj", "task-1", "proj", "ssh")
         db.close()
 
         keys_file = tmp_path / "ssh-keys.json"
@@ -340,7 +340,7 @@ class TestSSHAgentUnixSocket:
         )
 
         sock_path = tmp_path / "ssh-agent.sock"
-        server = await start_ssh_agent_server(
+        server = await start_ssh_signer(
             str(tmp_path / "test.db"), str(keys_file), socket_path=str(sock_path)
         )
         try:
@@ -378,7 +378,7 @@ class TestSSHAgentUnixSocket:
         keys_file.write_text(json.dumps({}))
 
         with pytest.raises(RuntimeError, match="Refusing to remove non-socket"):
-            await start_ssh_agent_server(
+            await start_ssh_signer(
                 str(tmp_path / "test.db"), str(keys_file), socket_path=str(sock_path)
             )
 
@@ -407,7 +407,7 @@ class TestSSHAgentUnixSocket:
             json.dumps({"s": [{"private_key": str(priv_path), "public_key": str(pub_path)}]})
         )
 
-        server = await start_ssh_agent_server(
+        server = await start_ssh_signer(
             str(tmp_path / "test.db"), str(keys_file), socket_path=str(sock_path)
         )
         try:
@@ -425,7 +425,7 @@ class TestSSHAgentUnixSocket:
         keys_file.write_text(json.dumps({}))
 
         with pytest.raises(ValueError, match="Either socket_path or host\\+port"):
-            await start_ssh_agent_server(str(tmp_path / "test.db"), str(keys_file))
+            await start_ssh_signer(str(tmp_path / "test.db"), str(keys_file))
 
 
 # ── Gate server: _serve_foreground validation ────────────────────────────
@@ -540,30 +540,30 @@ class TestGateMainPortDefault:
         assert kwargs["port"] == 9418
 
 
-# ── Credential proxy: SSH agent mutual exclusion ─────────────────────────
+# ── Vault: SSH signer mutual exclusion ───────────────────────────────────
 
 
-class TestSSHAgentMutualExclusion:
-    """Verify --ssh-agent-port and --ssh-agent-socket-path are mutually exclusive."""
+class TestSSHSignerMutualExclusion:
+    """Verify --ssh-signer-port and --ssh-signer-socket-path are mutually exclusive."""
 
     def test_rejects_both_port_and_socket(self) -> None:
-        """Passing both --ssh-agent-port and --ssh-agent-socket-path is an error."""
+        """Passing both --ssh-signer-port and --ssh-signer-socket-path is an error."""
         with unittest.mock.patch(
             "sys.argv",
             [
-                "terok-credential-proxy",
+                "terok-vault",
                 "--socket-path=/tmp/terok-testing/proxy.sock",
                 "--db-path=/tmp/terok-testing/db",
                 "--routes-file=/tmp/terok-testing/routes.json",
-                "--ssh-agent-port=18732",
-                "--ssh-agent-socket-path=/tmp/terok-testing/ssh.sock",
+                "--ssh-signer-port=18732",
+                "--ssh-signer-socket-path=/tmp/terok-testing/ssh.sock",
                 "--ssh-keys-file=/tmp/terok-testing/keys.json",
             ],
         ):
-            from terok_sandbox.credentials.proxy.server import main as proxy_main
+            from terok_sandbox.vault.token_broker import main as vault_main
 
             with pytest.raises(SystemExit):
-                proxy_main()
+                vault_main()
 
 
 class TestInstallSystemdPortGuards:
@@ -587,7 +587,7 @@ class TestInstallSystemdPortGuards:
 
     def test_gate_socket_install_without_port_is_fine(self) -> None:
         """Socket transport never reads the port — ``None`` must pass the guard."""
-        from terok_sandbox.credentials.proxy.server import main as _unused_main  # noqa: F401
+        from terok_sandbox.vault.token_broker import main as _unused_main  # noqa: F401
 
         mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
         mock_cfg.gate_port = None
@@ -606,35 +606,35 @@ class TestInstallSystemdPortGuards:
                     # the port guard did not fire.
                     mgr.install_systemd_units(transport="socket")
 
-    def test_proxy_tcp_install_without_port_raises(self) -> None:
-        """CredentialProxyManager rejects tcp install with no proxy_port."""
-        from terok_sandbox.credentials.lifecycle import CredentialProxyManager
+    def test_vault_tcp_install_without_port_raises(self) -> None:
+        """VaultManager rejects tcp install with no token_broker_port."""
+        from terok_sandbox.vault.lifecycle import VaultManager
 
         mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
-        mock_cfg.proxy_port = None
-        mock_cfg.ssh_agent_port = 18732
+        mock_cfg.token_broker_port = None
+        mock_cfg.ssh_signer_port = 18732
         with unittest.mock.patch.object(
-            CredentialProxyManager,
+            VaultManager,
             "__init__",
             lambda self, cfg=None: setattr(self, "_cfg", mock_cfg),
         ):
-            mgr = CredentialProxyManager()
+            mgr = VaultManager()
             with pytest.raises(SystemExit, match="no port is set"):
                 mgr.install_systemd_units(transport="tcp")
 
-    def test_proxy_tcp_install_without_ssh_agent_port_raises(self) -> None:
-        """Same guard fires when only ssh_agent_port is unset."""
-        from terok_sandbox.credentials.lifecycle import CredentialProxyManager
+    def test_vault_tcp_install_without_ssh_signer_port_raises(self) -> None:
+        """Same guard fires when only ssh_signer_port is unset."""
+        from terok_sandbox.vault.lifecycle import VaultManager
 
         mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
-        mock_cfg.proxy_port = 18731
-        mock_cfg.ssh_agent_port = None
+        mock_cfg.token_broker_port = 18731
+        mock_cfg.ssh_signer_port = None
         with unittest.mock.patch.object(
-            CredentialProxyManager,
+            VaultManager,
             "__init__",
             lambda self, cfg=None: setattr(self, "_cfg", mock_cfg),
         ):
-            mgr = CredentialProxyManager()
+            mgr = VaultManager()
             with pytest.raises(SystemExit, match="no port is set"):
                 mgr.install_systemd_units(transport="tcp")
 
@@ -669,40 +669,32 @@ class TestInstallSystemdTransportResolution:
         mock_mode.assert_not_called()
         mock_install.assert_called_once_with(transport="tcp")
 
-    def test_proxy_wrapper_resolves_transport_from_config(self) -> None:
-        """``install_proxy_systemd(transport=None)`` reads services.mode."""
-        from terok_sandbox import install_proxy_systemd
-        from terok_sandbox.credentials.lifecycle import CredentialProxyManager
+    def test_vault_wrapper_resolves_transport_from_config(self) -> None:
+        """``install_vault_systemd(transport=None)`` reads services.mode."""
+        from terok_sandbox import install_vault_systemd
+        from terok_sandbox.vault.lifecycle import VaultManager
 
         with (
             unittest.mock.patch("terok_sandbox.config._services_mode", return_value="socket"),
-            unittest.mock.patch.object(
-                CredentialProxyManager, "install_systemd_units"
-            ) as mock_install,
-            unittest.mock.patch.object(
-                CredentialProxyManager, "__init__", lambda self, cfg=None: None
-            ),
+            unittest.mock.patch.object(VaultManager, "install_systemd_units") as mock_install,
+            unittest.mock.patch.object(VaultManager, "__init__", lambda self, cfg=None: None),
         ):
-            install_proxy_systemd()
+            install_vault_systemd()
         mock_install.assert_called_once_with(transport="socket")
 
-    def test_proxy_wrapper_honours_explicit_transport(self) -> None:
+    def test_vault_wrapper_honours_explicit_transport(self) -> None:
         """An explicit ``transport=`` argument bypasses the config read."""
-        from terok_sandbox import install_proxy_systemd
-        from terok_sandbox.credentials.lifecycle import CredentialProxyManager
+        from terok_sandbox import install_vault_systemd
+        from terok_sandbox.vault.lifecycle import VaultManager
 
         with (
             unittest.mock.patch(
                 "terok_sandbox.config._services_mode", return_value="socket"
             ) as mock_mode,
-            unittest.mock.patch.object(
-                CredentialProxyManager, "install_systemd_units"
-            ) as mock_install,
-            unittest.mock.patch.object(
-                CredentialProxyManager, "__init__", lambda self, cfg=None: None
-            ),
+            unittest.mock.patch.object(VaultManager, "install_systemd_units") as mock_install,
+            unittest.mock.patch.object(VaultManager, "__init__", lambda self, cfg=None: None),
         ):
-            install_proxy_systemd(transport="tcp")
+            install_vault_systemd(transport="tcp")
         mock_mode.assert_not_called()
         mock_install.assert_called_once_with(transport="tcp")
 

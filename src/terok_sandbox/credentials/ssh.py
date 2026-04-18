@@ -47,7 +47,7 @@ class SSHManager:
     Handles the full SSH setup lifecycle: directory creation, keypair
     generation (ed25519 or RSA), config file rendering from templates, and
     permission hardening.  Keys are stored under ``ssh_keys_dir/<scope>``
-    and used by the credential proxy's SSH agent for container access.
+    and used by the vault's SSH signer for container access.
     """
 
     def __init__(
@@ -310,7 +310,7 @@ def update_ssh_keys_json(keys_json_path: Path, scope: str, result: SSHInitResult
 
     The JSON file maps credential scopes to their SSH key file paths,
     similar to how ``routes.json`` maps provider names to proxy routes.
-    The credential proxy's SSH agent handler reads this file to locate
+    The vault's SSH signer handler reads this file to locate
     the private key for signing requests.
 
     Key management rules (keyed by ``private_key`` path):

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for the SSH agent proxy — wire format, handshake, identity, signing."""
+"""Tests for the SSH signer — wire format, handshake, identity, signing."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from cryptography.hazmat.primitives.serialization import (
 )
 
 from terok_sandbox.credentials.db import CredentialDB
-from terok_sandbox.credentials.proxy.ssh_agent import (
+from terok_sandbox.vault.ssh_signer import (
     SSH_AGENT_FAILURE,
     SSH_AGENT_IDENTITIES_ANSWER,
     SSH_AGENT_RSA_SHA2_256,
@@ -35,7 +35,7 @@ from terok_sandbox.credentials.proxy.ssh_agent import (
     _pack_string,
     _sign,
     _unpack_string,
-    start_ssh_agent_server,
+    start_ssh_signer,
 )
 
 # ── Fixtures ────────────────────────────────────────────────────────────
@@ -59,13 +59,13 @@ def ed25519_keypair(tmp_path: Path) -> tuple[Path, Path, bytes]:
 
 
 @pytest.fixture()
-def ssh_agent_env(tmp_path: Path, ed25519_keypair: tuple[Path, Path, bytes]):
+def ssh_signer_env(tmp_path: Path, ed25519_keypair: tuple[Path, Path, bytes]):
     """Set up DB + keys JSON + keypair.  Returns (db_path, keys_file, token, pub_blob)."""
     priv_path, pub_path, pub_blob = ed25519_keypair
 
-    # Create DB with a phantom token
+    # Create DB with a scoped token
     db = CredentialDB(tmp_path / "test.db")
-    token = db.create_proxy_token("test-project", "task-1", "test-project", "ssh")
+    token = db.create_token("test-project", "task-1", "test-project", "ssh")
     db.close()
 
     # Write ssh-keys.json
@@ -214,13 +214,13 @@ class TestSign:
 
 
 def _build_handshake(token: str) -> bytes:
-    """Build a phantom-token handshake prefix."""
+    """Build a token handshake prefix."""
     token_bytes = token.encode("utf-8")
     return struct.pack(">I", len(token_bytes)) + token_bytes
 
 
 def _build_msg(msg_type: int, payload: bytes = b"") -> bytes:
-    """Build an SSH agent protocol message."""
+    """Build an SSH signer protocol message."""
     body = bytes([msg_type]) + payload
     return struct.pack(">I", len(body)) + body
 
@@ -229,7 +229,7 @@ _READ_TIMEOUT = 5.0  # seconds — prevent tests from hanging on CI
 
 
 async def _read_response(reader: asyncio.StreamReader) -> tuple[int, bytes]:
-    """Read one SSH agent response message."""
+    """Read one SSH signer response message."""
     raw_len = await asyncio.wait_for(reader.readexactly(4), timeout=_READ_TIMEOUT)
     (msg_len,) = struct.unpack(">I", raw_len)
     body = await asyncio.wait_for(reader.readexactly(msg_len), timeout=_READ_TIMEOUT)
@@ -237,14 +237,14 @@ async def _read_response(reader: asyncio.StreamReader) -> tuple[int, bytes]:
 
 
 @pytest.mark.asyncio
-class TestSSHAgentRoundTrip:
+class TestSSHSignerRoundTrip:
     """Full TCP round-trip tests using a real asyncio server."""
 
-    async def test_identity_listing(self, ssh_agent_env) -> None:
+    async def test_identity_listing(self, ssh_signer_env) -> None:
         """REQUEST_IDENTITIES returns the scope's public key."""
-        db_path, keys_file, token, pub_blob = ssh_agent_env
+        db_path, keys_file, token, pub_blob = ssh_signer_env
 
-        server = await start_ssh_agent_server(db_path, keys_file, "127.0.0.1", 0)
+        server = await start_ssh_signer(db_path, keys_file, "127.0.0.1", 0)
         port = server.sockets[0].getsockname()[1]
         try:
             reader, writer = await asyncio.open_connection("127.0.0.1", port)
@@ -267,11 +267,11 @@ class TestSSHAgentRoundTrip:
             server.close()
             await server.wait_closed()
 
-    async def test_sign_request(self, ssh_agent_env) -> None:
+    async def test_sign_request(self, ssh_signer_env) -> None:
         """SIGN_REQUEST returns a valid signature."""
-        db_path, keys_file, token, pub_blob = ssh_agent_env
+        db_path, keys_file, token, pub_blob = ssh_signer_env
 
-        server = await start_ssh_agent_server(db_path, keys_file, "127.0.0.1", 0)
+        server = await start_ssh_signer(db_path, keys_file, "127.0.0.1", 0)
         port = server.sockets[0].getsockname()[1]
         try:
             reader, writer = await asyncio.open_connection("127.0.0.1", port)
@@ -329,12 +329,10 @@ class TestSSHAgentRoundTrip:
         )
 
         db = CredentialDB(tmp_path / "test.db")
-        token = db.create_proxy_token("proj", "task-1", "proj", "ssh")
+        token = db.create_token("proj", "task-1", "proj", "ssh")
         db.close()
 
-        server = await start_ssh_agent_server(
-            str(tmp_path / "test.db"), str(keys_file), "127.0.0.1", 0
-        )
+        server = await start_ssh_signer(str(tmp_path / "test.db"), str(keys_file), "127.0.0.1", 0)
         port = server.sockets[0].getsockname()[1]
         try:
             reader, writer = await asyncio.open_connection("127.0.0.1", port)
@@ -371,11 +369,11 @@ class TestSSHAgentRoundTrip:
             server.close()
             await server.wait_closed()
 
-    async def test_invalid_token_closes_connection(self, ssh_agent_env) -> None:
-        """Invalid phantom token closes the connection without response."""
-        db_path, keys_file, _token, _pub_blob = ssh_agent_env
+    async def test_invalid_token_closes_connection(self, ssh_signer_env) -> None:
+        """Invalid token closes the connection without response."""
+        db_path, keys_file, _token, _pub_blob = ssh_signer_env
 
-        server = await start_ssh_agent_server(db_path, keys_file, "127.0.0.1", 0)
+        server = await start_ssh_signer(db_path, keys_file, "127.0.0.1", 0)
         port = server.sockets[0].getsockname()[1]
         try:
             reader, writer = await asyncio.open_connection("127.0.0.1", port)
@@ -394,7 +392,7 @@ class TestSSHAgentRoundTrip:
             await server.wait_closed()
 
     async def test_non_ssh_provider_token_rejected(self, tmp_path: Path) -> None:
-        """A phantom token with provider != 'ssh' is rejected."""
+        """A token with provider != 'ssh' is rejected."""
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey as EK
         from cryptography.hazmat.primitives.serialization import (
             Encoding as E,
@@ -423,12 +421,10 @@ class TestSSHAgentRoundTrip:
 
         db = CredentialDB(tmp_path / "test.db")
         # Create a token with provider="claude" (not "ssh")
-        api_token = db.create_proxy_token("proj", "task-1", "default", "claude")
+        api_token = db.create_token("proj", "task-1", "default", "claude")
         db.close()
 
-        server = await start_ssh_agent_server(
-            str(tmp_path / "test.db"), str(keys_file), "127.0.0.1", 0
-        )
+        server = await start_ssh_signer(str(tmp_path / "test.db"), str(keys_file), "127.0.0.1", 0)
         port = server.sockets[0].getsockname()[1]
         try:
             reader, writer = await asyncio.open_connection("127.0.0.1", port)
@@ -446,11 +442,11 @@ class TestSSHAgentRoundTrip:
             server.close()
             await server.wait_closed()
 
-    async def test_unknown_message_returns_failure(self, ssh_agent_env) -> None:
+    async def test_unknown_message_returns_failure(self, ssh_signer_env) -> None:
         """Unknown message type returns SSH_AGENT_FAILURE."""
-        db_path, keys_file, token, _pub_blob = ssh_agent_env
+        db_path, keys_file, token, _pub_blob = ssh_signer_env
 
-        server = await start_ssh_agent_server(db_path, keys_file, "127.0.0.1", 0)
+        server = await start_ssh_signer(db_path, keys_file, "127.0.0.1", 0)
         port = server.sockets[0].getsockname()[1]
         try:
             reader, writer = await asyncio.open_connection("127.0.0.1", port)
@@ -467,11 +463,11 @@ class TestSSHAgentRoundTrip:
             server.close()
             await server.wait_closed()
 
-    async def test_sign_wrong_key_returns_failure(self, ssh_agent_env) -> None:
+    async def test_sign_wrong_key_returns_failure(self, ssh_signer_env) -> None:
         """Sign request for an unknown key blob returns SSH_AGENT_FAILURE."""
-        db_path, keys_file, token, _pub_blob = ssh_agent_env
+        db_path, keys_file, token, _pub_blob = ssh_signer_env
 
-        server = await start_ssh_agent_server(db_path, keys_file, "127.0.0.1", 0)
+        server = await start_ssh_signer(db_path, keys_file, "127.0.0.1", 0)
         port = server.sockets[0].getsockname()[1]
         try:
             reader, writer = await asyncio.open_connection("127.0.0.1", port)
@@ -491,11 +487,11 @@ class TestSSHAgentRoundTrip:
             server.close()
             await server.wait_closed()
 
-    async def test_malformed_sign_payload_returns_failure(self, ssh_agent_env) -> None:
+    async def test_malformed_sign_payload_returns_failure(self, ssh_signer_env) -> None:
         """Truncated sign request payload returns SSH_AGENT_FAILURE."""
-        db_path, keys_file, token, _pub_blob = ssh_agent_env
+        db_path, keys_file, token, _pub_blob = ssh_signer_env
 
-        server = await start_ssh_agent_server(db_path, keys_file, "127.0.0.1", 0)
+        server = await start_ssh_signer(db_path, keys_file, "127.0.0.1", 0)
         port = server.sockets[0].getsockname()[1]
         try:
             reader, writer = await asyncio.open_connection("127.0.0.1", port)
@@ -515,10 +511,10 @@ class TestSSHAgentRoundTrip:
     async def test_missing_keys_file_closes_connection(self, tmp_path: Path) -> None:
         """When ssh-keys.json doesn't exist, connections fail gracefully."""
         db = CredentialDB(tmp_path / "test.db")
-        token = db.create_proxy_token("ghost", "task-1", "ghost", "ssh")
+        token = db.create_token("ghost", "task-1", "ghost", "ssh")
         db.close()
 
-        server = await start_ssh_agent_server(
+        server = await start_ssh_signer(
             str(tmp_path / "test.db"), str(tmp_path / "no-such.json"), "127.0.0.1", 0
         )
         port = server.sockets[0].getsockname()[1]
@@ -658,17 +654,19 @@ class TestRSASign:
         raw_sig, _ = _unpack_string(memoryview(sig_blob), off)
         rsa_key.public_key().verify(raw_sig, data, PKCS1v15(), SHA512())
 
-    def test_rsa_no_flags_uses_ssh_rsa_sha1(self, rsa_key) -> None:
-        """No flags defaults to ssh-rsa with SHA-1 per RFC 4253 §6.6."""
+    def test_rsa_no_flags_defaults_to_sha2_256(self, rsa_key) -> None:
+        """A client that sets no RSA-SHA2 flag gets rsa-sha2-256 — SHA-1 is
+        not offered (OpenSSH 8.7+ rejects SHA-1 signatures and SHA-1 is no
+        longer collision-resistant)."""
         from cryptography.hazmat.primitives.asymmetric.padding import PKCS1v15
-        from cryptography.hazmat.primitives.hashes import SHA1
+        from cryptography.hazmat.primitives.hashes import SHA256
 
         data = b"test"
         sig_blob = _sign(rsa_key, data, 0)
         algo, off = _unpack_string(memoryview(sig_blob), 0)
-        assert algo == b"ssh-rsa"
+        assert algo == b"rsa-sha2-256"
         raw_sig, _ = _unpack_string(memoryview(sig_blob), off)
-        rsa_key.public_key().verify(raw_sig, data, PKCS1v15(), SHA1())  # noqa: S303
+        rsa_key.public_key().verify(raw_sig, data, PKCS1v15(), SHA256())
 
     def test_rsa_sha256_signature_verifies(self, rsa_key) -> None:
         """RSA-SHA2-256 signature verifies against the public key."""
@@ -827,12 +825,10 @@ class TestTkMainOrdering:
         )
 
         db = CredentialDB(tmp_path / "test.db")
-        token = db.create_proxy_token("myproject", "task-1", "myproject", "ssh")
+        token = db.create_token("myproject", "task-1", "myproject", "ssh")
         db.close()
 
-        server = await start_ssh_agent_server(
-            str(tmp_path / "test.db"), str(keys_file), "127.0.0.1", 0
-        )
+        server = await start_ssh_signer(str(tmp_path / "test.db"), str(keys_file), "127.0.0.1", 0)
         port = server.sockets[0].getsockname()[1]
         try:
             reader, writer = await asyncio.open_connection("127.0.0.1", port)
@@ -887,12 +883,10 @@ class TestTkMainOrdering:
         )
 
         db = CredentialDB(tmp_path / "test.db")
-        token = db.create_proxy_token("proj", "task-1", "proj", "ssh")
+        token = db.create_token("proj", "task-1", "proj", "ssh")
         db.close()
 
-        server = await start_ssh_agent_server(
-            str(tmp_path / "test.db"), str(keys_file), "127.0.0.1", 0
-        )
+        server = await start_ssh_signer(str(tmp_path / "test.db"), str(keys_file), "127.0.0.1", 0)
         port = server.sockets[0].getsockname()[1]
         try:
             reader, writer = await asyncio.open_connection("127.0.0.1", port)

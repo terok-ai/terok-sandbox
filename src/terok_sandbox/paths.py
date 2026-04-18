@@ -250,13 +250,39 @@ def runtime_root() -> Path:
     return namespace_runtime_dir("sandbox", "TEROK_SANDBOX_RUNTIME_DIR")
 
 
-def credentials_root() -> Path:
-    """Shared credentials directory used by all terok ecosystem packages.
+def vault_root() -> Path:
+    """Shared vault directory used by all terok ecosystem packages.
 
-    Priority: ``TEROK_CREDENTIALS_DIR`` → ``/var/lib/terok/credentials`` (root)
+    Priority: ``TEROK_VAULT_DIR`` → ``/var/lib/terok/vault`` (root)
     → XDG data dir.
+
+    Migration: detects the pre-0.8 ``credentials/`` directory and the legacy
+    ``TEROK_CREDENTIALS_DIR`` env var, emitting warnings when found.
     """
-    return namespace_state_dir("credentials", "TEROK_CREDENTIALS_DIR")
+    env = os.getenv("TEROK_VAULT_DIR")
+    if not env:
+        old_env = os.getenv("TEROK_CREDENTIALS_DIR")
+        if old_env:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "TEROK_CREDENTIALS_DIR is deprecated — use TEROK_VAULT_DIR instead"
+            )
+            return Path(old_env).expanduser()
+    if env:
+        return Path(env).expanduser()
+    path = namespace_state_dir("vault", "TEROK_VAULT_DIR")
+    old = path.parent / "credentials"
+    if old.is_dir() and not path.is_dir():
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "Pre-0.8 credentials directory detected at %s — "
+            "run 'terok-migrate-vault' to migrate to %s",
+            old,
+            path,
+        )
+    return path
 
 
 def namespace_config_root() -> Path:

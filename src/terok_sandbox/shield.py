@@ -51,7 +51,9 @@ def make_shield(task_dir: Path, cfg: SandboxConfig | None = None) -> Shield:
     c = _cfg(cfg)
     # Socket-mode transports emit no loopback traffic; filter ``None`` so
     # the nftables rule generator only sees ports that actually exist.
-    loopback = tuple(p for p in (c.gate_port, c.proxy_port, c.ssh_agent_port) if p is not None)
+    loopback = tuple(
+        p for p in (c.gate_port, c.token_broker_port, c.ssh_signer_port) if p is not None
+    )
     config = ShieldConfig(
         state_dir=task_dir / "shield",
         mode=ShieldMode.HOOK,

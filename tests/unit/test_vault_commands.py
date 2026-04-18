@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for credential proxy CLI command handlers."""
+"""Tests for vault CLI command handlers."""
 
 from __future__ import annotations
 
@@ -10,16 +10,16 @@ from unittest.mock import patch
 
 import pytest
 
-from terok_sandbox.commands import _handle_proxy_start, _handle_proxy_status, _handle_proxy_stop
-from terok_sandbox.credentials.lifecycle import CredentialProxyManager, CredentialProxyStatus
+from terok_sandbox.commands import _handle_vault_start, _handle_vault_status, _handle_vault_stop
+from terok_sandbox.vault.lifecycle import VaultManager, VaultStatus
 
 
-class TestProxyStart:
-    """Verify _handle_proxy_start."""
+class TestVaultStart:
+    """Verify the vault start command handler."""
 
     def test_already_running(self, capsys: pytest.CaptureFixture[str]) -> None:
-        """Prints message and returns when proxy is already running."""
-        status = CredentialProxyStatus(
+        """Prints message and returns when vault is already running."""
+        status = VaultStatus(
             mode="daemon",
             running=True,
             healthy=True,
@@ -29,14 +29,14 @@ class TestProxyStart:
             routes_configured=0,
             credentials_stored=(),
         )
-        with patch.object(CredentialProxyManager, "get_status", return_value=status):
-            _handle_proxy_start()
+        with patch.object(VaultManager, "get_status", return_value=status):
+            _handle_vault_start()
 
         assert "already running" in capsys.readouterr().out
 
     def test_starts_daemon(self, capsys: pytest.CaptureFixture[str]) -> None:
         """Calls start_daemon and prints confirmation."""
-        status = CredentialProxyStatus(
+        status = VaultStatus(
             mode="none",
             running=False,
             healthy=False,
@@ -47,43 +47,43 @@ class TestProxyStart:
             credentials_stored=(),
         )
         with (
-            patch.object(CredentialProxyManager, "get_status", return_value=status),
-            patch.object(CredentialProxyManager, "start_daemon") as mock_start,
+            patch.object(VaultManager, "get_status", return_value=status),
+            patch.object(VaultManager, "start_daemon") as mock_start,
         ):
-            _handle_proxy_start()
+            _handle_vault_start()
 
         mock_start.assert_called_once()
         assert "started" in capsys.readouterr().out
 
 
-class TestProxyStop:
-    """Verify _handle_proxy_stop."""
+class TestVaultStop:
+    """Verify the vault stop command handler."""
 
     def test_not_running(self, capsys: pytest.CaptureFixture[str]) -> None:
-        """Prints message when proxy is not running."""
-        with patch.object(CredentialProxyManager, "is_daemon_running", return_value=False):
-            _handle_proxy_stop()
+        """Prints message when vault is not running."""
+        with patch.object(VaultManager, "is_daemon_running", return_value=False):
+            _handle_vault_stop()
 
         assert "not running" in capsys.readouterr().out
 
     def test_stops_daemon(self, capsys: pytest.CaptureFixture[str]) -> None:
         """Calls stop_daemon and prints confirmation."""
         with (
-            patch.object(CredentialProxyManager, "is_daemon_running", return_value=True),
-            patch.object(CredentialProxyManager, "stop_daemon") as mock_stop,
+            patch.object(VaultManager, "is_daemon_running", return_value=True),
+            patch.object(VaultManager, "stop_daemon") as mock_stop,
         ):
-            _handle_proxy_stop()
+            _handle_vault_stop()
 
         mock_stop.assert_called_once()
         assert "stopped" in capsys.readouterr().out
 
 
-class TestProxyStatus:
-    """Verify _handle_proxy_status."""
+class TestVaultStatus:
+    """Verify the vault status command handler."""
 
     def test_shows_running(self, capsys: pytest.CaptureFixture[str]) -> None:
         """Displays running status with socket and DB paths."""
-        status = CredentialProxyStatus(
+        status = VaultStatus(
             mode="daemon",
             running=True,
             healthy=True,
@@ -93,8 +93,8 @@ class TestProxyStatus:
             routes_configured=0,
             credentials_stored=(),
         )
-        with patch.object(CredentialProxyManager, "get_status", return_value=status):
-            _handle_proxy_status()
+        with patch.object(VaultManager, "get_status", return_value=status):
+            _handle_vault_status()
 
         out = capsys.readouterr().out
         assert "running" in out
@@ -103,7 +103,7 @@ class TestProxyStatus:
 
     def test_shows_stopped(self, capsys: pytest.CaptureFixture[str]) -> None:
         """Displays stopped status."""
-        status = CredentialProxyStatus(
+        status = VaultStatus(
             mode="none",
             running=False,
             healthy=False,
@@ -113,7 +113,7 @@ class TestProxyStatus:
             routes_configured=0,
             credentials_stored=(),
         )
-        with patch.object(CredentialProxyManager, "get_status", return_value=status):
-            _handle_proxy_status()
+        with patch.object(VaultManager, "get_status", return_value=status):
+            _handle_vault_status()
 
         assert "stopped" in capsys.readouterr().out

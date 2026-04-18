@@ -8,8 +8,8 @@ Delegates to domain subsystems:
 
 - :mod:`~.gate` — authenticated git serving: HTTP server, token CRUD, upstream
   mirror management, systemd/daemon lifecycle.
-- :mod:`~.credentials` — secret injection: reverse proxy with phantom tokens,
-  SSH keypair provisioning, SQLite credential store, systemd/daemon lifecycle.
+- :mod:`~.vault` — secret injection: token broker with phantom credentials,
+  SSH signing proxy, SQLite credential store, systemd/daemon lifecycle.
 - :mod:`~.shield` — egress firewall adapter (delegates to terok-shield).
 - :mod:`~.runtime` — Podman CLI wrapper (state queries, GPU, log streaming).
 - :mod:`~.sandbox` — facade composing the above behind :class:`SandboxConfig`.
@@ -42,33 +42,27 @@ from .commands import (
     COMMANDS as SANDBOX_COMMANDS,
     DOCTOR_COMMANDS,
     GATE_COMMANDS,
-    PROXY_COMMANDS,
     SHIELD_COMMANDS,
     SSH_COMMANDS,
+    VAULT_COMMANDS,
     CommandDef,
     KeyRow,
 )
 from .config import CONTAINER_RUNTIME_DIR, SandboxConfig
 from .config_stack import ConfigScope, ConfigStack
 from .credentials.db import CredentialDB
-from .credentials.lifecycle import (
-    CredentialProxyManager,
-    CredentialProxyStatus,
-    ProxyUnreachableError,
-)
-from .credentials.proxy.constants import PHANTOM_CREDENTIALS_MARKER
 from .credentials.ssh import SSHManager, generate_keypair, update_ssh_keys_json
 from .doctor import CheckVerdict, DoctorCheck, sandbox_doctor_checks
 from .gate.lifecycle import GateServerManager, GateServerStatus
 from .gate.mirror import GateStalenessInfo, GitGate
 from .gate.tokens import TokenStore
 from .paths import (
-    credentials_root,
     namespace_config_dir,
     namespace_config_root,
     namespace_runtime_dir,
     namespace_state_dir,
     port_registry_dir,
+    vault_root,
 )
 
 # -- Port registry -----------------------------------------------------------
@@ -122,6 +116,12 @@ from .shield import (
     state,
     status,
     up,
+)
+from .vault.constants import PHANTOM_CREDENTIALS_MARKER
+from .vault.lifecycle import (
+    VaultManager,
+    VaultStatus,
+    VaultUnreachableError,
 )
 
 if TYPE_CHECKING:
@@ -226,37 +226,37 @@ def revoke_token_for_task(scope: str, task_id: str, cfg: SandboxConfig | None = 
     TokenStore(cfg).revoke_for_task(scope, task_id)
 
 
-# -- Credential proxy wrappers -----------------------------------------------
+# -- Vault wrappers ----------------------------------------------------------
 
 
-def ensure_proxy_reachable(cfg: SandboxConfig | None = None) -> None:
-    """Verify the credential proxy is running and its TCP ports are up."""
-    CredentialProxyManager(cfg).ensure_reachable()
+def ensure_vault_reachable(cfg: SandboxConfig | None = None) -> None:
+    """Verify the vault is running and its TCP ports are up."""
+    VaultManager(cfg).ensure_reachable()
 
 
-def get_proxy_status(cfg: SandboxConfig | None = None) -> CredentialProxyStatus:
-    """Return the current credential proxy status."""
-    return CredentialProxyManager(cfg).get_status()
+def get_vault_status(cfg: SandboxConfig | None = None) -> VaultStatus:
+    """Return the current vault status."""
+    return VaultManager(cfg).get_status()
 
 
-def get_proxy_port(cfg: SandboxConfig | None = None) -> int:
-    """Return the configured credential proxy TCP port."""
-    return CredentialProxyManager(cfg).proxy_port
+def get_token_broker_port(cfg: SandboxConfig | None = None) -> int:
+    """Return the configured token broker TCP port."""
+    return VaultManager(cfg).token_broker_port
 
 
-def get_ssh_agent_port(cfg: SandboxConfig | None = None) -> int:
-    """Return the configured SSH agent proxy TCP port."""
-    return CredentialProxyManager(cfg).ssh_agent_port
+def get_ssh_signer_port(cfg: SandboxConfig | None = None) -> int:
+    """Return the configured SSH signer TCP port."""
+    return VaultManager(cfg).ssh_signer_port
 
 
-def install_proxy_systemd(
+def install_vault_systemd(
     cfg: SandboxConfig | None = None, *, transport: str | None = None
 ) -> None:
-    """Render and install credential proxy systemd units for the selected transport.
+    """Render and install vault systemd units for the selected transport.
 
     When *transport* is ``None`` (the default), reads ``services.mode``
     from the layered config so callers that don't thread the transport
-    explicitly (e.g. the TUI's proxy-install action) still pick up the
+    explicitly (e.g. the TUI's vault-install action) still pick up the
     user's ``socket`` vs ``tcp`` choice.  Pass an explicit string to
     override the config.
     """
@@ -264,47 +264,47 @@ def install_proxy_systemd(
         from .config import _services_mode
 
         transport = _services_mode()
-    CredentialProxyManager(cfg).install_systemd_units(transport=transport)
+    VaultManager(cfg).install_systemd_units(transport=transport)
 
 
-def is_proxy_running(cfg: SandboxConfig | None = None) -> bool:
-    """Check whether the managed proxy daemon is alive."""
-    return CredentialProxyManager(cfg).is_daemon_running()
+def is_vault_running(cfg: SandboxConfig | None = None) -> bool:
+    """Check whether the managed vault daemon is alive."""
+    return VaultManager(cfg).is_daemon_running()
 
 
-def is_proxy_service_active() -> bool:
-    """Check whether the credential proxy service unit is active."""
-    return CredentialProxyManager().is_service_active()
+def is_vault_service_active() -> bool:
+    """Check whether the vault service unit is active."""
+    return VaultManager().is_service_active()
 
 
-def is_proxy_socket_active() -> bool:
-    """Check whether the credential proxy socket unit is active."""
-    return CredentialProxyManager().is_socket_active()
+def is_vault_socket_active() -> bool:
+    """Check whether the vault socket unit is active."""
+    return VaultManager().is_socket_active()
 
 
-def is_proxy_socket_installed() -> bool:
-    """Check whether the credential proxy socket unit file exists."""
-    return CredentialProxyManager().is_socket_installed()
+def is_vault_socket_installed() -> bool:
+    """Check whether the vault socket unit file exists."""
+    return VaultManager().is_socket_installed()
 
 
-def is_proxy_systemd_available() -> bool:
+def is_vault_systemd_available() -> bool:
     """Check whether the systemd user session is reachable."""
-    return CredentialProxyManager().is_systemd_available()
+    return VaultManager().is_systemd_available()
 
 
-def start_proxy(cfg: SandboxConfig | None = None) -> None:
-    """Start the credential proxy as a background daemon."""
-    CredentialProxyManager(cfg).start_daemon()
+def start_vault(cfg: SandboxConfig | None = None) -> None:
+    """Start the vault as a background daemon."""
+    VaultManager(cfg).start_daemon()
 
 
-def stop_proxy(cfg: SandboxConfig | None = None) -> None:
-    """Stop the managed proxy daemon."""
-    CredentialProxyManager(cfg).stop_daemon()
+def stop_vault(cfg: SandboxConfig | None = None) -> None:
+    """Stop the managed vault daemon."""
+    VaultManager(cfg).stop_daemon()
 
 
-def uninstall_proxy_systemd(cfg: SandboxConfig | None = None) -> None:
+def uninstall_vault_systemd(cfg: SandboxConfig | None = None) -> None:
     """Disable+stop the socket and remove unit files."""
-    CredentialProxyManager(cfg).uninstall_systemd_units()
+    VaultManager(cfg).uninstall_systemd_units()
 
 
 __all__ = [
@@ -314,10 +314,10 @@ __all__ = [
     "ConfigStack",
     "SandboxConfig",
     # Lifecycle managers
-    "CredentialProxyManager",
+    "VaultManager",
     "GateServerManager",
     "TokenStore",
-    "credentials_root",
+    "vault_root",
     "namespace_config_dir",
     "namespace_config_root",
     "namespace_runtime_dir",
@@ -382,28 +382,28 @@ __all__ = [
     "PHANTOM_CREDENTIALS_MARKER",
     # Credential DB
     "CredentialDB",
-    # Credential proxy
-    "CredentialProxyStatus",
-    "ProxyUnreachableError",
-    "ensure_proxy_reachable",
-    "get_proxy_port",
-    "get_proxy_status",
-    "get_ssh_agent_port",
-    "install_proxy_systemd",
-    "is_proxy_running",
-    "is_proxy_service_active",
-    "is_proxy_socket_active",
-    "is_proxy_socket_installed",
-    "is_proxy_systemd_available",
-    "start_proxy",
-    "stop_proxy",
-    "uninstall_proxy_systemd",
+    # Vault
+    "VaultStatus",
+    "VaultUnreachableError",
+    "ensure_vault_reachable",
+    "get_token_broker_port",
+    "get_vault_status",
+    "get_ssh_signer_port",
+    "install_vault_systemd",
+    "is_vault_running",
+    "is_vault_service_active",
+    "is_vault_socket_active",
+    "is_vault_socket_installed",
+    "is_vault_systemd_available",
+    "start_vault",
+    "stop_vault",
+    "uninstall_vault_systemd",
     # Command registry
     "CommandDef",
     "KeyRow",
     "DOCTOR_COMMANDS",
     "GATE_COMMANDS",
-    "PROXY_COMMANDS",
+    "VAULT_COMMANDS",
     "SANDBOX_COMMANDS",
     "SHIELD_COMMANDS",
     "SSH_COMMANDS",

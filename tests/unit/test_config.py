@@ -26,8 +26,8 @@ class TestSocketModeSkipsPortResolution:
             cfg = SandboxConfig()
         resolve.assert_not_called()
         assert cfg.gate_port is None
-        assert cfg.proxy_port is None
-        assert cfg.ssh_agent_port is None
+        assert cfg.token_broker_port is None
+        assert cfg.ssh_signer_port is None
 
     def test_invalid_mode_warns_and_falls_back(self, capsys: pytest.CaptureFixture[str]) -> None:
         """A typo in ``services.mode`` emits stderr warning and defaults to tcp."""
@@ -56,5 +56,5 @@ class TestSocketModeSkipsPortResolution:
             cfg = SandboxConfig()
         resolve.assert_called_once()
         assert cfg.gate_port == 18700
-        assert cfg.proxy_port == 18701
-        assert cfg.ssh_agent_port == 18702
+        assert cfg.token_broker_port == 18701
+        assert cfg.ssh_signer_port == 18702

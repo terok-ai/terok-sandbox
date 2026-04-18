@@ -4,11 +4,11 @@
 """SQLite-backed credential store and phantom token registry.
 
 Provides host-side storage for captured credentials (API keys, OAuth tokens)
-and per-task phantom tokens used by the credential proxy.  The database is
-**never** mounted into task containers — only the proxy daemon reads it.
+and per-task phantom tokens used by the vault.  The database is
+**never** mounted into task containers — only the vault daemon reads it.
 
 Uses sqlite3 in WAL mode for lock-free concurrent reads across multiple
-terok processes (CLI commands, proxy daemon, task runners).  Zero external
+terok processes (CLI commands, vault daemon, task runners).  Zero external
 dependencies.
 
 Encryption upgrade path: wrap the ``data`` column with
@@ -26,6 +26,9 @@ from pathlib import Path
 
 class CredentialDB:
     """SQLite-backed credential store and phantom token registry.
+
+    Stores captured provider credentials and issues per-task phantom tokens
+    consumed by the vault.
 
     Args:
         db_path: Path to the sqlite3 database file.  Parent directories
@@ -93,7 +96,7 @@ class CredentialDB:
 
     # ── Phantom tokens ───────────────────────────────────────────────────
 
-    def create_proxy_token(self, scope: str, task: str, credential_set: str, provider: str) -> str:
+    def create_token(self, scope: str, task: str, credential_set: str, provider: str) -> str:
         """Create a per-task, per-provider phantom token.
 
         Token format: ``terok-p-<32 hex chars>``.
@@ -107,7 +110,7 @@ class CredentialDB:
         self._conn.commit()
         return token
 
-    def lookup_proxy_token(self, token: str) -> dict | None:
+    def lookup_token(self, token: str) -> dict | None:
         """Return ``{scope, task, credential_set, provider}`` or ``None``."""
         row = self._conn.execute(
             "SELECT scope, task, credential_set, provider FROM proxy_tokens WHERE token = ?",
@@ -117,8 +120,8 @@ class CredentialDB:
             return None
         return {"scope": row[0], "task": row[1], "credential_set": row[2], "provider": row[3]}
 
-    def revoke_proxy_tokens(self, scope: str, task: str) -> int:
-        """Revoke all tokens for a scope/task pair.  Returns count revoked."""
+    def revoke_tokens(self, scope: str, task: str) -> int:
+        """Revoke all phantom tokens for a scope/task pair.  Returns count revoked."""
         cur = self._conn.execute(
             "DELETE FROM proxy_tokens WHERE scope = ? AND task = ?",
             (scope, task),

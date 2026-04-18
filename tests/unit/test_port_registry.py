@@ -16,7 +16,7 @@ from terok_sandbox.port_registry import (
     PortRegistry,
     _is_port_free,
     _parse_listen_port,
-    _parse_ssh_agent_port,
+    _parse_ssh_signer_port,
     _save_ports,
 )
 
@@ -331,7 +331,7 @@ def test_sandbox_config_auto_resolves(tmp_path: Path) -> None:
     state.mkdir()
     cfg = SandboxConfig(state_dir=state)
     assert isinstance(cfg.gate_port, int)
-    assert len({cfg.gate_port, cfg.proxy_port, cfg.ssh_agent_port}) == 3
+    assert len({cfg.gate_port, cfg.token_broker_port, cfg.ssh_signer_port}) == 3
     assert (state / reg._CLAIMS_FILENAME).exists()
 
 
@@ -339,8 +339,8 @@ def test_sandbox_config_explicit_passthrough() -> None:
     """SandboxConfig with explicit ports does not auto-resolve."""
     from terok_sandbox import SandboxConfig
 
-    cfg = SandboxConfig(gate_port=9418, proxy_port=18731, ssh_agent_port=18732)
-    assert (cfg.gate_port, cfg.proxy_port, cfg.ssh_agent_port) == (9418, 18731, 18732)
+    cfg = SandboxConfig(gate_port=9418, token_broker_port=18731, ssh_signer_port=18732)
+    assert (cfg.gate_port, cfg.token_broker_port, cfg.ssh_signer_port) == (9418, 18731, 18732)
 
 
 # ---------------------------------------------------------------------------
@@ -349,7 +349,7 @@ def test_sandbox_config_explicit_passthrough() -> None:
 
 
 class TestParseListenPort:
-    """Tests for _parse_listen_port (gate + proxy socket units)."""
+    """Tests for _parse_listen_port (gate + vault socket units)."""
 
     def test_extracts_port_from_gate_socket(self, tmp_path: Path) -> None:
         """Parses ListenStream=127.0.0.1:PORT from a gate socket unit."""
@@ -357,12 +357,12 @@ class TestParseListenPort:
         unit.write_text("[Socket]\nListenStream=127.0.0.1:18750\nAccept=yes\n")
         assert _parse_listen_port(unit) == 18750
 
-    def test_extracts_port_from_proxy_socket(self, tmp_path: Path) -> None:
-        """Parses TCP ListenStream from proxy socket (ignores Unix socket line)."""
-        unit = tmp_path / "terok-credential-proxy.socket"
+    def test_extracts_port_from_vault_socket(self, tmp_path: Path) -> None:
+        """Parses TCP ListenStream from vault socket (ignores Unix socket line)."""
+        unit = tmp_path / "terok-vault.socket"
         unit.write_text(
             "[Socket]\n"
-            "ListenStream=/run/user/1000/terok/credential-proxy.sock\n"
+            "ListenStream=/run/user/1000/terok/vault.sock\n"
             "SocketMode=0600\n"
             "ListenStream=127.0.0.1:18751\n"
         )
@@ -388,40 +388,40 @@ class TestParseListenPort:
         assert _parse_listen_port(unit) is None
 
 
-class TestParseSshAgentPort:
-    """Tests for _parse_ssh_agent_port (proxy service unit)."""
+class TestParseSshSignerPort:
+    """Tests for _parse_ssh_signer_port (vault service unit)."""
 
-    def test_extracts_ssh_agent_port(self, tmp_path: Path) -> None:
-        """Parses --ssh-agent-port from ExecStart line."""
-        unit = tmp_path / "terok-credential-proxy.service"
+    def test_extracts_ssh_signer_port(self, tmp_path: Path) -> None:
+        """Parses --ssh-signer-port from ExecStart line."""
+        unit = tmp_path / "terok-vault.service"
         unit.write_text(
             "[Service]\n"
-            "ExecStart=/usr/bin/python3 -m terok_sandbox.credentials.proxy "
-            "--port=18751 --ssh-agent-port=18752 --db-path=/tmp/db\n"
+            "ExecStart=/usr/bin/python3 -m terok_sandbox.vault.token_broker "
+            "--port=18751 --ssh-signer-port=18752 --db-path=/tmp/db\n"
         )
-        assert _parse_ssh_agent_port(unit) == 18752
+        assert _parse_ssh_signer_port(unit) == 18752
 
     def test_equals_separator(self, tmp_path: Path) -> None:
-        """--ssh-agent-port=PORT (equals sign) is parsed."""
+        """--ssh-signer-port=PORT (equals sign) is parsed."""
         unit = tmp_path / "svc.service"
-        unit.write_text("ExecStart=cmd --ssh-agent-port=19000\n")
-        assert _parse_ssh_agent_port(unit) == 19000
+        unit.write_text("ExecStart=cmd --ssh-signer-port=19000\n")
+        assert _parse_ssh_signer_port(unit) == 19000
 
     def test_space_separator(self, tmp_path: Path) -> None:
-        """--ssh-agent-port PORT (space) is parsed."""
+        """--ssh-signer-port PORT (space) is parsed."""
         unit = tmp_path / "svc.service"
-        unit.write_text("ExecStart=cmd --ssh-agent-port 19000\n")
-        assert _parse_ssh_agent_port(unit) == 19000
+        unit.write_text("ExecStart=cmd --ssh-signer-port 19000\n")
+        assert _parse_ssh_signer_port(unit) == 19000
 
     def test_missing_file_returns_none(self, tmp_path: Path) -> None:
-        """Non-existent service file → None."""
-        assert _parse_ssh_agent_port(tmp_path / "nonexistent.service") is None
+        """Non-existent service file -> None."""
+        assert _parse_ssh_signer_port(tmp_path / "nonexistent.service") is None
 
     def test_no_flag_returns_none(self, tmp_path: Path) -> None:
-        """Service file without --ssh-agent-port → None."""
+        """Service file without --ssh-signer-port -> None."""
         unit = tmp_path / "svc.service"
         unit.write_text("ExecStart=cmd --port=18751\n")
-        assert _parse_ssh_agent_port(unit) is None
+        assert _parse_ssh_signer_port(unit) is None
 
 
 class TestInstalledPortReclaim:

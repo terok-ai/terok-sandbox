@@ -1,7 +1,7 @@
-# terok-credential-proxy-version: {{UNIT_VERSION}}
+# terok-vault-version: {{UNIT_VERSION}}
 
 [Unit]
-Description=terok credential proxy socket
+Description=terok vault socket
 
 [Socket]
 ListenStream={{SOCKET_PATH}}

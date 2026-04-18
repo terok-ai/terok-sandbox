@@ -63,7 +63,7 @@ def make_mock_shield(
     ("cfg_kwargs", "expected_profiles", "expected_port", "audit_enabled"),
     [
         pytest.param(
-            {"gate_port": GATE_PORT, "proxy_port": 18731, "ssh_agent_port": 18732},
+            {"gate_port": GATE_PORT, "token_broker_port": 18731, "ssh_signer_port": 18732},
             ("dev-standard",),
             GATE_PORT,
             True,
@@ -84,8 +84,8 @@ def make_mock_shield(
             {
                 "shield_profiles": ("single-profile",),
                 "gate_port": GATE_PORT,
-                "proxy_port": 18731,
-                "ssh_agent_port": 18732,
+                "token_broker_port": 18731,
+                "ssh_signer_port": 18732,
             },
             ("single-profile",),
             GATE_PORT,
@@ -112,7 +112,7 @@ def test_make_shield_maps_config_to_shield_config(
     config = shield.config
     assert config.mode == ShieldMode.HOOK
     assert config.default_profiles == expected_profiles
-    assert config.loopback_ports == (expected_port, cfg.proxy_port, cfg.ssh_agent_port)
+    assert config.loopback_ports == (expected_port, cfg.token_broker_port, cfg.ssh_signer_port)
     assert config.audit_enabled is audit_enabled
     assert config.state_dir == MOCK_TASK_DIR / "shield"
     assert config.profiles_dir == MOCK_CONFIG_ROOT / "shield" / "profiles"

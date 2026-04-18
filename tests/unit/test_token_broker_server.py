@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for the credential proxy server — token routing, auth, and forwarding."""
+"""Tests for the token broker server -- token routing, auth, and forwarding."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ import pytest
 from aiohttp import web
 
 from terok_sandbox.credentials.db import CredentialDB
-from terok_sandbox.credentials.proxy.server import (
+from terok_sandbox.vault.token_broker import (
     _KEY_CLIENT,
     _KEY_ROUTES,
     _KEY_TOKEN_DB,
@@ -137,14 +137,14 @@ class TestExtractPhantomToken:
 
 
 class TestTokenDB:
-    """Verify the read-only DB accessor used by the proxy server."""
+    """Verify the read-only DB accessor used by the token broker server."""
 
     @pytest.fixture()
     def token_db(self, tmp_path: Path):
         """Create a DB with test data and return a _TokenDB accessor."""
         db = CredentialDB(tmp_path / "test.db")
         db.store_credential("default", "claude", {"access_token": "sk-real-123"})
-        token = db.create_proxy_token("proj", "task-1", "default", "claude")
+        token = db.create_token("proj", "task-1", "default", "claude")
         db.close()
         accessor = _TokenDB(str(tmp_path / "test.db"))
         accessor._test_token = token  # stash for test use
@@ -205,15 +205,15 @@ class TestBuildApp:
 
 
 @pytest.fixture()
-def _proxy_env(tmp_path: Path):
-    """Set up a DB with per-provider tokens + routes, return (app, tokens)."""
+def _broker_env(tmp_path: Path):
+    """Set up a DB with per-provider tokens and routes, return (app, tokens)."""
     db = CredentialDB(tmp_path / "test.db")
     db.store_credential("default", "claude", {"access_token": "sk-real"})
     db.store_credential("default", "empty", {"type": "oauth"})  # no token fields
     db.store_credential("default", "orphan", {"access_token": "sk-orphan"})
-    claude_token = db.create_proxy_token("proj", "t1", "default", "claude")
-    empty_token = db.create_proxy_token("proj", "t1", "default", "empty")
-    orphan_token = db.create_proxy_token("proj", "t1", "default", "orphan")
+    claude_token = db.create_token("proj", "t1", "default", "claude")
+    empty_token = db.create_token("proj", "t1", "default", "empty")
+    orphan_token = db.create_token("proj", "t1", "default", "orphan")
     db.close()
 
     routes = tmp_path / "routes.json"
@@ -243,56 +243,56 @@ def _proxy_env(tmp_path: Path):
 class TestHandlerEdgeCases:
     """Exercise _handle_request edge cases via aiohttp TestClient."""
 
-    async def test_missing_auth_401(self, _proxy_env) -> None:
+    async def test_missing_auth_401(self, _broker_env) -> None:
         """Request without auth header returns 401."""
         from aiohttp.test_utils import TestClient, TestServer
 
-        app, _tokens = _proxy_env
+        app, _tokens = _broker_env
         async with TestClient(TestServer(app)) as client:
             resp = await client.get("/v1/messages")
             assert resp.status == 401
 
-    async def test_missing_auth_logs_warning(self, _proxy_env, caplog) -> None:
+    async def test_missing_auth_logs_warning(self, _broker_env, caplog) -> None:
         """Missing auth header logs a WARNING with method and path."""
         import logging
 
         from aiohttp.test_utils import TestClient, TestServer
 
-        app, _tokens = _proxy_env
-        with caplog.at_level(logging.WARNING, logger="terok-credential-proxy"):
+        app, _tokens = _broker_env
+        with caplog.at_level(logging.WARNING, logger="terok-vault"):
             async with TestClient(TestServer(app)) as client:
                 await client.get("/v1/messages")
         assert any("GET /v1/messages" in r.message and "401" in r.message for r in caplog.records)
 
-    async def test_invalid_token_401(self, _proxy_env) -> None:
+    async def test_invalid_token_401(self, _broker_env) -> None:
         """Request with bad phantom token returns 401."""
         from aiohttp.test_utils import TestClient, TestServer
 
-        app, _tokens = _proxy_env
+        app, _tokens = _broker_env
         async with TestClient(TestServer(app)) as client:
             resp = await client.get("/v1/messages", headers={"Authorization": "Bearer fake"})
             assert resp.status == 401
 
-    async def test_invalid_token_logs_warning(self, _proxy_env, caplog) -> None:
+    async def test_invalid_token_logs_warning(self, _broker_env, caplog) -> None:
         """Invalid phantom token logs a WARNING with method and path."""
         import logging
 
         from aiohttp.test_utils import TestClient, TestServer
 
-        app, _tokens = _proxy_env
-        with caplog.at_level(logging.WARNING, logger="terok-credential-proxy"):
+        app, _tokens = _broker_env
+        with caplog.at_level(logging.WARNING, logger="terok-vault"):
             async with TestClient(TestServer(app)) as client:
                 await client.get("/v1/messages", headers={"Authorization": "Bearer fake"})
         assert any("GET /v1/messages" in r.message and "401" in r.message for r in caplog.records)
 
-    async def test_no_route_logs_warning(self, _proxy_env, caplog) -> None:
+    async def test_no_route_logs_warning(self, _broker_env, caplog) -> None:
         """Valid token with no matching route logs a WARNING."""
         import logging
 
         from aiohttp.test_utils import TestClient, TestServer
 
-        app, tokens = _proxy_env
-        with caplog.at_level(logging.WARNING, logger="terok-credential-proxy"):
+        app, tokens = _broker_env
+        with caplog.at_level(logging.WARNING, logger="terok-vault"):
             async with TestClient(TestServer(app)) as client:
                 resp = await client.get(
                     "/v1/x", headers={"Authorization": f"Bearer {tokens['orphan']}"}
@@ -300,11 +300,11 @@ class TestHandlerEdgeCases:
         assert resp.status == 404
         assert any("404" in r.message and "orphan" in r.message for r in caplog.records)
 
-    async def test_empty_credential_returns_502(self, _proxy_env) -> None:
+    async def test_empty_credential_returns_502(self, _broker_env) -> None:
         """Credential with no usable token field returns 502."""
         from aiohttp.test_utils import TestClient, TestServer
 
-        app, tokens = _proxy_env
+        app, tokens = _broker_env
         async with TestClient(TestServer(app)) as client:
             resp = await client.get(
                 "/v1/x",
@@ -316,7 +316,7 @@ class TestHandlerEdgeCases:
 
 @pytest.fixture()
 def _static_marker_env(tmp_path: Path):
-    """Set up DB with Claude OAuth credential + routes for static marker tests."""
+    """Set up DB with Claude OAuth credential and routes for static marker tests."""
     db = CredentialDB(tmp_path / "test.db")
     db.store_credential(
         "default", "claude", {"type": "oauth", "access_token": "sk-real-oauth-static"}
@@ -332,13 +332,13 @@ def _static_marker_env(tmp_path: Path):
 
 @pytest.mark.asyncio
 class TestStaticPhantomMarker:
-    """Verify the static PHANTOM_CREDENTIALS_MARKER is accepted by the proxy."""
+    """Verify the static PHANTOM_CREDENTIALS_MARKER is accepted by the token broker."""
 
     async def test_static_marker_routes_to_claude(self, _static_marker_env) -> None:
-        """Static marker token resolves to Claude credential (returns 502 since upstream is down)."""
+        """Static marker resolves to Claude credential (returns 502 since upstream is down)."""
         from aiohttp.test_utils import TestClient, TestServer
 
-        from terok_sandbox.credentials.proxy.constants import PHANTOM_CREDENTIALS_MARKER
+        from terok_sandbox.vault.constants import PHANTOM_CREDENTIALS_MARKER
 
         app = _static_marker_env
         async with TestClient(TestServer(app)) as client:
@@ -353,7 +353,7 @@ class TestStaticPhantomMarker:
         """Static marker returns 502 (no credential) when Claude has no stored credentials."""
         from aiohttp.test_utils import TestClient, TestServer
 
-        from terok_sandbox.credentials.proxy.constants import PHANTOM_CREDENTIALS_MARKER
+        from terok_sandbox.vault.constants import PHANTOM_CREDENTIALS_MARKER
 
         db = CredentialDB(tmp_path / "test.db")
         db.close()  # empty DB
@@ -385,7 +385,7 @@ class TestStaticPhantomMarker:
 
 @pytest.fixture()
 def _forwarding_env(tmp_path: Path):
-    """Set up proxy + mock upstream to test the full forwarding path."""
+    """Set up token broker + mock upstream to test the full forwarding path."""
     from aiohttp import web as _web
 
     # Mock upstream that echoes back auth and path
@@ -408,9 +408,9 @@ def _forwarding_env(tmp_path: Path):
     db.store_credential("default", "claude", {"type": "oauth", "access_token": "sk-real-oauth"})
     db.store_credential("default", "vibe", {"type": "api_key", "key": "mistral-real-key"})
     db.store_credential("default", "glab", {"type": "pat", "token": "glpat-real"})
-    claude_token = db.create_proxy_token("proj", "t1", "default", "claude")
-    vibe_token = db.create_proxy_token("proj", "t1", "default", "vibe")
-    glab_token = db.create_proxy_token("proj", "t1", "default", "glab")
+    claude_token = db.create_token("proj", "t1", "default", "claude")
+    vibe_token = db.create_token("proj", "t1", "default", "vibe")
+    glab_token = db.create_token("proj", "t1", "default", "glab")
     db.close()
 
     return upstream_app, tmp_path, {"claude": claude_token, "vibe": vibe_token, "glab": glab_token}
@@ -440,8 +440,8 @@ class TestForwardingPath:
             )
         )
 
-        proxy_app = _build_app(str(tmp_path / "test.db"), str(routes))
-        async with TestClient(TestServer(proxy_app)) as client:
+        broker_app = _build_app(str(tmp_path / "test.db"), str(routes))
+        async with TestClient(TestServer(broker_app)) as client:
             resp = await client.post(
                 "/v1/messages",
                 headers={
@@ -480,8 +480,8 @@ class TestForwardingPath:
             )
         )
 
-        proxy_app = _build_app(str(tmp_path / "test.db"), str(routes))
-        async with TestClient(TestServer(proxy_app)) as client:
+        broker_app = _build_app(str(tmp_path / "test.db"), str(routes))
+        async with TestClient(TestServer(broker_app)) as client:
             resp = await client.post(
                 "/v1/chat/completions",
                 headers={"Authorization": f"Bearer {tokens['vibe']}"},
@@ -514,8 +514,8 @@ class TestForwardingPath:
             )
         )
 
-        proxy_app = _build_app(str(tmp_path / "test.db"), str(routes))
-        async with TestClient(TestServer(proxy_app)) as client:
+        broker_app = _build_app(str(tmp_path / "test.db"), str(routes))
+        async with TestClient(TestServer(broker_app)) as client:
             resp = await client.get(
                 "/api/v4/projects",
                 headers={"PRIVATE-TOKEN": tokens["glab"]},
@@ -540,8 +540,8 @@ class TestForwardingPath:
             json.dumps({"claude": {"upstream": f"http://127.0.0.1:{upstream_server.port}"}})
         )
 
-        proxy_app = _build_app(str(tmp_path / "test.db"), str(routes))
-        async with TestClient(TestServer(proxy_app)) as client:
+        broker_app = _build_app(str(tmp_path / "test.db"), str(routes))
+        async with TestClient(TestServer(broker_app)) as client:
             resp = await client.get(
                 "/v1/check?foo=bar&baz=1",
                 headers={"Authorization": f"Bearer {tokens['claude']}"},
@@ -565,8 +565,8 @@ class TestForwardingPath:
             )
         )
 
-        proxy_app = _build_app(str(tmp_path / "test.db"), str(routes))
-        async with TestClient(TestServer(proxy_app)) as client:
+        broker_app = _build_app(str(tmp_path / "test.db"), str(routes))
+        async with TestClient(TestServer(broker_app)) as client:
             resp = await client.get(
                 "/v1/messages",
                 headers={"Authorization": f"Bearer {tokens['claude']}"},
@@ -884,10 +884,10 @@ class TestServerDisconnectRetry:
 
     @pytest.fixture()
     def _app_and_token(self, tmp_path: Path):
-        """Minimal proxy app with a single claude credential; upstream URL is irrelevant (session mocked)."""
+        """Minimal broker app with a single claude credential; upstream URL is irrelevant (session mocked)."""
         db = CredentialDB(tmp_path / "test.db")
         db.store_credential("default", "claude", {"type": "oauth", "access_token": "sk-real"})
-        token = db.create_proxy_token("proj", "t1", "default", "claude")
+        token = db.create_token("proj", "t1", "default", "claude")
         db.close()
 
         routes = tmp_path / "routes.json"
@@ -977,7 +977,7 @@ class TestServerDisconnectRetry:
 
 
 class TestRunMultiSiteSelection:
-    """Verify _run_multi uses inherited sockets or creates its own."""
+    """Verify _run_multi uses inherited sockets or creates its own listeners."""
 
     @staticmethod
     def _make_app(tmp_path: Path) -> web.Application:
@@ -1012,13 +1012,13 @@ class TestRunMultiSiteSelection:
 
         with (
             patch(
-                "terok_sandbox.credentials.proxy.server._systemd_sockets",
+                "terok_sandbox.vault.token_broker._systemd_sockets",
                 return_value=(mock_unix, mock_tcp),
             ),
             patch("aiohttp.web_runner.SockSite", _TrackingSockSite),
         ):
             task = asyncio.create_task(
-                _run_multi(app, sock_path=str(tmp_path / "proxy.sock"), port=18731)
+                _run_multi(app, sock_path=str(tmp_path / "vault.sock"), port=18731)
             )
             await asyncio.sleep(0.05)
             task.cancel()
@@ -1056,14 +1056,14 @@ class TestRunMultiSiteSelection:
 
         with (
             patch(
-                "terok_sandbox.credentials.proxy.server._systemd_sockets",
+                "terok_sandbox.vault.token_broker._systemd_sockets",
                 return_value=(None, None),
             ),
             patch("aiohttp.web_runner.SockSite", _TrackingSockSite),
             patch("aiohttp.web_runner.TCPSite", _TrackingTCPSite),
         ):
             task = asyncio.create_task(
-                _run_multi(app, sock_path=str(tmp_path / "proxy.sock"), port=18731)
+                _run_multi(app, sock_path=str(tmp_path / "vault.sock"), port=18731)
             )
             await asyncio.sleep(0.05)
             task.cancel()

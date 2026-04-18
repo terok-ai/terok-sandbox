@@ -204,39 +204,39 @@ SHIELD_COMMANDS: tuple[CommandDef, ...] = (
 )
 
 # ---------------------------------------------------------------------------
-# Credential proxy handlers
+# Vault handlers
 # ---------------------------------------------------------------------------
 
 
-def _handle_proxy_start() -> None:
-    """Start the credential proxy daemon."""
-    from .credentials.lifecycle import CredentialProxyManager
+def _handle_vault_start() -> None:
+    """Start the vault daemon."""
+    from .vault.lifecycle import VaultManager
 
-    mgr = CredentialProxyManager()
+    mgr = VaultManager()
     if mgr.get_status().running:
-        print("Credential proxy is already running.")
+        print("Vault is already running.")
         return
     mgr.start_daemon()
-    print("Credential proxy started.")
+    print("Vault started.")
 
 
-def _handle_proxy_stop() -> None:
-    """Stop the credential proxy daemon."""
-    from .credentials.lifecycle import CredentialProxyManager
+def _handle_vault_stop() -> None:
+    """Stop the vault daemon."""
+    from .vault.lifecycle import VaultManager
 
-    mgr = CredentialProxyManager()
+    mgr = VaultManager()
     if not mgr.is_daemon_running():
-        print("Credential proxy is not running.")
+        print("Vault is not running.")
         return
     mgr.stop_daemon()
-    print("Credential proxy stopped.")
+    print("Vault stopped.")
 
 
-def _handle_proxy_status() -> None:
-    """Show credential proxy status."""
-    from .credentials.lifecycle import CredentialProxyManager
+def _handle_vault_status() -> None:
+    """Show vault status."""
+    from .vault.lifecycle import VaultManager
 
-    status = CredentialProxyManager().get_status()
+    status = VaultManager().get_status()
     state = "running" if status.running else "stopped"
     print(f"Status: {state}")
     print(f"Socket: {sanitize_tty(str(status.socket_path))}")
@@ -250,60 +250,60 @@ def _handle_proxy_status() -> None:
         print("Credentials: none stored")
 
 
-def _handle_proxy_install() -> None:
-    """Install and start systemd socket activation for the credential proxy."""
-    from .credentials.lifecycle import CredentialProxyManager
+def _handle_vault_install() -> None:
+    """Install and start systemd socket activation for the vault."""
+    from .vault.lifecycle import VaultManager
 
-    mgr = CredentialProxyManager()
+    mgr = VaultManager()
     if not mgr.is_systemd_available():
         print("Error: systemd user services are not available on this host.")
         raise SystemExit(1)
     mgr.install_systemd_units()
-    print("Credential proxy installed via systemd socket activation.")
+    print("Vault installed via systemd socket activation.")
 
 
-def _handle_proxy_uninstall() -> None:
-    """Remove credential proxy systemd units."""
-    from .credentials.lifecycle import CredentialProxyManager
+def _handle_vault_uninstall() -> None:
+    """Remove vault systemd units."""
+    from .vault.lifecycle import VaultManager
 
-    mgr = CredentialProxyManager()
+    mgr = VaultManager()
     if not mgr.is_systemd_available():
         print("Error: systemd user services are not available. Nothing to uninstall.")
         raise SystemExit(1)
     mgr.uninstall_systemd_units()
-    print("Credential proxy systemd units removed.")
+    print("Vault systemd units removed.")
 
 
-PROXY_COMMANDS: tuple[CommandDef, ...] = (
+VAULT_COMMANDS: tuple[CommandDef, ...] = (
     CommandDef(
         name="start",
-        help="Start the credential proxy daemon",
-        handler=_handle_proxy_start,
-        group="proxy",
+        help="Start the vault daemon",
+        handler=_handle_vault_start,
+        group="vault",
     ),
     CommandDef(
         name="stop",
-        help="Stop the credential proxy daemon",
-        handler=_handle_proxy_stop,
-        group="proxy",
+        help="Stop the vault daemon",
+        handler=_handle_vault_stop,
+        group="vault",
     ),
     CommandDef(
         name="status",
-        help="Show credential proxy status",
-        handler=_handle_proxy_status,
-        group="proxy",
+        help="Show vault status",
+        handler=_handle_vault_status,
+        group="vault",
     ),
     CommandDef(
         name="install",
         help="Install systemd socket activation",
-        handler=_handle_proxy_install,
-        group="proxy",
+        handler=_handle_vault_install,
+        group="vault",
     ),
     CommandDef(
         name="uninstall",
         help="Remove systemd units",
-        handler=_handle_proxy_uninstall,
-        group="proxy",
+        handler=_handle_vault_uninstall,
+        group="vault",
     ),
 )
 
@@ -976,14 +976,15 @@ def _handle_doctor(*, cfg: SandboxConfig | None = None) -> None:
     import sys
 
     from .config import SandboxConfig as _SandboxConfig
-    from .credentials.lifecycle import get_proxy_port, get_ssh_agent_port
     from .doctor import sandbox_doctor_checks
+    from .vault.lifecycle import VaultManager
 
     if cfg is None:
         cfg = _SandboxConfig()
+    mgr = VaultManager(cfg)
     checks = sandbox_doctor_checks(
-        proxy_port=get_proxy_port(cfg),
-        ssh_agent_port=get_ssh_agent_port(cfg),
+        token_broker_port=mgr.token_broker_port,
+        ssh_signer_port=mgr.ssh_signer_port,
         desired_shield_state=None,  # standalone mode — no task context
     )
     worst = "ok"
@@ -1033,5 +1034,5 @@ DOCTOR_COMMANDS: tuple[CommandDef, ...] = (
 
 #: All sandbox commands, grouped by subsystem.
 COMMANDS: tuple[CommandDef, ...] = (
-    GATE_COMMANDS + SHIELD_COMMANDS + PROXY_COMMANDS + SSH_COMMANDS + DOCTOR_COMMANDS
+    GATE_COMMANDS + SHIELD_COMMANDS + VAULT_COMMANDS + SSH_COMMANDS + DOCTOR_COMMANDS
 )

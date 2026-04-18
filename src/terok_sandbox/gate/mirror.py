@@ -465,7 +465,7 @@ def _git_env_with_ssh(
     """Return an env that forces git to use the scope's SSH key directly.
 
     Builds ``GIT_SSH_COMMAND`` from the private key file — no SSH config file
-    required.  The credential proxy handles container-side SSH auth; this
+    required.  The vault handles container-side SSH auth; this
     helper only covers host-side gate operations (clone, fetch).
 
     When the key file is not found and *allow_host_keys* is ``False``

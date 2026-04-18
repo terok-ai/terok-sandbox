@@ -67,7 +67,7 @@ depends_on = [
 path = "terok_sandbox.doctor"
 layer = "foundation"
 depends_on = [
-    "terok_sandbox.credentials.proxy",
+    "terok_sandbox.vault",
 ]
 
 # Credential DB — standalone SQLite store
@@ -76,13 +76,13 @@ path = "terok_sandbox.credentials.db"
 layer = "foundation"
 depends_on = []
 
-# Credential proxy server — standalone, zero terok imports
+# Vault — token broker + SSH signer, standalone, zero terok imports
 [[modules]]
-path = "terok_sandbox.credentials.proxy"
+path = "terok_sandbox.vault"
 layer = "foundation"
 depends_on = []
 
-# Credentials package root — standalone
+# Credentials package root — standalone (DB + SSH key management)
 [[modules]]
 path = "terok_sandbox.credentials"
 layer = "foundation"
@@ -144,9 +144,9 @@ path = "terok_sandbox.gate.mirror"
 layer = "core"
 depends_on = []
 
-# Credential proxy lifecycle
+# Vault lifecycle (daemon start/stop, systemd units)
 [[modules]]
-path = "terok_sandbox.credentials.lifecycle"
+path = "terok_sandbox.vault.lifecycle"
 layer = "core"
 depends_on = []
 
