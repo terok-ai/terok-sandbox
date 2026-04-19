@@ -491,10 +491,6 @@ def is_ssh_url(url: str | None) -> bool:
       optional (``git@github.com:foo.git``, ``deploy@host:repo.git``,
       bare ``github.com:foo.git``).
 
-    Non-SSH URL schemes (``https://``, ``http://``, ``file://``) short-
-    circuit to ``False`` before the scp-style regex is consulted, so
-    ``http://example.com:80/path`` isn't misread as ``host:port``.
-
     Shared with terok-main: both the gate's env builder and callers that
     branch on "does this project use SSH?" (e.g. deploy-key prompts,
     gate-sync fallback hints) must agree on one definition.

@@ -542,9 +542,8 @@ def _handle_ssh_pub(
     cfg: SandboxConfig | None = None,
 ) -> None:
     """Print the scope's public key line to stdout (for piping to a deploy-key form)."""
-    import base64
-
     from .config import SandboxConfig as _SandboxConfig
+    from .credentials.ssh_keypair import public_line_of
 
     _validate_scope_name(scope)
     if cfg is None:
@@ -562,9 +561,7 @@ def _handle_ssh_pub(
             if not matches:
                 raise SystemExit(f"key_id {key_id} is not assigned to scope {scope!r}")
             record = matches[0]
-        algo = "ssh-ed25519" if record.key_type == "ed25519" else "ssh-rsa"
-        b64 = base64.b64encode(record.public_blob).decode("ascii")
-        print(f"{algo} {b64} {record.comment}".rstrip())
+        print(public_line_of(record))
     finally:
         db.close()
 

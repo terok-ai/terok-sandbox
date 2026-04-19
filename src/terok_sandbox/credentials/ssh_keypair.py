@@ -334,7 +334,7 @@ def _sanitize_out_name(out_name: str | None) -> str | None:
     if not out_name:
         return None
     if out_name in {".", ".."} or Path(out_name).name != out_name:
-        raise ValueError(f"--out-name must be a bare filename stem, not a path: {out_name!r}")
+        raise ValueError(f"out_name must be a bare filename stem, not a path: {out_name!r}")
     return out_name
 
 
