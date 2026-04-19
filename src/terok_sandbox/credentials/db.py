@@ -263,6 +263,48 @@ class CredentialDB:
             self._bump_ssh_keys_version()
         self._conn.commit()
 
+    def replace_ssh_keys_for_scope(self, scope: str, *, keep_key_id: int) -> None:
+        """Atomically make *keep_key_id* the scope's sole assigned key.
+
+        Wraps the "assign new + revoke every other" sequence in a single
+        SQLite transaction so two concurrent ``init(force=True)`` calls
+        can't both leave their own keys assigned — whichever transaction
+        commits last wins the scope, and exactly one primary survives.
+        Orphaned ``ssh_keys`` rows for revoked keys are cleaned up in the
+        same step via ``unassign_ssh_key`` semantics.
+        """
+        _require_safe_scope(scope)
+        with self._conn:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO ssh_key_assignments (scope, key_id) VALUES (?, ?)",
+                (scope, keep_key_id),
+            )
+            stale_ids = [
+                r[0]
+                for r in self._conn.execute(
+                    "SELECT key_id FROM ssh_key_assignments WHERE scope = ? AND key_id != ?",
+                    (scope, keep_key_id),
+                ).fetchall()
+            ]
+            if stale_ids:
+                # ``placeholders`` is a fixed-length string of ``?`` marks,
+                # never user input — the variadic IN() clause is the reason
+                # we build the SQL with f-string instead of plain params.
+                placeholders = ",".join("?" * len(stale_ids))
+                self._conn.execute(
+                    f"DELETE FROM ssh_key_assignments"  # nosec B608
+                    f" WHERE scope = ? AND key_id IN ({placeholders})",
+                    (scope, *stale_ids),
+                )
+                self._conn.execute(
+                    f"DELETE FROM ssh_keys WHERE id IN ({placeholders})"  # nosec B608
+                    f" AND NOT EXISTS ("
+                    f"  SELECT 1 FROM ssh_key_assignments WHERE key_id = ssh_keys.id"
+                    f")",
+                    tuple(stale_ids),
+                )
+            self._bump_ssh_keys_version()
+
     def unassign_all_ssh_keys(self, scope: str) -> int:
         """Revoke every key currently assigned to *scope*.  Returns count removed."""
         key_ids = [

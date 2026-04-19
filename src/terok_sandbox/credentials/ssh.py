@@ -139,13 +139,12 @@ class SSHManager:
             comment=keypair.comment,
             fingerprint=keypair.fingerprint,
         )
-        self._db.assign_ssh_key(self._scope, key_id)
-
         if force:
-            # New key is already durable — tear down the old assignments.
-            for row in existing:
-                if row.id != key_id:
-                    self._db.unassign_ssh_key(self._scope, row.id)
+            # Atomic "assign new + revoke every other" so two concurrent
+            # force-rotations can't both leave their key assigned.
+            self._db.replace_ssh_keys_for_scope(self._scope, keep_key_id=key_id)
+        else:
+            self._db.assign_ssh_key(self._scope, key_id)
 
         return SSHInitResult(
             key_id=key_id,

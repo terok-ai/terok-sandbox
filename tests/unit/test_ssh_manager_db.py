@@ -71,6 +71,14 @@ class TestInit:
         rotated = SSHManager(scope="proj", db=db).init(force=True)
         assert rotated["comment"] == "tk-main:proj"
 
+    def test_force_rotation_drops_orphaned_ssh_keys_rows(self, db: CredentialDB) -> None:
+        """Atomic replace deletes unassigned ``ssh_keys`` rows too (no stale secrets)."""
+        first = SSHManager(scope="proj", db=db).init()
+        second = SSHManager(scope="proj", db=db).init(force=True)
+        ids_in_db = {r[0] for r in db._conn.execute("SELECT id FROM ssh_keys").fetchall()}
+        assert ids_in_db == {second["key_id"]}
+        assert first["key_id"] not in ids_in_db
+
     def test_empty_comment_is_preserved_not_defaulted(self, db: CredentialDB) -> None:
         """An explicit ``comment=""`` is passed through verbatim."""
         result = SSHManager(scope="proj", db=db).init(comment="")
@@ -96,8 +104,13 @@ class TestOwnership:
 
     def test_context_manager_closes_owned_db(self, tmp_path) -> None:
         """``SSHManager.open`` + ``with`` closes the DB at block exit."""
+        import sqlite3
+
         with SSHManager.open(scope="proj", db_path=tmp_path / "owned.db") as m:
             m.init()  # proves the DB is usable inside the block
+        # Any read on the closed connection must raise — proves __exit__ really closed it.
+        with pytest.raises(sqlite3.ProgrammingError):
+            m._db.list_ssh_keys_for_scope("proj")
         # A second close() must be a no-op (idempotent).
         m.close()
 
