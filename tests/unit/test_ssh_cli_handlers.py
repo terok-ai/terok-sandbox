@@ -15,9 +15,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from terok_sandbox.commands import (
+    _handle_ssh_add,
+    _handle_ssh_export,
     _handle_ssh_import,
     _handle_ssh_link,
+    _handle_ssh_list,
     _handle_ssh_pub,
+    _handle_ssh_remove,
 )
 from terok_sandbox.credentials.db import CredentialDB
 from terok_sandbox.credentials.ssh_keypair import generate_keypair
@@ -276,3 +280,238 @@ class TestImportMessaging:
         capsys.readouterr()
         _handle_ssh_import(scope="proj-a", private_key=str(priv), public_key=str(pub), cfg=mock_cfg)
         assert "Key already linked to scope" in capsys.readouterr().out
+
+
+class TestAdd:
+    """``ssh-add`` mints a new keypair and prints the summary."""
+
+    def test_generates_and_reports(
+        self,
+        db_path: Path,
+        mock_cfg: MagicMock,
+        patched_open_db,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """The happy path stores one row and prints id/type/fingerprint/pub."""
+        _handle_ssh_add(scope="proj", cfg=mock_cfg)
+        out = capsys.readouterr().out
+        assert "SSH key ready for scope 'proj'" in out
+        assert "type:        ed25519" in out
+        assert "ssh-ed25519 " in out
+        db = CredentialDB(db_path)
+        try:
+            assert len(db.list_ssh_keys_for_scope("proj")) == 1
+        finally:
+            db.close()
+
+    def test_rejects_unsupported_key_type(
+        self, db_path: Path, mock_cfg: MagicMock, patched_open_db
+    ) -> None:
+        """Anything other than ed25519/rsa fails before touching the DB."""
+        with pytest.raises(SystemExit, match="Unsupported --key-type"):
+            _handle_ssh_add(scope="proj", key_type="dsa", cfg=mock_cfg)
+
+
+class TestExport:
+    """``ssh-export`` writes OpenSSH files and maps library errors cleanly."""
+
+    def test_writes_both_files(
+        self,
+        tmp_path: Path,
+        db_path: Path,
+        mock_cfg: MagicMock,
+        patched_open_db,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Success prints paths for both files and both land on disk."""
+        _seed(db_path, "proj")
+        out_dir = tmp_path / "out"
+        _handle_ssh_export(scope="proj", out_dir=str(out_dir), cfg=mock_cfg)
+        out = capsys.readouterr().out
+        assert "Exported key id=" in out
+        assert "private key:" in out
+        assert "public key:" in out
+        privs = list(out_dir.glob("id_*"))
+        assert any(p.suffix == ".pub" for p in privs)
+        assert any(p.suffix == "" for p in privs)
+
+    def test_empty_scope_surfaces_as_system_exit(
+        self, tmp_path: Path, db_path: Path, mock_cfg: MagicMock, patched_open_db
+    ) -> None:
+        """Exporting a scope with no keys bubbles the library ValueError as SystemExit."""
+        CredentialDB(db_path).close()  # ensure DB exists
+        with pytest.raises(SystemExit, match="has no SSH keys"):
+            _handle_ssh_export(scope="proj", out_dir=str(tmp_path / "out"), cfg=mock_cfg)
+
+    def test_clobber_surfaces_as_system_exit(
+        self,
+        tmp_path: Path,
+        db_path: Path,
+        mock_cfg: MagicMock,
+        patched_open_db,
+    ) -> None:
+        """Refusing to overwrite a pre-existing file reports the offender path."""
+        _seed(db_path, "proj")
+        out_dir = tmp_path / "out"
+        _handle_ssh_export(scope="proj", out_dir=str(out_dir), out_name="custom", cfg=mock_cfg)
+        with pytest.raises(SystemExit, match="Refusing to overwrite"):
+            _handle_ssh_export(scope="proj", out_dir=str(out_dir), out_name="custom", cfg=mock_cfg)
+
+
+class TestList:
+    """``ssh-list`` renders the full key table or a single-scope subset."""
+
+    def test_lists_all_when_no_filter(
+        self,
+        db_path: Path,
+        mock_cfg: MagicMock,
+        patched_open_db,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Without ``--scope``, every registered key shows up in the table."""
+        _seed(db_path, "proj-a")
+        _seed(db_path, "proj-b")
+        _handle_ssh_list(cfg=mock_cfg)
+        out = capsys.readouterr().out
+        assert "proj-a" in out
+        assert "proj-b" in out
+
+    def test_scope_filter_narrows_rows(
+        self,
+        db_path: Path,
+        mock_cfg: MagicMock,
+        patched_open_db,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A matching ``--scope`` narrows the table to that scope's keys only."""
+        _seed(db_path, "proj-a")
+        _seed(db_path, "proj-b")
+        _handle_ssh_list(scope="proj-a", cfg=mock_cfg)
+        out = capsys.readouterr().out
+        assert "proj-a" in out
+        assert "proj-b" not in out
+
+    def test_unknown_scope_filter_errors(
+        self, db_path: Path, mock_cfg: MagicMock, patched_open_db
+    ) -> None:
+        """``--scope`` that matches nothing exits non-zero."""
+        _seed(db_path, "proj-a")
+        with pytest.raises(SystemExit, match="No keys registered for scope"):
+            _handle_ssh_list(scope="nowhere", cfg=mock_cfg)
+
+
+class TestRemove:
+    """``ssh-remove`` covers filter + confirmation + interactive selection."""
+
+    def test_empty_vault_errors(self, db_path: Path, mock_cfg: MagicMock, patched_open_db) -> None:
+        """With no registered keys, remove refuses up front."""
+        CredentialDB(db_path).close()
+        with pytest.raises(SystemExit, match="No SSH keys registered"):
+            _handle_ssh_remove(cfg=mock_cfg)
+
+    def test_filter_with_yes_removes_silently(
+        self,
+        db_path: Path,
+        mock_cfg: MagicMock,
+        patched_open_db,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """``--scope X --yes`` drops X's keys without prompting."""
+        _seed(db_path, "proj-a")
+        _seed(db_path, "proj-b")
+        _handle_ssh_remove(scope="proj-a", yes=True, cfg=mock_cfg)
+        out = capsys.readouterr().out
+        assert "Unassigned 1 key from their scope(s)" in out
+        db = CredentialDB(db_path)
+        try:
+            assert db.list_ssh_keys_for_scope("proj-a") == []
+            assert len(db.list_ssh_keys_for_scope("proj-b")) == 1
+        finally:
+            db.close()
+
+    def test_filter_no_match_errors(
+        self, db_path: Path, mock_cfg: MagicMock, patched_open_db
+    ) -> None:
+        """A filter that matches nothing exits with a clear message."""
+        _seed(db_path, "proj-a")
+        with pytest.raises(SystemExit, match="No keys match"):
+            _handle_ssh_remove(scope="nowhere", yes=True, cfg=mock_cfg)
+
+    def test_yes_without_filters_errors(
+        self, db_path: Path, mock_cfg: MagicMock, patched_open_db
+    ) -> None:
+        """``--yes`` alone refuses to wipe everything silently."""
+        _seed(db_path, "proj-a")
+        with pytest.raises(SystemExit, match="without at least one filter"):
+            _handle_ssh_remove(yes=True, cfg=mock_cfg)
+
+    def test_filter_prompt_decline(
+        self,
+        db_path: Path,
+        mock_cfg: MagicMock,
+        patched_open_db,
+    ) -> None:
+        """A non-yes answer to the confirmation prompt aborts."""
+        _seed(db_path, "proj-a")
+        with patch("builtins.input", return_value="n"):
+            with pytest.raises(SystemExit, match="Aborted"):
+                _handle_ssh_remove(scope="proj-a", cfg=mock_cfg)
+
+    def test_filter_prompt_accept(
+        self,
+        db_path: Path,
+        mock_cfg: MagicMock,
+        patched_open_db,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A ``y`` answer proceeds with the removal."""
+        _seed(db_path, "proj-a")
+        with patch("builtins.input", return_value="y"):
+            _handle_ssh_remove(scope="proj-a", cfg=mock_cfg)
+        assert "Unassigned 1 key" in capsys.readouterr().out
+
+    def test_interactive_all(
+        self,
+        db_path: Path,
+        mock_cfg: MagicMock,
+        patched_open_db,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Without filters, typing ``all`` at the prompt removes every row."""
+        _seed(db_path, "proj-a")
+        _seed(db_path, "proj-b")
+        with patch("builtins.input", return_value="all"):
+            _handle_ssh_remove(cfg=mock_cfg)
+        assert "Unassigned 2 keys" in capsys.readouterr().out
+
+    def test_interactive_numeric_selection(
+        self,
+        db_path: Path,
+        mock_cfg: MagicMock,
+        patched_open_db,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Comma-separated indices remove only the chosen rows."""
+        _seed(db_path, "proj-a")
+        _seed(db_path, "proj-b")
+        with patch("builtins.input", return_value="1"):
+            _handle_ssh_remove(cfg=mock_cfg)
+        assert "Unassigned 1 key" in capsys.readouterr().out
+
+    def test_interactive_empty_selection_aborts(
+        self, db_path: Path, mock_cfg: MagicMock, patched_open_db
+    ) -> None:
+        """An empty line at the prompt counts as ``Aborted``."""
+        _seed(db_path, "proj-a")
+        with patch("builtins.input", return_value=""):
+            with pytest.raises(SystemExit, match="Aborted"):
+                _handle_ssh_remove(cfg=mock_cfg)
+
+    def test_interactive_invalid_index_errors(
+        self, db_path: Path, mock_cfg: MagicMock, patched_open_db
+    ) -> None:
+        """Non-numeric or out-of-range input is rejected with a clear message."""
+        _seed(db_path, "proj-a")
+        with patch("builtins.input", return_value="42"):
+            with pytest.raises(SystemExit, match="Invalid selection"):
+                _handle_ssh_remove(cfg=mock_cfg)
