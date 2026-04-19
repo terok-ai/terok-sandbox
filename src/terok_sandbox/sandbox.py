@@ -3,9 +3,11 @@
 
 """High-level sandbox facade composing shield, gate, runtime, and SSH.
 
-Convenience composition layer — delegates to the existing module-level
-functions.  Callers can also use those functions directly; this class
-simply groups them behind a shared :class:`SandboxConfig`.
+Convenience composition layer — delegates container lifecycle to the
+injected :class:`ContainerRuntime`, plus convenience wrappers for gate
+and shield services.  The launch path (:meth:`Sandbox.run`,
+:meth:`Sandbox.create`) is still podman-specific and invokes the podman
+CLI directly; Phase 3 will factor that through the runtime as well.
 """
 
 from __future__ import annotations
@@ -19,6 +21,14 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
 from .config import SandboxConfig
+from .runtime import ContainerRuntime, PodmanRuntime
+from .runtime.podman import (
+    bypass_network_args,
+    check_gpu_error,
+    gpu_run_args,
+    podman_userns_args,
+    redact_env_args,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -160,21 +170,34 @@ class RunSpec:
 
 
 class Sandbox:
-    """Stateless facade composing sandbox primitives.
+    """Per-task orchestrator composing runtime + services.
 
-    All methods delegate to the module-level functions in this package,
-    passing the stored :class:`SandboxConfig`.  The existing function-level
-    API remains the canonical interface — this class is a convenience for
-    callers that manage a config instance.
+    Holds a :class:`ContainerRuntime` (defaulting to :class:`PodmanRuntime`)
+    and a :class:`SandboxConfig`, and exposes gate / shield / lifecycle
+    verbs bundled in one place.  Container lifecycle verbs delegate to the
+    runtime; the launch path (:meth:`run`, :meth:`create`) still drives
+    podman directly because shield / gate integration is podman-specific
+    today.
     """
 
-    def __init__(self, config: SandboxConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: SandboxConfig | None = None,
+        *,
+        runtime: ContainerRuntime | None = None,
+    ) -> None:
         self._cfg = config or SandboxConfig()
+        self._runtime: ContainerRuntime = runtime or PodmanRuntime()
 
     @property
     def config(self) -> SandboxConfig:
         """Return the sandbox configuration."""
         return self._cfg
+
+    @property
+    def runtime(self) -> ContainerRuntime:
+        """Return the injected container runtime."""
+        return self._runtime
 
     # -- Gate ---------------------------------------------------------------
 
@@ -218,6 +241,10 @@ class Sandbox:
         down(container, task_dir, cfg=self._cfg)
 
     # -- Container launch ---------------------------------------------------
+    #
+    # The launch path still drives podman directly because shield and
+    # bypass-network integration produces podman-flavoured CLI args.  A
+    # future krun backend will push this down into the runtime as well.
 
     def _build_cmd(self, spec: RunSpec, verb: str = "run") -> list[str]:
         """Assemble the ``podman`` command line for *spec*.
@@ -229,8 +256,6 @@ class Sandbox:
         In **sealed** mode the volume specs are omitted from the command
         (they are injected via :meth:`copy_to` between create and start).
         """
-        from .runtime import bypass_network_args, gpu_run_args, podman_userns_args
-
         cmd: list[str] = ["podman", verb] + (["-d"] if verb == "run" else [])
         cmd += podman_userns_args()
 
@@ -279,8 +304,6 @@ class Sandbox:
 
     def _exec_podman(self, cmd: list[str], *, input: bytes | None = None) -> None:
         """Run a podman command, translating failures to SystemExit."""
-        from .runtime import check_gpu_error
-
         kwargs: dict = {"check": True, "capture_output": True}
         if input is not None:
             kwargs["input"] = input
@@ -305,11 +328,9 @@ class Sandbox:
         copied in via ``podman cp``, and the container is then started.
 
         Fires *hooks.pre_start* before creation and *hooks.post_start*
-        after a successful start.  Raises :class:`~.runtime.GpuConfigError`
-        when the launch fails due to NVIDIA CDI misconfiguration.
+        after a successful start.  Raises :class:`GpuConfigError` when the
+        launch fails due to NVIDIA CDI misconfiguration.
         """
-        from .runtime import redact_env_args
-
         if spec.sealed:
             self.create(spec, hooks=hooks)
             present = tuple(v for v in spec.volumes if v.host_path.exists())
@@ -337,8 +358,6 @@ class Sandbox:
         ``podman create``.  The container can then receive injected files
         via :meth:`copy_to` before being started with :meth:`start`.
         """
-        from .runtime import redact_env_args
-
         cmd = self._build_cmd(spec, verb="create")
         print("$", shlex.join(redact_env_args(cmd)))
 
@@ -349,11 +368,11 @@ class Sandbox:
         return spec.container_name
 
     def start(self, container_name: str, *, hooks: LifecycleHooks | None = None) -> None:
-        """Start a previously created container.
+        """Start a previously created container via the runtime.
 
         Fires *hooks.post_start* after a successful start.
         """
-        self._exec_podman(["podman", "start", container_name])
+        self._runtime.container(container_name).start()
         if hooks and hooks.post_start:
             hooks.post_start()
 
@@ -392,14 +411,8 @@ class Sandbox:
         )
 
     def copy_to(self, container_name: str, src: Path, dest: str) -> None:
-        """Copy a host path into a stopped container.
-
-        For directories, copies the *contents* of *src* into *dest*
-        (``podman cp src/. container:dest``).  For files, copies the file
-        directly (``podman cp src container:dest``).
-        """
-        src_arg = f"{src}/." if src.is_dir() else str(src)
-        self._exec_podman(["podman", "cp", src_arg, f"{container_name}:{dest}"])
+        """Copy a host path into a stopped container via the runtime."""
+        self._runtime.container(container_name).copy_in(src, dest)
 
     # -- Runtime ------------------------------------------------------------
 
@@ -411,33 +424,20 @@ class Sandbox:
         ready_check: Callable[[str], bool] | None = None,
     ) -> bool:
         """Stream container logs until *ready_check* matches or timeout."""
-        from .runtime import stream_initial_logs
-
         check = ready_check or (lambda line: READY_MARKER in line)
-        return stream_initial_logs(container, timeout, check)
+        return self._runtime.container(container).stream_initial_logs(check, timeout)
 
     def wait_for_exit(self, container: str, timeout: float | None = None) -> int:
-        """Block until *container* exits; return its exit code.
-
-        Raises :class:`TimeoutError` on timeout, :class:`RuntimeError` on
-        ``podman wait`` failures or non-numeric output, and lets
-        :class:`FileNotFoundError` propagate when podman is not on PATH.
-        See :func:`.runtime.wait_for_exit` for the full contract.
-        """
-        from .runtime import wait_for_exit
-
-        return wait_for_exit(container, timeout)
+        """Block until *container* exits; return its exit code."""
+        return self._runtime.container(container).wait(timeout)
 
     def stop(self, containers: list[str]) -> list[ContainerRemoveResult]:
-        """Best-effort stop and remove *containers* via ``podman rm -f``.
+        """Best-effort stop and remove *containers*.
 
-        Returns one :class:`~.runtime.ContainerRemoveResult` per entry in
-        *containers*.  Inspect ``removed`` and ``error`` on each result to
-        determine whether the container was successfully removed.
+        Returns one :class:`ContainerRemoveResult` per entry.
         """
-        from .runtime import stop_task_containers
-
-        return stop_task_containers(containers)
+        handles = [self._runtime.container(name) for name in containers]
+        return self._runtime.force_remove(handles)
 
     # -- SSH ----------------------------------------------------------------
 

@@ -11,7 +11,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from terok_sandbox.runtime import GpuConfigError, check_gpu_error, redact_env_args
+from terok_sandbox import GpuConfigError
+from terok_sandbox.runtime.podman import check_gpu_error, redact_env_args
 from terok_sandbox.sandbox import (
     READY_MARKER,
     LifecycleHooks,
@@ -132,18 +133,23 @@ class TestSandbox:
             assert result == ["--hook"]
             mock.assert_called_once_with("ctr", Path("/tmp/task"), s.config)
 
-    def test_stop_delegates(self) -> None:
-        with patch("terok_sandbox.runtime.stop_task_containers") as mock:
-            s = Sandbox()
+    def test_stop_delegates_to_runtime_force_remove(self) -> None:
+        """``Sandbox.stop`` wraps names in container handles and delegates."""
+        s = Sandbox()
+        with patch.object(s.runtime, "force_remove", return_value=[]) as mock:
             s.stop(["c1", "c2"])
-            mock.assert_called_once_with(["c1", "c2"])
+            mock.assert_called_once()
+            handles = mock.call_args[0][0]
+            assert [c.name for c in handles] == ["c1", "c2"]
 
     def test_stream_logs_uses_ready_marker(self) -> None:
-        with patch("terok_sandbox.runtime.stream_initial_logs", return_value=True) as mock:
-            s = Sandbox()
-            result = s.stream_logs("ctr", timeout=30.0)
+        """``Sandbox.stream_logs`` delegates to the container's stream_initial_logs."""
+        from terok_sandbox.runtime.podman import PodmanContainer
+
+        with patch.object(PodmanContainer, "stream_initial_logs", return_value=True) as mock:
+            result = Sandbox().stream_logs("ctr", timeout=30.0)
             assert result is True
-            check_fn = mock.call_args[0][2]
+            check_fn = mock.call_args[0][0]
             assert check_fn(">> init complete")
             assert not check_fn("still waiting")
 
@@ -207,7 +213,7 @@ class TestSandbox:
             patch("subprocess.run"),
             patch("builtins.print"),
             patch(
-                "terok_sandbox.runtime.bypass_network_args",
+                "terok_sandbox.sandbox.bypass_network_args",
                 return_value=["--network", "pasta:-T,9418"],
             ) as mock_bypass,
             patch("terok_sandbox.shield.pre_start") as mock_shield,
@@ -447,23 +453,23 @@ class TestSandboxSealed:
 
 
 class TestSandboxCopyTo:
-    """Verify copy_to delegates to podman cp."""
+    """Verify ``Sandbox.copy_to`` delegates through the runtime."""
 
     def test_copy_to_directory(self, tmp_path: Path) -> None:
-        """Directories use the src/. form to copy contents."""
+        """Directories use the ``src/.`` form to copy contents into *dest*."""
         src = tmp_path / "config"
         src.mkdir()
-        with patch("subprocess.run") as mock_run:
+        with patch("terok_sandbox.runtime.podman.subprocess.run") as mock_run:
             Sandbox().copy_to("my-ctr", src, "/dest")
 
         cmd = mock_run.call_args[0][0]
         assert cmd == ["podman", "cp", f"{src}/.", "my-ctr:/dest"]
 
     def test_copy_to_file(self, tmp_path: Path) -> None:
-        """Files are copied directly without the /. suffix."""
+        """Files are copied directly without the ``/.`` suffix."""
         src = tmp_path / "prompt.txt"
         src.write_text("hello")
-        with patch("subprocess.run") as mock_run:
+        with patch("terok_sandbox.runtime.podman.subprocess.run") as mock_run:
             Sandbox().copy_to("my-ctr", src, "/dest/prompt.txt")
 
         cmd = mock_run.call_args[0][0]
@@ -471,19 +477,19 @@ class TestSandboxCopyTo:
 
 
 class TestSandboxStart:
-    """Verify start delegates to podman start."""
+    """Verify ``Sandbox.start`` delegates through the runtime."""
 
     def test_start_invokes_podman_start(self) -> None:
-        with patch("subprocess.run") as mock_run:
+        """The runtime ``Container.start`` drives ``podman start``."""
+        with patch("terok_sandbox.runtime.podman.subprocess.run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stderr="")
             Sandbox().start("my-ctr")
 
-        mock_run.assert_called_once_with(
-            ["podman", "start", "my-ctr"],
-            check=True,
-            capture_output=True,
-        )
+        cmd = mock_run.call_args[0][0]
+        assert cmd == ["podman", "start", "my-ctr"]
 
     def test_start_fires_post_start_hook(self) -> None:
+        """``post_start`` fires after a successful start."""
         hook_called = False
 
         def on_post_start() -> None:
@@ -491,7 +497,8 @@ class TestSandboxStart:
             hook_called = True
 
         hooks = LifecycleHooks(post_start=on_post_start)
-        with patch("subprocess.run"):
+        with patch("terok_sandbox.runtime.podman.subprocess.run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stderr="")
             Sandbox().start("my-ctr", hooks=hooks)
 
         assert hook_called

@@ -67,12 +67,15 @@ def test_import_shield():
 
 
 def test_import_runtime():
-    """Runtime module is importable."""
+    """Runtime subpackage exposes the protocol and backend types."""
     from terok_sandbox import runtime
 
-    assert callable(runtime.get_container_state)
-    assert callable(runtime.is_container_running)
-    assert callable(runtime.stop_task_containers)
+    assert callable(runtime.PodmanRuntime)
+    assert callable(runtime.NullRuntime)
+    # Protocol types are classes (Protocol-derived)
+    assert isinstance(runtime.ContainerRuntime, type)
+    assert isinstance(runtime.Container, type)
+    assert isinstance(runtime.Image, type)
 
 
 def test_import_gate_lifecycle():
@@ -128,17 +131,26 @@ def test_cli_main_shows_help_without_args():
     assert exc_info.value.code == 1
 
 
-def test_find_free_port_returns_valid_port():
-    """find_free_port returns a port in the valid range."""
-    from terok_sandbox.runtime import find_free_port
+def test_reserve_port_returns_valid_port():
+    """PodmanRuntime.reserve_port yields a port in the ephemeral range."""
+    from terok_sandbox import PodmanRuntime
 
-    port = find_free_port()
-    assert 1024 <= port <= 65535
+    with PodmanRuntime().reserve_port() as reservation:
+        assert 1024 <= reservation.port <= 65535
 
 
-def test_find_free_port_unique():
-    """Two consecutive calls return different ports."""
-    from terok_sandbox.runtime import find_free_port
+def test_reserve_port_unique():
+    """Consecutive reservations return different ports while held."""
+    import contextlib
 
-    ports = {find_free_port() for _ in range(10)}
-    assert len(ports) >= 2  # at least some diversity
+    from terok_sandbox import PodmanRuntime
+
+    runtime = PodmanRuntime()
+    with contextlib.ExitStack() as stack:
+        reservations = []
+        for _ in range(10):
+            reservation = runtime.reserve_port()
+            reservations.append(reservation)
+            stack.callback(reservation.close)
+        ports = {r.port for r in reservations}
+        assert len(ports) == 10

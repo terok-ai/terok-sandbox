@@ -343,16 +343,17 @@ class TestStopTaskContainersLogging:
 
     def test_subprocess_failure_logs_debug(self) -> None:
         """FileNotFoundError (podman missing) is caught and logged."""
-        from terok_sandbox.runtime import stop_task_containers
+        from terok_sandbox import PodmanRuntime
 
+        runtime = PodmanRuntime()
         with (
             unittest.mock.patch(
-                "terok_sandbox.runtime.subprocess.run",
+                "terok_sandbox.runtime.podman.subprocess.run",
                 side_effect=FileNotFoundError("podman not found"),
             ),
-            unittest.mock.patch("terok_sandbox.runtime.log_debug") as mock_log,
+            unittest.mock.patch("terok_sandbox.runtime.podman.log_debug") as mock_log,
         ):
-            results = stop_task_containers(["test-container"])
+            results = runtime.force_remove([runtime.container("test-container")])
         # Should have logged the failure
         calls = [str(c) for c in mock_log.call_args_list]
         assert any("not found" in c for c in calls)
