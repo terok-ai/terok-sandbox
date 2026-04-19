@@ -245,7 +245,7 @@ def export_ssh_keypair(
     across scopes sharing an ``out_dir``.
     """
     record = _pick_key_for_export(db, scope, key_id)
-    stem = out_name or f"id_{record.key_type}_{record.fingerprint[:8]}"
+    stem = _sanitize_out_name(out_name) or f"id_{record.key_type}_{record.fingerprint[:8]}"
     out_dir = out_dir.expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     priv_path = out_dir / stem
@@ -321,8 +321,21 @@ def _classify_key(private_key) -> str:
 
 
 def _algo_name(key_type: str) -> str:
-    """Return the SSH protocol algorithm name for a key type."""
-    return "ssh-ed25519" if key_type == "ed25519" else "ssh-rsa"
+    """Return the SSH protocol algorithm name for a stored key type."""
+    if key_type == "ed25519":
+        return "ssh-ed25519"
+    if key_type == "rsa":
+        return "ssh-rsa"
+    raise ValueError(f"unsupported key type: {key_type!r}")
+
+
+def _sanitize_out_name(out_name: str | None) -> str | None:
+    """Reject out-of-directory stems; ``None`` means "use the default"."""
+    if not out_name:
+        return None
+    if out_name in {".", ".."} or Path(out_name).name != out_name:
+        raise ValueError(f"--out-name must be a bare filename stem, not a path: {out_name!r}")
+    return out_name
 
 
 def _pick_key_for_export(db: CredentialDB, scope: str, key_id: int | None) -> SSHKeyRecord:

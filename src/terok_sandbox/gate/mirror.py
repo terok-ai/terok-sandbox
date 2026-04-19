@@ -24,8 +24,10 @@ Value types returned by ``GitGate`` methods:
 
 import logging
 import os
+import re
 import shlex
 import shutil
+import stat
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -473,8 +475,19 @@ class GitGate:
 # ---------- Public predicates ----------
 
 
+# scp-style SSH URL: ``user@host:path``.  Host part forbids ``:`` and ``/``
+# so ``https://`` and Windows ``C:\…`` paths stay out of the match.
+_SCP_SSH_RE = re.compile(r"^[^@/\s:]+@[^:/\s]+:.+")
+
+
 def is_ssh_url(url: str | None) -> bool:
-    """Return ``True`` for SSH-scheme git URLs (``git@host:`` or ``ssh://``).
+    """Return ``True`` for SSH-scheme git URLs.
+
+    Accepts the two forms git itself accepts:
+
+    - ``ssh://[user@]host[:port]/path`` — explicit URL scheme.
+    - ``[user@]host:path`` — scp-style shorthand (``git@github.com:foo.git``,
+      ``deploy@host:repo.git``).
 
     Shared with terok-main: both the gate's env builder and callers that
     branch on "does this project use SSH?" (e.g. deploy-key prompts,
@@ -482,7 +495,8 @@ def is_ssh_url(url: str | None) -> bool:
     """
     if not url:
         return False
-    return url.startswith("git@") or url.startswith("ssh://")
+    candidate = url.strip()
+    return candidate.lower().startswith("ssh://") or bool(_SCP_SSH_RE.match(candidate))
 
 
 # ---------- Private helpers ----------
@@ -513,7 +527,7 @@ def _git_env_with_ssh(*, scope: str, use_personal_ssh: bool = False) -> dict:
         return env  # let the user's ambient SSH handle it
 
     sock = SandboxConfig().ssh_signer_local_socket_path(scope)
-    if not sock.exists():
+    if not _is_unix_socket(sock):
         raise GateAuthNotConfigured(scope)
 
     env["SSH_AUTH_SOCK"] = str(sock)
@@ -527,6 +541,14 @@ def _git_env_with_ssh(*, scope: str, use_personal_ssh: bool = False) -> dict:
         ]
     )
     return env
+
+
+def _is_unix_socket(path: Path) -> bool:
+    """Return ``True`` iff *path* refers to an existing Unix domain socket."""
+    try:
+        return stat.S_ISSOCK(path.stat().st_mode)
+    except FileNotFoundError:
+        return False
 
 
 def _clone_gate_mirror(upstream_url: str, gate_dir: Path, env: dict) -> None:

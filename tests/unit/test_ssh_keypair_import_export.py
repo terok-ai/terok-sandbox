@@ -195,3 +195,17 @@ class TestExport:
         """Exporting a scope with no keys fails explicitly."""
         with pytest.raises(ValueError):
             export_ssh_keypair(db, "proj", tmp_path / "out")
+
+    @pytest.mark.parametrize("bad_name", ["../escape", "/etc/passwd", "sub/file", ".", ".."])
+    def test_rejects_path_like_out_name(
+        self,
+        db: CredentialDB,
+        disk_keypair: tuple[Path, Path],
+        tmp_path: Path,
+        bad_name: str,
+    ) -> None:
+        """``out_name`` must be a bare stem — path-ish values are rejected up front."""
+        priv, pub = disk_keypair
+        import_ssh_keypair(db, "proj", priv, pub_path=pub)
+        with pytest.raises(ValueError):
+            export_ssh_keypair(db, "proj", tmp_path / "out", out_name=bad_name)
