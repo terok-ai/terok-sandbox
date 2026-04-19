@@ -1,355 +1,165 @@
 # SPDX-FileCopyrightText: 2025 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""SSH keypair generation and config directory setup.
+"""SSH keypair generation for a project scope.
 
-Manages the lifecycle of SSH keypairs and config for sandboxed containers.
-:class:`SSHManager` generates keys, renders the SSH config from a template,
-and sets permissions so that the container's ``/home/dev/.ssh`` mount works
-correctly.
+:class:`SSHManager` generates an SSH keypair in memory, stores the private
+material in the credential DB, and assigns it to a project scope.  The
+generated key never touches the filesystem — the signer serves it over the
+per-scope agent socket managed by the vault.
 
-All constructor parameters are plain values (strings, paths) — no
-terok-specific types.  The orchestration layer constructs the manager
-from caller configuration.
+See :mod:`.ssh_keypair` for import/export against OpenSSH files and for the
+bytes-level keypair vocabulary (``GeneratedKeypair``, fingerprint helpers).
 """
 
-import fcntl
-import json
-import os
-import re
-import subprocess
-from importlib import resources
+from __future__ import annotations
+
 from pathlib import Path
 from typing import TypedDict
 
-from .._util import effective_ssh_key_name, ensure_dir_writable, render_template
-from ..config import SandboxConfig
-
-# ---------- Vocabulary ----------
+from .db import CredentialDB, _require_safe_scope
+from .ssh_keypair import DEFAULT_RSA_BITS, GeneratedKeypair, generate_keypair
 
 
 class SSHInitResult(TypedDict):
-    """Result of SSH directory initialization."""
+    """Public summary of an ``ssh-init`` invocation."""
 
-    dir: str
-    private_key: str
-    public_key: str
-    config_path: str
-    key_name: str
-
-
-# ---------- Public API ----------
+    key_id: int
+    key_type: str
+    fingerprint: str
+    comment: str
+    public_line: str
 
 
 class SSHManager:
-    """SSH keypair generation and config directory management.
+    """Mints SSH keypairs for a scope and stores them in the vault.
 
-    Handles the full SSH setup lifecycle: directory creation, keypair
-    generation (ed25519 or RSA), config file rendering from templates, and
-    permission hardening.  Keys are stored under ``ssh_keys_dir/<scope>``
-    and used by the vault's SSH signer for container access.
+    Each scope may hold multiple keys (e.g. GitHub + GitLab), each with a
+    distinct fingerprint.  ``init`` is **additive** by default: every call
+    generates a new keypair and assigns it alongside any existing keys.
+    ``force=True`` **rotates** atomically — the new key takes the scope
+    in a single transaction that also revokes every prior assignment, so
+    concurrent rotations converge on exactly one primary key.
+
+    Two constructors for two ownership stories:
+
+    - ``SSHManager(scope=..., db=...)`` binds the manager to a
+      caller-owned :class:`CredentialDB`.  The manager uses it and
+      never closes it.  Right shape for tests and pooled connections.
+    - :meth:`SSHManager.open` opens its own DB against a path and
+      closes it on :meth:`close` / context exit / garbage collection.
+      Right shape for one-shot CLI commands.
     """
 
-    def __init__(
-        self,
-        *,
-        scope: str,
-        ssh_host_dir: Path | str | None = None,
-        ssh_key_name: str | None = None,
-        ssh_config_template: Path | str | None = None,
-    ) -> None:
-        """Initialize with plain parameters.
-
-        Parameters
-        ----------
-        scope:
-            Credential scope used for key naming and directory layout.
-        ssh_host_dir:
-            Explicit SSH directory (overrides default ``<ssh_keys_dir>/<id>``).
-        ssh_key_name:
-            Explicit key filename (overrides derived ``id_<type>_<id>``).
-        ssh_config_template:
-            Path to a user-provided SSH config template file.
-        """
+    def __init__(self, *, scope: str, db: CredentialDB) -> None:
+        """Bind the manager to a caller-provided :class:`CredentialDB`."""
         self._scope = scope
-        self._ssh_host_dir = Path(ssh_host_dir) if ssh_host_dir else None
-        self._ssh_key_name = ssh_key_name
-        self._ssh_config_template = Path(ssh_config_template) if ssh_config_template else None
+        self._db = db
+        self._owned_db: CredentialDB | None = None
 
-    @property
-    def key_name(self) -> str:
-        """Return the effective SSH key name."""
-        return effective_ssh_key_name(self._scope, ssh_key_name=self._ssh_key_name)
+    @classmethod
+    def open(cls, *, scope: str, db_path: Path | str) -> SSHManager:
+        """Return a manager that owns its own DB connection.
+
+        The connection is opened against *db_path* and closed when the
+        manager exits its context or is garbage-collected.
+        """
+        db = CredentialDB(Path(db_path))
+        manager = cls(scope=scope, db=db)
+        manager._owned_db = db
+        return manager
+
+    def close(self) -> None:
+        """Close the DB connection if this manager opened it (idempotent)."""
+        if self._owned_db is not None:
+            self._owned_db.close()
+            self._owned_db = None
+
+    def __enter__(self) -> SSHManager:
+        """Enter the runtime context; returns self."""
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        """Close the owned DB on exit."""
+        self.close()
+
+    def __del__(self) -> None:
+        """Best-effort close on garbage collection."""
+        try:
+            self.close()
+        except Exception:  # noqa: BLE001
+            pass
 
     def init(
         self,
         key_type: str = "ed25519",
-        key_name: str | None = None,
+        comment: str | None = None,
         force: bool = False,
     ) -> SSHInitResult:
-        """Initialize the SSH directory and generate a keypair.
+        """Provision a keypair for the scope.
 
-        Location resolution:
-          - If *ssh_host_dir* was provided, use that path.
-          - Otherwise: ``<ssh_keys_dir>/<scope>``
+        Args:
+            key_type: ``"ed25519"`` (default) or ``"rsa"``.
+            comment: Comment to embed in the public key.  Defaults to
+                ``tk-main:<scope>`` for the first key, ``tk-side:<scope>:<n>``
+                for additional keys (so the signer's ``tk-main:`` promotion
+                still picks the primary deploy key).
+            force: When ``True``, rotate — the new key takes the scope in
+                a single transaction that drops every prior assignment.
 
-        Key name defaults to ``id_<type>_<scope>`` (e.g. ``id_ed25519_proj``).
+        Returns:
+            Metadata sufficient to display the key to the user or register
+            it with a remote.  No filesystem paths.
+
+        Raises:
+            InvalidScopeName: if the scope fails validation.  Checked
+                *before* any key material is generated so a rejected
+                call leaves no orphaned row in ``ssh_keys``.
         """
-        if key_type not in ("ed25519", "rsa"):
-            raise SystemExit("Unsupported --key-type. Use 'ed25519' or 'rsa'.")
+        _require_safe_scope(self._scope)
 
-        target_dir = self._ssh_host_dir or (SandboxConfig().ssh_keys_dir / self._scope)
-        target_dir = Path(target_dir).expanduser().resolve()
-        ensure_dir_writable(target_dir, "SSH host dir")
-
-        if not key_name:
-            key_name = effective_ssh_key_name(
-                self._scope, ssh_key_name=self._ssh_key_name, key_type=key_type
-            )
-
-        # Reject path-like or reserved key names
-        _RESERVED_NAMES = {"config", "known_hosts", "authorized_keys"}
-        key_path = Path(key_name)
-        if key_path.is_absolute() or ".." in key_path.parts or "/" in key_name or "\\" in key_name:
-            raise SystemExit(
-                f"Invalid SSH key name {key_name!r}: must be a plain filename, "
-                "not an absolute path or traversal sequence"
-            )
-        if key_name.lower() in _RESERVED_NAMES:
-            raise SystemExit(
-                f"Invalid SSH key name {key_name!r}: collides with reserved "
-                f"filename (reserved: {', '.join(sorted(_RESERVED_NAMES))})"
-            )
-
-        priv_path = target_dir / key_name
-        pub_path = target_dir / f"{key_name}.pub"
-        cfg_path = target_dir / "config"
-
-        # Refuse to reuse artifacts that are symlinks or non-regular files
-        for p in (priv_path, pub_path, cfg_path):
-            if p.exists() or p.is_symlink():
-                if p.is_symlink() or not p.is_file():
-                    raise SystemExit(
-                        f"Refusing to use {p}: expected a regular file but found "
-                        f"{'a symlink' if p.is_symlink() else 'a non-regular file'}. "
-                        "Remove it manually and retry."
-                    )
-
-        if force or not priv_path.exists() or not pub_path.exists():
-            self._generate_keypair(key_type, priv_path, pub_path, self._scope)
-
-        if force or not cfg_path.exists():
-            self._render_config(
-                cfg_path, key_name, priv_path, self._scope, self._ssh_config_template
-            )
-
-        try:
-            self._harden_permissions(target_dir, priv_path, pub_path, cfg_path)
-        except OSError as e:
-            raise SystemExit(f"Failed to set SSH directory permissions on {target_dir}: {e}") from e
-        self._print_init_summary(target_dir, priv_path, pub_path, cfg_path)
-        return SSHInitResult(
-            dir=str(target_dir),
-            private_key=str(priv_path),
-            public_key=str(pub_path),
-            config_path=str(cfg_path),
-            key_name=key_name,
+        existing = self._db.list_ssh_keys_for_scope(self._scope)
+        # After a force-rotation the new key is the scope's only key, so it
+        # *is* the primary even when prior keys existed.  An explicit empty
+        # comment is honored; only ``None`` falls back to the derived default.
+        primary = force or not existing
+        effective_comment = (
+            comment
+            if comment is not None
+            else self._default_comment(existing_count=len(existing), primary=primary)
         )
 
-    @staticmethod
-    def _generate_keypair(key_type: str, priv_path: Path, pub_path: Path, scope: str) -> None:
-        """Generate an SSH keypair, removing any stale half-existing files first."""
-        generate_keypair(key_type, priv_path, pub_path, f"tk-main:{scope}")
-
-    @staticmethod
-    def _render_config(
-        cfg_path: Path,
-        key_name: str,
-        priv_path: Path,
-        scope: str,
-        config_template: Path | None = None,
-    ) -> None:
-        """Render the SSH config from a user or packaged template."""
-        variables = {
-            "KEY_NAME": key_name,
-            "IDENTITY_FILE": str(priv_path),
-            "SCOPE": scope,
-        }
-        user_config = SSHManager._try_render_user_template(config_template, variables)
-        config_text = (
-            user_config
-            if user_config is not None
-            else SSHManager._try_render_packaged_template(variables)
+        keypair = generate_keypair(key_type, comment=effective_comment)
+        key_id = self._db.store_ssh_key(
+            key_type=keypair.key_type,
+            private_pem=keypair.private_pem,
+            public_blob=keypair.public_blob,
+            comment=keypair.comment,
+            fingerprint=keypair.fingerprint,
         )
-        if config_text is None:
-            raise SystemExit(
-                "Failed to render SSH config: no valid template. "
-                "Ensure an ssh.config_template is set or the packaged template exists."
-            )
-        try:
-            cfg_path.write_text(config_text)
-        except Exception as e:
-            raise SystemExit(f"Failed to write SSH config at {cfg_path}: {e}")
-
-    @staticmethod
-    def _try_render_user_template(
-        template_path: Path | None, variables: dict[str, str]
-    ) -> str | None:
-        """Render the user-provided SSH config template, if configured.
-
-        Raises ``SystemExit`` if the template path is configured but the file
-        is missing or rendering fails — explicit misconfiguration should fail
-        fast rather than silently falling back to the packaged template.
-        """
-        if not template_path:
-            return None
-        p = Path(template_path)
-        if not p.is_file():
-            raise SystemExit(f"SSH config template not found: {p}")
-        try:
-            return render_template(p, variables)
-        except Exception as exc:
-            raise SystemExit(f"Failed to render SSH config template {p}: {exc}") from exc
-
-    @staticmethod
-    def _try_render_packaged_template(variables: dict[str, str]) -> str | None:
-        """Attempt to render the bundled SSH config template from package resources."""
-        try:
-            raw = (
-                resources.files("terok_sandbox") / "resources" / "templates" / "ssh_config.template"
-            ).read_text()
-        except Exception:
-            return None
-        for k, v in variables.items():
-            raw = raw.replace(f"{{{{{k}}}}}", v)
-        return raw
-
-    @staticmethod
-    def _harden_permissions(
-        target_dir: Path, priv_path: Path, pub_path: Path, cfg_path: Path
-    ) -> None:
-        """Set restrictive permissions on the SSH directory and key files.
-
-        Raises ``OSError`` if any chmod operation fails.
-        """
-        os.chmod(target_dir, 0o700)
-        if priv_path.exists():
-            os.chmod(priv_path, 0o600)
-        if pub_path.exists():
-            os.chmod(pub_path, 0o600)
-        if cfg_path.exists():
-            os.chmod(cfg_path, 0o600)
-
-    @staticmethod
-    def _next_key_number(scope_dir: Path, algo: str) -> int:
-        """Scan *scope_dir* for ``id_<algo>_key-N`` files and return the next *N*.
-
-        Returns 1 when no numbered keys exist yet.  Uses max+1 (no gap-filling)
-        so that retired key numbers are never reused.
-        """
-        pattern = re.compile(rf"^id_{re.escape(algo)}_key-(\d+)$")
-        max_n = 0
-        if scope_dir.is_dir():
-            for entry in scope_dir.iterdir():
-                if m := pattern.match(entry.name):
-                    max_n = max(max_n, int(m.group(1)))
-        return max_n + 1
-
-    @staticmethod
-    def _print_init_summary(
-        target_dir: Path, priv_path: Path, pub_path: Path, cfg_path: Path
-    ) -> None:
-        """Print a human-readable summary of the initialized SSH directory."""
-        from .._util import sanitize_tty
-
-        print("SSH directory initialized:")
-        print(f"  dir:         {sanitize_tty(str(target_dir))}")
-        print(f"  private key: {sanitize_tty(str(priv_path))}")
-        print(f"  public key:  {sanitize_tty(str(pub_path))}")
-        print(f"  config:      {sanitize_tty(str(cfg_path))}")
-        try:
-            if pub_path.exists():
-                pub_key_text = pub_path.read_text(encoding="utf-8", errors="ignore").strip()
-                if pub_key_text:
-                    print("Public key:")
-                    print(f"  {sanitize_tty(pub_key_text)}")
-        except Exception:
-            pass
-
-
-def generate_keypair(key_type: str, priv_path: Path, pub_path: Path, comment: str) -> None:
-    """Generate an SSH keypair via ``ssh-keygen``.
-
-    Removes any stale half-existing files first, then invokes
-    ``ssh-keygen`` with the given *comment* embedded in the public key.
-    """
-    for p in (priv_path, pub_path):
-        p.unlink(missing_ok=True)
-
-    cmd = [
-        "ssh-keygen",
-        "-t",
-        key_type,
-        "-f",
-        str(priv_path),
-        "-N",
-        "",
-        "-C",
-        comment,
-    ]
-    try:
-        subprocess.run(cmd, check=True)
-    except FileNotFoundError:
-        raise SystemExit("ssh-keygen not found. Please install OpenSSH client tools.")
-    except subprocess.CalledProcessError as e:
-        raise SystemExit(f"ssh-keygen failed: {e}")
-
-
-def update_ssh_keys_json(keys_json_path: Path, scope: str, result: SSHInitResult) -> None:
-    """Update the SSH key mapping JSON with a scope's key paths.
-
-    The JSON file maps credential scopes to their SSH key file paths,
-    similar to how ``routes.json`` maps provider names to proxy routes.
-    The vault's SSH signer handler reads this file to locate
-    the private key for signing requests.
-
-    Key management rules (keyed by ``private_key`` path):
-
-    - **No existing entry**: write a single-dict entry (simple case).
-    - **Same private_key path**: replace in-place (idempotent re-run of ``ssh-init``).
-    - **Different private_key path**: expand to / append to a list, so a scope can
-      hold multiple independent SSH keys (e.g. GitHub + GitLab).
-
-    Uses ``fcntl.flock`` to prevent concurrent ``ssh-init`` invocations
-    from corrupting the file.
-    """
-    new_entry: dict[str, str] = {
-        "private_key": result["private_key"],
-        "public_key": result["public_key"],
-    }
-    keys_json_path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(str(keys_json_path), os.O_RDWR | os.O_CREAT, 0o600)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        chunks: list[bytes] = []
-        while chunk := os.read(fd, 8192):
-            chunks.append(chunk)
-        raw = b"".join(chunks)
-        mapping: dict = json.loads(raw) if raw.strip() else {}
-        entries: list[dict[str, str]] = mapping.get(scope) or []
-        if not isinstance(entries, list):
-            entries = []
-        for i, entry in enumerate(entries):
-            if isinstance(entry, dict) and entry.get("private_key") == new_entry["private_key"]:
-                entries[i] = new_entry  # same path — idempotent update
-                break
+        if force:
+            self._db.replace_ssh_keys_for_scope(self._scope, keep_key_id=key_id)
         else:
-            entries.append(new_entry)  # new path — append
-        mapping[scope] = entries
-        data = (json.dumps(mapping, indent=2) + "\n").encode("utf-8")
-        os.lseek(fd, 0, os.SEEK_SET)
-        os.ftruncate(fd, 0)
-        os.write(fd, data)
-    finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        os.close(fd)
+            self._db.assign_ssh_key(self._scope, key_id)
+
+        return SSHInitResult(
+            key_id=key_id,
+            key_type=keypair.key_type,
+            fingerprint=keypair.fingerprint,
+            comment=keypair.comment,
+            public_line=keypair.public_line,
+        )
+
+    def _default_comment(self, *, existing_count: int, primary: bool) -> str:
+        """Pick a default comment based on post-operation key-set state.
+
+        The signer's ``tk-main:`` promotion heuristic expects exactly one
+        primary key per scope; additional keys use ``tk-side:`` so they
+        don't compete for the front of the identity list.
+        """
+        if primary:
+            return f"tk-main:{self._scope}"
+        return f"tk-side:{self._scope}:{existing_count + 1}"
+
+
+__all__ = ["SSHInitResult", "SSHManager", "DEFAULT_RSA_BITS", "GeneratedKeypair"]

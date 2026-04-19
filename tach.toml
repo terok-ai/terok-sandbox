@@ -53,13 +53,16 @@ path = "terok_sandbox.port_registry"
 layer = "foundation"
 depends_on = ["terok_sandbox.paths"]
 
-# Configuration dataclass — same-layer dep on paths + port_registry
+# Configuration dataclass — same-layer dep on paths + port_registry,
+# plus credentials.db for the scope-name guard reused by per-scope
+# socket paths.
 [[modules]]
 path = "terok_sandbox.config"
 layer = "foundation"
 depends_on = [
     "terok_sandbox.paths",
     "terok_sandbox.port_registry",
+    "terok_sandbox.credentials.db",
 ]
 
 # Health check protocol + sandbox-level diagnostics
@@ -76,11 +79,15 @@ path = "terok_sandbox.credentials.db"
 layer = "foundation"
 depends_on = []
 
-# Vault — token broker + SSH signer, standalone, zero terok imports
+# Vault — token broker + SSH signer, standalone; reads SSH key records
+# straight from the credential DB (same layer) so the signer can serve
+# them without re-encoding via a higher-level facade.
 [[modules]]
 path = "terok_sandbox.vault"
 layer = "foundation"
-depends_on = []
+depends_on = [
+    "terok_sandbox.credentials.db",
+]
 
 # Credentials package root — standalone (DB + SSH key management)
 [[modules]]
@@ -132,9 +139,17 @@ depends_on = [
     "terok_sandbox.gate.tokens",
 ]
 
-# SSH key management
+# SSH key management — user-facing SSHManager
 [[modules]]
 path = "terok_sandbox.credentials.ssh"
+layer = "core"
+depends_on = [
+    "terok_sandbox.credentials.ssh_keypair",
+]
+
+# SSH keypair generation, import, and export against the credential DB
+[[modules]]
+path = "terok_sandbox.credentials.ssh_keypair"
 layer = "core"
 depends_on = []
 

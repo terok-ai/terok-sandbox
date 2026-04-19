@@ -76,7 +76,12 @@ class _RouteTable:
 
 
 class _TokenDB:
-    """Read-only sqlite3 accessor for phantom token lookups and credential loading."""
+    """Read-only sqlite3 accessor for phantom tokens, credentials, and SSH keys.
+
+    Kept deliberately thin — only the SELECTs the vault daemon needs at
+    request-handling time.  Writers go through
+    :class:`terok_sandbox.credentials.db.CredentialDB`.
+    """
 
     def __init__(self, db_path: str) -> None:
         # check_same_thread=False is safe: this is a read-only accessor and
@@ -101,6 +106,28 @@ class _TokenDB:
             (credential_set, provider),
         ).fetchone()
         return json.loads(row[0]) if row else None
+
+    def ssh_keys_version(self) -> int:
+        """Return the monotonic SSH-keys version counter (cache invalidation)."""
+        row = self._conn.execute(
+            "SELECT version FROM ssh_keys_version WHERE id = 0",
+        ).fetchone()
+        return row[0] if row else 0
+
+    def load_ssh_keys_for_scope(self, scope: str):
+        """Return full SSH key records (including raw bytes) assigned to *scope*."""
+        from ..credentials.db import SSHKeyRecord
+
+        rows = self._conn.execute(
+            "SELECT k.id, k.key_type, k.private_pem, k.public_blob,"
+            " k.comment, k.fingerprint"
+            " FROM ssh_keys k"
+            " JOIN ssh_key_assignments a ON a.key_id = k.id"
+            " WHERE a.scope = ?"
+            " ORDER BY a.assigned_at",
+            (scope,),
+        ).fetchall()
+        return [SSHKeyRecord(*r) for r in rows]
 
     def list_refreshable(self) -> list[tuple[str, str, dict]]:
         """Return ``(credential_set, provider, data)`` for OAuth creds with a refresh token."""
@@ -485,8 +512,8 @@ async def _run_multi(
     port: int | None,
     ssh_signer_port: int | None = None,
     ssh_signer_socket_path: str | None = None,
-    ssh_keys_file: str | None = None,
     db_path: str | None = None,
+    scope_sockets_dir: Path | None = None,
 ) -> None:
     """Run the app on a Unix socket and optionally a TCP port simultaneously."""
     import asyncio
@@ -496,6 +523,7 @@ async def _run_multi(
     runner = AppRunner(app, access_log=_logger)
     await runner.setup()
     ssh_server = None
+    scope_reconciler = None
     try:
         sd_unix, sd_tcp = _systemd_sockets()
         if sd_unix:
@@ -553,22 +581,30 @@ async def _run_multi(
             await TCPSite(runner, "127.0.0.1", port).start()
 
         if (
-            (ssh_signer_port is not None or ssh_signer_socket_path is not None)
-            and ssh_keys_file is not None
-            and db_path is not None
-        ):
+            ssh_signer_port is not None or ssh_signer_socket_path is not None
+        ) and db_path is not None:
             from .ssh_signer import start_ssh_signer
 
             ssh_server = await start_ssh_signer(
                 db_path=db_path,
-                keys_file=ssh_keys_file,
                 host="127.0.0.1" if ssh_signer_port is not None else None,
                 port=ssh_signer_port,
                 socket_path=ssh_signer_socket_path,
             )
 
+        if db_path is not None and scope_sockets_dir is not None:
+            from .scope_sockets import ScopeSocketReconciler
+
+            scope_reconciler = ScopeSocketReconciler(
+                db_path=db_path,
+                runtime_dir=scope_sockets_dir,
+            )
+            await scope_reconciler.start()
+
         await asyncio.Event().wait()  # Block until cancelled
     finally:
+        if scope_reconciler is not None:
+            await scope_reconciler.stop()
         if ssh_server is not None:
             ssh_server.close()
             await ssh_server.wait_closed()
@@ -611,9 +647,13 @@ def main() -> None:
         help="Unix socket path for the SSH signer",
     )
     parser.add_argument(
-        "--ssh-keys-file",
+        "--scope-sockets-dir",
         default=None,
-        help="Path to ssh-keys.json mapping credential scopes to key file paths",
+        help=(
+            "Directory in which to bind per-scope SSH-agent sockets "
+            "(ssh-agent-local-<scope>.sock).  Defaults to the parent of "
+            "--ssh-signer-socket-path when not set."
+        ),
     )
     parser.add_argument(
         "--pid-file", default=None, help="Write PID to this file (for lifecycle management)"
@@ -624,12 +664,6 @@ def main() -> None:
 
     if args.ssh_signer_port is not None and args.ssh_signer_socket_path is not None:
         parser.error("--ssh-signer-port and --ssh-signer-socket-path are mutually exclusive")
-    has_ssh_transport = args.ssh_signer_port is not None or args.ssh_signer_socket_path is not None
-    if has_ssh_transport != (args.ssh_keys_file is not None):
-        parser.error(
-            "SSH signer transport (--ssh-signer-port/--ssh-signer-socket-path) "
-            "and --ssh-keys-file must be provided together"
-        )
 
     log_level = getattr(logging, args.log_level.upper(), logging.INFO)
     log_fmt = "%(asctime)s %(name)s %(levelname)s %(message)s"
@@ -665,6 +699,7 @@ def main() -> None:
 
     signal.signal(signal.SIGTERM, _handle_sigterm)
 
+    scope_sockets_dir = _resolve_scope_sockets_dir(args)
     try:
         asyncio.run(
             _run_multi(
@@ -673,12 +708,27 @@ def main() -> None:
                 port=args.port,
                 ssh_signer_port=args.ssh_signer_port,
                 ssh_signer_socket_path=args.ssh_signer_socket_path,
-                ssh_keys_file=args.ssh_keys_file,
                 db_path=args.db_path,
+                scope_sockets_dir=scope_sockets_dir,
             )
         )
     except (KeyboardInterrupt, SystemExit):
         pass
+
+
+def _resolve_scope_sockets_dir(args) -> Path | None:
+    """Pick the directory for per-scope local sockets.
+
+    Explicit ``--scope-sockets-dir`` wins; otherwise inherit from the parent
+    of ``--ssh-signer-socket-path`` so the host-local sockets live next to
+    the main signer socket by default.  ``None`` when no hint is available
+    (pure TCP-mode installs without any Unix path).
+    """
+    if args.scope_sockets_dir:
+        return Path(args.scope_sockets_dir)
+    if args.ssh_signer_socket_path:
+        return Path(args.ssh_signer_socket_path).parent
+    return None
 
 
 if __name__ == "__main__":

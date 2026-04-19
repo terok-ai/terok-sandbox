@@ -21,7 +21,6 @@ from ._util import sanitize_tty
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
     from .config import SandboxConfig
 
@@ -324,53 +323,38 @@ VAULT_COMMANDS: tuple[CommandDef, ...] = (
 # ---------------------------------------------------------------------------
 
 
+def _open_db(cfg: SandboxConfig):
+    """Open the vault credential DB for SSH operations."""
+    from .credentials.db import CredentialDB
+
+    return CredentialDB(cfg.db_path)
+
+
 def _build_key_rows(cfg: SandboxConfig) -> list[KeyRow]:
-    """Load ssh-keys.json and resolve each entry into a displayable row.
+    """Enumerate every registered SSH key as a displayable :class:`KeyRow`.
 
     Shared by ``list`` and ``remove`` so both present identical
     information.  Returns an empty list when no keys are registered.
     """
-    import base64
-    import hashlib
-    import json
-    from pathlib import Path
-
-    keys_path = cfg.ssh_keys_json_path
-    if not keys_path.is_file():
-        return []
-
+    db = _open_db(cfg)
     try:
-        data = json.loads(keys_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise SystemExit(f"Cannot read {keys_path}: {exc}") from exc
-
-    if not isinstance(data, dict):
-        raise SystemExit(f"Cannot read {keys_path}: expected top-level JSON object")
-
-    rows: list[KeyRow] = []
-    for scope in sorted(data):
-        entries = data[scope]
-        if not isinstance(entries, list):
-            continue
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            pub_path = Path(entry.get("public_key", ""))
-            priv_path = entry.get("private_key", "")
-            if pub_path.is_file():
-                try:
-                    parts = pub_path.read_text(encoding="utf-8").strip().split()
-                    key_type = parts[0].removeprefix("ssh-") if parts else "?"
-                    blob = base64.b64decode(parts[1]) if len(parts) > 1 else b""
-                    comment = " ".join(parts[2:]) if len(parts) > 2 else pub_path.stem
-                    digest = base64.b64encode(hashlib.sha256(blob).digest()).rstrip(b"=")
-                    fingerprint = f"SHA256:{digest.decode()}"
-                except Exception:
-                    key_type, comment, fingerprint = "?", pub_path.stem, "(error)"
-            else:
-                key_type, comment, fingerprint = "?", Path(priv_path).stem, "(pub missing)"
-            rows.append(KeyRow(scope, comment, key_type, fingerprint, priv_path, str(pub_path)))
-    return rows
+        rows: list[KeyRow] = []
+        for scope in db.list_scopes_with_ssh_keys():
+            for r in db.list_ssh_keys_for_scope(scope):
+                rows.append(
+                    KeyRow(
+                        scope=scope,
+                        comment=r.comment or f"id={r.id}",
+                        key_type=r.key_type,
+                        fingerprint=f"SHA256:{r.fingerprint}",
+                        private_key=f"db:ssh_keys/{r.id}",
+                        public_key=f"db:ssh_keys/{r.id}",
+                    )
+                )
+        rows.sort(key=lambda r: (r.scope, r.comment))
+        return rows
+    finally:
+        db.close()
 
 
 def _print_key_table(rows: list[KeyRow], *, numbered: bool = False) -> None:
@@ -411,214 +395,175 @@ def _print_key_table(rows: list[KeyRow], *, numbered: bool = False) -> None:
             print(fmt.format(*d))
 
 
+_SCOPE_NAME_PATTERN = r"[A-Za-z0-9][A-Za-z0-9._-]*"
+
+
+def _validate_scope_name(scope: str) -> None:
+    """Raise :class:`SystemExit` if *scope* is not a safe identifier."""
+    import re
+
+    if not re.fullmatch(_SCOPE_NAME_PATTERN, scope):
+        raise SystemExit(
+            f"Invalid scope {scope!r}: must start with a letter or digit "
+            "and contain only [A-Za-z0-9._-]"
+        )
+
+
 def _handle_ssh_import(
     *,
     scope: str,
     private_key: str,
     public_key: str | None = None,
-    create_scope: bool = False,
+    comment: str | None = None,
     cfg: SandboxConfig | None = None,
 ) -> None:
-    """Copy an SSH keypair into the managed key store and register it in ssh-keys.json."""
-    import os
-    import re
-    import shutil
+    """Import an OpenSSH keypair from files into the vault DB for *scope*."""
     from pathlib import Path
 
     from .config import SandboxConfig as _SandboxConfig
-    from .credentials.ssh import SSHInitResult, update_ssh_keys_json
+    from .credentials.ssh_keypair import (
+        PasswordProtectedKeyError,
+        import_ssh_keypair,
+    )
 
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", scope):
-        raise SystemExit(
-            f"Invalid scope {scope!r}: must start with a letter or digit "
-            "and contain only [A-Za-z0-9._-]"
-        )
-
+    _validate_scope_name(scope)
     if cfg is None:
         cfg = _SandboxConfig()
 
-    _validate_scope_exists(scope, create_scope, cfg)
+    priv_path = Path(private_key).expanduser().resolve()
+    pub_path = Path(public_key).expanduser().resolve() if public_key else None
 
-    priv_src = Path(private_key).expanduser().resolve()
-    pub_src = Path(public_key).expanduser().resolve() if public_key else Path(f"{priv_src}.pub")
+    if not priv_path.is_file():
+        raise SystemExit(f"Private key not found: {priv_path}")
+    if pub_path is not None and not pub_path.is_file():
+        raise SystemExit(f"Public key not found: {pub_path}")
 
-    if not priv_src.exists():
-        raise SystemExit(f"Private key not found: {priv_src}")
-    if not pub_src.exists():
-        raise SystemExit(
-            f"Public key not found: {pub_src} (use --public-key to specify explicitly)"
+    db = _open_db(cfg)
+    try:
+        try:
+            result = import_ssh_keypair(
+                db,
+                scope,
+                priv_path,
+                pub_path=pub_path,
+                comment=comment,
+            )
+        except PasswordProtectedKeyError as exc:
+            raise SystemExit(str(exc)) from exc
+
+        state = "already registered" if result.already_present else "registered"
+        print(
+            f"Key {state} for scope '{sanitize_tty(scope)}':\n"
+            f"  id:          {result.key_id}\n"
+            f"  fingerprint: SHA256:{sanitize_tty(result.fingerprint)}\n"
+            f"  comment:     {sanitize_tty(result.comment)}"
         )
-
-    dest_dir = cfg.ssh_keys_dir / scope
-    dest_dir.mkdir(parents=True, exist_ok=True)
-
-    def _unique_dst(src: Path) -> Path:
-        """Return dest path for *src* inside *dest_dir*, with numeric suffix on collision.
-
-        A destination that already exists with identical content is considered
-        the same key (re-import) and returns the existing path unchanged.
-        """
-        p = dest_dir / src.name
-        if not p.exists() or p.read_bytes() == src.read_bytes():
-            return p
-        stem, suffix = p.stem, p.suffix
-        n = 1
-        while True:
-            p = dest_dir / f"{stem}_{n}{suffix}"
-            if not p.exists() or p.read_bytes() == src.read_bytes():
-                return p
-            n += 1
-
-    priv_dst = _unique_dst(priv_src)
-    pub_dst = _unique_dst(pub_src)
-
-    print(f"Copying private key: {sanitize_tty(str(priv_src))}")
-    print(f"              → {sanitize_tty(str(priv_dst))}")
-    shutil.copy2(str(priv_src), str(priv_dst))
-    os.chmod(priv_dst, 0o600)
-
-    print(f"Copying public key:  {sanitize_tty(str(pub_src))}")
-    print(f"              → {sanitize_tty(str(pub_dst))}")
-    shutil.copy2(str(pub_src), str(pub_dst))
-
-    result = SSHInitResult(
-        dir=str(dest_dir),
-        private_key=str(priv_dst),
-        public_key=str(pub_dst),
-        config_path="",
-        key_name=priv_dst.name,
-    )
-    keys_path = cfg.ssh_keys_json_path
-    update_ssh_keys_json(keys_path, scope, result)
-    print(f"Registered key for scope '{sanitize_tty(scope)}': {sanitize_tty(str(priv_dst))}")
+    finally:
+        db.close()
 
 
 def _handle_ssh_add(
     *,
     scope: str,
-    name: str | None = None,
     key_type: str = "ed25519",
-    create_scope: bool = False,
+    comment: str | None = None,
+    force: bool = False,
     cfg: SandboxConfig | None = None,
 ) -> None:
-    """Generate a new SSH keypair and register it for a credential scope."""
-    import re
-
+    """Generate a new SSH keypair in the vault for *scope*."""
     from .config import SandboxConfig as _SandboxConfig
-    from .credentials.ssh import (
-        SSHInitResult,
-        SSHManager,
-        generate_keypair,
-        update_ssh_keys_json,
-    )
+    from .credentials.ssh import SSHManager
 
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", scope):
-        raise SystemExit(
-            f"Invalid scope {scope!r}: must start with a letter or digit "
-            "and contain only [A-Za-z0-9._-]"
-        )
+    _validate_scope_name(scope)
     if key_type not in ("ed25519", "rsa"):
         raise SystemExit("Unsupported --key-type. Use 'ed25519' or 'rsa'.")
-
-    algo = "ed25519" if key_type == "ed25519" else "rsa"
     if cfg is None:
         cfg = _SandboxConfig()
 
-    _validate_scope_exists(scope, create_scope, cfg)
-
-    dest_dir = cfg.ssh_keys_dir / scope
-    dest_dir.mkdir(parents=True, exist_ok=True)
-
-    if name is not None:
-        if not re.fullmatch(r"[a-zA-Z_-]+", name):
-            raise SystemExit(
-                f"Invalid key name {name!r}: must contain only letters, underscores, and hyphens"
-            )
-        key_name = name
-    else:
-        key_name = f"key-{SSHManager._next_key_number(dest_dir, algo)}"
-
-    filename = f"id_{algo}_{key_name}"
-    priv_path = dest_dir / filename
-    pub_path = dest_dir / f"{filename}.pub"
-
-    existing = priv_path if priv_path.exists() else pub_path if pub_path.exists() else None
-    if existing:
-        raise SystemExit(
-            f"Key file already exists: {existing}\n"
-            "Use a different --name or remove the existing key first."
-        )
-
-    scope_has_keys = _scope_has_keys(cfg.ssh_keys_json_path, scope)
-    comment = f"tk-side:{scope}:{key_name}" if scope_has_keys else f"tk-main:{scope}"
-    generate_keypair(key_type, priv_path, pub_path, comment)
-
+    db = _open_db(cfg)
     try:
-        SSHManager._harden_permissions(dest_dir, priv_path, pub_path, dest_dir / "config")
-    except OSError as e:
-        raise SystemExit(f"Failed to set permissions: {e}") from e
+        manager = SSHManager(scope=scope, db=db)
+        result = manager.init(key_type=key_type, comment=comment, force=force)
+        print(f"SSH key ready for scope '{sanitize_tty(scope)}':")
+        print(f"  id:          {result['key_id']}")
+        print(f"  type:        {sanitize_tty(result['key_type'])}")
+        print(f"  fingerprint: SHA256:{sanitize_tty(result['fingerprint'])}")
+        print(f"  comment:     {sanitize_tty(result['comment'])}")
+        print("Public key (register as a deploy key):")
+        print(f"  {sanitize_tty(result['public_line'])}")
+    finally:
+        db.close()
 
-    result = SSHInitResult(
-        dir=str(dest_dir),
-        private_key=str(priv_path),
-        public_key=str(pub_path),
-        config_path="",
-        key_name=filename,
-    )
-    update_ssh_keys_json(cfg.ssh_keys_json_path, scope, result)
 
-    print(f"SSH key generated for scope '{sanitize_tty(scope)}':")
-    print(f"  name:        {sanitize_tty(key_name)}")
-    print(f"  private key: {sanitize_tty(str(priv_path))}")
-    print(f"  public key:  {sanitize_tty(str(pub_path))}")
-    print(f"  comment:     {sanitize_tty(comment)}")
+def _handle_ssh_export(
+    *,
+    scope: str,
+    out_dir: str,
+    key_id: int | None = None,
+    out_name: str | None = None,
+    cfg: SandboxConfig | None = None,
+) -> None:
+    """Write a scope's key back to a standard OpenSSH file pair."""
+    from pathlib import Path
+
+    from .config import SandboxConfig as _SandboxConfig
+    from .credentials.ssh_keypair import export_ssh_keypair
+
+    _validate_scope_name(scope)
+    if cfg is None:
+        cfg = _SandboxConfig()
+
+    db = _open_db(cfg)
     try:
-        pub_text = pub_path.read_text(encoding="utf-8", errors="ignore").strip()
-        if pub_text:
-            print("Public key (add as deploy key):")
-            print(f"  {sanitize_tty(pub_text)}")
-    except Exception:
-        pass
-
-
-def _scope_has_keys(keys_json_path: Path, scope: str) -> bool:
-    """Return *True* if *scope* already owns at least one key in ``ssh-keys.json``."""
-    import json
-
-    if not keys_json_path.is_file():
-        return False
-    try:
-        mapping = json.loads(keys_json_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return False
-    if not isinstance(mapping, dict):
-        return False
-    entries = mapping.get(scope)
-    return isinstance(entries, list) and len(entries) > 0
-
-
-def _validate_scope_exists(scope: str, create_scope: bool, cfg: SandboxConfig) -> None:
-    """Reject unknown scopes unless ``--create-scope`` was passed.
-
-    Scopes are considered "known" if they appear in ``ssh-keys.json``.
-    """
-    import json
-
-    keys_path = cfg.ssh_keys_json_path
-    existing: dict = {}
-    if keys_path.is_file():
         try:
-            existing = json.loads(keys_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            pass
-    if scope in existing or create_scope:
-        return
-    known = sorted(existing)
-    msg = f"Unknown scope {scope!r}."
-    if known:
-        msg += f" Known scopes: {', '.join(known)}"
-    msg += "\nUse --create-scope to create a new credential scope."
-    raise SystemExit(msg)
+            result = export_ssh_keypair(
+                db,
+                scope,
+                Path(out_dir).expanduser(),
+                key_id=key_id,
+                out_name=out_name,
+            )
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+        except FileExistsError as exc:
+            raise SystemExit(f"Refusing to overwrite existing file: {exc.filename}") from exc
+
+        print(f"Exported key id={result.key_id} (SHA256:{sanitize_tty(result.fingerprint)}):")
+        print(f"  private key: {sanitize_tty(str(result.private_path))}")
+        print(f"  public key:  {sanitize_tty(str(result.public_path))}")
+    finally:
+        db.close()
+
+
+def _handle_ssh_pub(
+    *,
+    scope: str,
+    key_id: int | None = None,
+    cfg: SandboxConfig | None = None,
+) -> None:
+    """Print the scope's public key line to stdout (for piping to a deploy-key form)."""
+    from .config import SandboxConfig as _SandboxConfig
+    from .credentials.ssh_keypair import public_line_of
+
+    _validate_scope_name(scope)
+    if cfg is None:
+        cfg = _SandboxConfig()
+
+    db = _open_db(cfg)
+    try:
+        records = db.load_ssh_keys_for_scope(scope)
+        if not records:
+            raise SystemExit(f"scope {scope!r} has no SSH keys assigned")
+        if key_id is None:
+            record = records[-1]
+        else:
+            matches = [r for r in records if r.id == key_id]
+            if not matches:
+                raise SystemExit(f"key_id {key_id} is not assigned to scope {scope!r}")
+            record = matches[0]
+        print(public_line_of(record))
+    finally:
+        db.close()
 
 
 def _handle_ssh_list(
@@ -642,147 +587,43 @@ def _handle_ssh_list(
     _print_key_table(rows)
 
 
-def _remove_keys_from_json(keys_json_path: Path, removals: list[KeyRow]) -> None:
-    """Delete key entries from ssh-keys.json, removing empty scopes.
-
-    Matches by ``private_key`` path — the stable identifier across
-    renames of the public key or comment changes.  Uses the same
-    ``fcntl.flock`` concurrency guard as :func:`update_ssh_keys_json`.
-    """
-    import fcntl
-    import json
-    import os
-
-    remove_set = {r.private_key for r in removals}
-
-    fd = os.open(str(keys_json_path), os.O_RDWR | os.O_CREAT, 0o600)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        chunks: list[bytes] = []
-        while chunk := os.read(fd, 8192):
-            chunks.append(chunk)
-        raw = b"".join(chunks)
-        try:
-            parsed = json.loads(raw) if raw.strip() else {}
-        except json.JSONDecodeError as exc:
-            raise SystemExit(f"Cannot read {keys_json_path}: {exc}") from exc
-        if not isinstance(parsed, dict):
-            raise SystemExit(f"Cannot read {keys_json_path}: expected top-level JSON object")
-        mapping: dict = parsed
-
-        for scope in list(mapping):
-            entries = mapping[scope]
-            if not isinstance(entries, list):
-                continue
-            mapping[scope] = [
-                e for e in entries if isinstance(e, dict) and e.get("private_key") not in remove_set
-            ]
-            if not mapping[scope]:
-                del mapping[scope]
-
-        data = (json.dumps(mapping, indent=2) + "\n").encode("utf-8")
-        os.lseek(fd, 0, os.SEEK_SET)
-        os.ftruncate(fd, 0)
-        os.write(fd, data)
-    finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        os.close(fd)
-
-
-def _delete_key_files(rows: list[KeyRow], cfg: SandboxConfig) -> tuple[int, list[str]]:
-    """Remove private and public key files from disk.
-
-    Paths are validated against ``cfg.ssh_keys_dir`` to prevent a
-    tampered ``ssh-keys.json`` from steering deletions outside the
-    managed key directory (CWE-73).
-
-    Continues past per-file failures so partial cleanup still completes.
-    The registry has already been updated by the time this runs, so
-    leaving a stale file is better than aborting mid-deletion.
-
-    Returns:
-        Tuple of (files deleted, list of error messages for failed deletions).
-    """
-    from pathlib import Path
-
-    base = cfg.ssh_keys_dir.resolve()
-    deleted = 0
-    errors: list[str] = []
-    for row in rows:
-        for p in (row.private_key, row.public_key):
-            path = Path(p)
-            try:
-                resolved = path.resolve(strict=True)
-            except (FileNotFoundError, OSError):
-                continue
-            if not resolved.is_file():
-                continue
-            if not resolved.is_relative_to(base):
-                errors.append(f"Refusing to delete outside managed dir: {resolved}")
-                continue
-            try:
-                resolved.unlink()
-                deleted += 1
-            except OSError as exc:
-                errors.append(f"{resolved}: {exc}")
-    return deleted, errors
-
-
 def _filter_key_rows(
     rows: list[KeyRow],
     *,
     scope: str | None = None,
-    name: str | None = None,
+    comment: str | None = None,
     fingerprint: str | None = None,
 ) -> list[KeyRow]:
-    """Narrow key rows by scope (exact), name (glob), and fingerprint (prefix)."""
+    """Narrow key rows by scope (exact), comment (glob), and fingerprint (prefix)."""
     from fnmatch import fnmatch
 
     if scope:
         rows = [r for r in rows if r.scope == scope]
-    if name:
-        rows = [r for r in rows if fnmatch(r.comment, name)]
+    if comment:
+        rows = [r for r in rows if fnmatch(r.comment, comment)]
     if fingerprint:
-        # Accept both "SHA256:..." and raw prefix
         fp = fingerprint.removeprefix("SHA256:")
         rows = [r for r in rows if r.fingerprint.removeprefix("SHA256:").startswith(fp)]
     return rows
 
 
-def _prompt_file_action(*, delete_files: bool, keep_files: bool, yes: bool = False) -> bool:
-    """Determine whether to delete key files, prompting if neither flag is set.
-
-    Raises:
-        SystemExit: If both ``--delete-files`` and ``--keep-files`` are set.
-    """
-    if delete_files and keep_files:
-        raise SystemExit("Cannot use both --delete-files and --keep-files.")
-    if delete_files:
-        return True
-    if keep_files or yes:
-        return False
-    try:
-        answer = input("Also delete key files from disk? [y/N]: ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        print()
-        return False
-    return answer in ("y", "yes")
+def _key_id_from_row(row: KeyRow) -> int:
+    """Extract the ``ssh_keys.id`` from a row's pseudo-path ``db:ssh_keys/<id>``."""
+    return int(row.private_key.rsplit("/", 1)[-1])
 
 
 def _handle_ssh_remove(
     *,
     scope: str | None = None,
-    name: str | None = None,
+    comment: str | None = None,
     fingerprint: str | None = None,
     yes: bool = False,
-    delete_files: bool = False,
-    keep_files: bool = False,
     cfg: SandboxConfig | None = None,
 ) -> None:
-    """Remove SSH keys from the auth proxy's key store.
+    """Unassign SSH keys from their scope(s); cascade-delete orphaned key rows.
 
     Two modes: interactive selection when called without filters, or
-    direct matching when any of ``--scope``, ``--name``, or
+    direct matching when any of ``--scope``, ``--comment``, or
     ``--fingerprint`` is provided.
     """
     from .config import SandboxConfig as _SandboxConfig
@@ -794,11 +635,15 @@ def _handle_ssh_remove(
     if not all_rows:
         raise SystemExit("No SSH keys registered.")
 
-    has_filters = any((scope, name, fingerprint))
+    has_filters = any((scope, comment, fingerprint))
 
     if has_filters:
-        # Parameterized mode — filter and confirm
-        candidates = _filter_key_rows(all_rows, scope=scope, name=name, fingerprint=fingerprint)
+        candidates = _filter_key_rows(
+            all_rows,
+            scope=scope,
+            comment=comment,
+            fingerprint=fingerprint,
+        )
         if not candidates:
             raise SystemExit("No keys match the given filters.")
         if not yes:
@@ -815,7 +660,6 @@ def _handle_ssh_remove(
             if answer not in ("y", "yes"):
                 raise SystemExit("Aborted.")
     else:
-        # Interactive mode — numbered list, user picks
         if yes:
             raise SystemExit("Cannot use --yes without at least one filter flag.")
         _print_key_table(all_rows, numbered=True)
@@ -842,28 +686,21 @@ def _handle_ssh_remove(
                 indices.append(int(part) - 1)
             candidates = [all_rows[i] for i in dict.fromkeys(indices)]
 
-    # Determine file action
-    do_delete = _prompt_file_action(delete_files=delete_files, keep_files=keep_files, yes=yes)
-
-    # Execute removal
-    _remove_keys_from_json(cfg.ssh_keys_json_path, candidates)
-    files_deleted, file_errors = _delete_key_files(candidates, cfg) if do_delete else (0, [])
+    db = _open_db(cfg)
+    try:
+        for row in candidates:
+            db.unassign_ssh_key(row.scope, _key_id_from_row(row))
+    finally:
+        db.close()
 
     n = len(candidates)
-    msg = f"Removed {n} key{'s' if n != 1 else ''} from registry."
-    if files_deleted:
-        msg += f" Deleted {files_deleted} file{'s' if files_deleted != 1 else ''} from disk."
-    elif not do_delete:
-        msg += " Key files kept on disk."
-    print(msg)
-    for err in file_errors:
-        print(f"  Warning: could not delete {err}", file=__import__("sys").stderr)
+    print(f"Removed {n} key{'s' if n != 1 else ''} from the vault.")
 
 
 SSH_COMMANDS: tuple[CommandDef, ...] = (
     CommandDef(
         name="list",
-        help="List SSH keys registered in the auth proxy",
+        help="List SSH keys stored in the vault",
         handler=_handle_ssh_list,
         group="ssh",
         args=(
@@ -876,7 +713,7 @@ SSH_COMMANDS: tuple[CommandDef, ...] = (
     ),
     CommandDef(
         name="import",
-        help="Register an existing SSH keypair in ssh-keys.json",
+        help="Import an OpenSSH keypair from files into the vault DB",
         handler=_handle_ssh_import,
         group="ssh",
         args=(
@@ -889,30 +726,24 @@ SSH_COMMANDS: tuple[CommandDef, ...] = (
             ),
             ArgDef(
                 name="--public-key",
-                help="Path to the .pub file (default: <private-key>.pub)",
+                help="Path to the .pub file (default: derive from the private key)",
                 default=None,
                 dest="public_key",
             ),
             ArgDef(
-                name="--create-scope",
-                help="Allow creating a new credential scope",
-                action="store_true",
-                dest="create_scope",
+                name="--comment",
+                help="Override the key's comment string",
+                default=None,
             ),
         ),
     ),
     CommandDef(
         name="add",
-        help="Generate a new SSH keypair for a credential scope",
+        help="Generate a new SSH keypair in the vault for a credential scope",
         handler=_handle_ssh_add,
         group="ssh",
         args=(
             ArgDef(name="scope", help="Credential scope to associate the key with"),
-            ArgDef(
-                name="--name",
-                help="Key name ([a-zA-Z_-]; auto-generates key-1, key-2, ... if omitted)",
-                default=None,
-            ),
             ArgDef(
                 name="--key-type",
                 help="Key algorithm: ed25519 (default) or rsa",
@@ -920,16 +751,64 @@ SSH_COMMANDS: tuple[CommandDef, ...] = (
                 dest="key_type",
             ),
             ArgDef(
-                name="--create-scope",
-                help="Allow creating a new credential scope",
+                name="--comment",
+                help="Comment embedded in the public key (default: tk-main:<scope>)",
+                default=None,
+            ),
+            ArgDef(
+                name="--force",
+                help="Rotate — unassign all existing keys from the scope and generate fresh",
                 action="store_true",
-                dest="create_scope",
+            ),
+        ),
+    ),
+    CommandDef(
+        name="export",
+        help="Export a scope's SSH keypair to standard OpenSSH files",
+        handler=_handle_ssh_export,
+        group="ssh",
+        args=(
+            ArgDef(name="scope", help="Credential scope to export"),
+            ArgDef(
+                name="--out-dir",
+                help="Directory to write files into",
+                dest="out_dir",
+                required=True,
+            ),
+            ArgDef(
+                name="--key-id",
+                help="Export a specific ssh_keys.id (default: most recently added)",
+                default=None,
+                dest="key_id",
+                type=int,
+            ),
+            ArgDef(
+                name="--out-name",
+                help="Override the output filename stem (default: id_<type>_<fp8>)",
+                default=None,
+                dest="out_name",
+            ),
+        ),
+    ),
+    CommandDef(
+        name="pub",
+        help="Print a scope's public key to stdout",
+        handler=_handle_ssh_pub,
+        group="ssh",
+        args=(
+            ArgDef(name="scope", help="Credential scope"),
+            ArgDef(
+                name="--key-id",
+                help="Specific ssh_keys.id (default: most recently added)",
+                default=None,
+                dest="key_id",
+                type=int,
             ),
         ),
     ),
     CommandDef(
         name="remove",
-        help="Remove SSH keys from the auth proxy's key store",
+        help="Unassign SSH keys from scopes (orphaned keys cascade-delete)",
         handler=_handle_ssh_remove,
         group="ssh",
         args=(
@@ -939,8 +818,8 @@ SSH_COMMANDS: tuple[CommandDef, ...] = (
                 default=None,
             ),
             ArgDef(
-                name="--name",
-                help="Filter by key name/comment (supports glob wildcards)",
+                name="--comment",
+                help="Filter by comment (supports glob wildcards)",
                 default=None,
             ),
             ArgDef(
@@ -953,18 +832,6 @@ SSH_COMMANDS: tuple[CommandDef, ...] = (
                 help="Skip confirmation prompts",
                 action="store_true",
                 dest="yes",
-            ),
-            ArgDef(
-                name="--delete-files",
-                help="Delete key files from disk (skip prompt)",
-                action="store_true",
-                dest="delete_files",
-            ),
-            ArgDef(
-                name="--keep-files",
-                help="Keep key files on disk (skip prompt)",
-                action="store_true",
-                dest="keep_files",
             ),
         ),
     ),

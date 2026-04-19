@@ -1,24 +1,22 @@
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""SSH signer — signs with host-side private keys on behalf of containers.
+"""SSH signer — signs with vault-stored private keys on behalf of clients.
 
-Implements the `SSH agent protocol`_ over TCP with a phantom-token handshake.
-Containers connect via a socat bridge (``UNIX-LISTEN → TCP``) and set
-``SSH_AUTH_SOCK`` to the local Unix socket.  Private keys never enter the
-container — the signer reads them from the host filesystem.
+Implements the `SSH agent protocol`_ in two deployment flavours that share
+one connection handler:
 
-Like :mod:`token_broker`, this module has **zero terok imports**.  It is a
-self-contained security component that reads phantom tokens from the same
-sqlite3 database and key paths from a JSON sidecar file.
+- **Container-facing** (``start_ssh_signer``) — TCP or Unix, guarded by a
+  phantom-token handshake so a compromised container can't impersonate
+  another.  Scope is resolved from the token.
+- **Host-local, per-scope** (``start_ssh_signer_local``) — one Unix socket
+  per scope at mode 0600.  Scope is fixed at bind time and the UID-gated
+  filesystem permissions are the whole access control — host processes
+  don't cross a trust boundary.
 
-Wire format (per `draft-miller-ssh-agent`_):
-
-    [4-byte big-endian length][1-byte message type][payload]
-
-Custom handshake (first bytes on each TCP connection):
-
-    [4-byte big-endian length][phantom-token UTF-8 bytes]
+Private keys live in ``credentials.db`` (``ssh_keys`` table) and never touch
+the filesystem; the ``_DBKeyCache`` reloads them only when the DB version
+counter advances.
 
 .. _SSH agent protocol: https://datatracker.ietf.org/doc/html/draft-miller-ssh-agent
 """
@@ -26,8 +24,6 @@ Custom handshake (first bytes on each TCP connection):
 from __future__ import annotations
 
 import asyncio
-import base64
-import json
 import logging
 import struct
 from pathlib import Path
@@ -40,6 +36,8 @@ from cryptography.hazmat.primitives.serialization import (
     load_pem_private_key,
     load_ssh_private_key,
 )
+
+from ..credentials.db import SSHKeyRecord
 
 _logger = logging.getLogger("terok-ssh-agent")
 
@@ -59,6 +57,9 @@ SSH_AGENT_RSA_SHA2_512 = 0x04
 
 _HANDSHAKE_TIMEOUT = 5.0  # seconds
 _MSG_MAX_LEN = 256 * 1024  # 256 KiB — generous for sign requests
+
+_LOCAL_SOCKET_MODE = 0o600
+
 
 # ---------------------------------------------------------------------------
 # Wire format helpers
@@ -102,156 +103,65 @@ def _write_msg(writer: asyncio.StreamWriter, msg_type: int, payload: bytes = b""
 
 
 # ---------------------------------------------------------------------------
-# Key table (loads ssh-keys.json)
+# Key cache — DB-backed, version-counter invalidation
 # ---------------------------------------------------------------------------
 
 
 _ResolvedKey = tuple[Ed25519PrivateKey | RSAPrivateKey, bytes, str]
 """(private_key, pub_blob, comment) — one loaded keypair."""
 
-# JSON entry: {"private_key": str, "public_key": str}
-_KeyEntry = dict[str, str]
 
-# Cache: fingerprint string → list of resolved keys
-_CacheSlot = tuple[str, list[_ResolvedKey]]
+class _DBKeyCache:
+    """Caches decoded SSH keys per scope, reloading when the DB version bumps.
 
-
-class _KeyCache:
-    """Caches resolved SSH key material per credential scope.
-
-    Each scope may have one key (dict entry) or multiple keys (list of
-    dict entries) in ``ssh-keys.json``.  On each :meth:`get` call the
-    sidecar JSON is re-read (so ``ssh-init`` changes are visible without
-    a proxy restart).  When the key paths and mtimes haven't changed
-    since the last load, the cached material is returned directly.
-
-    The file may not exist on a fresh install (returns ``None``).
+    The DB's ``ssh_keys_version`` counter increments on every insert,
+    assignment, or unassignment.  A cached slot is valid only as long as
+    the version it was loaded at matches the current version — so
+    ``ssh-init``, ``ssh-import``, and ``ssh-remove`` all invalidate
+    transparently without a proxy restart.
     """
 
-    def __init__(self, keys_path: str) -> None:
-        """Store the *keys_path* for on-demand reads."""
-        self._path = Path(keys_path)
-        self._cache: dict[str, _CacheSlot] = {}
+    def __init__(self, token_db) -> None:
+        self._token_db = token_db
+        self._cache: dict[str, tuple[int, list[_ResolvedKey]]] = {}
 
-    def get(self, scope: str) -> list[_ResolvedKey] | None:
-        """Return a list of ``(private_key, pub_blob, comment)`` or ``None``."""
-        entries = self._lookup_entries(scope)
-        if not entries:
-            self._cache.pop(scope, None)
-            return None
-
-        fingerprint = self._fingerprint(entries)
+    def get(self, scope: str) -> list[_ResolvedKey]:
+        """Return the scope's resolved keys, or ``[]`` if none are assigned."""
+        version = self._token_db.ssh_keys_version()
         cached = self._cache.get(scope)
-        if cached and cached[0] == fingerprint:
+        if cached and cached[0] == version:
             return cached[1]
 
-        # Cache miss or stale: load all keys from disk
         resolved: list[_ResolvedKey] = []
-        for entry in entries:
+        for record in self._token_db.load_ssh_keys_for_scope(scope):
             try:
-                private_key = _load_private_key(entry["private_key"])
-                pub_blob, comment = _load_public_key_blob(entry["public_key"])
-                resolved.append((private_key, pub_blob, comment))
-            except (OSError, ValueError) as exc:
+                resolved.append(_decode_record(record))
+            except ValueError as exc:
                 _logger.error(
-                    "Failed to load SSH key for scope %r (%s): %s",
+                    "Failed to decode SSH key id=%d for scope %r: %s",
+                    record.id,
                     scope,
-                    entry.get("private_key", "?"),
                     exc,
                 )
 
-        if not resolved:
-            self._cache.pop(scope, None)
-            return None
-
-        self._cache[scope] = (fingerprint, resolved)
+        self._cache[scope] = (version, resolved)
         return resolved
 
-    @staticmethod
-    def _fingerprint(entries: list[_KeyEntry]) -> str:
-        """Build a cache-invalidation fingerprint from paths + mtimes."""
-        parts: list[str] = []
-        for e in entries:
-            for key in ("private_key", "public_key"):
-                path = e[key]
-                try:
-                    mt = Path(path).stat().st_mtime_ns
-                except OSError:
-                    mt = 0
-                parts.append(f"{path}:{mt}")
-        return "|".join(parts)
 
-    def _lookup_entries(self, scope: str) -> list[_KeyEntry] | None:
-        """Read ssh-keys.json and return the key entries for *scope*.
-
-        The JSON maps credential scopes to lists of ``{"private_key", "public_key"}``
-        dicts.  Uses ``LOCK_SH`` to coordinate with the ``LOCK_EX`` writer in
-        :func:`update_ssh_keys_json`.
-        """
-        import fcntl
-
-        if not self._path.is_file():
-            return None
-        try:
-            fd = self._path.open()
-            try:
-                fcntl.flock(fd, fcntl.LOCK_SH)
-                mapping = json.loads(fd.read())
-            finally:
-                fcntl.flock(fd, fcntl.LOCK_UN)
-                fd.close()
-        except (json.JSONDecodeError, OSError):
-            return None
-        if not isinstance(mapping, dict):
-            return None
-        entries = mapping.get(scope)
-        if not isinstance(entries, list):
-            return None
-        return [
-            e
-            for e in entries
-            if isinstance(e, dict)
-            and isinstance(e.get("private_key"), str)
-            and isinstance(e.get("public_key"), str)
-        ] or None
-
-
-# ---------------------------------------------------------------------------
-# Key loading and signing
-# ---------------------------------------------------------------------------
-
-
-def _load_private_key(key_path: str) -> Ed25519PrivateKey | RSAPrivateKey:
-    """Load an SSH private key from a file on the host filesystem.
-
-    Supports both OpenSSH format (``BEGIN OPENSSH PRIVATE KEY``, the default
-    for ``ssh-keygen`` since OpenSSH 7.8) and traditional PEM format.
-    """
-    raw = Path(key_path).read_bytes()
-    if b"OPENSSH PRIVATE KEY" in raw:
-        key = load_ssh_private_key(raw, password=None)
+def _decode_record(record: SSHKeyRecord) -> _ResolvedKey:
+    """Decode ``record.private_pem`` into a cryptography private key object."""
+    if b"OPENSSH PRIVATE KEY" in record.private_pem:
+        key = load_ssh_private_key(record.private_pem, password=None)
     else:
-        key = load_pem_private_key(raw, password=None)
+        key = load_pem_private_key(record.private_pem, password=None)
     if not isinstance(key, (Ed25519PrivateKey, RSAPrivateKey)):
         raise ValueError(f"Unsupported key type: {type(key).__name__}")
-    return key
+    return key, record.public_blob, record.comment
 
 
-def _load_public_key_blob(pub_key_path: str) -> tuple[bytes, str]:
-    """Load the SSH wire-format public key blob and comment from a ``.pub`` file.
-
-    Returns ``(key_blob, comment)``.  The blob is the base64-decoded middle
-    field of the ``<type> <base64> <comment>`` format.
-
-    Raises ``ValueError`` if the file format is invalid.
-    """
-    text = Path(pub_key_path).read_text(encoding="utf-8").strip()
-    parts = text.split(None, 2)
-    if len(parts) < 2:
-        raise ValueError("Malformed public key file: expected '<type> <base64> [comment]'")
-    blob = base64.b64decode(parts[1])
-    comment = parts[2] if len(parts) > 2 else ""
-    return blob, comment
+# ---------------------------------------------------------------------------
+# Signing
+# ---------------------------------------------------------------------------
 
 
 def _sign(key: Ed25519PrivateKey | RSAPrivateKey, data: bytes, flags: int) -> bytes:
@@ -277,7 +187,7 @@ def _sign(key: Ed25519PrivateKey | RSAPrivateKey, data: bytes, flags: int) -> by
 
 
 # ---------------------------------------------------------------------------
-# Connection handler
+# Connection handlers
 # ---------------------------------------------------------------------------
 
 
@@ -302,105 +212,128 @@ async def _read_handshake(reader: asyncio.StreamReader) -> str | None:
     return raw_token.decode("utf-8", errors="replace")
 
 
-async def _handle_connection(
+async def _resolve_scope_from_token(
+    reader: asyncio.StreamReader, writer: asyncio.StreamWriter, token_db
+) -> str | None:
+    """Container-facing: read and validate the phantom token, return the scope."""
+    peer = writer.get_extra_info("peername")
+    token = await _read_handshake(reader)
+    if not token:
+        _logger.info("Handshake failed (no token) from %s", peer)
+        return None
+    token_info = token_db.lookup_token(token)
+    if token_info is None:
+        _logger.warning("Invalid SSH agent token from %s", peer)
+        return None
+    if token_info.get("provider") != "ssh":
+        _logger.warning("Token provider %r is not 'ssh', rejecting", token_info.get("provider"))
+        return None
+    return token_info["scope"]
+
+
+async def _serve_agent_session(
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
-    token_db: object,
-    key_cache: _KeyCache,
+    scope: str,
+    key_cache: _DBKeyCache,
 ) -> None:
-    """Handle one SSH agent TCP connection.
-
-    1. Read phantom-token handshake → validate via DB
-    2. Resolve SSH key from cache (or load from filesystem on miss)
-    3. Serve agent protocol messages until EOF
-    """
+    """Run the agent message loop for a connection bound to *scope*."""
     peer = writer.get_extra_info("peername")
-    try:
-        # --- Handshake ---
-        token = await _read_handshake(reader)
-        if not token:
-            _logger.info("Handshake failed (no token) from %s", peer)
-            return
+    keys = key_cache.get(scope)
+    if not keys:
+        _logger.warning("No SSH keys loaded for scope %r", scope)
+        return
 
-        token_info = token_db.lookup_token(token)  # type: ignore[attr-defined]
-        if token_info is None:
-            _logger.warning("Invalid SSH agent token from %s", peer)
-            return
+    # Promote the tk-main key to the front so SSH offers it first to GitHub,
+    # ensuring the primary workspace key is used for the main repo without
+    # requiring IdentityFile configuration in the container.
+    keys = sorted(keys, key=lambda k: 0 if k[2].startswith("tk-main:") else 1)
+    key_by_blob = {pub_blob: (priv, comment) for priv, pub_blob, comment in keys}
+    _logger.info(
+        "SSH agent session ready for scope %r from %s — %d key(s) available",
+        scope,
+        peer,
+        len(keys),
+    )
 
-        if token_info.get("provider") != "ssh":
-            _logger.warning("Token provider %r is not 'ssh', rejecting", token_info.get("provider"))
-            return
+    while True:
+        try:
+            msg_type, payload = await _read_msg(reader)
+        except (asyncio.IncompleteReadError, ValueError):
+            break
 
-        scope = token_info["scope"]
-        _logger.info("SSH agent connection from %s for scope %r", peer, scope)
-        keys = key_cache.get(scope)
-        if not keys:
-            _logger.warning("No SSH keys loaded for scope %r — check ssh-keys.json paths", scope)
-            return
+        if msg_type == SSH_AGENTC_REQUEST_IDENTITIES:
+            _logger.info("Identity request for scope %r — returning %d key(s)", scope, len(keys))
+            body = struct.pack(">I", len(keys))
+            for _priv, pub_blob, comment in keys:
+                body += _pack_string(pub_blob)
+                body += _pack_string(comment.encode("utf-8"))
+            _write_msg(writer, SSH_AGENT_IDENTITIES_ANSWER, body)
 
-        # Promote the tk-main key to the front so SSH offers it first to GitHub,
-        # ensuring the primary workspace key is used for the main repo without
-        # requiring IdentityFile configuration in the container.
-        keys = sorted(keys, key=lambda k: 0 if k[2].startswith("tk-main:") else 1)
-
-        # Build a lookup: pub_blob → (private_key, comment) for sign requests
-        key_by_blob = {pub_blob: (priv, comment) for priv, pub_blob, comment in keys}
-        _logger.info(
-            "SSH agent session ready for scope %r from %s — %d key(s) available",
-            scope,
-            peer,
-            len(keys),
-        )
-
-        # --- Agent message loop ---
-        while True:
+        elif msg_type == SSH_AGENTC_SIGN_REQUEST:
             try:
-                msg_type, payload = await _read_msg(reader)
-            except (asyncio.IncompleteReadError, ValueError):
-                break
-
-            if msg_type == SSH_AGENTC_REQUEST_IDENTITIES:
-                _logger.info(
-                    "Identity request for scope %r — returning %d key(s)", scope, len(keys)
-                )
-                body = struct.pack(">I", len(keys))
-                for _priv, pub_blob, comment in keys:
-                    body += _pack_string(pub_blob)
-                    body += _pack_string(comment.encode("utf-8"))
-                _write_msg(writer, SSH_AGENT_IDENTITIES_ANSWER, body)
-
-            elif msg_type == SSH_AGENTC_SIGN_REQUEST:
-                try:
-                    mv = memoryview(payload)
-                    req_blob, off = _unpack_string(mv, 0)
-                    sign_data, off = _unpack_string(mv, off)
-                    if off + 4 > len(mv):
-                        raise ValueError("Payload too short for flags field")
-                    (flags,) = struct.unpack_from(">I", mv, off)
-                except (ValueError, struct.error) as exc:
-                    _logger.warning("Malformed sign request from %s: %s", peer, exc)
+                mv = memoryview(payload)
+                req_blob, off = _unpack_string(mv, 0)
+                sign_data, off = _unpack_string(mv, off)
+                if off + 4 > len(mv):
+                    raise ValueError("Payload too short for flags field")
+                (flags,) = struct.unpack_from(">I", mv, off)
+            except (ValueError, struct.error) as exc:
+                _logger.warning("Malformed sign request from %s: %s", peer, exc)
+                _write_msg(writer, SSH_AGENT_FAILURE)
+            else:
+                match = key_by_blob.get(req_blob)
+                if match is None:
+                    _logger.warning(
+                        "Sign request for unknown key from %s (scope %r) — no matching key blob",
+                        peer,
+                        scope,
+                    )
                     _write_msg(writer, SSH_AGENT_FAILURE)
                 else:
-                    match = key_by_blob.get(req_blob)
-                    if match is None:
-                        _logger.warning(
-                            "Sign request for unknown key from %s (scope %r) — no matching key blob",
-                            peer,
-                            scope,
-                        )
-                        _write_msg(writer, SSH_AGENT_FAILURE)
-                    else:
-                        _logger.info("Sign request fulfilled for scope %r key %r", scope, match[1])
-                        sig_blob = _sign(match[0], sign_data, flags)
-                        _write_msg(writer, SSH_AGENT_SIGN_RESPONSE, _pack_string(sig_blob))
+                    _logger.info("Sign request fulfilled for scope %r key %r", scope, match[1])
+                    sig_blob = _sign(match[0], sign_data, flags)
+                    _write_msg(writer, SSH_AGENT_SIGN_RESPONSE, _pack_string(sig_blob))
 
-            else:
-                _write_msg(writer, SSH_AGENT_FAILURE)
+        else:
+            _write_msg(writer, SSH_AGENT_FAILURE)
 
-            await writer.drain()
+        await writer.drain()
 
+
+async def _handle_container_connection(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    token_db,
+    key_cache: _DBKeyCache,
+) -> None:
+    """Container-facing connection: handshake → scope → agent session."""
+    try:
+        scope = await _resolve_scope_from_token(reader, writer, token_db)
+        if scope is None:
+            return
+        await _serve_agent_session(reader, writer, scope, key_cache)
     except Exception:
-        _logger.exception("SSH agent connection error from %s", peer)
+        _logger.exception("SSH agent connection error from %s", writer.get_extra_info("peername"))
+    finally:
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+async def _handle_local_connection(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    scope: str,
+    key_cache: _DBKeyCache,
+) -> None:
+    """Host-local connection: scope is fixed at bind time, no handshake."""
+    try:
+        await _serve_agent_session(reader, writer, scope, key_cache)
+    except Exception:
+        _logger.exception("SSH agent connection error on local socket for scope %r", scope)
     finally:
         writer.close()
         try:
@@ -410,22 +343,20 @@ async def _handle_connection(
 
 
 # ---------------------------------------------------------------------------
-# Server factory
+# Server factories
 # ---------------------------------------------------------------------------
 
 
 async def start_ssh_signer(
     db_path: str,
-    keys_file: str,
     host: str | None = None,
     port: int | None = None,
     socket_path: str | None = None,
 ) -> asyncio.Server:
-    """Start the SSH signer on TCP, a Unix socket, or both.
+    """Start the container-facing SSH signer (token-gated).
 
     Args:
-        db_path: Path to the vault sqlite3 database (for phantom token lookups).
-        keys_file: Path to ``ssh-keys.json`` mapping credential scopes to key file paths.
+        db_path: Path to the vault sqlite3 database (phantom tokens + SSH keys).
         host: Bind address for TCP (typically ``"127.0.0.1"``).
         port: TCP port to listen on.
         socket_path: Unix socket path to listen on.
@@ -439,34 +370,71 @@ async def start_ssh_signer(
     from .token_broker import _TokenDB
 
     token_db = _TokenDB(db_path)
-    key_cache = _KeyCache(keys_file)
+    key_cache = _DBKeyCache(token_db)
 
     async def _on_connect(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        """Handle an incoming SSH agent connection."""
-        await _handle_connection(reader, writer, token_db, key_cache)
+        """Handle an incoming SSH agent connection (token-gated)."""
+        await _handle_container_connection(reader, writer, token_db, key_cache)
 
     if socket_path:
-        import socket as _socket
-
-        from terok_sandbox._util._net import harden_socket, prepare_socket_path
-        from terok_sandbox._util._selinux import socket_selinux_context
-
-        path = Path(socket_path)
-        prepare_socket_path(path)
-        # Bind+listen synchronously inside the SELinux context — the
-        # socket-creation-context is process-scoped, so awaiting inside
-        # the context manager could leak ``terok_socket_t`` onto sockets
-        # created by unrelated coroutines running during the await.
-        with socket_selinux_context():
-            sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
-            sock.bind(str(path))
-            sock.listen(128)
-        server = await asyncio.start_unix_server(_on_connect, sock=sock)
-        harden_socket(path)
-        _logger.info("SSH signer listening on %s", path)
+        server = await _bind_hardened_unix(socket_path, _on_connect)
+        _logger.info("SSH signer listening on %s", socket_path)
     elif host is not None and port is not None:
         server = await asyncio.start_server(_on_connect, host, port)
         _logger.info("SSH signer listening on %s:%d", host, port)
     else:
         raise ValueError("Either socket_path or host+port must be provided")
+    return server
+
+
+async def start_ssh_signer_local(*, scope: str, socket_path: Path, db_path: str) -> asyncio.Server:
+    """Start a host-local SSH signer bound to a single scope.
+
+    The returned server listens on a mode-0600 Unix socket; same-UID
+    filesystem permissions are the whole access control.  No token
+    handshake — every accepted connection immediately enters the agent
+    message loop with *scope* as its fixed identity source.
+    """
+    from .token_broker import _TokenDB
+
+    token_db = _TokenDB(db_path)
+    key_cache = _DBKeyCache(token_db)
+
+    async def _on_connect(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        """Handle an incoming host-local SSH agent connection."""
+        await _handle_local_connection(reader, writer, scope, key_cache)
+
+    server = await _bind_hardened_unix(str(socket_path), _on_connect, mode=_LOCAL_SOCKET_MODE)
+    _logger.info("SSH signer listening on %s for scope %r", socket_path, scope)
+    return server
+
+
+async def _bind_hardened_unix(
+    path_str: str,
+    on_connect,
+    *,
+    mode: int | None = None,
+) -> asyncio.Server:
+    """Bind a Unix-domain socket with SELinux labelling and optional 0600 hardening."""
+    import socket as _socket
+
+    from terok_sandbox._util._net import harden_socket, prepare_socket_path
+    from terok_sandbox._util._selinux import socket_selinux_context
+
+    path = Path(path_str)
+    prepare_socket_path(path)
+    # Bind+listen synchronously inside the SELinux context — the
+    # socket-creation-context is process-scoped, so awaiting inside the
+    # context manager could leak ``terok_socket_t`` onto sockets created
+    # by unrelated coroutines running during the await.
+    with socket_selinux_context():
+        sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        sock.bind(str(path))
+        sock.listen(128)
+    server = await asyncio.start_unix_server(on_connect, sock=sock)
+    harden_socket(path)
+    if mode is not None:
+        import os as _os
+
+        _os.chmod(path, mode)
     return server

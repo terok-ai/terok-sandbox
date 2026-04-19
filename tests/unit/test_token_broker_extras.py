@@ -287,18 +287,11 @@ class TestMainCli:
             with pytest.raises(SystemExit):
                 main()
 
-    def test_ssh_transport_requires_keys_file(self, tmp_path: Path) -> None:
-        argv = _argv_basics(tmp_path) + ["--ssh-signer-port=18732"]  # missing --ssh-keys-file
-        with patch("sys.argv", argv):
-            with pytest.raises(SystemExit):
-                main()
-
-    def test_keys_file_alone_is_an_error(self, tmp_path: Path) -> None:
-        """--ssh-keys-file without an SSH transport is rejected."""
-        argv = _argv_basics(tmp_path) + ["--ssh-keys-file=/tmp/terok-testing/k.json"]
-        with patch("sys.argv", argv):
-            with pytest.raises(SystemExit):
-                main()
+    def test_unknown_flag_is_an_error(self, tmp_path: Path) -> None:
+        """A legacy flag like the old ``--ssh-keys-file`` is rejected by argparse."""
+        argv = _argv_basics(tmp_path) + ["--ssh-keys-file=/tmp/nope.json"]
+        with patch("sys.argv", argv), pytest.raises(SystemExit):
+            main()
 
     def test_invalid_log_level_falls_back_to_info(self, tmp_path: Path) -> None:
         """Unknown --log-level value falls through to logging.INFO."""

@@ -200,5 +200,30 @@ class SandboxConfig:
 
     @property
     def ssh_keys_json_path(self) -> Path:
-        """Return the path to the SSH key mapping JSON."""
+        """Return the path to the SSH key mapping JSON.
+
+        .. deprecated::
+            SSH keys are stored in :attr:`db_path` (table ``ssh_keys``) and
+            served via per-scope sockets at
+            :meth:`ssh_signer_local_socket_path`.  This path is retained
+            only for transitional callers in sibling packages; new code
+            must not read or write it.
+        """
         return self.vault_dir / "ssh-keys.json"
+
+    def ssh_signer_local_socket_path(self, scope: str) -> Path:
+        """Return the per-scope vault SSH-agent socket path for *scope*.
+
+        The vault binds one 0600 Unix socket per scope with at least one
+        assigned key, under the same ``runtime_dir`` as the main signer.
+        Host-side ``gate-sync`` points ``SSH_AUTH_SOCK`` at this path.
+
+        Rejects unsafe scope names with :class:`~.credentials.db.InvalidScopeName`
+        as a belt-and-braces guard — writers in the DB layer enforce the
+        same policy, but the socket path is public API and may be called
+        without a preceding DB write.
+        """
+        from .credentials.db import _require_safe_scope
+
+        _require_safe_scope(scope)
+        return self.runtime_dir / f"ssh-agent-local-{scope}.sock"

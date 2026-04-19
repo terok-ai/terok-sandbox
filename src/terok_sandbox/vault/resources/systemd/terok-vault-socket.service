@@ -5,7 +5,7 @@ Description=terok vault (Unix socket mode)
 
 [Service]
 Type=simple
-ExecStart={{BIN}} "--socket-path={{SOCKET_PATH}}" "--db-path={{DB_PATH}}" "--routes-file={{ROUTES_PATH}}" "--ssh-signer-socket-path={{SSH_SIGNER_SOCKET_PATH}}" "--ssh-keys-file={{SSH_KEYS_FILE}}"
+ExecStart={{BIN}} "--socket-path={{SOCKET_PATH}}" "--db-path={{DB_PATH}}" "--routes-file={{ROUTES_PATH}}" "--ssh-signer-socket-path={{SSH_SIGNER_SOCKET_PATH}}"
 
 [Install]
 WantedBy=default.target
