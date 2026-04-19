@@ -131,7 +131,19 @@ def _handle_gate_status(*, cfg: SandboxConfig | None = None) -> None:
 
 
 def _handle_shield_setup(*, root: bool = False, user: bool = False) -> None:
-    """Install OCI hooks for the shield firewall."""
+    """Install OCI hooks for the shield firewall.
+
+    Validates the ``--root`` / ``--user`` choice at the CLI layer so
+    the library function (:func:`shield.run_setup`) can stay UX-agnostic:
+    it raises ``ValueError`` on invalid combinations; this handler turns
+    that into a ``SystemExit`` with CLI-specific remediation hints.
+    """
+    if not root and not user:
+        raise SystemExit(
+            "Specify --root (system-wide, uses sudo) or --user (user-local).\n"
+            "  shield install-hooks --root   # /etc/containers/oci/hooks.d\n"
+            "  shield install-hooks --user   # ~/.local/share/containers/oci/hooks.d"
+        )
     from .shield import run_setup
 
     run_setup(root=root, user=user)

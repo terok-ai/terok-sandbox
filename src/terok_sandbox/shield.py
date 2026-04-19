@@ -155,14 +155,13 @@ def run_setup(*, root: bool = False, user: bool = False) -> None:
     Global hooks are required on all podman versions to survive
     container stop/start cycles (terok-shield#122).
 
-    Raises :class:`SystemExit` when neither ``--root`` nor ``--user`` is given.
+    Raises :class:`ValueError` when neither ``root`` nor ``user`` is true.
+    The CLI layer (``_handle_shield_setup`` in :mod:`.commands`) maps this
+    to a ``SystemExit`` with actionable ``shield install-hooks …`` hints;
+    the library stays UX-agnostic.
     """
     if not root and not user:
-        raise SystemExit(
-            "Specify --root (system-wide, uses sudo) or --user (user-local).\n"
-            "  shield install-hooks --root   # /etc/containers/oci/hooks.d\n"
-            "  shield install-hooks --user   # ~/.local/share/containers/oci/hooks.d"
-        )
+        raise ValueError("run_setup requires either root=True or user=True")
     setup_hooks_direct(root=root)
 
 

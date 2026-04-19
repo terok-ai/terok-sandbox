@@ -68,9 +68,9 @@ class TestCommandRegistry:
         names = {cmd.name for cmd in SHIELD_COMMANDS}
         assert {"install-hooks", "status"} <= names
 
-    def test_ssh_has_import_and_remove(self) -> None:
+    def test_ssh_has_import_add_and_remove(self) -> None:
         names = {cmd.name for cmd in SSH_COMMANDS}
-        assert {"import", "remove"} <= names
+        assert {"import", "add", "remove"} <= names
 
 
 # ---------------------------------------------------------------------------
@@ -95,7 +95,27 @@ class TestCLIBasics:
     def test_shield_no_subcommand_shows_help(self) -> None:
         out, _, _ = _run_cli("shield")
         combined = out.lower()
-        assert "install-hooks" in combined or "status" in combined
+        # Both subcommands must appear — the help listing isn't conditional.
+        assert "install-hooks" in combined
+        assert "status" in combined
+
+    def test_shield_install_hooks_requires_scope_flag(self) -> None:
+        """``shield install-hooks`` with no flag surfaces CLI-specific hints.
+
+        The library function (:func:`terok_sandbox.shield.run_setup`) raises
+        ``ValueError`` on invalid combos — the CLI layer is what maps it to
+        actionable ``install-hooks --root/--user`` remediation text.
+        """
+        from terok_sandbox.commands import _handle_shield_setup
+
+        try:
+            _handle_shield_setup()
+        except SystemExit as exc:
+            message = str(exc)
+            assert "--root" in message and "--user" in message
+            assert "shield install-hooks" in message
+        else:  # pragma: no cover — defensive: must SystemExit
+            raise AssertionError("_handle_shield_setup should have raised SystemExit")
 
     def test_gate_no_subcommand_shows_help(self) -> None:
         out, _, _ = _run_cli("gate")
