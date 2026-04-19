@@ -352,14 +352,14 @@ def test_setup_hooks_direct(
         mock_conf.assert_not_called()
 
 
-@patch("terok_shield.cli.interactive.run_interactive")
-def test_shield_interactive_session_delegates_to_run_interactive(
-    mock_run_interactive: MagicMock,
+@patch("terok_shield.cli.simple_clearance.run_simple_clearance")
+def test_shield_interactive_session_delegates_to_simple_clearance(
+    mock_run_simple_clearance: MagicMock,
 ) -> None:
-    """Session helper forwards the shield state_dir and container to terok-shield."""
-    shield_interactive_session("task-ctr", MOCK_TASK_DIR, raw=True)
+    """Session helper forwards the shield state_dir and container to the terminal fallback."""
+    shield_interactive_session("task-ctr", MOCK_TASK_DIR)
 
-    mock_run_interactive.assert_called_once_with(MOCK_TASK_DIR / "shield", "task-ctr", raw=True)
+    mock_run_simple_clearance.assert_called_once_with(MOCK_TASK_DIR / "shield", "task-ctr")
 
 
 @patch("terok_shield.cli.watch.run_watch")

@@ -114,6 +114,7 @@ from .shield import (
     block,
     check_environment,
     down,
+    install_shield_bridge,
     make_shield,
     pre_start,
     run_setup,
@@ -122,6 +123,7 @@ from .shield import (
     shield_watch_session,
     state,
     status,
+    uninstall_shield_bridge,
     up,
 )
 from .vault.constants import PHANTOM_CREDENTIALS_MARKER
@@ -365,6 +367,7 @@ __all__ = [
     "block",
     "check_environment",
     "down",
+    "install_shield_bridge",
     "make_shield",
     "pre_start",
     "run_setup",
@@ -373,6 +376,7 @@ __all__ = [
     "shield_watch_session",
     "state",
     "status",
+    "uninstall_shield_bridge",
     "up",
     # Git gate
     "GateAuthNotConfigured",
