@@ -88,3 +88,63 @@ class TestReconciler:
         assert sock.exists()
         await reconciler.stop()
         assert not sock.exists()
+
+    async def test_socket_path_is_public_accessor(self, tmp_path: Path) -> None:
+        """``socket_path(scope)`` renders the canonical path without side effects."""
+        runtime_dir = tmp_path / "runtime"
+        reconciler = ScopeSocketReconciler(
+            db_path=str(tmp_path / "unused.db"), runtime_dir=runtime_dir
+        )
+        assert reconciler.socket_path("alpha") == runtime_dir / "ssh-agent-local-alpha.sock"
+
+    async def test_unchanged_version_is_a_noop(self, tmp_path: Path) -> None:
+        """A second reconcile with the same version doesn't rebind anything."""
+        db_path = tmp_path / "vault.db"
+        db = CredentialDB(db_path)
+        _seed(db, "proj")
+        db.close()
+
+        runtime_dir = tmp_path / "runtime"
+        reconciler = ScopeSocketReconciler(db_path=str(db_path), runtime_dir=runtime_dir)
+        try:
+            await reconciler.start()
+            existing_server = reconciler._servers["proj"]
+            await reconciler._reconcile()
+            # Same server object — no unbind/rebind cycle happened.
+            assert reconciler._servers["proj"] is existing_server
+        finally:
+            await reconciler.stop()
+
+    async def test_bind_failure_keeps_version_pinned(self, tmp_path: Path) -> None:
+        """A bind failure leaves ``_last_version`` behind so the next tick retries."""
+        db_path = tmp_path / "vault.db"
+        db = CredentialDB(db_path)
+        _seed(db, "proj")
+        db.close()
+
+        runtime_dir = tmp_path / "runtime"
+        reconciler = ScopeSocketReconciler(db_path=str(db_path), runtime_dir=runtime_dir)
+
+        async def _boom(**_kwargs):
+            raise RuntimeError("synthetic bind failure")
+
+        import terok_sandbox.vault.scope_sockets as mod
+
+        original = mod.start_ssh_signer_local
+        mod.start_ssh_signer_local = _boom
+        try:
+            await reconciler._reconcile()
+            assert reconciler._last_version == -1  # did not advance
+            assert "proj" not in reconciler._servers
+        finally:
+            mod.start_ssh_signer_local = original
+            await reconciler.stop()
+
+    async def test_unbind_on_unknown_scope_is_noop(self, tmp_path: Path) -> None:
+        """``_unbind_scope`` returns True when the scope was never bound."""
+        runtime_dir = tmp_path / "runtime"
+        runtime_dir.mkdir()
+        reconciler = ScopeSocketReconciler(
+            db_path=str(tmp_path / "unused.db"), runtime_dir=runtime_dir
+        )
+        assert await reconciler._unbind_scope("ghost") is True

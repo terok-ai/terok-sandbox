@@ -112,6 +112,112 @@ class TestSign:
         raw_sig, _ = _unpack_string(memoryview(sig_blob), off)
         key.public_key().verify(raw_sig, data)
 
+    def test_rsa_default_uses_sha256(self) -> None:
+        """RSA sign with flags=0 emits rsa-sha2-256 (widest compatible)."""
+        from cryptography.hazmat.primitives.asymmetric.rsa import generate_private_key
+
+        key = generate_private_key(public_exponent=65537, key_size=2048)
+        sig_blob = _sign(key, b"payload", 0)
+        algo, _ = _unpack_string(memoryview(sig_blob), 0)
+        assert algo == b"rsa-sha2-256"
+
+    def test_rsa_flag_selects_sha512(self) -> None:
+        """RSA sign with SSH_AGENT_RSA_SHA2_512 flag emits rsa-sha2-512."""
+        from cryptography.hazmat.primitives.asymmetric.rsa import generate_private_key
+
+        from terok_sandbox.vault.ssh_signer import SSH_AGENT_RSA_SHA2_512
+
+        key = generate_private_key(public_exponent=65537, key_size=2048)
+        sig_blob = _sign(key, b"payload", SSH_AGENT_RSA_SHA2_512)
+        algo, _ = _unpack_string(memoryview(sig_blob), 0)
+        assert algo == b"rsa-sha2-512"
+
+
+class TestUnpackStringGuards:
+    """Verify ``_unpack_string`` rejects under-sized buffers with a clear message."""
+
+    def test_header_shorter_than_four_bytes(self) -> None:
+        """A 3-byte buffer can't even hold a length prefix."""
+        with pytest.raises(ValueError, match="Buffer too short"):
+            _unpack_string(memoryview(b"abc"), 0)
+
+    def test_declared_length_exceeds_buffer(self) -> None:
+        """Length prefix larger than remaining bytes is a protocol error."""
+        # Declares 1000-byte string, only 4 bytes follow.
+        bad = struct.pack(">I", 1000) + b"\x00" * 4
+        with pytest.raises(ValueError, match="exceeds buffer"):
+            _unpack_string(memoryview(bad), 0)
+
+
+class TestDecodeRecord:
+    """Verify ``_decode_record`` rejects non-RSA/ed25519 keys."""
+
+    def test_unsupported_key_type_is_rejected(self) -> None:
+        """A DSA key round-trips through decode as an explicit ValueError."""
+        from cryptography.hazmat.primitives.asymmetric.ec import (
+            SECP256R1,
+            generate_private_key,
+        )
+        from cryptography.hazmat.primitives.serialization import (
+            Encoding,
+            NoEncryption,
+            PrivateFormat,
+        )
+
+        from terok_sandbox.credentials.db import SSHKeyRecord
+        from terok_sandbox.vault.ssh_signer import _decode_record
+
+        ec_key = generate_private_key(SECP256R1())
+        pem = ec_key.private_bytes(
+            encoding=Encoding.PEM,
+            format=PrivateFormat.PKCS8,
+            encryption_algorithm=NoEncryption(),
+        )
+        rec = SSHKeyRecord(
+            id=1,
+            key_type="ecdsa",  # not what the cache accepts
+            private_pem=pem,
+            public_blob=b"x",
+            comment="c",
+            fingerprint="00" * 32,
+        )
+        with pytest.raises(ValueError, match="Unsupported key type"):
+            _decode_record(rec)
+
+
+class TestDBKeyCache:
+    """Verify the version-counter cache behaviour."""
+
+    def test_second_call_same_version_hits_cache(self, tmp_path: Path) -> None:
+        """When ``ssh_keys_version`` is unchanged, the cache returns the prior slot."""
+        from terok_sandbox.vault.ssh_signer import _DBKeyCache
+
+        db_path = tmp_path / "vault.db"
+        db = CredentialDB(db_path)
+        _seed_key(db, "proj")
+
+        cache = _DBKeyCache(db)
+        first = cache.get("proj")
+        second = cache.get("proj")
+        assert second is first  # same list object — cache hit
+        db.close()
+
+    def test_version_bump_reloads(self, tmp_path: Path) -> None:
+        """A new ``assign_ssh_key`` bumps the version and invalidates the cached slot."""
+        from terok_sandbox.vault.ssh_signer import _DBKeyCache
+
+        db_path = tmp_path / "vault.db"
+        db = CredentialDB(db_path)
+        _seed_key(db, "proj", comment="first")
+
+        cache = _DBKeyCache(db)
+        before = cache.get("proj")
+        _seed_key(db, "proj", comment="second")  # bumps ssh_keys_version
+        after = cache.get("proj")
+        assert after is not before
+        assert len(after) == 2
+        db.close()
+
 
 # ── Round-trip (TCP + token handshake) ──────────────────────────────────
 
