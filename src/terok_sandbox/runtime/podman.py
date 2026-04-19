@@ -71,8 +71,15 @@ def check_gpu_error(exc: subprocess.CalledProcessError) -> None:
     """Raise :class:`GpuConfigError` if *exc* looks like a CDI/NVIDIA issue.
 
     Does nothing if the error does not match any known CDI patterns.
+    Defensively handles both ``bytes`` and ``str`` stderr so callers
+    that ran subprocess with ``text=True`` are not punished with an
+    ``AttributeError`` on ``.decode``.
     """
-    stderr = (exc.stderr or b"").decode(errors="replace")
+    stderr_raw = exc.stderr or b""
+    if isinstance(stderr_raw, bytes):
+        stderr = stderr_raw.decode(errors="replace")
+    else:
+        stderr = str(stderr_raw)
     if any(pat in stderr for pat in _CDI_ERROR_PATTERNS):
         msg = f"Container launch failed (GPU misconfiguration):\n{stderr.strip()}\n\n{_CDI_HINT}"
         raise GpuConfigError(msg) from exc
@@ -304,16 +311,29 @@ class PodmanContainer:
             return None
 
     def start(self) -> None:
-        """Start the container.  Raises :class:`RuntimeError` on failure."""
+        """Start the container.
+
+        Every lifecycle failure — missing podman, timeout, or non-zero
+        exit — surfaces as :class:`RuntimeError` so callers have a
+        single exception type to catch.  The original exception is
+        preserved via ``__cause__`` when applicable.
+        """
         log_debug(f"PodmanContainer.start({self.name})")
-        proc = subprocess.run(
-            ["podman", "start", self.name],
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=_START_TIMEOUT,
-        )
+        try:
+            proc = subprocess.run(
+                ["podman", "start", self.name],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=_START_TIMEOUT,
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError(f"podman start {self.name!r} failed: podman not found") from exc
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"podman start {self.name!r} timed out after {_START_TIMEOUT}s"
+            ) from exc
         if proc.returncode != 0:
             raise RuntimeError(
                 f"podman start {self.name!r} failed "
@@ -321,16 +341,27 @@ class PodmanContainer:
             )
 
     def stop(self, *, timeout: int = 10) -> None:
-        """Stop the container, SIGKILL after *timeout* seconds."""
+        """Stop the container, SIGKILL after *timeout* seconds.
+
+        Every lifecycle failure surfaces as :class:`RuntimeError`; see
+        :meth:`start` for the rationale.
+        """
         log_debug(f"PodmanContainer.stop({self.name}, timeout={timeout})")
-        proc = subprocess.run(
-            ["podman", "stop", "--time", str(timeout), self.name],
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=timeout + _STOP_TIMEOUT_BUFFER,
-        )
+        try:
+            proc = subprocess.run(
+                ["podman", "stop", "--time", str(timeout), self.name],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=timeout + _STOP_TIMEOUT_BUFFER,
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError(f"podman stop {self.name!r} failed: podman not found") from exc
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"podman stop {self.name!r} timed out after {timeout + _STOP_TIMEOUT_BUFFER}s"
+            ) from exc
         if proc.returncode != 0:
             raise RuntimeError(
                 f"podman stop {self.name!r} failed "
@@ -607,7 +638,13 @@ class PodmanLogStream:
         self.close()
 
     def close(self) -> None:
-        """Terminate the underlying ``podman logs`` process, if still alive."""
+        """Terminate the underlying ``podman logs`` process and release its pipes.
+
+        Reaps the child (terminate → wait → kill fallback) and then
+        closes both parent-side file descriptors so repeated
+        ``container.logs()`` calls do not leak FDs.  Safe to call
+        multiple times; second call is a no-op.
+        """
         if self._proc.poll() is None:
             self._proc.terminate()
             try:
@@ -615,6 +652,14 @@ class PodmanLogStream:
             except subprocess.TimeoutExpired:
                 self._proc.kill()
                 self._proc.wait()
+        for stream in (self._proc.stdout, self._proc.stderr):
+            if stream is not None:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+        self._proc.stdout = None
+        self._proc.stderr = None
 
 
 # ── PortReservation ───────────────────────────────────────────────────────
@@ -754,7 +799,7 @@ class PodmanRuntime:
             ["podman", "exec", container.name, *cmd],
             capture_output=True,
             text=True,
-            timeout=timeout if timeout is not None else 30,
+            timeout=timeout,
             check=False,
         )
         return ExecResult(

@@ -197,6 +197,34 @@ class TestPodmanLogStream:
         proc.kill.assert_called_once()
 
     @patch("terok_sandbox.runtime.podman.subprocess.Popen")
+    def test_close_releases_parent_side_fds(self, mock_popen_cls) -> None:
+        """``close`` closes both stdout and stderr parent-side pipes."""
+        proc = _fake_popen([], returncode=0)
+        stderr = MagicMock()
+        proc.stderr = stderr
+        mock_popen_cls.return_value = proc
+        stream = PodmanLogStream("ctr", follow=False, tail=None)
+        stdout = proc.stdout
+        stream.close()
+        stdout.close.assert_called_once()
+        stderr.close.assert_called_once()
+        assert proc.stdout is None
+        assert proc.stderr is None
+
+    @patch("terok_sandbox.runtime.podman.subprocess.Popen")
+    def test_close_swallows_stream_close_errors(self, mock_popen_cls) -> None:
+        """``close`` tolerates already-closed or broken parent pipes."""
+        proc = _fake_popen([], returncode=0)
+        proc.stdout.close.side_effect = OSError("fd closed")
+        proc.stderr = MagicMock()
+        proc.stderr.close.side_effect = OSError("fd closed")
+        mock_popen_cls.return_value = proc
+        stream = PodmanLogStream("ctr", follow=False, tail=None)
+        stream.close()  # must not raise
+        assert proc.stdout is None
+        assert proc.stderr is None
+
+    @patch("terok_sandbox.runtime.podman.subprocess.Popen")
     def test_next_returns_stopiteration_when_no_stdout(self, mock_popen_cls) -> None:
         """Missing stdout terminates iteration immediately."""
         proc = MagicMock()

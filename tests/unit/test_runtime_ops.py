@@ -34,7 +34,7 @@ class TestExec:
             ["podman", "exec", "mycontainer", "cat", "/etc/hostname"],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=None,
             check=False,
         )
         assert result.exit_code == 0
@@ -136,12 +136,22 @@ class TestContainerStart:
             PodmanRuntime().container("gone").start()
 
     @patch("terok_sandbox.runtime.podman.subprocess.run")
-    def test_filenotfounderror_propagates(self, mock_run) -> None:
-        """Missing podman propagates unchanged."""
+    def test_missing_podman_is_runtimeerror(self, mock_run) -> None:
+        """Missing podman is normalised to RuntimeError (chains the original)."""
         mock_run.side_effect = FileNotFoundError("podman")
 
-        with pytest.raises(FileNotFoundError):
+        with pytest.raises(RuntimeError, match="podman not found") as exc_info:
             PodmanRuntime().container("c1").start()
+        assert isinstance(exc_info.value.__cause__, FileNotFoundError)
+
+    @patch("terok_sandbox.runtime.podman.subprocess.run")
+    def test_timeout_is_runtimeerror(self, mock_run) -> None:
+        """Timeout is normalised to RuntimeError with the elapsed seconds."""
+        mock_run.side_effect = subprocess.TimeoutExpired("podman", 30)
+
+        with pytest.raises(RuntimeError, match=r"timed out after \d+s") as exc_info:
+            PodmanRuntime().container("c1").start()
+        assert isinstance(exc_info.value.__cause__, subprocess.TimeoutExpired)
 
 
 class TestContainerStop:
@@ -182,9 +192,19 @@ class TestContainerStop:
             PodmanRuntime().container("gone").stop()
 
     @patch("terok_sandbox.runtime.podman.subprocess.run")
-    def test_filenotfounderror_propagates(self, mock_run) -> None:
-        """Missing podman propagates unchanged."""
+    def test_missing_podman_is_runtimeerror(self, mock_run) -> None:
+        """Missing podman is normalised to RuntimeError (chains the original)."""
         mock_run.side_effect = FileNotFoundError("podman")
 
-        with pytest.raises(FileNotFoundError):
+        with pytest.raises(RuntimeError, match="podman not found") as exc_info:
             PodmanRuntime().container("c1").stop()
+        assert isinstance(exc_info.value.__cause__, FileNotFoundError)
+
+    @patch("terok_sandbox.runtime.podman.subprocess.run")
+    def test_timeout_is_runtimeerror(self, mock_run) -> None:
+        """Timeout is normalised to RuntimeError with the elapsed seconds."""
+        mock_run.side_effect = subprocess.TimeoutExpired("podman", 15)
+
+        with pytest.raises(RuntimeError, match=r"timed out after \d+s") as exc_info:
+            PodmanRuntime().container("c1").stop()
+        assert isinstance(exc_info.value.__cause__, subprocess.TimeoutExpired)

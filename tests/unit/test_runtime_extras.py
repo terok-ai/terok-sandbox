@@ -72,6 +72,16 @@ class TestCheckGpuError:
         exc = subprocess.CalledProcessError(returncode=125, cmd=["podman"], stderr=None)
         check_gpu_error(exc)
 
+    def test_text_stderr_is_handled(self) -> None:
+        """``str`` stderr (``text=True`` callers) does not trip ``.decode``."""
+        exc = subprocess.CalledProcessError(
+            returncode=125,
+            cmd=["podman", "run"],
+            stderr="Error: CDI device nvidia.com/gpu=all not registered",
+        )
+        with pytest.raises(GpuConfigError):
+            check_gpu_error(exc)
+
 
 class TestRedactEnvArgs:
     """Sensitive ``-e KEY=VALUE`` args are redacted; others pass through."""
