@@ -65,6 +65,17 @@ class TestInit:
         rows = db.list_ssh_keys_for_scope("proj")
         assert [r.id for r in rows] == [second["key_id"]]
 
+    def test_force_rotation_reseeds_primary_comment(self, db: CredentialDB) -> None:
+        """The survivor of a force-rotation is the new primary — ``tk-main:``."""
+        SSHManager(scope="proj", db=db).init()
+        rotated = SSHManager(scope="proj", db=db).init(force=True)
+        assert rotated["comment"] == "tk-main:proj"
+
+    def test_empty_comment_is_preserved_not_defaulted(self, db: CredentialDB) -> None:
+        """An explicit ``comment=""`` is passed through verbatim."""
+        result = SSHManager(scope="proj", db=db).init(comment="")
+        assert result["comment"] == ""
+
     def test_invalid_scope_rejected_before_key_material_is_persisted(
         self, db: CredentialDB
     ) -> None:

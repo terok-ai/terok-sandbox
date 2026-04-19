@@ -120,7 +120,16 @@ class SSHManager:
         _require_safe_scope(self._scope)
 
         existing = self._db.list_ssh_keys_for_scope(self._scope)
-        effective_comment = comment or self._default_comment(existing)
+        # A ``force=True`` rotation leaves exactly this key assigned, so the
+        # new key *is* the primary even when prior keys existed.  Empty
+        # comments are preserved as-is — only ``None`` falls back to the
+        # derived default.
+        primary = force or not existing
+        effective_comment = (
+            comment
+            if comment is not None
+            else self._default_comment(existing_count=len(existing), primary=primary)
+        )
 
         keypair = generate_keypair(key_type, comment=effective_comment)
         key_id = self._db.store_ssh_key(
@@ -146,16 +155,16 @@ class SSHManager:
             public_line=keypair.public_line,
         )
 
-    def _default_comment(self, existing) -> str:
-        """Pick a default comment based on whether the scope already has keys.
+    def _default_comment(self, *, existing_count: int, primary: bool) -> str:
+        """Pick a default comment based on post-operation key-set state.
 
         The signer's ``tk-main:`` promotion heuristic expects exactly one
         primary key per scope; additional keys use ``tk-side:`` so they
         don't compete for the front of the identity list.
         """
-        if existing:
-            return f"tk-side:{self._scope}:{len(existing) + 1}"
-        return f"tk-main:{self._scope}"
+        if primary:
+            return f"tk-main:{self._scope}"
+        return f"tk-side:{self._scope}:{existing_count + 1}"
 
 
 __all__ = ["SSHInitResult", "SSHManager", "DEFAULT_RSA_BITS", "GeneratedKeypair"]
