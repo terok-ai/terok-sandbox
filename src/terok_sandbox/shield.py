@@ -149,6 +149,40 @@ def check_environment(cfg: SandboxConfig | None = None) -> EnvironmentCheck:
         return make_shield(Path(tmp), cfg).check_environment()
 
 
+def shield_interactive_session(
+    container: str,
+    task_dir: Path,
+    *,
+    raw: bool = False,
+    cfg: SandboxConfig | None = None,
+) -> None:
+    """Run an interactive verdict session for a task's shield.
+
+    Thin wrapper that spares callers from reaching into
+    :mod:`terok_shield.cli.interactive` and rebuilding the
+    ``state_dir`` themselves.
+    """
+    from terok_shield.cli.interactive import run_interactive
+
+    run_interactive(make_shield(task_dir, cfg).config.state_dir, container, raw=raw)
+
+
+def shield_watch_session(
+    container: str,
+    task_dir: Path,
+    cfg: SandboxConfig | None = None,
+) -> None:
+    """Stream shield blocked-access events for a task as JSON lines.
+
+    Thin wrapper that spares callers from reaching into
+    :mod:`terok_shield.cli.watch` and rebuilding the ``state_dir``
+    themselves.
+    """
+    from terok_shield.cli.watch import run_watch
+
+    run_watch(make_shield(task_dir, cfg).config.state_dir, container)
+
+
 def run_setup(*, root: bool = False, user: bool = False) -> None:
     """Install global OCI hooks for shield egress firewalling.
 

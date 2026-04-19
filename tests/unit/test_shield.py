@@ -31,6 +31,8 @@ from terok_sandbox.shield import (
     pre_start,
     run_setup,
     setup_hooks_direct,
+    shield_interactive_session,
+    shield_watch_session,
     state,
     status,
     up,
@@ -348,3 +350,21 @@ def test_setup_hooks_direct(
         mock_conf.assert_called_once_with(expected_target)
     else:
         mock_conf.assert_not_called()
+
+
+@patch("terok_shield.cli.interactive.run_interactive")
+def test_shield_interactive_session_delegates_to_run_interactive(
+    mock_run_interactive: MagicMock,
+) -> None:
+    """Session helper forwards the shield state_dir and container to terok-shield."""
+    shield_interactive_session("task-ctr", MOCK_TASK_DIR, raw=True)
+
+    mock_run_interactive.assert_called_once_with(MOCK_TASK_DIR / "shield", "task-ctr", raw=True)
+
+
+@patch("terok_shield.cli.watch.run_watch")
+def test_shield_watch_session_delegates_to_run_watch(mock_run_watch: MagicMock) -> None:
+    """Session helper forwards the shield state_dir and container to terok-shield."""
+    shield_watch_session("task-ctr", MOCK_TASK_DIR)
+
+    mock_run_watch.assert_called_once_with(MOCK_TASK_DIR / "shield", "task-ctr")
