@@ -175,6 +175,61 @@ class TestLink:
         assert "already linked" in capsys.readouterr().out
 
 
+class TestImportErrorMapping:
+    """``_handle_ssh_import`` turns library-level errors into clean SystemExits."""
+
+    def test_mismatched_pub_file_raises_system_exit(
+        self, tmp_path: Path, db_path: Path, mock_cfg: MagicMock, patched_open_db
+    ) -> None:
+        """A pub file from a different keypair surfaces as a user-facing error."""
+        kp_a = generate_keypair("ed25519", comment="a")
+        kp_b = generate_keypair("ed25519", comment="b")
+        priv = tmp_path / "priv"
+        pub = tmp_path / "pub"
+        priv.write_bytes(kp_a.private_pem)
+        pub.write_text(kp_b.public_line + "\n")
+        with pytest.raises(SystemExit, match="Import failed:"):
+            _handle_ssh_import(
+                scope="proj", private_key=str(priv), public_key=str(pub), cfg=mock_cfg
+            )
+
+    def test_poisoned_comment_raises_system_exit(
+        self, tmp_path: Path, db_path: Path, mock_cfg: MagicMock, patched_open_db
+    ) -> None:
+        """ANSI escapes in the comment come back as ``Import failed``, not a traceback."""
+        kp = generate_keypair("ed25519", comment="clean")
+        priv = tmp_path / "id"
+        pub = tmp_path / "id.pub"
+        priv.write_bytes(kp.private_pem)
+        pub.write_text(kp.public_line.rsplit(" ", 1)[0] + " bad\x1b[31m\n")
+        with pytest.raises(SystemExit, match="Import failed:"):
+            _handle_ssh_import(
+                scope="proj", private_key=str(priv), public_key=str(pub), cfg=mock_cfg
+            )
+
+    def test_garbage_pem_raises_system_exit(
+        self, tmp_path: Path, db_path: Path, mock_cfg: MagicMock, patched_open_db
+    ) -> None:
+        """A non-PEM private-key file surfaces as a clean error."""
+        priv = tmp_path / "id"
+        priv.write_bytes(b"not a real PEM")
+        with pytest.raises(SystemExit, match="Import failed:"):
+            _handle_ssh_import(scope="proj", private_key=str(priv), cfg=mock_cfg)
+
+
+class TestScopeNameValidation:
+    """``_validate_scope_name`` now covers length, not just charset."""
+
+    def test_oversize_scope_rejected(
+        self, db_path: Path, mock_cfg: MagicMock, patched_open_db
+    ) -> None:
+        """A 65-char scope exceeds the unix-socket-budget bound and fails at CLI time."""
+        from terok_sandbox.commands import _validate_scope_name
+
+        with pytest.raises(SystemExit, match="exceeds"):
+            _validate_scope_name("x" * 65)
+
+
 class TestImportMessaging:
     """``ssh-import`` emits different messages depending on DB + scope state."""
 

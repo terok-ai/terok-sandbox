@@ -197,8 +197,8 @@ def import_ssh_keypair(
     The public key is optional; when omitted it is derived from the private
     key.  When both are given they must match — fingerprint mismatch raises
     :class:`KeypairMismatchError`.  Password-protected private keys raise
-    :class:`PasswordProtectedKeyError`; strip the passphrase with
-    ``ssh-keygen -p`` and retry.
+    :class:`PasswordProtectedKeyError`; the library stays diagnostic-only,
+    so callers own the remediation hint they render to the user.
     """
     priv_bytes = priv_path.read_bytes()
     pub_bytes = pub_path.read_bytes() if pub_path else None
@@ -246,9 +246,7 @@ def parse_openssh_keypair(
         private_key = load_ssh_private_key(priv_bytes, password=None)
     except (TypeError, ValueError) as exc:
         if isinstance(exc, TypeError) or _PASSPHRASE_HINT.search(str(exc)):
-            raise PasswordProtectedKeyError(
-                "private key is passphrase-protected; run `ssh-keygen -p -f <file>` to strip it"
-            ) from exc
+            raise PasswordProtectedKeyError("private key is passphrase-protected") from exc
         raise
 
     key_type = _classify_key(private_key)
@@ -307,7 +305,18 @@ def export_ssh_keypair(
     pub_path = out_dir / f"{stem}.pub"
 
     _write_exclusive(priv_path, record.private_pem, PRIVATE_KEY_MODE)
-    _write_exclusive(pub_path, (public_line_of(record) + "\n").encode("utf-8"), PUBLIC_KEY_MODE)
+    try:
+        _write_exclusive(
+            pub_path,
+            (public_line_of(record) + "\n").encode("utf-8"),
+            PUBLIC_KEY_MODE,
+        )
+    except BaseException:
+        # Don't leave a lone private key on disk if the matching public
+        # write failed; the user would have no way to identify which
+        # scope it belongs to without the companion ``.pub`` file.
+        priv_path.unlink(missing_ok=True)
+        raise
 
     return ExportResult(
         key_id=record.id,
@@ -407,10 +416,28 @@ def _pick_key_for_export(db: CredentialDB, scope: str, key_id: int | None) -> SS
 
 
 def _write_exclusive(path: Path, data: bytes, mode: int) -> None:
-    """Create *path* with ``O_EXCL`` and *mode*; refuses to overwrite."""
+    """Create *path* with ``O_EXCL`` and *mode*, writing *data* atomically-ish.
+
+    POSIX lets ``os.write`` short-write even for regular files, so loop
+    until every byte lands.  If any write or the final ``chmod`` fails,
+    the partially-written file is unlinked so no truncated key material
+    survives.
+    """
     fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
     try:
-        os.write(fd, data)
-    finally:
+        view = memoryview(data)
+        offset = 0
+        while offset < len(view):
+            written = os.write(fd, view[offset:])
+            if written <= 0:
+                raise OSError(f"os.write made no progress at offset {offset}")
+            offset += written
         os.close(fd)
-    os.chmod(path, mode)  # honor explicit mode even under a restrictive umask
+        fd = -1
+        # Honor explicit mode even under a restrictive umask (0022 etc.).
+        os.chmod(path, mode)
+    except BaseException:
+        if fd >= 0:
+            os.close(fd)
+        path.unlink(missing_ok=True)
+        raise

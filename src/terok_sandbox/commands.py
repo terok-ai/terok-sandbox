@@ -395,18 +395,19 @@ def _print_key_table(rows: list[KeyRow], *, numbered: bool = False) -> None:
             print(fmt.format(*d))
 
 
-_SCOPE_NAME_PATTERN = r"[A-Za-z0-9][A-Za-z0-9._-]*"
-
-
 def _validate_scope_name(scope: str) -> None:
-    """Raise :class:`SystemExit` if *scope* is not a safe identifier."""
-    import re
+    """Raise :class:`SystemExit` if *scope* is not a safe identifier.
 
-    if not re.fullmatch(_SCOPE_NAME_PATTERN, scope):
-        raise SystemExit(
-            f"Invalid scope {scope!r}: must start with a letter or digit "
-            "and contain only [A-Za-z0-9._-]"
-        )
+    Delegates to the canonical DB-layer validator so the character set
+    *and* the length bound (derived from the AF_UNIX socket-path budget)
+    stay co-located with the write sites that depend on them.
+    """
+    from .credentials.db import InvalidScopeName, _require_safe_scope
+
+    try:
+        _require_safe_scope(scope)
+    except InvalidScopeName as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 def _handle_ssh_import(
@@ -422,7 +423,9 @@ def _handle_ssh_import(
 
     from .config import SandboxConfig as _SandboxConfig
     from .credentials.ssh_keypair import (
+        KeypairMismatchError,
         PasswordProtectedKeyError,
+        UnsafeCommentError,
         import_ssh_keypair,
     )
 
@@ -449,7 +452,12 @@ def _handle_ssh_import(
                 comment=comment,
             )
         except PasswordProtectedKeyError as exc:
-            raise SystemExit(str(exc)) from exc
+            # The library message is diagnostic; append the CLI remediation here.
+            raise SystemExit(
+                f"{exc}  Run `ssh-keygen -p -f {priv_path}` to strip the passphrase."
+            ) from exc
+        except (KeypairMismatchError, UnsafeCommentError, ValueError) as exc:
+            raise SystemExit(f"Import failed: {exc}") from exc
 
         pretty_scope = sanitize_tty(scope)
         if not result.already_present:
@@ -756,7 +764,9 @@ def _handle_ssh_remove(
         db.close()
 
     n = len(candidates)
-    print(f"Removed {n} key{'s' if n != 1 else ''} from the vault.")
+    # Keys still assigned to *other* scopes survive the DB — unassign,
+    # not remove, is the truthful verb for a possibly-shared key.
+    print(f"Unassigned {n} key{'s' if n != 1 else ''} from their scope(s).")
 
 
 SSH_COMMANDS: tuple[CommandDef, ...] = (

@@ -191,7 +191,9 @@ class TestPasswordProtected:
             pytest.raises(PasswordProtectedKeyError) as excinfo,
         ):
             import_ssh_keypair(db, "proj", priv)
-        assert "ssh-keygen -p" in str(excinfo.value)
+        # Library exception is diagnostic; the CLI handler appends the
+        # ``ssh-keygen -p`` remediation hint itself.
+        assert "passphrase-protected" in str(excinfo.value)
 
 
 class TestExport:
@@ -251,6 +253,38 @@ class TestExport:
         with pytest.raises(ValueError):
             export_ssh_keypair(db, "", tmp_path / "out")
 
+    def test_public_write_failure_rolls_back_private(
+        self,
+        db: CredentialDB,
+        disk_keypair: tuple[Path, Path],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """If the .pub write fails, the private file must not linger on disk."""
+        from terok_sandbox.credentials import ssh_keypair as mod
+
+        priv, pub = disk_keypair
+        import_ssh_keypair(db, "proj", priv, pub_path=pub)
+
+        real = mod._write_exclusive
+        calls: list[Path] = []
+
+        def _fault_on_pub(path: Path, data: bytes, mode: int) -> None:
+            calls.append(path)
+            if path.suffix == ".pub":
+                raise OSError("synthetic pub-write failure")
+            real(path, data, mode)
+
+        monkeypatch.setattr(mod, "_write_exclusive", _fault_on_pub)
+
+        out_dir = tmp_path / "out"
+        with pytest.raises(OSError, match="synthetic pub-write failure"):
+            export_ssh_keypair(db, "proj", out_dir)
+
+        # Private file exists briefly, then gets unlinked during rollback.
+        survivors = list(out_dir.glob("*"))
+        assert survivors == [], f"no files should remain, got {survivors}"
+
     @pytest.mark.parametrize("bad_name", ["../escape", "/etc/passwd", "sub/file", ".", ".."])
     def test_rejects_path_like_out_name(
         self,
@@ -290,6 +324,43 @@ class TestExport:
         import_ssh_keypair(db, "proj", priv, pub_path=pub)
         with pytest.raises(ValueError, match="key_id .* not assigned"):
             export_ssh_keypair(db, "proj", tmp_path / "out", key_id=99999)
+
+
+class TestWriteExclusive:
+    """Verify ``_write_exclusive`` handles short writes and rollback."""
+
+    def test_short_writes_are_looped(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``os.write`` short-writes of 1 byte at a time still produce the full file."""
+        import os
+
+        from terok_sandbox.credentials import ssh_keypair as mod
+
+        real_write = os.write
+
+        def _one_byte_at_a_time(fd: int, data):
+            return real_write(fd, bytes(memoryview(data))[:1])
+
+        monkeypatch.setattr(mod.os, "write", _one_byte_at_a_time)
+
+        target = tmp_path / "small.bin"
+        mod._write_exclusive(target, b"hello-world", 0o600)
+        assert target.read_bytes() == b"hello-world"
+
+    def test_chmod_failure_unlinks_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failure after bytes landed still rolls back — no truncated-mode leftover."""
+        from terok_sandbox.credentials import ssh_keypair as mod
+
+        def _chmod_boom(_path, _mode):
+            raise OSError("synthetic chmod failure")
+
+        monkeypatch.setattr(mod.os, "chmod", _chmod_boom)
+
+        target = tmp_path / "partial.bin"
+        with pytest.raises(OSError, match="chmod failure"):
+            mod._write_exclusive(target, b"data", 0o600)
+        assert not target.exists()
 
 
 class TestCommentGuard:
