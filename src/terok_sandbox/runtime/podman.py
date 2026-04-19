@@ -889,6 +889,35 @@ class PodmanRuntime:
 # ── stream_initial_logs internals ─────────────────────────────────────────
 
 
+def _reap_logs_proc(proc: subprocess.Popen | None) -> None:
+    """Terminate, wait, and close the ``podman logs`` child if still alive.
+
+    Shared by every exit path of :func:`_stream_initial_logs` so the
+    podman child never leaks as a zombie and its stdout pipe never
+    leaks as an open file descriptor.  Safe to call with ``None`` or
+    with a child that has already exited.
+    """
+    if proc is None:
+        return
+    try:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        else:
+            # Already exited — still reap to release zombie slot.
+            proc.wait()
+    finally:
+        if proc.stdout is not None:
+            try:
+                proc.stdout.close()
+            except OSError:
+                pass
+
+
 def _stream_initial_logs(
     container_name: str,
     timeout_sec: float | None,
@@ -900,6 +929,7 @@ def _stream_initial_logs(
     proc_holder: list[subprocess.Popen | None] = [None]
 
     def _read_loop() -> None:
+        proc: subprocess.Popen | None = None
         try:
             proc = subprocess.Popen(
                 ["podman", "logs", "-f", container_name],
@@ -937,7 +967,6 @@ def _stream_initial_logs(
                         print(line, file=sys.stdout, flush=True)
                         if ready_check(line):
                             holder[0] = True
-                            proc.terminate()
                             return
 
             if buf:
@@ -946,10 +975,10 @@ def _stream_initial_logs(
                     print(line, file=sys.stdout, flush=True)
                     if ready_check(line):
                         holder[0] = True
-
-            proc.terminate()
         except Exception as exc:  # noqa: BLE001
             log_warning(f"stream_initial_logs error: {exc}")
+        finally:
+            _reap_logs_proc(proc)
 
     stream_thread = threading.Thread(target=_read_loop)
     stream_thread.start()
@@ -957,9 +986,10 @@ def _stream_initial_logs(
 
     if stream_thread.is_alive():
         stop_event.set()
-        proc = proc_holder[0]
-        if proc is not None:
-            proc.terminate()
+        # Reap from the main thread too in case the reader is wedged in
+        # select.select and hasn't reached its finally block yet — the
+        # podman child still needs its fds closed before we return.
+        _reap_logs_proc(proc_holder[0])
         stream_thread.join(timeout=5)
 
     return holder[0]
