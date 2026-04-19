@@ -417,7 +417,13 @@ class Sandbox:
         return stream_initial_logs(container, timeout, check)
 
     def wait_for_exit(self, container: str, timeout: float | None = None) -> int:
-        """Block until container exits; return exit code."""
+        """Block until *container* exits; return its exit code.
+
+        Raises :class:`TimeoutError` on timeout, :class:`RuntimeError` on
+        ``podman wait`` failures or non-numeric output, and lets
+        :class:`FileNotFoundError` propagate when podman is not on PATH.
+        See :func:`.runtime.wait_for_exit` for the full contract.
+        """
         from .runtime import wait_for_exit
 
         return wait_for_exit(container, timeout)

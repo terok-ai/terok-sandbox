@@ -520,23 +520,44 @@ def stream_initial_logs(
 def wait_for_exit(cname: str, timeout_sec: float | None = None) -> int:
     """Wait for a container to exit and return its exit code.
 
-    Returns 124 on timeout, 1 if podman is not found.
+    Raises :class:`TimeoutError` when *timeout_sec* elapses before the
+    container exits — signalled out of band so a container that
+    legitimately exits with code 124 (the ``timeout(1)`` convention)
+    is returned as its real exit code rather than conflated with the
+    wait timing out.
+
+    Raises :class:`RuntimeError` when ``podman wait`` itself fails
+    (non-zero returncode, e.g. unknown container) or returns output
+    that is not a parseable integer — the podman diagnostic is never
+    impersonated as the container's exit code.
+
+    Raises :class:`FileNotFoundError` when ``podman`` is not on PATH;
+    previously swallowed as the sentinel ``1``, which was
+    indistinguishable from a container that really exited with 1.
     """
     try:
         proc = subprocess.run(
             ["podman", "wait", cname],
             check=False,
             capture_output=True,
+            text=True,
             timeout=timeout_sec,
         )
-        stdout = proc.stdout.decode().strip() if isinstance(proc.stdout, bytes) else proc.stdout
-        if stdout:
-            return int(stdout)
-        return proc.returncode
-    except subprocess.TimeoutExpired:
-        return 124
-    except (FileNotFoundError, ValueError):
-        return 1
+    except subprocess.TimeoutExpired as exc:
+        raise TimeoutError(f"container {cname!r} did not exit within {timeout_sec}s") from exc
+
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip() or "<no output>"
+        raise RuntimeError(f"podman wait {cname!r} failed (returncode={proc.returncode}): {detail}")
+
+    stdout = (proc.stdout or "").strip()
+    try:
+        return int(stdout)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"podman wait {cname!r} returned unexpected output: "
+            f"stdout={proc.stdout!r}, stderr={proc.stderr!r}"
+        ) from exc
 
 
 def reserve_free_port(host: str = "127.0.0.1") -> tuple[socket.socket, int]:

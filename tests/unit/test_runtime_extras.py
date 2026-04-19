@@ -268,36 +268,56 @@ class TestGpuRunArgs:
 
 
 class TestWaitForExit:
-    """wait_for_exit translates podman wait output / errors to exit codes."""
+    """wait_for_exit returns the container's real exit code and signals
+    timeouts, podman errors, and missing podman out of band — nothing is
+    impersonated as an exit code."""
 
     @patch("terok_sandbox.runtime.subprocess.run")
     def test_returns_parsed_exit_code(self, mock_run) -> None:
         mock_run.return_value = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout=b"42\n", stderr=b""
+            args=[], returncode=0, stdout="42\n", stderr=""
         )
         assert wait_for_exit("c") == 42
 
     @patch("terok_sandbox.runtime.subprocess.run")
-    def test_falls_back_to_returncode_when_stdout_empty(self, mock_run) -> None:
+    def test_returns_exit_code_124_distinctly(self, mock_run) -> None:
+        """A container that legitimately exits with code 124 is returned
+        as 124 — not confused with the watcher's own timeout signal."""
         mock_run.return_value = subprocess.CompletedProcess(
-            args=[], returncode=7, stdout=b"", stderr=b""
+            args=[], returncode=0, stdout="124\n", stderr=""
         )
-        assert wait_for_exit("c") == 7
+        assert wait_for_exit("c") == 124
 
     @patch("terok_sandbox.runtime.subprocess.run", side_effect=subprocess.TimeoutExpired("p", 1))
-    def test_timeout_returns_124(self, _run) -> None:
-        assert wait_for_exit("c", timeout_sec=0.1) == 124
+    def test_timeout_raises(self, _run) -> None:
+        with pytest.raises(TimeoutError, match=r"did not exit within"):
+            wait_for_exit("c", timeout_sec=0.1)
 
     @patch("terok_sandbox.runtime.subprocess.run", side_effect=FileNotFoundError)
-    def test_missing_podman_returns_1(self, _run) -> None:
-        assert wait_for_exit("c") == 1
+    def test_missing_podman_raises(self, _run) -> None:
+        with pytest.raises(FileNotFoundError):
+            wait_for_exit("c")
 
     @patch("terok_sandbox.runtime.subprocess.run")
-    def test_unparseable_stdout_returns_1(self, mock_run) -> None:
+    def test_podman_wait_failure_raises(self, mock_run) -> None:
+        """Non-zero ``podman wait`` returncode (e.g. unknown container)
+        raises RuntimeError with the stderr text — never impersonated as
+        the container's exit code."""
         mock_run.return_value = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout=b"oops\n", stderr=b""
+            args=[], returncode=125, stdout="", stderr="Error: no such container c\n"
         )
-        assert wait_for_exit("c") == 1
+        with pytest.raises(RuntimeError, match=r"returncode=125.*no such container"):
+            wait_for_exit("c")
+
+    @patch("terok_sandbox.runtime.subprocess.run")
+    def test_unparseable_stdout_raises(self, mock_run) -> None:
+        """Non-numeric stdout raises RuntimeError with diagnostic context
+        instead of leaking a bare ValueError from ``int(...)``."""
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="oops\n", stderr=""
+        )
+        with pytest.raises(RuntimeError, match=r"returned unexpected output.*oops"):
+            wait_for_exit("c")
 
 
 # ---------------------------------------------------------------------------
