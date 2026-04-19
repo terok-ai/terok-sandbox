@@ -105,6 +105,18 @@ class TestImport:
         assert first.key_id == second.key_id
         assert second.already_present is True
 
+    def test_rsa_import_round_trip(self, tmp_path: Path, db: CredentialDB) -> None:
+        """RSA keys flow through import just like ed25519 — classifier picks the right algo."""
+        kp = generate_keypair("rsa", comment="rsa-import")
+        priv = tmp_path / "id_rsa"
+        pub = tmp_path / "id_rsa.pub"
+        priv.write_bytes(kp.private_pem)
+        pub.write_text(kp.public_line + "\n")
+        result = import_ssh_keypair(db, "proj", priv, pub_path=pub)
+        [row] = db.list_ssh_keys_for_scope("proj")
+        assert row.key_type == "rsa"
+        assert row.fingerprint == result.fingerprint
+
     def test_mismatched_pub_rejected(self, tmp_path: Path, db: CredentialDB) -> None:
         """Priv and pub from unrelated keypairs raises KeypairMismatchError."""
         kp1 = generate_keypair("ed25519", comment="a")
@@ -214,3 +226,100 @@ class TestExport:
         import_ssh_keypair(db, "proj", priv, pub_path=pub)
         with pytest.raises(ValueError):
             export_ssh_keypair(db, "proj", tmp_path / "out", out_name=bad_name)
+
+    def test_picks_key_by_id(
+        self, db: CredentialDB, disk_keypair: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        """Explicit ``key_id`` exports that specific key, not the most-recent."""
+        priv, pub = disk_keypair
+        first = import_ssh_keypair(db, "proj", priv, pub_path=pub)
+        kp2 = generate_keypair("ed25519", comment="second")
+        second_priv = tmp_path / "id2"
+        second_pub = tmp_path / "id2.pub"
+        second_priv.write_bytes(kp2.private_pem)
+        second_pub.write_text(kp2.public_line + "\n")
+        import_ssh_keypair(db, "proj", second_priv, pub_path=second_pub)
+
+        result = export_ssh_keypair(db, "proj", tmp_path / "out", key_id=first.key_id)
+        assert result.key_id == first.key_id
+        assert result.fingerprint == first.fingerprint
+
+    def test_unknown_key_id_raises(
+        self, db: CredentialDB, disk_keypair: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        """An unassigned key_id fails with a clear message."""
+        priv, pub = disk_keypair
+        import_ssh_keypair(db, "proj", priv, pub_path=pub)
+        with pytest.raises(ValueError, match="key_id .* not assigned"):
+            export_ssh_keypair(db, "proj", tmp_path / "out", key_id=99999)
+
+
+class TestPublicLine:
+    """Verify :func:`public_line_of` covers both algos and rejects unknowns."""
+
+    def test_ed25519_line_format(self) -> None:
+        """Line starts with ``ssh-ed25519`` and ends with the comment."""
+        from terok_sandbox.credentials.ssh_keypair import public_line_of
+
+        kp = generate_keypair("ed25519", comment="hi")
+        rec = _record_from(kp, id=1)
+        line = public_line_of(rec)
+        assert line.startswith("ssh-ed25519 ")
+        assert line.endswith(" hi")
+
+    def test_rsa_line_format(self) -> None:
+        """RSA records render as ``ssh-rsa <b64> <comment>``."""
+        from terok_sandbox.credentials.ssh_keypair import public_line_of
+
+        kp = generate_keypair("rsa", comment="rsa-c")
+        rec = _record_from(kp, id=1)
+        line = public_line_of(rec)
+        assert line.startswith("ssh-rsa ")
+        assert line.endswith(" rsa-c")
+
+    def test_unknown_algo_rejected(self) -> None:
+        """Corrupt DB with an unexpected key_type surfaces as ValueError."""
+        from terok_sandbox.credentials.db import SSHKeyRecord
+        from terok_sandbox.credentials.ssh_keypair import public_line_of
+
+        rec = SSHKeyRecord(
+            id=1,
+            key_type="dsa",
+            private_pem=b"",
+            public_blob=b"x",
+            comment="",
+            fingerprint="deadbeef",
+        )
+        with pytest.raises(ValueError, match="unsupported key type"):
+            public_line_of(rec)
+
+
+def _record_from(kp, *, id: int):
+    """Build an :class:`SSHKeyRecord` from a :class:`GeneratedKeypair`."""
+    from terok_sandbox.credentials.db import SSHKeyRecord
+
+    return SSHKeyRecord(
+        id=id,
+        key_type=kp.key_type,
+        private_pem=kp.private_pem,
+        public_blob=kp.public_blob,
+        comment=kp.comment,
+        fingerprint=kp.fingerprint,
+    )
+
+
+class TestParseErrors:
+    """Verify :func:`parse_openssh_keypair` failure modes."""
+
+    def test_malformed_pub_line_raises(self, tmp_path: Path) -> None:
+        """A ``.pub`` file with fewer than two whitespace-separated fields is rejected."""
+        kp = generate_keypair("ed25519", comment="")
+        priv = tmp_path / "k"
+        priv.write_bytes(kp.private_pem)
+        with pytest.raises(ValueError, match="malformed public key file"):
+            parse_openssh_keypair(priv.read_bytes(), b"only-one-field")
+
+    def test_malformed_private_pem_raises(self, tmp_path: Path) -> None:
+        """A garbage private PEM bubbles up as a plain ``ValueError``, not the passphrase one."""
+        with pytest.raises(ValueError):
+            parse_openssh_keypair(b"not-a-real-pem")
