@@ -442,7 +442,13 @@ class Sandbox:
     # -- SSH ----------------------------------------------------------------
 
     def init_ssh(self, scope: str) -> SSHManager:
-        """Create an SSH manager for *scope*."""
+        """Create an SSH manager for *scope* that owns its own ``CredentialDB``.
+
+        Callers receive an ``SSHManager`` whose DB connection is opened
+        against :attr:`SandboxConfig.db_path`.  Use it as a context
+        manager (``with sandbox.init_ssh(scope) as m: ...``) or call
+        :meth:`SSHManager.close` when done.
+        """
         from .credentials.ssh import SSHManager
 
-        return SSHManager(scope=scope)
+        return SSHManager(scope=scope, db_path=self._cfg.db_path)

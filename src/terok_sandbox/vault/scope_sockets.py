@@ -129,19 +129,29 @@ class ScopeSocketReconciler:
         return True
 
     async def _unbind_scope(self, scope: str) -> bool:
-        """Close *scope*'s server and unlink its socket; return ``True`` on success."""
-        server = self._servers.pop(scope, None)
+        """Close *scope*'s server and unlink its socket; return ``True`` on success.
+
+        Failures on close *or* unlink keep the scope in ``_servers`` so
+        the next reconciliation pass retries the teardown — otherwise
+        ``_last_version`` could advance past an incomplete cleanup and
+        leave a stale socket path behind indefinitely.
+        """
+        server = self._servers.get(scope)
         if server is None:
             return True
         try:
             server.close()
             await server.wait_closed()
         except Exception:
-            _logger.exception("Failed to tear down scope socket for %r", scope)
-            # Put the server back so the next pass retries the teardown.
-            self._servers[scope] = server
+            _logger.exception("Failed to close scope server for %r", scope)
             return False
-        self._socket_path(scope).unlink(missing_ok=True)
+        try:
+            self._socket_path(scope).unlink(missing_ok=True)
+        except OSError:
+            _logger.exception("Failed to unlink scope socket path for %r", scope)
+            return False
+        # Both close and unlink succeeded — stop tracking the scope.
+        self._servers.pop(scope, None)
         return True
 
     def _socket_path(self, scope: str) -> Path:

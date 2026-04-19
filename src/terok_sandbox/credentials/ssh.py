@@ -78,7 +78,7 @@ class SSHManager:
             self._db.close()
             self._owns_db = False
 
-    def __enter__(self) -> "SSHManager":
+    def __enter__(self) -> SSHManager:
         """Enter the runtime context; returns self."""
         return self
 
