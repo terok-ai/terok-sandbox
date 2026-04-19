@@ -47,6 +47,13 @@ DEFAULT_RSA_BITS = 3072
 PRIVATE_KEY_MODE = 0o600
 PUBLIC_KEY_MODE = 0o644
 
+_PASSPHRASE_HINT = re.compile(r"(encrypted|password|passphrase)", re.IGNORECASE)
+"""Message substrings cryptography uses when a private key is passphrase-protected.
+
+Detection drives :class:`PasswordProtectedKeyError` translation so malformed
+non-protected PEMs keep bubbling up as plain ``ValueError``.
+"""
+
 
 # ── Domain types ────────────────────────────────────────────────────────────
 
@@ -166,9 +173,6 @@ def import_ssh_keypair(
     )
 
 
-_PASSPHRASE_HINT = re.compile(r"(encrypted|password|passphrase)", re.IGNORECASE)
-
-
 def parse_openssh_keypair(
     priv_bytes: bytes,
     pub_bytes: bytes | None = None,
@@ -248,12 +252,7 @@ def export_ssh_keypair(
     pub_path = out_dir / f"{stem}.pub"
 
     _write_exclusive(priv_path, record.private_pem, PRIVATE_KEY_MODE)
-    algo = _algo_name(record.key_type)
-    public_line = (
-        f"{algo} {base64.b64encode(record.public_blob).decode('ascii')} {record.comment}".rstrip()
-        + "\n"
-    )
-    _write_exclusive(pub_path, public_line.encode("utf-8"), PUBLIC_KEY_MODE)
+    _write_exclusive(pub_path, (public_line_of(record) + "\n").encode("utf-8"), PUBLIC_KEY_MODE)
 
     return ExportResult(
         key_id=record.id,
@@ -263,12 +262,25 @@ def export_ssh_keypair(
     )
 
 
-# ── Fingerprint helper ──────────────────────────────────────────────────────
+# ── Projections on an SSH key ───────────────────────────────────────────────
 
 
 def fingerprint_of(public_blob: bytes) -> str:
     """Return the canonical fingerprint — hex SHA-256 of the SSH wire blob."""
     return hashlib.sha256(public_blob).hexdigest()
+
+
+def public_line_of(record: SSHKeyRecord) -> str:
+    """Render *record* as the one-line OpenSSH public key form.
+
+    Format: ``<algo> <base64-blob> <comment>`` — matches what
+    ``ssh-keygen`` writes to ``.pub`` files and what a remote's deploy-key
+    field expects.  Callers that rendered this inline now go through this
+    single helper so the algo-name mapping lives in one place.
+    """
+    algo = _algo_name(record.key_type)
+    b64 = base64.b64encode(record.public_blob).decode("ascii")
+    return f"{algo} {b64} {record.comment}".rstrip()
 
 
 # ── Private helpers ─────────────────────────────────────────────────────────

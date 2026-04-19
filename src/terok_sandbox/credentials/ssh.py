@@ -42,41 +42,39 @@ class SSHManager:
     crash can leave stale keys (harmless, to be manually cleaned) but
     never leaves the scope with no key at all.
 
-    Ownership: the manager constructs its own :class:`CredentialDB` from
-    the given ``db_path`` and closes it on :meth:`close` / context exit /
-    garbage collection — matching the pattern ``CredentialDB`` itself
-    uses.  Callers get a clean "open ssh manager, use it, toss it" API
-    with no separate resource to track.  For tests and advanced callers
-    that already hold a live ``CredentialDB``, construct with the ``db``
-    keyword instead; the manager will *not* close a caller-owned DB.
+    Two constructors for two ownership stories:
+
+    - ``SSHManager(scope=..., db=...)`` binds the manager to a
+      caller-owned :class:`CredentialDB`.  The manager uses it and
+      never closes it.  Right shape for tests and pooled connections.
+    - :meth:`SSHManager.open` opens its own DB against a path and
+      closes it on :meth:`close` / context exit / garbage collection.
+      Right shape for one-shot CLI commands.
     """
 
-    def __init__(
-        self,
-        *,
-        scope: str,
-        db_path: Path | str | None = None,
-        db: CredentialDB | None = None,
-    ) -> None:
-        """Open a manager backed by *db* (caller-owned) or *db_path* (we own it).
-
-        Exactly one of ``db`` and ``db_path`` must be provided.
-        """
-        if (db is None) == (db_path is None):
-            raise ValueError("SSHManager needs exactly one of `db` or `db_path`")
+    def __init__(self, *, scope: str, db: CredentialDB) -> None:
+        """Bind the manager to a caller-provided :class:`CredentialDB`."""
         self._scope = scope
-        if db is not None:
-            self._db = db
-            self._owns_db = False
-        else:
-            self._db = CredentialDB(Path(db_path))
-            self._owns_db = True
+        self._db = db
+        self._owned_db: CredentialDB | None = None
+
+    @classmethod
+    def open(cls, *, scope: str, db_path: Path | str) -> SSHManager:
+        """Return a manager that owns its own DB connection.
+
+        The connection is opened against *db_path* and closed when the
+        manager exits its context or is garbage-collected.
+        """
+        db = CredentialDB(Path(db_path))
+        manager = cls(scope=scope, db=db)
+        manager._owned_db = db
+        return manager
 
     def close(self) -> None:
         """Close the DB connection if this manager opened it (idempotent)."""
-        if self._owns_db:
-            self._db.close()
-            self._owns_db = False
+        if self._owned_db is not None:
+            self._owned_db.close()
+            self._owned_db = None
 
     def __enter__(self) -> SSHManager:
         """Enter the runtime context; returns self."""

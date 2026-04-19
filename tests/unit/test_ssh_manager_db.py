@@ -67,25 +67,17 @@ class TestInit:
 
 
 class TestOwnership:
-    """``SSHManager`` owns the DB iff constructed with ``db_path``."""
-
-    def test_rejects_both_or_neither(self, tmp_path) -> None:
-        """Exactly one of ``db``/``db_path`` is required."""
-        with pytest.raises(ValueError):
-            SSHManager(scope="proj")  # neither
-        db = CredentialDB(tmp_path / "d.sqlite")
-        with pytest.raises(ValueError):
-            SSHManager(scope="proj", db=db, db_path=tmp_path / "other.db")
+    """``SSHManager`` owns its DB iff constructed via :meth:`SSHManager.open`."""
 
     def test_context_manager_closes_owned_db(self, tmp_path) -> None:
-        """Exiting the ``with`` block closes the DB opened by the manager."""
-        with SSHManager(scope="proj", db_path=tmp_path / "owned.db") as m:
+        """``SSHManager.open`` + ``with`` closes the DB at block exit."""
+        with SSHManager.open(scope="proj", db_path=tmp_path / "owned.db") as m:
             m.init()  # proves the DB is usable inside the block
         # A second close() must be a no-op (idempotent).
         m.close()
 
     def test_does_not_close_caller_owned_db(self, db: CredentialDB) -> None:
-        """A caller-owned DB survives the manager's exit."""
+        """Direct constructor = caller-owned DB; survives the manager's exit."""
         with SSHManager(scope="proj", db=db):
             pass
         # If the manager had closed it, this would raise ProgrammingError.

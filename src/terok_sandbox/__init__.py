@@ -60,9 +60,11 @@ from .credentials.ssh_keypair import (
     KeypairMismatchError,
     PasswordProtectedKeyError,
     export_ssh_keypair,
+    fingerprint_of,
     generate_keypair,
     import_ssh_keypair,
     parse_openssh_keypair,
+    public_line_of,
 )
 from .doctor import CheckVerdict, DoctorCheck, sandbox_doctor_checks
 from .gate.lifecycle import GateServerManager, GateServerStatus
@@ -464,7 +466,9 @@ __all__ = [
     "export_ssh_keypair",
     "generate_keypair",
     "import_ssh_keypair",
+    "fingerprint_of",
     "parse_openssh_keypair",
+    "public_line_of",
     # Port registry
     "PORT_RANGE",
     "PortRegistry",
