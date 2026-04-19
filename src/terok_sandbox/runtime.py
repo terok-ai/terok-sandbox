@@ -180,6 +180,26 @@ def is_container_running(cname: str) -> bool:
     return out.lower() == "true"
 
 
+def container_image(cname: str) -> str | None:
+    """Return the image ID the container *cname* is built on, or ``None``.
+
+    Used by callers that need to reason about the running container's
+    image (e.g. is-its-build-hash-still-current checks).  ``None`` on
+    missing container, absent podman, or any inspect failure — the three
+    signals collapse because the caller's reaction is identical ("can't
+    determine, skip").
+    """
+    try:
+        out = subprocess.check_output(
+            ["podman", "inspect", "-f", "{{.Image}}", cname],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+    return out or None
+
+
 def image_exists(tag: str) -> bool:
     """Return ``True`` when a container image with *tag* is present locally.
 
@@ -228,6 +248,100 @@ def image_labels(tag: str) -> dict[str, str]:
     if not isinstance(parsed, dict):
         return {}
     return {str(k): str(v) for k, v in parsed.items()}
+
+
+@dataclass(frozen=True)
+class ImageRecord:
+    """One row from ``podman images`` — name, tag, id, size, created.
+
+    All fields are strings exactly as podman renders them (sizes are
+    human-readable like ``"1.2GB"``; created is the podman timestamp
+    string).  Callers that need structured sizes should post-process with
+    :func:`_parse_human_size`.
+    """
+
+    repository: str
+    tag: str
+    image_id: str
+    size: str
+    created: str
+
+
+_IMAGES_FORMAT = "{{.Repository}}\t{{.Tag}}\t{{.ID}}\t{{.Size}}\t{{.Created}}"
+
+
+def images_list(*, dangling_only: bool = False) -> list[ImageRecord]:
+    """List local container images as :class:`ImageRecord` rows.
+
+    When *dangling_only*, applies ``--filter dangling=true`` — callers
+    doing cleanup use this to find removable images without matching
+    ``<none>:<none>`` tag strings by hand.  Empty list on podman error
+    or absence.
+    """
+    cmd = ["podman", "images", "--format", _IMAGES_FORMAT, "--no-trunc"]
+    if dangling_only:
+        cmd[2:2] = ["--filter", "dangling=true"]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return []
+    if result.returncode != 0:
+        return []
+
+    records: list[ImageRecord] = []
+    for line in result.stdout.strip().splitlines():
+        parts = line.split("\t")
+        if len(parts) == 5:
+            records.append(ImageRecord(*parts))
+    return records
+
+
+def image_history(image_id: str) -> list[str]:
+    """Return the ``CreatedBy`` string of each layer of *image_id*.
+
+    Empty list when the image is missing or podman is unavailable —
+    callers use the strings to match build-time layer provenance
+    (e.g. ``terok.`` layer prefixes) without parsing JSON.
+    """
+    try:
+        result = subprocess.run(
+            ["podman", "image", "history", "--format", "{{.CreatedBy}}", image_id],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return []
+    if result.returncode != 0:
+        return []
+    return [line for line in result.stdout.splitlines() if line]
+
+
+def image_rm(image_id: str) -> bool:
+    """Remove *image_id*; return ``True`` on success.
+
+    No force flag — an image referenced by a running container stays,
+    which matches cleanup semantics (sweeping safe garbage, not reaping
+    live state).  Returns ``False`` when podman is absent or the image
+    is not removable.
+    """
+    try:
+        result = subprocess.run(
+            ["podman", "image", "rm", image_id],
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
 
 
 def get_container_rw_size(cname: str) -> int | None:

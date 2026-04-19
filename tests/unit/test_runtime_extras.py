@@ -189,6 +189,37 @@ class TestIsContainerRunning:
         assert is_container_running("c") is False
 
 
+class TestContainerImage:
+    """Image-ID lookup for a container; None on any failure."""
+
+    @patch("terok_sandbox.runtime.subprocess.check_output", return_value="sha256:abc\n")
+    def test_returns_image_id(self, _co) -> None:
+        from terok_sandbox.runtime import container_image
+
+        assert container_image("c") == "sha256:abc"
+
+    @patch("terok_sandbox.runtime.subprocess.check_output", return_value="\n")
+    def test_empty_output_is_none(self, _co) -> None:
+        from terok_sandbox.runtime import container_image
+
+        assert container_image("c") is None
+
+    @patch(
+        "terok_sandbox.runtime.subprocess.check_output",
+        side_effect=subprocess.CalledProcessError(125, "podman"),
+    )
+    def test_missing_container_is_none(self, _co) -> None:
+        from terok_sandbox.runtime import container_image
+
+        assert container_image("c") is None
+
+    @patch("terok_sandbox.runtime.subprocess.check_output", side_effect=FileNotFoundError)
+    def test_no_podman_is_none(self, _co) -> None:
+        from terok_sandbox.runtime import container_image
+
+        assert container_image("c") is None
+
+
 class TestImageExists:
     """``podman image exists`` exit-code translation."""
 
@@ -265,6 +296,127 @@ class TestImageLabels:
             args=[], returncode=0, stdout="not-json", stderr=""
         )
         assert image_labels("any:tag") == {}
+
+
+class TestImagesList:
+    """Parse ``podman images`` TSV output into ImageRecord rows."""
+
+    @patch("terok_sandbox.runtime.subprocess.run")
+    def test_parses_rows(self, mock_run) -> None:
+        from terok_sandbox.runtime import ImageRecord, images_list
+
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=(
+                "docker.io/terok/l1-cli\tubuntu-24.04\tabc123\t420MB\t2 hours ago\n"
+                "docker.io/terok/l0\tubuntu-24.04\tdef456\t120MB\t1 day ago\n"
+            ),
+            stderr="",
+        )
+        records = images_list()
+        assert records == [
+            ImageRecord("docker.io/terok/l1-cli", "ubuntu-24.04", "abc123", "420MB", "2 hours ago"),
+            ImageRecord("docker.io/terok/l0", "ubuntu-24.04", "def456", "120MB", "1 day ago"),
+        ]
+
+    @patch("terok_sandbox.runtime.subprocess.run")
+    def test_dangling_only_sets_filter(self, mock_run) -> None:
+        from terok_sandbox.runtime import images_list
+
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        images_list(dangling_only=True)
+        cmd = mock_run.call_args[0][0]
+        assert "--filter" in cmd
+        assert "dangling=true" in cmd
+
+    @patch("terok_sandbox.runtime.subprocess.run")
+    def test_skips_malformed_rows(self, mock_run) -> None:
+        from terok_sandbox.runtime import images_list
+
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout="repo\ttag\tid\t100MB\tyesterday\nmalformed\n",
+            stderr="",
+        )
+        assert len(images_list()) == 1
+
+    @patch("terok_sandbox.runtime.subprocess.run")
+    def test_podman_error_returns_empty(self, mock_run) -> None:
+        from terok_sandbox.runtime import images_list
+
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr=""
+        )
+        assert images_list() == []
+
+    @patch("terok_sandbox.runtime.subprocess.run", side_effect=FileNotFoundError)
+    def test_no_podman_returns_empty(self, _run) -> None:
+        from terok_sandbox.runtime import images_list
+
+        assert images_list() == []
+
+
+class TestImageHistory:
+    """Return the ``CreatedBy`` line for each layer."""
+
+    @patch("terok_sandbox.runtime.subprocess.run")
+    def test_returns_history_lines(self, mock_run) -> None:
+        from terok_sandbox.runtime import image_history
+
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout="COPY . /app\nRUN apt-get install curl\nFROM ubuntu:24.04\n",
+            stderr="",
+        )
+        assert image_history("abc123") == [
+            "COPY . /app",
+            "RUN apt-get install curl",
+            "FROM ubuntu:24.04",
+        ]
+
+    @patch("terok_sandbox.runtime.subprocess.run")
+    def test_empty_on_podman_error(self, mock_run) -> None:
+        from terok_sandbox.runtime import image_history
+
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr="Error: no such image\n"
+        )
+        assert image_history("abc123") == []
+
+    @patch("terok_sandbox.runtime.subprocess.run", side_effect=FileNotFoundError)
+    def test_no_podman_returns_empty(self, _run) -> None:
+        from terok_sandbox.runtime import image_history
+
+        assert image_history("abc123") == []
+
+
+class TestImageRm:
+    """Best-effort image removal; False on any failure."""
+
+    @patch("terok_sandbox.runtime.subprocess.run")
+    def test_success(self, mock_run) -> None:
+        from terok_sandbox.runtime import image_rm
+
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0)
+        assert image_rm("abc123") is True
+
+    @patch("terok_sandbox.runtime.subprocess.run")
+    def test_failure_returns_false(self, mock_run) -> None:
+        from terok_sandbox.runtime import image_rm
+
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=2)
+        assert image_rm("abc123") is False
+
+    @patch("terok_sandbox.runtime.subprocess.run", side_effect=FileNotFoundError)
+    def test_no_podman_returns_false(self, _run) -> None:
+        from terok_sandbox.runtime import image_rm
+
+        assert image_rm("abc123") is False
 
 
 # ---------------------------------------------------------------------------
