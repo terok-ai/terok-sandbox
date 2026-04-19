@@ -24,16 +24,40 @@ Value types returned by ``GitGate`` methods:
 
 import logging
 import os
+import re
 import shlex
 import shutil
+import sqlite3
+import stat
 import subprocess
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import TypedDict
 
-from .._util import effective_ssh_key_name
+
+class GateAuthNotConfigured(RuntimeError):
+    """Raised when a scope has no vault key and personal-SSH fallback is not opted in.
+
+    Callers (the ``gate-sync`` CLI dispatch) turn this into a two-door
+    remediation hint:
+
+    - generate a terok-managed key with ``terok ssh-init <project>`` and
+      register it upstream, or
+    - opt in to the user's own ``~/.ssh`` keys with ``--use-personal-ssh``
+      (or ``ssh.use_personal: true`` in the project YAML).
+    """
+
+    def __init__(self, scope: str) -> None:
+        self.scope = scope
+        super().__init__(
+            f"No SSH key is assigned to scope {scope!r} and personal-SSH "
+            "fallback is not enabled.  Either run `terok ssh-init` to "
+            "generate one, or pass --use-personal-ssh."
+        )
+
 
 logger = logging.getLogger(__name__)
 
@@ -103,9 +127,7 @@ class GitGate:
         gate_path: Path | str,
         upstream_url: str | None = None,
         default_branch: str | None = None,
-        ssh_host_dir: Path | str | None = None,
-        ssh_key_name: str | None = None,
-        allow_host_keys: bool = False,
+        use_personal_ssh: bool = False,
         validate_gate_fn: Callable[[str], None] | None = None,
         clone_cache_base: Path | str | None = None,
     ) -> None:
@@ -114,23 +136,20 @@ class GitGate:
         Parameters
         ----------
         scope:
-            Credential scope for this gate's owner.
+            Credential scope for this gate's owner.  Used to locate the
+            per-scope vault SSH-agent socket.
         gate_path:
             Path to the bare git mirror on the host.
         upstream_url:
             Git upstream URL to sync from.
         default_branch:
             Branch name used for staleness comparisons.
-        ssh_host_dir:
-            Explicit SSH directory for git operations.  When ``None``,
-            falls back to ``SandboxConfig().ssh_keys_dir / scope``.
-        ssh_key_name:
-            Explicit SSH key filename.
-        allow_host_keys:
-            When ``True``, fall back to the user's ``~/.ssh`` keys and
-            SSH agent if no terok-managed key is found.  Default
-            ``False`` — blocks host-key probing to prevent accidental
-            exposure of personal credentials.
+        use_personal_ssh:
+            When ``True``, skip the vault socket entirely and let git fall
+            through to the user's ``~/.ssh`` keys / loaded agent.  Default
+            ``False`` — "terok never touches your real keys" is the advertised
+            property.  Opt in per-invocation (``--use-personal-ssh``) or
+            per-project (``ssh.use_personal: true`` in project YAML).
         validate_gate_fn:
             Optional callback ``(scope) -> None`` that validates no other
             scope uses the same gate with a different upstream.  Injected by
@@ -146,9 +165,7 @@ class GitGate:
         self._gate_path = Path(gate_path)
         self._upstream_url = upstream_url
         self._default_branch = default_branch
-        self._ssh_host_dir = Path(ssh_host_dir) if ssh_host_dir else None
-        self._ssh_key_name = ssh_key_name
-        self._allow_host_keys = allow_host_keys
+        self._use_personal_ssh = use_personal_ssh
         self._validate_gate_fn = validate_gate_fn
         self._clone_cache_base = Path(clone_cache_base) if clone_cache_base else None
 
@@ -158,12 +175,17 @@ class GitGate:
         return (self._clone_cache_base / self._scope) if self._clone_cache_base else None
 
     def _ssh_env(self) -> dict:
-        """Return a subprocess env dict with SSH configuration."""
+        """Return a subprocess env dict, injecting SSH config only for SSH upstreams.
+
+        HTTPS upstreams don't use SSH at all, so we hand git an unmodified
+        env in that case — fetching `GateAuthNotConfigured` on an HTTPS
+        project would be absurd.
+        """
+        if not is_ssh_url(self._upstream_url):
+            return os.environ.copy()
         return _git_env_with_ssh(
             scope=self._scope,
-            ssh_host_dir=self._ssh_host_dir,
-            ssh_key_name=self._ssh_key_name,
-            allow_host_keys=self._allow_host_keys,
+            use_personal_ssh=self._use_personal_ssh,
         )
 
     def _validate_gate(self) -> None:
@@ -452,53 +474,143 @@ class GitGate:
             return None
 
 
+# ---------- Public predicates ----------
+
+
+# scp-style SSH URL: optional ``user@`` prefix, then ``host:path``.  Host
+# must be ≥2 chars so Windows ``C:\…`` paths (1-char "host") stay out.
+# Any other URL scheme is ruled out before we consult this pattern.
+_SCP_SSH_RE = re.compile(r"^(?:[^@/\s:]+@)?[^:/\s]{2,}:.+")
+
+
+def is_ssh_url(url: str | None) -> bool:
+    """Return ``True`` for SSH-scheme git URLs.
+
+    Accepts the two forms git itself accepts:
+
+    - ``ssh://[user@]host[:port]/path`` — explicit URL scheme.
+    - ``[user@]host:path`` — scp-style shorthand.  The user part is
+      optional (``git@github.com:foo.git``, ``deploy@host:repo.git``,
+      bare ``github.com:foo.git``).
+
+    Shared with terok-main: both the gate's env builder and callers that
+    branch on "does this project use SSH?" (e.g. deploy-key prompts,
+    gate-sync fallback hints) must agree on one definition.
+    """
+    if not url:
+        return False
+    candidate = url.strip()
+    lowered = candidate.lower()
+    if lowered.startswith("ssh://"):
+        return True
+    if "://" in candidate:
+        return False
+    return bool(_SCP_SSH_RE.match(candidate))
+
+
 # ---------- Private helpers ----------
 
 
-def _git_env_with_ssh(
-    *,
-    scope: str,
-    ssh_host_dir: Path | None,
-    ssh_key_name: str | None,
-    allow_host_keys: bool = False,
-) -> dict:
-    """Return an env that forces git to use the scope's SSH key directly.
+_SOCKET_BIND_WAIT_SECONDS = 4.0
+"""Client-side tolerance for the daemon's reconciler to bind a fresh scope socket.
 
-    Builds ``GIT_SSH_COMMAND`` from the private key file — no SSH config file
-    required.  The vault handles container-side SSH auth; this
-    helper only covers host-side gate operations (clone, fetch).
+Roughly two of the reconciler's own poll ticks
+(:data:`terok_sandbox.vault.scope_sockets._POLL_INTERVAL_SECONDS`) — enough to
+absorb one full miss plus the next bind attempt.
+"""
 
-    When the key file is not found and *allow_host_keys* is ``False``
-    (default), SSH is configured to reject all identities so that the
-    user's personal ``~/.ssh`` keys are never tried silently.
+_SOCKET_POLL_INTERVAL = 0.1
+"""How often :func:`_wait_for_socket` rechecks while inside the grace window."""
+
+
+def _git_env_with_ssh(*, scope: str, use_personal_ssh: bool = False) -> dict:
+    """Return a subprocess env for *scope*'s git operations.
+
+    Three branches:
+
+    - **Vault-only (default).**  When the per-scope vault agent socket
+      exists, point ``SSH_AUTH_SOCK`` at it and set ``GIT_SSH_COMMAND`` to
+      ``ssh -o IdentityFile=none``.  The explicit ``IdentityFile=none``
+      suppresses OpenSSH's default ``~/.ssh/id_*`` list, so the vault's
+      agent is the only identity source — the user's personal keys are
+      never offered.
+    - **Personal-SSH opt-in.**  ``use_personal_ssh=True`` returns the
+      process env unmodified so OpenSSH behaves normally (user's loaded
+      agent, default ``~/.ssh/id_*`` files).
+    - **Unconfigured.**  No vault socket and no opt-in — raise
+      :class:`GateAuthNotConfigured` so the CLI layer can surface the
+      two remediation paths.
     """
     from ..config import SandboxConfig
 
     env = os.environ.copy()
-    ssh_dir = ssh_host_dir or (SandboxConfig().ssh_keys_dir / scope)
-    eff_name = effective_ssh_key_name(scope, ssh_key_name=ssh_key_name, key_type="ed25519")
-    key_path = Path(ssh_dir) / eff_name
-    if key_path.is_file():
-        ssh_cmd = [
+    if use_personal_ssh:
+        return env  # let the user's ambient SSH handle it
+
+    cfg = SandboxConfig()
+    sock = cfg.ssh_signer_local_socket_path(scope)
+
+    # The vault daemon's reconciler binds the per-scope socket on a short
+    # poll interval, so a ``gate-sync`` fired right after ``ssh-init`` /
+    # ``ssh-import`` can race the bind.  If the DB already says this scope
+    # owns keys, give the daemon a bounded grace window to catch up before
+    # declaring it unconfigured.
+    if not _is_unix_socket(sock) and _db_has_keys_for_scope(cfg.db_path, scope):
+        _wait_for_socket(sock, _SOCKET_BIND_WAIT_SECONDS)
+    if not _is_unix_socket(sock):
+        raise GateAuthNotConfigured(scope)
+
+    env["SSH_AUTH_SOCK"] = str(sock)
+    env["GIT_SSH_COMMAND"] = shlex.join(
+        [
             "ssh",
             "-o",
-            "IdentitiesOnly=yes",
-            "-o",
-            f"IdentityFile={key_path}",
+            "IdentityFile=none",
             "-o",
             "StrictHostKeyChecking=no",
         ]
-        env["GIT_SSH_COMMAND"] = shlex.join(ssh_cmd)
-        env["SSH_AUTH_SOCK"] = ""
-    elif allow_host_keys:
-        pass  # unmodified env — host SSH agent + ~/.ssh keys allowed
-    else:
-        # Block host-key probing: IdentitiesOnly with no IdentityFile.
-        logger.warning("SSH key not found at %s — host keys blocked", key_path)
-        ssh_cmd = ["ssh", "-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=no"]
-        env["GIT_SSH_COMMAND"] = shlex.join(ssh_cmd)
-        env["SSH_AUTH_SOCK"] = ""
+    )
     return env
+
+
+def _wait_for_socket(path: Path, timeout: float) -> None:
+    """Block up to *timeout* seconds for *path* to become a Unix socket."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _is_unix_socket(path):
+            return
+        time.sleep(_SOCKET_POLL_INTERVAL)
+
+
+def _db_has_keys_for_scope(db_path: Path, scope: str) -> bool:
+    """Return ``True`` iff *scope* owns at least one row in ``ssh_key_assignments``.
+
+    Opens the DB read-only via the ``file:?mode=ro`` URI so a missing DB
+    file raises cleanly instead of being auto-created as a side effect.
+    Any ``sqlite3.Error`` — missing file, missing table, locked DB —
+    collapses to ``False`` so the caller falls straight through to
+    :class:`GateAuthNotConfigured` instead of hanging.
+    """
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM ssh_key_assignments WHERE scope = ? LIMIT 1",
+                (scope,),
+            ).fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return False
+    return row is not None
+
+
+def _is_unix_socket(path: Path) -> bool:
+    """Return ``True`` iff *path* refers to an existing Unix domain socket."""
+    try:
+        return stat.S_ISSOCK(path.stat().st_mode)
+    except FileNotFoundError:
+        return False
 
 
 def _clone_gate_mirror(upstream_url: str, gate_dir: Path, env: dict) -> None:

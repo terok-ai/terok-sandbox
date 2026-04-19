@@ -1,34 +1,111 @@
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""SQLite-backed credential store and phantom token registry.
+"""SQLite-backed credential store, SSH key registry, and phantom token registry.
 
-Provides host-side storage for captured credentials (API keys, OAuth tokens)
-and per-task phantom tokens used by the vault.  The database is
-**never** mounted into task containers — only the vault daemon reads it.
+Provides host-side storage for the three kinds of secret material the vault
+mediates:
 
-Uses sqlite3 in WAL mode for lock-free concurrent reads across multiple
+- **Provider credentials** (API keys, OAuth tokens) stored as JSON blobs keyed
+  by ``(credential_set, provider)``.
+- **SSH keys** stored as OpenSSH PEM + SSH wire-format public blob, deduplicated
+  by fingerprint, linked to project scopes through an assignments join table.
+- **Phantom tokens** minted per-task so containers can authenticate to the
+  vault without ever seeing real credentials.
+
+The database is **never** mounted into task containers — only the vault daemon
+reads it.  sqlite3 in WAL mode gives lock-free concurrent reads across multiple
 terok processes (CLI commands, vault daemon, task runners).  Zero external
 dependencies.
 
-Encryption upgrade path: wrap the ``data`` column with
-``cryptography.fernet`` before INSERT, or swap ``sqlite3`` for
-``sqlcipher3`` (drop-in API replacement).
+Encryption upgrade path: wrap the ``data`` / ``private_pem`` columns with
+``cryptography.fernet`` before INSERT, or swap ``sqlite3`` for ``sqlcipher3``
+(drop-in API replacement).  A single wrap applies uniformly to both API
+credentials and SSH keys.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import json
+import re
 import secrets
 import sqlite3
 from pathlib import Path
 
+# ── Scope-name guard ────────────────────────────────────────────────────────
+
+_SCOPE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+_MAX_SCOPE_LEN = 64
+"""Bound below the 108-byte AF_UNIX path limit once combined with
+``ssh-agent-local-<scope>.sock`` + ``runtime_dir``."""
+
+
+class InvalidScopeName(ValueError):
+    """Raised when a scope name would be unsafe as a filesystem path segment.
+
+    Scopes are embedded verbatim in per-scope Unix-socket paths
+    (``ssh-agent-local-<scope>.sock``), so unrestricted input could lead
+    to traversal (``../``) or oversized sockaddr strings.  Every write
+    path that persists a scope validates through this helper first, so
+    a malicious or buggy caller can't slip a hostile name past the CLI.
+    """
+
+
+def _require_safe_scope(scope: str) -> None:
+    """Reject scope names that would be unsafe as a filename fragment."""
+    if not isinstance(scope, str) or not scope:
+        raise InvalidScopeName("scope must be a non-empty string")
+    if len(scope) > _MAX_SCOPE_LEN:
+        raise InvalidScopeName(f"scope {scope!r} exceeds the {_MAX_SCOPE_LEN}-character limit")
+    if not _SCOPE_NAME_RE.fullmatch(scope):
+        raise InvalidScopeName(
+            f"invalid scope {scope!r}: must start with alphanumeric and match "
+            "[A-Za-z0-9][A-Za-z0-9._-]*"
+        )
+
+
+# ── Domain types ────────────────────────────────────────────────────────────
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class SSHKeyRow:
+    """SSH key metadata — everything except the private material.
+
+    Returned from listing operations where the caller wants to render
+    information about what is stored without decoding the private key.
+    """
+
+    id: int
+    key_type: str
+    fingerprint: str
+    comment: str
+    created_at: str
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class SSHKeyRecord:
+    """SSH key record carrying both metadata and raw key bytes.
+
+    Returned from loading operations that feed the signer.  The raw bytes
+    are *not* decoded here — decoding is the signer's responsibility so the
+    storage layer stays free of cryptography imports.
+    """
+
+    id: int
+    key_type: str
+    private_pem: bytes
+    public_blob: bytes
+    comment: str
+    fingerprint: str
+
 
 class CredentialDB:
-    """SQLite-backed credential store and phantom token registry.
+    """SQLite-backed store for provider credentials, SSH keys, and phantom tokens.
 
-    Stores captured provider credentials and issues per-task phantom tokens
-    consumed by the vault.
+    Stores captured provider credentials, SSH keypairs (private PEM + public
+    blob, assigned to scopes), and issues per-task phantom tokens consumed
+    by the vault's token broker and SSH signer.
 
     Args:
         db_path: Path to the sqlite3 database file.  Parent directories
@@ -43,7 +120,7 @@ class CredentialDB:
         self._create_tables()
 
     def _create_tables(self) -> None:
-        """Ensure both tables exist (idempotent)."""
+        """Ensure all tables exist (idempotent)."""
         self._conn.executescript("""
             CREATE TABLE IF NOT EXISTS credentials (
                 credential_set TEXT NOT NULL,
@@ -51,6 +128,26 @@ class CredentialDB:
                 data           TEXT NOT NULL,
                 PRIMARY KEY (credential_set, provider)
             );
+            CREATE TABLE IF NOT EXISTS ssh_keys (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                key_type     TEXT    NOT NULL CHECK (key_type IN ('ed25519','rsa')),
+                private_pem  BLOB    NOT NULL,
+                public_blob  BLOB    NOT NULL,
+                comment      TEXT    NOT NULL DEFAULT '',
+                fingerprint  TEXT    NOT NULL UNIQUE,
+                created_at   TEXT    NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE TABLE IF NOT EXISTS ssh_key_assignments (
+                scope        TEXT    NOT NULL,
+                key_id       INTEGER NOT NULL REFERENCES ssh_keys(id) ON DELETE CASCADE,
+                assigned_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (scope, key_id)
+            );
+            CREATE TABLE IF NOT EXISTS ssh_keys_version (
+                id      INTEGER PRIMARY KEY CHECK (id = 0),
+                version INTEGER NOT NULL
+            );
+            INSERT OR IGNORE INTO ssh_keys_version (id, version) VALUES (0, 0);
             CREATE TABLE IF NOT EXISTS proxy_tokens (
                 token          TEXT PRIMARY KEY,
                 scope          TEXT NOT NULL,
@@ -60,7 +157,7 @@ class CredentialDB:
             );
         """)
 
-    # ── Credentials ──────────────────────────────────────────────────────
+    # ── Provider credentials ────────────────────────────────────────────
 
     def store_credential(self, credential_set: str, provider: str, data: dict) -> None:
         """Insert or replace a credential entry."""
@@ -94,7 +191,183 @@ class CredentialDB:
         )
         self._conn.commit()
 
-    # ── Phantom tokens ───────────────────────────────────────────────────
+    # ── SSH keys ────────────────────────────────────────────────────────
+
+    def store_ssh_key(
+        self,
+        key_type: str,
+        private_pem: bytes,
+        public_blob: bytes,
+        comment: str,
+        fingerprint: str,
+    ) -> int:
+        """Register a keypair, dedup-by-fingerprint; return the ``ssh_keys.id``.
+
+        When a row with the same fingerprint already exists the stored bytes
+        and comment are left untouched (the caller is re-asserting an
+        already-known key, which is expected on repeat ``ssh-import``).
+        """
+        cur = self._conn.execute(
+            "INSERT OR IGNORE INTO ssh_keys"
+            " (key_type, private_pem, public_blob, comment, fingerprint)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (key_type, private_pem, public_blob, comment, fingerprint),
+        )
+        if cur.rowcount:
+            self._bump_ssh_keys_version()
+        self._conn.commit()
+        row = self._conn.execute(
+            "SELECT id FROM ssh_keys WHERE fingerprint = ?",
+            (fingerprint,),
+        ).fetchone()
+        return row[0]
+
+    def get_ssh_key_by_fingerprint(self, fingerprint: str) -> SSHKeyRow | None:
+        """Look up a key by fingerprint; returns metadata only."""
+        row = self._conn.execute(
+            "SELECT id, key_type, fingerprint, comment, created_at"
+            " FROM ssh_keys WHERE fingerprint = ?",
+            (fingerprint,),
+        ).fetchone()
+        return SSHKeyRow(*row) if row else None
+
+    def assign_ssh_key(self, scope: str, key_id: int) -> None:
+        """Grant *scope* access to *key_id* (idempotent).
+
+        Rejects unsafe scope names with :class:`InvalidScopeName` — the
+        value is later embedded in per-scope Unix-socket paths, so
+        traversal-like strings (``../``, ``/``) must not be persisted.
+        """
+        _require_safe_scope(scope)
+        cur = self._conn.execute(
+            "INSERT OR IGNORE INTO ssh_key_assignments (scope, key_id) VALUES (?, ?)",
+            (scope, key_id),
+        )
+        if cur.rowcount:
+            self._bump_ssh_keys_version()
+        self._conn.commit()
+
+    def unassign_ssh_key(self, scope: str, key_id: int) -> None:
+        """Revoke *scope*'s access to *key_id*; drop the key row if orphaned."""
+        cur = self._conn.execute(
+            "DELETE FROM ssh_key_assignments WHERE scope = ? AND key_id = ?",
+            (scope, key_id),
+        )
+        if cur.rowcount:
+            self._conn.execute(
+                "DELETE FROM ssh_keys WHERE id = ? AND NOT EXISTS ("
+                "  SELECT 1 FROM ssh_key_assignments WHERE key_id = ?"
+                ")",
+                (key_id, key_id),
+            )
+            self._bump_ssh_keys_version()
+        self._conn.commit()
+
+    def replace_ssh_keys_for_scope(self, scope: str, *, keep_key_id: int) -> None:
+        """Atomically make *keep_key_id* the scope's sole assigned key.
+
+        Wraps the "assign new + revoke every other" sequence in a single
+        SQLite transaction so two concurrent ``init(force=True)`` calls
+        can't both leave their own keys assigned — whichever transaction
+        commits last wins the scope, and exactly one primary survives.
+        Orphaned ``ssh_keys`` rows for revoked keys are cleaned up in the
+        same step via ``unassign_ssh_key`` semantics.
+        """
+        _require_safe_scope(scope)
+        with self._conn:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO ssh_key_assignments (scope, key_id) VALUES (?, ?)",
+                (scope, keep_key_id),
+            )
+            stale_ids = [
+                r[0]
+                for r in self._conn.execute(
+                    "SELECT key_id FROM ssh_key_assignments WHERE scope = ? AND key_id != ?",
+                    (scope, keep_key_id),
+                ).fetchall()
+            ]
+            if stale_ids:
+                # ``placeholders`` is a fixed-length string of ``?`` marks,
+                # never user input — the variadic IN() clause is the reason
+                # we build the SQL with f-string instead of plain params.
+                placeholders = ",".join("?" * len(stale_ids))
+                self._conn.execute(
+                    f"DELETE FROM ssh_key_assignments"  # nosec B608
+                    f" WHERE scope = ? AND key_id IN ({placeholders})",
+                    (scope, *stale_ids),
+                )
+                self._conn.execute(
+                    f"DELETE FROM ssh_keys WHERE id IN ({placeholders})"  # nosec B608
+                    f" AND NOT EXISTS ("
+                    f"  SELECT 1 FROM ssh_key_assignments WHERE key_id = ssh_keys.id"
+                    f")",
+                    tuple(stale_ids),
+                )
+            self._bump_ssh_keys_version()
+
+    def unassign_all_ssh_keys(self, scope: str) -> int:
+        """Revoke every key currently assigned to *scope*.  Returns count removed."""
+        key_ids = [
+            r[0]
+            for r in self._conn.execute(
+                "SELECT key_id FROM ssh_key_assignments WHERE scope = ?",
+                (scope,),
+            ).fetchall()
+        ]
+        for kid in key_ids:
+            self.unassign_ssh_key(scope, kid)
+        return len(key_ids)
+
+    def list_ssh_keys_for_scope(self, scope: str) -> list[SSHKeyRow]:
+        """Return metadata rows for every key assigned to *scope*."""
+        rows = self._conn.execute(
+            "SELECT k.id, k.key_type, k.fingerprint, k.comment, k.created_at"
+            " FROM ssh_keys k"
+            " JOIN ssh_key_assignments a ON a.key_id = k.id"
+            " WHERE a.scope = ?"
+            " ORDER BY a.assigned_at",
+            (scope,),
+        ).fetchall()
+        return [SSHKeyRow(*r) for r in rows]
+
+    def load_ssh_keys_for_scope(self, scope: str) -> list[SSHKeyRecord]:
+        """Return full records (with raw bytes) for every key assigned to *scope*."""
+        rows = self._conn.execute(
+            "SELECT k.id, k.key_type, k.private_pem, k.public_blob,"
+            " k.comment, k.fingerprint"
+            " FROM ssh_keys k"
+            " JOIN ssh_key_assignments a ON a.key_id = k.id"
+            " WHERE a.scope = ?"
+            " ORDER BY a.assigned_at",
+            (scope,),
+        ).fetchall()
+        return [SSHKeyRecord(*r) for r in rows]
+
+    def list_scopes_with_ssh_keys(self) -> list[str]:
+        """Return every scope that currently has at least one assigned key."""
+        rows = self._conn.execute(
+            "SELECT DISTINCT scope FROM ssh_key_assignments ORDER BY scope",
+        ).fetchall()
+        return [r[0] for r in rows]
+
+    def ssh_keys_version(self) -> int:
+        """Return the monotonic version counter for the SSH key tables.
+
+        Bumped on every successful insert, assignment, or unassignment.
+        Readers compare against a cached value to decide whether to reload.
+        """
+        row = self._conn.execute(
+            "SELECT version FROM ssh_keys_version WHERE id = 0",
+        ).fetchone()
+        return row[0] if row else 0
+
+    def _bump_ssh_keys_version(self) -> None:
+        """Increment the SSH key version counter."""
+        self._conn.execute(
+            "UPDATE ssh_keys_version SET version = version + 1 WHERE id = 0",
+        )
+
+    # ── Phantom tokens ──────────────────────────────────────────────────
 
     def create_token(self, scope: str, task: str, credential_set: str, provider: str) -> str:
         """Create a per-task, per-provider phantom token.
@@ -128,6 +401,8 @@ class CredentialDB:
         )
         self._conn.commit()
         return cur.rowcount
+
+    # ── Lifecycle ───────────────────────────────────────────────────────
 
     def close(self) -> None:
         """Close the database connection."""

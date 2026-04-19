@@ -45,6 +45,7 @@ class TestGitGateSyncGuards:
             scope="proj",
             gate_path=tmp_path / "g.git",
             upstream_url="git@example.com:x/y.git",
+            use_personal_ssh=True,  # bypass vault-socket lookup for this unit test
             validate_gate_fn=lambda scope: called.append(scope),
         )
         # Callback must run; the clone will be mocked into a no-op so the
@@ -148,6 +149,7 @@ class TestCompareVsUpstream:
             gate_path=tmp_path / "g.git",
             default_branch="main",
             upstream_url="git@x.com:a/b.git",
+            use_personal_ssh=True,
         )
         with (
             patch("terok_sandbox.gate.mirror._get_gate_branch_head", return_value="abc"),
@@ -162,6 +164,7 @@ class TestCompareVsUpstream:
             gate_path=tmp_path / "g.git",
             default_branch="main",
             upstream_url="git@x.com:a/b.git",
+            use_personal_ssh=True,
         )
         with (
             patch("terok_sandbox.gate.mirror._get_gate_branch_head", return_value="same"),
@@ -186,6 +189,7 @@ class TestCompareVsUpstream:
             gate_path=tmp_path / "g.git",
             default_branch="main",
             upstream_url="git@x.com:a/b.git",
+            use_personal_ssh=True,
         )
         with (
             patch("terok_sandbox.gate.mirror._get_gate_branch_head", return_value="old"),

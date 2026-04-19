@@ -7,4 +7,4 @@ After=terok-vault.socket
 
 [Service]
 Type=simple
-ExecStart={{BIN}} "--socket-path={{SOCKET_PATH}}" "--db-path={{DB_PATH}}" "--routes-file={{ROUTES_PATH}}" "--port={{PORT}}" "--ssh-signer-port={{SSH_SIGNER_PORT}}" "--ssh-keys-file={{SSH_KEYS_FILE}}"
+ExecStart={{BIN}} "--socket-path={{SOCKET_PATH}}" "--db-path={{DB_PATH}}" "--routes-file={{ROUTES_PATH}}" "--port={{PORT}}" "--ssh-signer-port={{SSH_SIGNER_PORT}}"

@@ -11,21 +11,12 @@ and SSH signer Unix socket mode.
 from __future__ import annotations
 
 import asyncio
-import base64
-import json
 import socket
 import struct
 import unittest.mock
 from pathlib import Path
 
 import pytest
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from cryptography.hazmat.primitives.serialization import (
-    Encoding,
-    NoEncryption,
-    PrivateFormat,
-    PublicFormat,
-)
 
 from terok_sandbox._util._net import harden_socket, prepare_socket_path, probe_unix_socket
 from terok_sandbox.config import SandboxConfig
@@ -318,31 +309,24 @@ class TestSSHSignerUnixSocket:
 
     async def test_roundtrip_via_unix_socket(self, tmp_path: Path) -> None:
         """Full handshake + identity listing via a Unix domain socket."""
-        # Generate keypair
-        key = Ed25519PrivateKey.generate()
-        priv_path = tmp_path / "id_ed25519"
-        pub_path = tmp_path / "id_ed25519.pub"
-        priv_path.write_bytes(
-            key.private_bytes(Encoding.PEM, PrivateFormat.OpenSSH, NoEncryption())
-        )
-        pub_raw = key.public_key().public_bytes(Encoding.OpenSSH, PublicFormat.OpenSSH)
-        pub_path.write_text(f"{pub_raw.decode()} test-socket\n")
-        pub_blob = base64.b64decode(pub_raw.decode().split()[1])
+        from terok_sandbox.credentials.ssh_keypair import generate_keypair
 
-        # Set up DB + keys
+        kp = generate_keypair("ed25519", comment="test-socket")
         db = CredentialDB(tmp_path / "test.db")
+        key_id = db.store_ssh_key(
+            key_type=kp.key_type,
+            private_pem=kp.private_pem,
+            public_blob=kp.public_blob,
+            comment=kp.comment,
+            fingerprint=kp.fingerprint,
+        )
+        db.assign_ssh_key("proj", key_id)
         token = db.create_token("proj", "task-1", "proj", "ssh")
         db.close()
-
-        keys_file = tmp_path / "ssh-keys.json"
-        keys_file.write_text(
-            json.dumps({"proj": [{"private_key": str(priv_path), "public_key": str(pub_path)}]})
-        )
+        pub_blob = kp.public_blob
 
         sock_path = tmp_path / "ssh-agent.sock"
-        server = await start_ssh_signer(
-            str(tmp_path / "test.db"), str(keys_file), socket_path=str(sock_path)
-        )
+        server = await start_ssh_signer(str(tmp_path / "test.db"), socket_path=str(sock_path))
         try:
             assert sock_path.exists()
 
@@ -374,13 +358,8 @@ class TestSSHSignerUnixSocket:
         db = CredentialDB(tmp_path / "test.db")
         db.close()
 
-        keys_file = tmp_path / "keys.json"
-        keys_file.write_text(json.dumps({}))
-
         with pytest.raises(RuntimeError, match="Refusing to remove non-socket"):
-            await start_ssh_signer(
-                str(tmp_path / "test.db"), str(keys_file), socket_path=str(sock_path)
-            )
+            await start_ssh_signer(str(tmp_path / "test.db"), socket_path=str(sock_path))
 
     async def test_socket_removes_stale_socket(self, tmp_path: Path) -> None:
         """Stale socket file is cleaned up before binding."""
@@ -393,23 +372,7 @@ class TestSSHSignerUnixSocket:
         db = CredentialDB(tmp_path / "test.db")
         db.close()
 
-        key = Ed25519PrivateKey.generate()
-        priv_path = tmp_path / "id"
-        pub_path = tmp_path / "id.pub"
-        priv_path.write_bytes(
-            key.private_bytes(Encoding.PEM, PrivateFormat.OpenSSH, NoEncryption())
-        )
-        pub_raw = key.public_key().public_bytes(Encoding.OpenSSH, PublicFormat.OpenSSH)
-        pub_path.write_text(f"{pub_raw.decode()} c\n")
-
-        keys_file = tmp_path / "keys.json"
-        keys_file.write_text(
-            json.dumps({"s": [{"private_key": str(priv_path), "public_key": str(pub_path)}]})
-        )
-
-        server = await start_ssh_signer(
-            str(tmp_path / "test.db"), str(keys_file), socket_path=str(sock_path)
-        )
+        server = await start_ssh_signer(str(tmp_path / "test.db"), socket_path=str(sock_path))
         try:
             assert sock_path.exists()
         finally:
@@ -421,11 +384,8 @@ class TestSSHSignerUnixSocket:
         db = CredentialDB(tmp_path / "test.db")
         db.close()
 
-        keys_file = tmp_path / "keys.json"
-        keys_file.write_text(json.dumps({}))
-
         with pytest.raises(ValueError, match="Either socket_path or host\\+port"):
-            await start_ssh_signer(str(tmp_path / "test.db"), str(keys_file))
+            await start_ssh_signer(str(tmp_path / "test.db"))
 
 
 # ── Gate server: _serve_foreground validation ────────────────────────────

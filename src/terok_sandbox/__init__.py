@@ -50,11 +50,26 @@ from .commands import (
 )
 from .config import CONTAINER_RUNTIME_DIR, SandboxConfig
 from .config_stack import ConfigScope, ConfigStack
-from .credentials.db import CredentialDB
-from .credentials.ssh import SSHManager, generate_keypair, update_ssh_keys_json
+from .credentials.db import CredentialDB, SSHKeyRecord, SSHKeyRow
+from .credentials.ssh import SSHInitResult, SSHManager
+from .credentials.ssh_keypair import (
+    DEFAULT_RSA_BITS,
+    ExportResult,
+    GeneratedKeypair,
+    ImportResult,
+    KeypairMismatchError,
+    PasswordProtectedKeyError,
+    UnsafeCommentError,
+    export_ssh_keypair,
+    fingerprint_of,
+    generate_keypair,
+    import_ssh_keypair,
+    parse_openssh_keypair,
+    public_line_of,
+)
 from .doctor import CheckVerdict, DoctorCheck, sandbox_doctor_checks
 from .gate.lifecycle import GateServerManager, GateServerStatus
-from .gate.mirror import GateStalenessInfo, GitGate
+from .gate.mirror import GateAuthNotConfigured, GateStalenessInfo, GitGate, is_ssh_url
 from .gate.tokens import TokenStore
 from .paths import (
     namespace_config_dir,
@@ -394,12 +409,16 @@ __all__ = [
     "status",
     "up",
     # Git gate
+    "GateAuthNotConfigured",
     "GateStalenessInfo",
     "GitGate",
+    "is_ssh_url",
     # Credential constants
     "PHANTOM_CREDENTIALS_MARKER",
     # Credential DB
     "CredentialDB",
+    "SSHKeyRecord",
+    "SSHKeyRow",
     # Vault
     "VaultStatus",
     "VaultUnreachableError",
@@ -437,9 +456,21 @@ __all__ = [
     "DoctorCheck",
     "sandbox_doctor_checks",
     # SSH
+    "DEFAULT_RSA_BITS",
+    "ExportResult",
+    "GeneratedKeypair",
+    "ImportResult",
+    "KeypairMismatchError",
+    "PasswordProtectedKeyError",
+    "SSHInitResult",
     "SSHManager",
+    "UnsafeCommentError",
+    "export_ssh_keypair",
     "generate_keypair",
-    "update_ssh_keys_json",
+    "import_ssh_keypair",
+    "fingerprint_of",
+    "parse_openssh_keypair",
+    "public_line_of",
     # Port registry
     "PORT_RANGE",
     "PortRegistry",

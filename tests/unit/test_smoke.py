@@ -94,12 +94,18 @@ def test_import_gate_tokens():
 
 
 def test_import_ssh():
-    """SSH module is importable."""
-    from terok_sandbox.credentials.ssh import SSHManager, effective_ssh_key_name
+    """SSH modules are importable."""
+    from terok_sandbox.credentials.ssh import SSHManager
+    from terok_sandbox.credentials.ssh_keypair import (
+        export_ssh_keypair,
+        generate_keypair,
+        import_ssh_keypair,
+    )
 
     assert callable(SSHManager)
-    assert callable(effective_ssh_key_name)
-    assert effective_ssh_key_name("myproj") == "id_ed25519_myproj"
+    assert callable(generate_keypair)
+    assert callable(import_ssh_keypair)
+    assert callable(export_ssh_keypair)
 
 
 def test_import_git_gate():

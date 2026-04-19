@@ -354,7 +354,6 @@ class VaultManager:
             "ROUTES_PATH": str(self._cfg.routes_path),
             "PORT": str(self._cfg.token_broker_port),
             "SSH_SIGNER_PORT": str(self._cfg.ssh_signer_port),
-            "SSH_KEYS_FILE": str(self._cfg.ssh_keys_json_path),
             "BIN": shlex.join(self._vault_exec_prefix()),
             "UNIT_VERSION": str(_UNIT_VERSION),
         }
@@ -482,9 +481,6 @@ class VaultManager:
                 routes_path,
             )
 
-        ssh_keys_path = self._cfg.ssh_keys_json_path
-        write_sensitive_file(ssh_keys_path, "{}\n")
-
         log_file = self._cfg.state_dir / "vault" / "vault.log"
         log_file.parent.mkdir(parents=True, exist_ok=True)
         os.chmod(log_file.parent, 0o700)
@@ -496,7 +492,6 @@ class VaultManager:
             f"--db-path={db_path}",
             f"--routes-file={routes_path}",
             f"--pid-file={pidfile}",
-            f"--ssh-keys-file={ssh_keys_path}",
             f"--log-file={log_file}",
             f"--log-level={log_level}",
         ]
