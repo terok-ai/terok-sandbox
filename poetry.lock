@@ -2702,7 +2702,7 @@ PyYAML = ">=6.0"
 type = "git"
 url = "https://github.com/sliwowitz/terok-shield.git"
 reference = "feat/dbus-clearance-bridge"
-resolved_reference = "77d0a123a589cb458bd94e8fbbf2caa39d8a2728"
+resolved_reference = "9c169c0cf908f43f851cbeca1442518b0117e9fe"
 
 [[package]]
 name = "tomli"
