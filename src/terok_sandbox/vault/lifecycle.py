@@ -376,17 +376,25 @@ class VaultManager:
             (unit_dir / template_name).write_text(content, encoding="utf-8")
 
         self._cfg.vault_socket_path.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run(["systemctl", "--user", "daemon-reload"], check=True, timeout=10)
+        subprocess.run(
+            ["systemctl", "--user", "daemon-reload"], check=True, timeout=10, capture_output=True
+        )
+        # Capture the "Created symlink ..." notice systemd prints to stderr — it
+        # interleaves ugly-looking noise into the caller's progress output
+        # otherwise.  Callers that care about the enable result can look at the
+        # subsequent reachability probe.
         subprocess.run(
             ["systemctl", "--user", "enable", "--now", enable_unit],
             check=True,
             timeout=10,
+            capture_output=True,
         )
         # Restart to apply updated unit configuration if socket was already active.
         subprocess.run(
             ["systemctl", "--user", "restart", enable_unit],
             check=True,
             timeout=10,
+            capture_output=True,
         )
 
     def _stop_all_units(self) -> None:

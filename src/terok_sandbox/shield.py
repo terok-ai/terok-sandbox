@@ -25,6 +25,9 @@ from terok_shield import (
     setup_global_hooks,
     system_hooks_dir,
 )
+from terok_shield.container import (
+    resolve_state_dir as resolve_container_state_dir,  # noqa: F401 — re-exported
+)
 
 from .config import SandboxConfig
 
@@ -153,18 +156,18 @@ def shield_interactive_session(
     container: str,
     task_dir: Path,
     *,
-    raw: bool = False,
     cfg: SandboxConfig | None = None,
 ) -> None:
-    """Run an interactive verdict session for a task's shield.
+    """Run the terminal clearance fallback for a task's shield.
 
     Thin wrapper that spares callers from reaching into
-    :mod:`terok_shield.cli.interactive` and rebuilding the
-    ``state_dir`` themselves.
+    :mod:`terok_shield.cli.simple_clearance` and rebuilding the
+    ``state_dir`` themselves.  Refuses to run when the D-Bus
+    clearance hub is already handling the session.
     """
-    from terok_shield.cli.interactive import run_interactive
+    from terok_shield.cli.simple_clearance import run_simple_clearance
 
-    run_interactive(make_shield(task_dir, cfg).config.state_dir, container, raw=raw)
+    run_simple_clearance(make_shield(task_dir, cfg).config.state_dir, container)
 
 
 def shield_watch_session(
@@ -213,3 +216,34 @@ def setup_hooks_direct(*, root: bool = False) -> None:
         target = Path(USER_HOOKS_DIR).expanduser()
         setup_global_hooks(target)
         ensure_containers_conf_hooks_dir(target)
+
+
+def install_shield_bridge(reader_dest: Path) -> None:
+    """Install the optional shield D-Bus bridge: NFLOG reader + hook pair.
+
+    Idempotent — safe to call when the bridge hook pair is already registered.
+
+    Args:
+        reader_dest: Filesystem path where the reader script should land
+            (typically under ``~/.local/share/terok-shield/``).
+    """
+    from terok_shield.hooks.install import install_bridge_hooks
+    from terok_shield.hooks.reader_install import install_reader_resource
+
+    install_reader_resource(reader_dest)
+    hooks_dir = Path(USER_HOOKS_DIR).expanduser()
+    entrypoint = hooks_dir / "terok-shield-hook"
+    install_bridge_hooks(hook_entrypoint=entrypoint, hooks_dir=hooks_dir)
+
+
+def uninstall_shield_bridge() -> None:
+    """Remove the optional shield D-Bus bridge hook pair — leaves nft hooks intact.
+
+    Called by ``terok setup --no-dbus-bridge`` to revert to the
+    audit-minimal hook set.  Does not remove the reader resource file
+    (harmless to leave; absent bridge hooks mean it never runs).
+    """
+    from terok_shield.hooks.install import uninstall_bridge_hooks
+
+    hooks_dir = Path(USER_HOOKS_DIR).expanduser()
+    uninstall_bridge_hooks(hooks_dir=hooks_dir)

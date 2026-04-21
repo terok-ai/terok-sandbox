@@ -24,7 +24,8 @@ packages = [
 
 [tool.poetry.dependencies]
 python = ">=3.12,<4.0"
-terok-shield = {url = "https://github.com/terok-ai/terok-shield/releases/download/v0.6.20/terok_shield-0.6.20-py3-none-any.whl"}
+# DEV-TIME BRANCH PIN — flipped back to release-URL by the release script.
+terok-shield = {git = "https://github.com/sliwowitz/terok-shield.git", branch = "feat/clearance-bridge"}
 platformdirs = ">=4.9.6"
 aiohttp = ">=3.9"
 cryptography = ">=46.0.7"

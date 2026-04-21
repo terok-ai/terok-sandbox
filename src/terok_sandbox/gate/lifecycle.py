@@ -307,11 +307,17 @@ class GateServerManager:
             content = render_template(template_path, variables)
             (unit_dir / template_name).write_text(content, encoding="utf-8")
 
-        subprocess.run(["systemctl", "--user", "daemon-reload"], check=True, timeout=10)
+        subprocess.run(
+            ["systemctl", "--user", "daemon-reload"], check=True, timeout=10, capture_output=True
+        )
+        # Capture the "Created symlink ..." notice — otherwise it interleaves
+        # with `terok setup`'s progressive stage output.  A failed enable is
+        # surfaced via the caller's subsequent reachability probe.
         subprocess.run(
             ["systemctl", "--user", "enable", "--now", enable_unit],
             check=True,
             timeout=10,
+            capture_output=True,
         )
 
     def _stop_all_units(self) -> None:
