@@ -13,6 +13,7 @@ import warnings
 from pathlib import Path
 
 from terok_shield import (
+    HOOK_ENTRYPOINT_NAME,
     USER_HOOKS_DIR,
     EnvironmentCheck,  # noqa: F401 — re-exported
     NftNotFoundError,  # noqa: F401 — re-exported
@@ -218,21 +219,22 @@ def setup_hooks_direct(*, root: bool = False) -> None:
         ensure_containers_conf_hooks_dir(target)
 
 
-def install_shield_bridge(reader_dest: Path) -> None:
+def install_shield_bridge(reader_dest: Path | None = None) -> None:
     """Install the optional shield D-Bus bridge: NFLOG reader + hook pair.
 
     Idempotent — safe to call when the bridge hook pair is already registered.
 
     Args:
-        reader_dest: Filesystem path where the reader script should land
-            (typically under ``~/.local/share/terok-shield/``).
+        reader_dest: Filesystem path where the reader script should land.
+            Defaults to the canonical XDG-aware location resolved by
+            ``terok_shield.reader_script_path()``.
     """
     from terok_shield.hooks.install import install_bridge_hooks
     from terok_shield.hooks.reader_install import install_reader_resource
 
     install_reader_resource(reader_dest)
     hooks_dir = Path(USER_HOOKS_DIR).expanduser()
-    entrypoint = hooks_dir / "terok-shield-hook"
+    entrypoint = hooks_dir / HOOK_ENTRYPOINT_NAME
     install_bridge_hooks(hook_entrypoint=entrypoint, hooks_dir=hooks_dir)
 
 
