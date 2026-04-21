@@ -221,9 +221,7 @@ def setup_hooks_direct(*, root: bool = False) -> None:
 def install_shield_bridge(reader_dest: Path) -> None:
     """Install the optional shield D-Bus bridge: NFLOG reader + hook pair.
 
-    Thin wrapper around ``terok_shield.hooks.reader_install`` +
-    ``terok_shield.hooks.install.install_bridge_hooks``.  Idempotent —
-    safe to call when the bridge hook pair is already registered.
+    Idempotent — safe to call when the bridge hook pair is already registered.
 
     Args:
         reader_dest: Filesystem path where the reader script should land
