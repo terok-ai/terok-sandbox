@@ -177,6 +177,31 @@ class TestSandbox:
         assert "-e" in cmd
         assert "alpine:latest" in cmd
 
+    def test_run_omits_hostname_by_default(self) -> None:
+        """Without an explicit hostname, --hostname is absent (podman picks one)."""
+        with (
+            patch("subprocess.run") as mock_run,
+            patch("builtins.print"),
+            patch("terok_sandbox.shield.pre_start", return_value=[]),
+        ):
+            Sandbox().run(_make_spec())
+
+        cmd = mock_run.call_args[0][0]
+        assert "--hostname" not in cmd
+
+    def test_run_passes_hostname_when_set(self) -> None:
+        """spec.hostname flows through as --hostname <value>."""
+        with (
+            patch("subprocess.run") as mock_run,
+            patch("builtins.print"),
+            patch("terok_sandbox.shield.pre_start", return_value=[]),
+        ):
+            Sandbox().run(_make_spec(hostname="myproj-cli-k3v8h"))
+
+        cmd = mock_run.call_args[0][0]
+        assert "--hostname" in cmd
+        assert cmd[cmd.index("--hostname") + 1] == "myproj-cli-k3v8h"
+
     def test_run_restricted_adds_no_new_privileges(self) -> None:
         """Restricted spec adds --security-opt no-new-privileges."""
         with (

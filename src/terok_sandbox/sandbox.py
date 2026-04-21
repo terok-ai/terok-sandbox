@@ -163,6 +163,17 @@ class RunSpec:
     sealed: bool = False
     """When True, volumes are injected via ``podman cp`` instead of bind-mounted."""
 
+    hostname: str | None = None
+    """Override the in-container hostname (podman ``--hostname``).
+
+    When ``None`` (default), podman assigns the short container ID as the
+    hostname.  Orchestrators may set this to a value that correlates with
+    their own task/container identity — e.g. so a shell prompt inside the
+    container matches the name the operator sees in task lists.  Must be a
+    valid DNS hostname (letters/digits/hyphens, ≤253 chars); podman enforces
+    the rule when parsing the flag.
+    """
+
 
 # ---------------------------------------------------------------------------
 # Facade
@@ -298,7 +309,10 @@ class Sandbox:
         for k, v in spec.env.items():
             cmd += ["-e", f"{k}={v}"]
 
-        cmd += ["--name", spec.container_name, "-w", "/workspace", spec.image]
+        cmd += ["--name", spec.container_name]
+        if spec.hostname is not None:
+            cmd += ["--hostname", spec.hostname]
+        cmd += ["-w", "/workspace", spec.image]
         cmd += list(spec.command)
         return cmd
 
