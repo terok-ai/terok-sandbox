@@ -23,6 +23,7 @@ from terok_shield import (
     ShieldNeedsSetup,  # noqa: F401 — re-exported
     ShieldState,  # noqa: F401 — re-exported
     ensure_containers_conf_hooks_dir,
+    reader_script_path,  # noqa: F401 — re-exported so terok's shield-boundary contract holds
     setup_global_hooks,
     system_hooks_dir,
 )

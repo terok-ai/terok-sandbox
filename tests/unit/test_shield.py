@@ -378,6 +378,8 @@ def test_install_shield_bridge_routes_through_shield_helpers(
     mock_install_reader: MagicMock, mock_install_hooks: MagicMock
 ) -> None:
     """``install_shield_bridge`` writes the reader resource and registers the hook pair."""
+    from terok_shield import HOOK_ENTRYPOINT_NAME
+
     dest = MOCK_BASE / "share" / "nflog-reader.py"
 
     install_shield_bridge(dest)
@@ -385,7 +387,18 @@ def test_install_shield_bridge_routes_through_shield_helpers(
     mock_install_reader.assert_called_once_with(dest)
     mock_install_hooks.assert_called_once()
     kwargs = mock_install_hooks.call_args.kwargs
-    assert kwargs["hook_entrypoint"].name == "terok-shield-hook"
+    assert kwargs["hook_entrypoint"].name == HOOK_ENTRYPOINT_NAME
+
+
+@patch("terok_shield.hooks.install.install_bridge_hooks")
+@patch("terok_shield.hooks.reader_install.install_reader_resource")
+def test_install_shield_bridge_forwards_none_to_install_reader_resource(
+    mock_install_reader: MagicMock, _mock_install_hooks: MagicMock
+) -> None:
+    """``install_shield_bridge()`` with no dest forwards ``None`` so shield picks the canonical path."""
+    install_shield_bridge()
+
+    mock_install_reader.assert_called_once_with(None)
 
 
 @patch("terok_shield.hooks.install.uninstall_bridge_hooks")
