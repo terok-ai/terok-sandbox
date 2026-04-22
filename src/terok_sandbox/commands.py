@@ -14,6 +14,7 @@ Shield commands are delegated to terok-shield's own registry —
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -67,6 +68,141 @@ class CommandDef:
     handler: Callable[..., None] | None = None
     args: tuple[ArgDef, ...] = ()
     group: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Sandbox-wide setup and uninstall
+#
+# Single-call bootstrap/teardown for the shield+vault+gate stack.  Consumed
+# by higher-level frontends (``terok setup``, ``terok-executor setup``)
+# so they can install everything with one call and tear it down
+# symmetrically.  Individual services still have their own install /
+# uninstall verbs in the groups below.
+# ---------------------------------------------------------------------------
+
+
+def _handle_sandbox_setup(
+    *,
+    root: bool = False,
+    no_shield: bool = False,
+    no_vault: bool = False,
+    no_gate: bool = False,
+) -> None:
+    """Install shield hooks, vault, and gate as one idempotent bootstrap."""
+    if not no_shield:
+        print("→ shield install-hooks")
+        _handle_shield_setup(user=not root, root=root)
+    if not no_vault:
+        print("→ vault install")
+        _handle_vault_install()
+    if not no_gate:
+        print("→ gate install")
+        _handle_gate_install()
+
+
+def _handle_sandbox_uninstall(
+    *,
+    root: bool = False,
+    no_shield: bool = False,
+    no_vault: bool = False,
+    no_gate: bool = False,
+) -> None:
+    """Tear down the stack in reverse install order.
+
+    A running container can lose its gate and vault without immediate
+    blast, but losing shield hooks mid-flight is the most disruptive —
+    shield goes last so live containers stay firewalled as long as
+    possible.
+
+    Best-effort across phases: a failing phase reports the error and
+    the next phase runs anyway, so a partial-install teardown still
+    removes what it can instead of leaving orphans behind.  Exits
+    non-zero only after every phase has had its attempt.
+    """
+    failed = False
+    if not no_gate:
+        print("→ gate uninstall")
+        failed |= _try_phase(_handle_gate_uninstall)
+    if not no_vault:
+        print("→ vault uninstall")
+        failed |= _try_phase(_handle_vault_uninstall)
+    if not no_shield:
+        print("→ shield uninstall-hooks")
+        failed |= _try_phase(lambda: _handle_shield_uninstall(user=not root, root=root))
+    if failed:
+        raise SystemExit(1)
+
+
+def _try_phase(phase: Callable[[], None]) -> bool:
+    """Run one uninstall phase, reporting but not re-raising on failure.
+
+    Returns True when the phase failed so the aggregator can decide
+    the exit code after every phase has had its attempt.
+    """
+    try:
+        phase()
+    except SystemExit as exc:
+        print(f"  phase failed: {exc}", file=sys.stderr)
+        return True
+    return False
+
+
+def _handle_gate_install() -> None:
+    """Install gate server systemd units, refusing hosts without systemd-user."""
+    from .gate.lifecycle import GateServerManager
+
+    mgr = GateServerManager()
+    if not mgr.is_systemd_available():
+        print("Error: systemd user services are not available on this host.")
+        raise SystemExit(1)
+    mgr.install_systemd_units()
+    print("Gate server installed via systemd socket activation.")
+
+
+def _handle_gate_uninstall() -> None:
+    """Remove gate server systemd units, stopping any stray daemon first."""
+    from .gate.lifecycle import GateServerManager
+
+    mgr = GateServerManager()
+    if mgr.get_status().mode == "daemon":
+        mgr.stop_daemon()
+    if mgr.is_systemd_available():
+        mgr.uninstall_systemd_units()
+    print("Gate server systemd units removed.")
+
+
+SETUP_COMMANDS: tuple[CommandDef, ...] = (
+    CommandDef(
+        name="setup",
+        help="Install shield hooks + vault + gate in one step",
+        handler=_handle_sandbox_setup,
+        args=(
+            ArgDef(
+                name="--root",
+                action="store_true",
+                help="Install shield hooks system-wide (requires sudo); vault and gate stay per-user",
+            ),
+            ArgDef(name="--no-shield", action="store_true", help="Skip shield install"),
+            ArgDef(name="--no-vault", action="store_true", help="Skip vault install"),
+            ArgDef(name="--no-gate", action="store_true", help="Skip gate install"),
+        ),
+    ),
+    CommandDef(
+        name="uninstall",
+        help="Remove shield hooks + vault + gate in one step",
+        handler=_handle_sandbox_uninstall,
+        args=(
+            ArgDef(
+                name="--root",
+                action="store_true",
+                help="Remove shield hooks from the system hooks directory (requires sudo)",
+            ),
+            ArgDef(name="--no-shield", action="store_true", help="Skip shield uninstall"),
+            ArgDef(name="--no-vault", action="store_true", help="Skip vault uninstall"),
+            ArgDef(name="--no-gate", action="store_true", help="Skip gate uninstall"),
+        ),
+    ),
+)
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +284,26 @@ def _handle_shield_setup(*, root: bool = False, user: bool = False) -> None:
     run_setup(root=root, user=user)
 
 
+def _handle_shield_uninstall(*, root: bool = False, user: bool = False) -> None:
+    """Remove the OCI hooks previously installed by ``shield install-hooks``.
+
+    Idempotent — missing files are treated as success.  Symmetric to
+    :func:`_handle_shield_setup`: ``--root`` uses sudo, ``--user``
+    touches the user hooks directory.
+    """
+    if not root and not user:
+        raise SystemExit(
+            "Specify --root (system-wide, uses sudo) or --user (user-local).\n"
+            "  shield uninstall-hooks --root   # /etc/containers/oci/hooks.d\n"
+            "  shield uninstall-hooks --user   # ~/.local/share/containers/oci/hooks.d"
+        )
+    from .shield import run_uninstall
+
+    run_uninstall(root=root, user=user)
+    scope = "system" if root else "user"
+    print(f"Shield hooks removed from {scope} hooks directory.")
+
+
 def _handle_shield_status() -> None:
     """Show shield configuration and environment check."""
     import sys
@@ -204,6 +360,16 @@ SHIELD_COMMANDS: tuple[CommandDef, ...] = (
         args=(
             ArgDef(name="--root", action="store_true", help="Install system-wide (requires sudo)"),
             ArgDef(name="--user", action="store_true", help="Install to user hooks directory"),
+        ),
+    ),
+    CommandDef(
+        name="uninstall-hooks",
+        help="Remove OCI hooks previously installed by install-hooks",
+        handler=_handle_shield_uninstall,
+        group="shield",
+        args=(
+            ArgDef(name="--root", action="store_true", help="Remove system-wide (requires sudo)"),
+            ArgDef(name="--user", action="store_true", help="Remove from user hooks directory"),
         ),
     ),
     CommandDef(
@@ -1007,5 +1173,10 @@ DOCTOR_COMMANDS: tuple[CommandDef, ...] = (
 
 #: All sandbox commands, grouped by subsystem.
 COMMANDS: tuple[CommandDef, ...] = (
-    GATE_COMMANDS + SHIELD_COMMANDS + VAULT_COMMANDS + SSH_COMMANDS + DOCTOR_COMMANDS
+    SETUP_COMMANDS
+    + GATE_COMMANDS
+    + SHIELD_COMMANDS
+    + VAULT_COMMANDS
+    + SSH_COMMANDS
+    + DOCTOR_COMMANDS
 )

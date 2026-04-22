@@ -16,6 +16,7 @@ from importlib.metadata import PackageNotFoundError, version as _meta_version
 from .commands import (
     DOCTOR_COMMANDS,
     GATE_COMMANDS,
+    SETUP_COMMANDS,
     SHIELD_COMMANDS,
     SSH_COMMANDS,
     VAULT_COMMANDS,
@@ -73,6 +74,10 @@ def main() -> None:
     )
     parser.add_argument("--version", action="version", version=f"terok-sandbox {__version__}")
     sub = parser.add_subparsers()
+
+    # -- top-level setup/uninstall aggregators --
+    for cmd in SETUP_COMMANDS:
+        _wire_command(sub, cmd)
 
     # -- shield --
     shield_p = sub.add_parser("shield", help="Egress firewall management")

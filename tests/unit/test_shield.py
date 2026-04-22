@@ -24,6 +24,7 @@ from terok_shield import (
 from terok_sandbox.config import SandboxConfig
 from terok_sandbox.shield import (
     _BYPASS_WARNING,
+    _HOOK_FILES,
     block,
     check_environment,
     down,
@@ -31,11 +32,13 @@ from terok_sandbox.shield import (
     make_shield,
     pre_start,
     run_setup,
+    run_uninstall,
     setup_hooks_direct,
     shield_interactive_session,
     shield_watch_session,
     state,
     status,
+    uninstall_hooks_direct,
     uninstall_shield_bridge,
     up,
 )
@@ -407,3 +410,103 @@ def test_uninstall_shield_bridge_removes_hook_pair(mock_uninstall: MagicMock) ->
     uninstall_shield_bridge()
     mock_uninstall.assert_called_once()
     assert mock_uninstall.call_args.kwargs["hooks_dir"].name == "hooks.d"
+
+
+# ── Uninstall (global hooks) ─────────────────────────────────────────────
+#
+# Install/uninstall is the contract under test: a setup-then-uninstall
+# round trip must leave the hooks directory exactly as it was, and a
+# stand-alone uninstall must not error when nothing is installed.
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected_calls"),
+    [
+        pytest.param({}, None, id="missing-flags"),
+        pytest.param({"user": True}, [{"root": False}], id="user-only"),
+        pytest.param({"root": True}, [{"root": True}], id="root-only"),
+        pytest.param(
+            {"root": True, "user": True},
+            [{"root": False}, {"root": True}],
+            id="both-scopes-removed",
+        ),
+    ],
+)
+def test_run_uninstall(
+    kwargs: dict[str, bool],
+    expected_calls: list[dict[str, bool]] | None,
+) -> None:
+    """``run_uninstall`` removes every scope the caller names; neither → ValueError."""
+    with patch("terok_sandbox.shield.uninstall_hooks_direct") as mock_direct:
+        if expected_calls is None:
+            with pytest.raises(ValueError, match="root=True or user=True"):
+                run_uninstall(**kwargs)
+            mock_direct.assert_not_called()
+        else:
+            run_uninstall(**kwargs)
+            assert mock_direct.call_count == len(expected_calls)
+            for call, expected in zip(mock_direct.call_args_list, expected_calls, strict=True):
+                assert call.kwargs == expected
+
+
+def test_uninstall_hooks_direct_user_removes_all_known_files(tmp_path: Path) -> None:
+    """User-mode uninstall deletes every hook file ``setup_global_hooks`` would write."""
+    for name in _HOOK_FILES:
+        (tmp_path / name).write_text("placeholder")
+    # Also drop an unrelated file so we can assert it survives.
+    stray = tmp_path / "unrelated.json"
+    stray.write_text("keep me")
+
+    with patch("pathlib.Path.expanduser", return_value=tmp_path):
+        uninstall_hooks_direct(root=False)
+
+    for name in _HOOK_FILES:
+        assert not (tmp_path / name).exists()
+    assert stray.exists()
+
+
+def test_uninstall_hooks_direct_user_is_idempotent(tmp_path: Path) -> None:
+    """Calling uninstall twice — or on an empty directory — must not raise."""
+    with patch("pathlib.Path.expanduser", return_value=tmp_path):
+        uninstall_hooks_direct(root=False)  # nothing installed
+        uninstall_hooks_direct(root=False)  # still nothing
+
+
+@patch("subprocess.run")
+@patch("terok_sandbox.shield.system_hooks_dir")
+def test_uninstall_hooks_direct_root_delegates_to_sudo(
+    mock_system_dir: MagicMock, mock_run: MagicMock, tmp_path: Path
+) -> None:
+    """Root-mode uninstall drops a single ``sudo rm -f`` covering every hook file."""
+    mock_system_dir.return_value = tmp_path
+
+    uninstall_hooks_direct(root=True)
+
+    mock_run.assert_called_once()
+    argv = mock_run.call_args.args[0]
+    assert argv[0:3] == ["sudo", "rm", "-f"]
+    removed = set(argv[3:])
+    for name in _HOOK_FILES:
+        assert str(tmp_path / name) in removed
+
+
+def test_setup_then_uninstall_round_trip(tmp_path: Path) -> None:
+    """Setup-then-uninstall leaves the hooks directory exactly as it was."""
+    from terok_shield.hooks.install import setup_global_hooks
+
+    hooks_dir = tmp_path / "hooks.d"
+    # Capture the pre-install snapshot.  Directory may not exist yet — that's
+    # the real user experience on a fresh host.
+    assert not hooks_dir.exists()
+
+    setup_global_hooks(hooks_dir)
+    assert hooks_dir.is_dir()
+    assert any(hooks_dir.iterdir())
+
+    with patch("pathlib.Path.expanduser", return_value=hooks_dir):
+        uninstall_hooks_direct(root=False)
+
+    # The directory itself is left in place (other tools may share it);
+    # only our files are gone.
+    remaining = list(hooks_dir.iterdir())
+    assert remaining == [], f"uninstall left residue: {remaining}"
