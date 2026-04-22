@@ -934,8 +934,17 @@ class PodmanRuntime:
 # ── stream_initial_logs internals ─────────────────────────────────────────
 
 
-_REAPED_FLAG = "_terok_reaped"
-_REAP_LOCK = "_terok_reap_lock"
+class _Reaper:
+    """One-shot reap guard attached to a ``Popen`` via ``__dict__.setdefault``."""
+
+    __slots__ = ("lock", "done")
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.done = False
+
+
+_REAPER_KEY = "_terok_reaper"
 
 
 def _reap_logs_proc(proc: subprocess.Popen | None) -> None:
@@ -946,40 +955,39 @@ def _reap_logs_proc(proc: subprocess.Popen | None) -> None:
     leaks as an open file descriptor.  Safe to call with ``None`` or
     with a child that has already exited.
 
-    Idempotent + thread-safe: on a slow host the reader thread's
-    ``finally`` and the main thread's fallback can both reach this
-    function.  A per-process ``threading.Lock`` (installed lazily via
-    ``setdefault``) guards the check-and-set on the reaped-flag, and
-    the whole terminate → wait → close sequence runs inside the
-    lock so the second caller never observes the pipe mid-teardown.
-    Writing via ``__dict__`` (not ``setattr``) keeps MagicMock's
-    auto-attribute magic from treating the flag as a pre-existing
-    truthy mock on the very first call.
+    Idempotent and thread-safe under two callers racing through (reader
+    thread's ``finally`` and the main thread's fallback): a per-process
+    :class:`_Reaper` guard claims ownership under a short lock, then
+    releases it so the winner can run the terminate/wait/close sequence
+    unsynchronised — a wedged reader mustn't stall the main thread's
+    fallback.  Writing via ``__dict__`` (not ``setattr``) keeps
+    MagicMock-typed procs in tests from auto-creating a truthy flag on
+    the very first call.
     """
     if proc is None:
         return
-    lock = proc.__dict__.setdefault(_REAP_LOCK, threading.Lock())
-    with lock:
-        if proc.__dict__.get(_REAPED_FLAG, False):
+    reaper: _Reaper = proc.__dict__.setdefault(_REAPER_KEY, _Reaper())
+    with reaper.lock:
+        if reaper.done:
             return
-        proc.__dict__[_REAPED_FLAG] = True
-        try:
-            if proc.poll() is None:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait()
-            else:
-                # Already exited — still reap to release zombie slot.
+        reaper.done = True
+    try:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
                 proc.wait()
-        finally:
-            if proc.stdout is not None:
-                try:
-                    proc.stdout.close()
-                except OSError:
-                    pass
+        else:
+            # Already exited — still reap to release zombie slot.
+            proc.wait()
+    finally:
+        if proc.stdout is not None:
+            try:
+                proc.stdout.close()
+            except OSError:
+                pass
 
 
 def _stream_initial_logs(
