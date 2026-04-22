@@ -72,12 +72,10 @@ class PodmanInspector:
     missing binary / container / malformed JSON by returning an empty
     :class:`ContainerInfo`, so callers keep a usable fallback.
 
-    Cache lifetime is "per instance" — construct a fresh one per
-    long-lived process (hub, notifier, TUI).  Container names CAN
-    change at runtime; a service that cares about live renames should
-    either expire entries or rebuild the inspector on every query.
-    For terok's clearance notifier, names are mostly stable within a
-    task's lifetime and the cache is the right default.
+    Cache lifetime is "per instance".  Container names CAN change at
+    runtime; callers that need live-rename visibility should call
+    :meth:`forget` on ``container_exited`` (or rebuild the inspector)
+    so the next lookup re-inspects.
     """
 
     def __init__(self) -> None:
@@ -93,6 +91,10 @@ class PodmanInspector:
         info = self._inspect(container_id)
         self._cache[container_id] = info
         return info
+
+    def forget(self, container_id: str) -> None:
+        """Drop *container_id* from the cache — call on container_exited."""
+        self._cache.pop(container_id, None)
 
     @staticmethod
     def _inspect(container_id: str) -> ContainerInfo:
@@ -132,6 +134,22 @@ class PodmanInspector:
         return _from_inspect(container_id, records)
 
 
+def _str(obj: Any, key: str) -> str:
+    """Return ``obj[key]`` as a string, or ``""`` for missing / non-string values."""
+    if not isinstance(obj, dict):
+        return ""
+    value = obj.get(key)
+    return value if isinstance(value, str) else ""
+
+
+def _dict(obj: Any, key: str) -> dict:
+    """Return ``obj[key]`` as a dict, or ``{}`` for missing / non-dict values."""
+    if not isinstance(obj, dict):
+        return {}
+    value = obj.get(key)
+    return value if isinstance(value, dict) else {}
+
+
 def _from_inspect(container_id: str, records: Any) -> ContainerInfo:
     """Build a :class:`ContainerInfo` from a ``podman inspect`` JSON payload."""
     if not isinstance(records, list) or not records:
@@ -139,18 +157,14 @@ def _from_inspect(container_id: str, records: Any) -> ContainerInfo:
     head = records[0]
     if not isinstance(head, dict):
         return ContainerInfo()
-    # Podman prefixes names with '/', strip for display.
-    name = head["Name"].lstrip("/") if isinstance(head.get("Name"), str) else ""
-    state_obj = head.get("State") if isinstance(head.get("State"), dict) else {}
-    state = state_obj.get("Status", "") if isinstance(state_obj.get("Status"), str) else ""
-    config = head.get("Config") if isinstance(head.get("Config"), dict) else {}
-    raw_ann = config.get("Annotations") if isinstance(config.get("Annotations"), dict) else {}
-    annotations = {
-        k: v for k, v in (raw_ann or {}).items() if isinstance(k, str) and isinstance(v, str)
-    }
     return ContainerInfo(
         container_id=container_id,
-        name=name,
-        state=state,
-        annotations=annotations,
+        # Podman prefixes names with '/'.
+        name=_str(head, "Name").lstrip("/"),
+        state=_str(_dict(head, "State"), "Status"),
+        annotations={
+            k: v
+            for k, v in _dict(_dict(head, "Config"), "Annotations").items()
+            if isinstance(k, str) and isinstance(v, str)
+        },
     )
