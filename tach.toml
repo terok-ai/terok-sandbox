@@ -125,6 +125,12 @@ path = "terok_sandbox.shield"
 layer = "core"
 depends_on = []
 
+# Podman container introspection — public surface for terok-aware callers.
+[[modules]]
+path = "terok_sandbox.podman"
+layer = "core"
+depends_on = []
+
 # Gate token CRUD
 [[modules]]
 path = "terok_sandbox.gate.tokens"

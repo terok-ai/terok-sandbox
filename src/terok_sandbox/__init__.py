@@ -80,6 +80,7 @@ from .paths import (
     port_registry_dir,
     vault_root,
 )
+from .podman import ContainerInfo, PodmanInspector
 
 # -- Port registry -----------------------------------------------------------
 from .port_registry import (
@@ -348,6 +349,9 @@ __all__ = [
     "NullRuntime",
     "PodmanRuntime",
     "PortReservation",
+    # Podman inspector (container metadata lookup for terok-aware callers)
+    "ContainerInfo",
+    "PodmanInspector",
     # Gate server
     "GateServerStatus",
     "check_units_outdated",

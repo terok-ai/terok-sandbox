@@ -1,0 +1,156 @@
+# SPDX-FileCopyrightText: 2026 Jiri Vyskocil
+# SPDX-License-Identifier: Apache-2.0
+
+"""Podman container introspection for terok-aware callers.
+
+Exposes a small public surface — :class:`ContainerInfo` +
+:class:`PodmanInspector` — so components that want to turn a short
+container ID into richer metadata (name, running state, OCI
+annotations) don't have to shell out to ``podman inspect`` themselves.
+The clearance notifier uses this together with terok's own task
+metadata to render "Task: project/task_id" bodies instead of raw IDs.
+
+Annotation keys are deliberately NOT interpreted here — we return the
+full ``annotations`` dict and let callers pick the ones they know.
+Keeps sandbox free of terok-specific knowledge (``ai.terok.task`` etc.
+are owned by terok) while still centralising the podman subprocess
+pattern, timeout policy, and cache strategy.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import shutil
+import subprocess  # nosec B404 — podman is a trusted host binary
+from dataclasses import dataclass, field
+from typing import Any
+
+_log = logging.getLogger(__name__)
+
+#: Upper bound on each ``podman inspect`` invocation.  A slow local
+#: podman (busy nft lock, throttled disk) mustn't pin the caller's
+#: event loop waiting for metadata that's ultimately best-effort
+#: cosmetic (the ID fallback is always good enough).
+_INSPECT_TIMEOUT_S = 5
+
+
+@dataclass(frozen=True)
+class ContainerInfo:
+    """What ``podman inspect`` tells us about one container.
+
+    Empty instance (``ContainerInfo()``) represents "not found" or
+    "lookup failed" — callers should treat missing fields as
+    best-effort and fall back to the raw container ID when they
+    don't have a better label.
+    """
+
+    container_id: str = ""
+    """The short ID podman reported back, or empty on failure."""
+
+    name: str = ""
+    """The container's name without podman's leading ``/`` prefix."""
+
+    state: str = ""
+    """Lifecycle state: ``running``, ``exited``, ``created``, etc.  Empty when unknown."""
+
+    annotations: dict[str, str] = field(default_factory=dict)
+    """Every OCI annotation podman recorded for this container.
+
+    Sandbox stays annotation-key-agnostic — the whole dict is handed
+    back as-is.  Callers (terok's task-aware resolver, anything else
+    that cares) pluck out the keys they know about.
+    """
+
+
+class PodmanInspector:
+    """Cached ID → :class:`ContainerInfo` lookup backed by ``podman inspect``.
+
+    Callable: instances act as ``Callable[[str], ContainerInfo]``.  On
+    a cache miss it shells out to ``podman inspect --format=json --``
+    with a bounded timeout and stores the result.  Soft-fails on
+    missing binary / container / malformed JSON by returning an empty
+    :class:`ContainerInfo`, so callers keep a usable fallback.
+
+    Cache lifetime is "per instance" — construct a fresh one per
+    long-lived process (hub, notifier, TUI).  Container names CAN
+    change at runtime; a service that cares about live renames should
+    either expire entries or rebuild the inspector on every query.
+    For terok's clearance notifier, names are mostly stable within a
+    task's lifetime and the cache is the right default.
+    """
+
+    def __init__(self) -> None:
+        """Initialise with an empty cache."""
+        self._cache: dict[str, ContainerInfo] = {}
+
+    def __call__(self, container_id: str) -> ContainerInfo:
+        """Return cached info for *container_id*, or inspect on miss."""
+        if not container_id:
+            return ContainerInfo()
+        if (cached := self._cache.get(container_id)) is not None:
+            return cached
+        info = self._inspect(container_id)
+        self._cache[container_id] = info
+        return info
+
+    @staticmethod
+    def _inspect(container_id: str) -> ContainerInfo:
+        """Shell out to ``podman inspect`` once; soft-fail on any error."""
+        podman = shutil.which("podman")
+        if not podman:
+            _log.debug("podman not on PATH — inspector unavailable")
+            return ContainerInfo()
+        try:
+            # ``--`` guards against a hostile container_id that starts
+            # with a dash being interpreted as a podman flag.  IDs
+            # don't naturally begin with one but the callable is a
+            # public boundary; be defensive.
+            result = subprocess.run(  # nosec B603 — fixed argv, no shell
+                [podman, "inspect", "--format=json", "--", container_id],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=_INSPECT_TIMEOUT_S,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            _log.debug("podman inspect failed for %s: %s", container_id, exc)
+            return ContainerInfo()
+        if result.returncode != 0:
+            _log.debug(
+                "podman inspect %s returned %d: %s",
+                container_id,
+                result.returncode,
+                result.stderr.strip(),
+            )
+            return ContainerInfo()
+        try:
+            records = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            _log.debug("podman inspect %s returned malformed JSON: %s", container_id, exc)
+            return ContainerInfo()
+        return _from_inspect(container_id, records)
+
+
+def _from_inspect(container_id: str, records: Any) -> ContainerInfo:
+    """Build a :class:`ContainerInfo` from a ``podman inspect`` JSON payload."""
+    if not isinstance(records, list) or not records:
+        return ContainerInfo()
+    head = records[0]
+    if not isinstance(head, dict):
+        return ContainerInfo()
+    # Podman prefixes names with '/', strip for display.
+    name = head["Name"].lstrip("/") if isinstance(head.get("Name"), str) else ""
+    state_obj = head.get("State") if isinstance(head.get("State"), dict) else {}
+    state = state_obj.get("Status", "") if isinstance(state_obj.get("Status"), str) else ""
+    config = head.get("Config") if isinstance(head.get("Config"), dict) else {}
+    raw_ann = config.get("Annotations") if isinstance(config.get("Annotations"), dict) else {}
+    annotations = {
+        k: v for k, v in (raw_ann or {}).items() if isinstance(k, str) and isinstance(v, str)
+    }
+    return ContainerInfo(
+        container_id=container_id,
+        name=name,
+        state=state,
+        annotations=annotations,
+    )
