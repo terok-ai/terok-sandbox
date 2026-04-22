@@ -420,26 +420,33 @@ def test_uninstall_shield_bridge_removes_hook_pair(mock_uninstall: MagicMock) ->
 
 
 @pytest.mark.parametrize(
-    ("kwargs", "expected_call"),
+    ("kwargs", "expected_calls"),
     [
         pytest.param({}, None, id="missing-flags"),
-        pytest.param({"user": True}, {"root": False}, id="user-uninstall"),
-        pytest.param({"root": True}, {"root": True}, id="root-uninstall"),
+        pytest.param({"user": True}, [{"root": False}], id="user-only"),
+        pytest.param({"root": True}, [{"root": True}], id="root-only"),
+        pytest.param(
+            {"root": True, "user": True},
+            [{"root": False}, {"root": True}],
+            id="both-scopes-removed",
+        ),
     ],
 )
 def test_run_uninstall(
     kwargs: dict[str, bool],
-    expected_call: dict[str, bool] | None,
+    expected_calls: list[dict[str, bool]] | None,
 ) -> None:
-    """``run_uninstall`` mirrors ``run_setup``'s flag contract exactly."""
+    """``run_uninstall`` removes every scope the caller names; neither → ValueError."""
     with patch("terok_sandbox.shield.uninstall_hooks_direct") as mock_direct:
-        if expected_call is None:
+        if expected_calls is None:
             with pytest.raises(ValueError, match="root=True or user=True"):
                 run_uninstall(**kwargs)
             mock_direct.assert_not_called()
         else:
             run_uninstall(**kwargs)
-            mock_direct.assert_called_once_with(**expected_call)
+            assert mock_direct.call_count == len(expected_calls)
+            for call, expected in zip(mock_direct.call_args_list, expected_calls, strict=True):
+                assert call.kwargs == expected
 
 
 def test_uninstall_hooks_direct_user_removes_all_known_files(tmp_path: Path) -> None:

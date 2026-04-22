@@ -14,6 +14,7 @@ Shield commands are delegated to terok-shield's own registry —
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -112,16 +113,38 @@ def _handle_sandbox_uninstall(
     blast, but losing shield hooks mid-flight is the most disruptive —
     shield goes last so live containers stay firewalled as long as
     possible.
+
+    Best-effort across phases: a failing phase reports the error and
+    the next phase runs anyway, so a partial-install teardown still
+    removes what it can instead of leaving orphans behind.  Exits
+    non-zero only after every phase has had its attempt.
     """
+    failed = False
     if not no_gate:
         print("→ gate uninstall")
-        _handle_gate_uninstall()
+        failed |= _try_phase(_handle_gate_uninstall)
     if not no_vault:
         print("→ vault uninstall")
-        _handle_vault_uninstall()
+        failed |= _try_phase(_handle_vault_uninstall)
     if not no_shield:
         print("→ shield uninstall-hooks")
-        _handle_shield_uninstall(user=not root, root=root)
+        failed |= _try_phase(lambda: _handle_shield_uninstall(user=not root, root=root))
+    if failed:
+        raise SystemExit(1)
+
+
+def _try_phase(phase: Callable[[], None]) -> bool:
+    """Run one uninstall phase, reporting but not re-raising on failure.
+
+    Returns True when the phase failed so the aggregator can decide
+    the exit code after every phase has had its attempt.
+    """
+    try:
+        phase()
+    except SystemExit as exc:
+        print(f"  phase failed: {exc}", file=sys.stderr)
+        return True
+    return False
 
 
 def _handle_gate_install() -> None:

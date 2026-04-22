@@ -126,6 +126,20 @@ class TestSandboxUninstall:
             if key != skipped_spy_key:
                 assert phase_spies[key].called, f"{key} should still run"
 
+    def test_failing_phase_does_not_abort_subsequent_phases(self, phase_spies) -> None:
+        """A vault uninstall that raises SystemExit must not skip shield cleanup."""
+        phase_spies["vault_uninstall"].side_effect = SystemExit("vault teardown broken")
+        with pytest.raises(SystemExit):
+            _handle_sandbox_uninstall()
+        # Gate ran before the failure; shield must run after the failure.
+        phase_spies["gate_uninstall"].assert_called_once()
+        phase_spies["shield_uninstall"].assert_called_once()
+
+    def test_all_phases_succeeding_does_not_exit_nonzero(self, phase_spies) -> None:
+        """Happy path is not wrapped in an exit-1 just because of the try/except."""
+        # No side_effects → no SystemExit.
+        _handle_sandbox_uninstall()
+
 
 # ── Gate install/uninstall handlers (aggregator phase primitives) ────────
 
