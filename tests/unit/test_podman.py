@@ -8,6 +8,8 @@ from __future__ import annotations
 import subprocess
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from terok_sandbox.podman import ContainerInfo, PodmanInspector, _from_inspect
 
 _CONTAINER_ID = "fa0905d97a1c"
@@ -176,3 +178,16 @@ class TestPodmanInspector:
         argv = run_mock.call_args.args[0]
         assert "--" in argv
         assert argv[argv.index("--") + 1] == _CONTAINER_ID
+
+    def test_annotations_are_read_only(self) -> None:
+        """Cached ``ContainerInfo`` instances are shared, so mutation must raise."""
+        with (
+            patch("terok_sandbox.podman.shutil.which", return_value="/usr/bin/podman"),
+            patch(
+                "terok_sandbox.podman.subprocess.run",
+                return_value=_mock_completed(_FULL_JSON),
+            ),
+        ):
+            info = PodmanInspector()(_CONTAINER_ID)
+        with pytest.raises(TypeError):
+            info.annotations["ai.terok.project"] = "hijacked"  # type: ignore[index]

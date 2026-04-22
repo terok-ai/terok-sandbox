@@ -18,8 +18,12 @@ import json
 import logging
 import shutil
 import subprocess  # nosec B404 — podman is a trusted host binary
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any
+
+_EMPTY_ANNOTATIONS: Mapping[str, str] = MappingProxyType({})
 
 _log = logging.getLogger(__name__)
 
@@ -49,12 +53,15 @@ class ContainerInfo:
     state: str = ""
     """Lifecycle state: ``running``, ``exited``, ``created``, etc.  Empty when unknown."""
 
-    annotations: dict[str, str] = field(default_factory=dict)
+    annotations: Mapping[str, str] = field(default_factory=lambda: _EMPTY_ANNOTATIONS)
     """Every OCI annotation podman recorded for this container.
 
-    Sandbox stays annotation-key-agnostic — the whole dict is handed
-    back as-is.  Callers (terok's task-aware resolver, anything else
-    that cares) pluck out the keys they know about.
+    Exposed as a read-only :class:`Mapping` — cached instances are
+    shared across ``PodmanInspector`` callers, so mutating the
+    underlying dict would poison future lookups.  Build with
+    :class:`types.MappingProxyType` at construction time; callers
+    (terok's task-aware resolver, anything else that cares) pluck
+    out the keys they know about.
     """
 
 
@@ -157,9 +164,11 @@ def _from_inspect(container_id: str, records: Any) -> ContainerInfo:
         # Podman prefixes names with '/'.
         name=_str(head, "Name").lstrip("/"),
         state=_str(_dict(head, "State"), "Status"),
-        annotations={
-            k: v
-            for k, v in _dict(_dict(head, "Config"), "Annotations").items()
-            if isinstance(k, str) and isinstance(v, str)
-        },
+        annotations=MappingProxyType(
+            {
+                k: v
+                for k, v in _dict(_dict(head, "Config"), "Annotations").items()
+                if isinstance(k, str) and isinstance(v, str)
+            }
+        ),
     )
