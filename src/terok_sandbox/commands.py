@@ -70,6 +70,119 @@ class CommandDef:
 
 
 # ---------------------------------------------------------------------------
+# Sandbox-wide setup and uninstall
+#
+# Single-call bootstrap/teardown for the shield+vault+gate stack.  Consumed
+# by higher-level frontends (``terok setup``, ``terok-executor setup``)
+# so they can install everything with one call and tear it down
+# symmetrically.  Individual services still have their own install /
+# uninstall verbs in the groups below.
+# ---------------------------------------------------------------------------
+
+
+def _handle_sandbox_setup(
+    *,
+    root: bool = False,
+    no_shield: bool = False,
+    no_vault: bool = False,
+    no_gate: bool = False,
+) -> None:
+    """Install shield hooks, vault, and gate as one idempotent bootstrap."""
+    if not no_shield:
+        print("→ shield install-hooks")
+        _handle_shield_setup(user=not root, root=root)
+    if not no_vault:
+        print("→ vault install")
+        _handle_vault_install()
+    if not no_gate:
+        print("→ gate install")
+        _handle_gate_install()
+
+
+def _handle_sandbox_uninstall(
+    *,
+    root: bool = False,
+    no_shield: bool = False,
+    no_vault: bool = False,
+    no_gate: bool = False,
+) -> None:
+    """Tear down the stack in reverse install order.
+
+    A running container can lose its gate and vault without immediate
+    blast, but losing shield hooks mid-flight is the most disruptive —
+    shield goes last so live containers stay firewalled as long as
+    possible.
+    """
+    if not no_gate:
+        print("→ gate uninstall")
+        _handle_gate_uninstall()
+    if not no_vault:
+        print("→ vault uninstall")
+        _handle_vault_uninstall()
+    if not no_shield:
+        print("→ shield uninstall-hooks")
+        _handle_shield_uninstall(user=not root, root=root)
+
+
+def _handle_gate_install() -> None:
+    """Install gate server systemd units, refusing hosts without systemd-user."""
+    from .gate.lifecycle import GateServerManager
+
+    mgr = GateServerManager()
+    if not mgr.is_systemd_available():
+        print("Error: systemd user services are not available on this host.")
+        raise SystemExit(1)
+    mgr.install_systemd_units()
+    print("Gate server installed via systemd socket activation.")
+
+
+def _handle_gate_uninstall() -> None:
+    """Remove gate server systemd units, stopping any stray daemon first."""
+    from .gate.lifecycle import GateServerManager
+
+    mgr = GateServerManager()
+    if mgr.get_status().mode == "daemon":
+        mgr.stop_daemon()
+    if mgr.is_systemd_available():
+        mgr.uninstall_systemd_units()
+    print("Gate server systemd units removed.")
+
+
+SETUP_COMMANDS: tuple[CommandDef, ...] = (
+    CommandDef(
+        name="setup",
+        help="Install shield hooks + vault + gate in one step",
+        handler=_handle_sandbox_setup,
+        args=(
+            ArgDef(
+                name="--root",
+                action="store_true",
+                help="Install shield hooks system-wide (requires sudo); vault and gate stay per-user",
+            ),
+            ArgDef(name="--no-shield", action="store_true", help="Skip shield install"),
+            ArgDef(name="--no-vault", action="store_true", help="Skip vault install"),
+            ArgDef(name="--no-gate", action="store_true", help="Skip gate install"),
+        ),
+    ),
+    CommandDef(
+        name="uninstall",
+        help="Remove shield hooks + vault + gate in one step",
+        handler=_handle_sandbox_uninstall,
+        args=(
+            ArgDef(
+                name="--root",
+                action="store_true",
+                help="Remove shield hooks from the system hooks directory (requires sudo)",
+            ),
+            ArgDef(name="--no-shield", action="store_true", help="Skip shield uninstall"),
+            ArgDef(name="--no-vault", action="store_true", help="Skip vault uninstall"),
+            ArgDef(name="--no-gate", action="store_true", help="Skip gate uninstall"),
+        ),
+    ),
+)
+
+
+# ---------------------------------------------------------------------------
 # Gate handlers
 # ---------------------------------------------------------------------------
 
@@ -345,136 +458,6 @@ VAULT_COMMANDS: tuple[CommandDef, ...] = (
         help="Remove systemd units",
         handler=_handle_vault_uninstall,
         group="vault",
-    ),
-)
-
-# ---------------------------------------------------------------------------
-# Top-level aggregators — compose shield + vault + gate as one step.
-#
-# The per-service commands above stay the authoritative single-operation API.
-# These aggregators exist so higher-level frontends (``terok setup``,
-# ``terok-executor setup``, new operator onboarding) can bootstrap everything
-# with a single call and tear it all down symmetrically with a single
-# ``sandbox uninstall``.  Phases can be opted out individually for hosts
-# where one service is managed externally.
-# ---------------------------------------------------------------------------
-
-
-def _handle_sandbox_setup(
-    *,
-    root: bool = False,
-    no_shield: bool = False,
-    no_vault: bool = False,
-    no_gate: bool = False,
-) -> None:
-    """Install shield hooks, vault, and gate — the full bottom-layer bootstrap.
-
-    Idempotent: each phase delegates to the matching ``*_install`` handler,
-    all of which tolerate re-runs.  Prints a one-line summary per phase
-    so operators can see what was touched.  ``--no-<phase>`` flags let a
-    host opt out of phases managed outside the sandbox stack.
-    """
-    if not no_shield:
-        print("→ shield install-hooks")
-        _handle_shield_setup(user=not root, root=root)
-    if not no_vault:
-        print("→ vault install")
-        _handle_vault_install()
-    if not no_gate:
-        print("→ gate install")
-        _handle_gate_install()
-
-
-def _handle_sandbox_uninstall(
-    *,
-    root: bool = False,
-    no_shield: bool = False,
-    no_vault: bool = False,
-    no_gate: bool = False,
-) -> None:
-    """Remove everything ``sandbox setup`` installed, in reverse order.
-
-    Idempotent: each phase tolerates the case where nothing was installed.
-    Removes gate first (may depend on the vault socket) then vault, then
-    shield hooks last — a running container can lose its gate and vault
-    gracefully but losing its shield hooks while live is the most
-    disruptive, so it goes last.
-    """
-    if not no_gate:
-        print("→ gate uninstall")
-        _handle_gate_uninstall()
-    if not no_vault:
-        print("→ vault uninstall")
-        _handle_vault_uninstall()
-    if not no_shield:
-        print("→ shield uninstall-hooks")
-        _handle_shield_uninstall(user=not root, root=root)
-
-
-def _handle_gate_install() -> None:
-    """Install gate server systemd units idempotently.
-
-    Wraps :class:`GateServerManager.install_systemd_units` with a friendly
-    error when systemd-user isn't available — the sandbox aggregator
-    depends on this shape so failure surfaces don't leak through argparse.
-    """
-    from .gate.lifecycle import GateServerManager
-
-    mgr = GateServerManager()
-    if not mgr.is_systemd_available():
-        print("Error: systemd user services are not available on this host.")
-        raise SystemExit(1)
-    mgr.install_systemd_units()
-    print("Gate server installed via systemd socket activation.")
-
-
-def _handle_gate_uninstall() -> None:
-    """Remove gate server systemd units previously installed by ``gate install``.
-
-    Also covers the case where the gate was last started as a daemon —
-    stops the daemon process so the uninstall leaves no stray state.
-    """
-    from .gate.lifecycle import GateServerManager
-
-    mgr = GateServerManager()
-    status = mgr.get_status()
-    if status.mode == "daemon":
-        mgr.stop_daemon()
-    if mgr.is_systemd_available():
-        mgr.uninstall_systemd_units()
-    print("Gate server systemd units removed.")
-
-
-SETUP_COMMANDS: tuple[CommandDef, ...] = (
-    CommandDef(
-        name="setup",
-        help="Install shield hooks + vault + gate in one step",
-        handler=_handle_sandbox_setup,
-        args=(
-            ArgDef(
-                name="--root",
-                action="store_true",
-                help="Install shield hooks system-wide (requires sudo); vault and gate stay per-user",
-            ),
-            ArgDef(name="--no-shield", action="store_true", help="Skip shield install"),
-            ArgDef(name="--no-vault", action="store_true", help="Skip vault install"),
-            ArgDef(name="--no-gate", action="store_true", help="Skip gate install"),
-        ),
-    ),
-    CommandDef(
-        name="uninstall",
-        help="Remove shield hooks + vault + gate in one step",
-        handler=_handle_sandbox_uninstall,
-        args=(
-            ArgDef(
-                name="--root",
-                action="store_true",
-                help="Remove shield hooks from the system hooks directory (requires sudo)",
-            ),
-            ArgDef(name="--no-shield", action="store_true", help="Skip shield uninstall"),
-            ArgDef(name="--no-vault", action="store_true", help="Skip vault uninstall"),
-            ArgDef(name="--no-gate", action="store_true", help="Skip gate uninstall"),
-        ),
     ),
 )
 
