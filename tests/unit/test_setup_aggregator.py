@@ -147,9 +147,7 @@ class TestSandboxUninstall:
 class TestHandleGateInstall:
     """Gate install handler — refuses hosts without systemd-user."""
 
-    def test_installs_when_systemd_available(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_installs_when_systemd_available(self, capsys: pytest.CaptureFixture[str]) -> None:
         from terok_sandbox.gate.lifecycle import GateServerManager
 
         with (
@@ -160,9 +158,7 @@ class TestHandleGateInstall:
         install.assert_called_once()
         assert "installed" in capsys.readouterr().out.lower()
 
-    def test_refuses_when_systemd_unavailable(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_refuses_when_systemd_unavailable(self, capsys: pytest.CaptureFixture[str]) -> None:
         from terok_sandbox.gate.lifecycle import GateServerManager
 
         with patch.object(GateServerManager, "is_systemd_available", return_value=False):
@@ -175,9 +171,7 @@ class TestHandleGateInstall:
 class TestHandleGateUninstall:
     """Gate uninstall handler — tolerates both daemon-started and systemd-installed state."""
 
-    def test_stops_daemon_when_running_as_daemon(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_stops_daemon_when_running_as_daemon(self, capsys: pytest.CaptureFixture[str]) -> None:
         from terok_sandbox.gate.lifecycle import GateServerManager, GateServerStatus
 
         status = GateServerStatus(mode="daemon", running=True, port=9418)
@@ -211,25 +205,19 @@ class TestHandleGateUninstall:
 class TestHandleShieldUninstall:
     """The ``shield uninstall-hooks`` handler's user/root flag contract."""
 
-    def test_missing_flags_exits_with_usage_hint(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_missing_flags_exits_with_usage_hint(self, capsys: pytest.CaptureFixture[str]) -> None:
         with pytest.raises(SystemExit) as exc:
             _handle_shield_uninstall()
         msg = str(exc.value)
         assert "--root" in msg and "--user" in msg
 
-    def test_user_flag_invokes_library_uninstall(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_user_flag_invokes_library_uninstall(self, capsys: pytest.CaptureFixture[str]) -> None:
         with patch("terok_sandbox.shield.run_uninstall") as mock_run:
             _handle_shield_uninstall(user=True)
         mock_run.assert_called_once_with(root=False, user=True)
         assert "user" in capsys.readouterr().out
 
-    def test_root_flag_invokes_library_uninstall(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_root_flag_invokes_library_uninstall(self, capsys: pytest.CaptureFixture[str]) -> None:
         with patch("terok_sandbox.shield.run_uninstall") as mock_run:
             _handle_shield_uninstall(root=True)
         mock_run.assert_called_once_with(root=True, user=False)
