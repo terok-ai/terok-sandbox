@@ -105,6 +105,27 @@ class TestReapLogsProc:
         proc.wait.assert_called_once_with()
         proc.stdout.close.assert_called_once()
 
+    def test_second_call_is_a_noop_concurrent(self) -> None:
+        """Two threads racing through the guard must not double-reap."""
+        import threading
+
+        proc = MagicMock()
+        proc.poll.return_value = 0
+        proc.stdout = MagicMock()
+        barrier = threading.Barrier(2)
+
+        def _racer() -> None:
+            barrier.wait()
+            _reap_logs_proc(proc)
+
+        threads = [threading.Thread(target=_racer) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        proc.wait.assert_called_once_with()
+        proc.stdout.close.assert_called_once()
+
 
 # ── _stream_initial_logs ─────────────────────────────────────────────────
 
