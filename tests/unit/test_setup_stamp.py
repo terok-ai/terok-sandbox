@@ -142,6 +142,17 @@ def test_stamp_corrupt_when_shape_is_wrong(content: str) -> None:
     assert needs_setup() is SetupVerdict.STAMP_CORRUPT
 
 
+def test_stamp_corrupt_when_path_is_a_directory() -> None:
+    """A directory at the stamp location is corrupt state, not a fresh install.
+
+    Distinct from FIRST_RUN: setup hasn't been bypassed, the slot is
+    occupied by something that ``write_stamp`` would also fail to
+    overwrite.  Surfacing STAMP_CORRUPT keeps the diagnostic accurate.
+    """
+    stamp_path().mkdir(parents=True, exist_ok=True)
+    assert needs_setup() is SetupVerdict.STAMP_CORRUPT
+
+
 # ── write_stamp / clear_stamp ─────────────────────────────────────────
 
 
@@ -157,10 +168,15 @@ def test_write_stamp_atomic_via_tmp_then_rename(monkeypatch, tmp_path) -> None:
     assert path.is_file()
     # The temp sibling shouldn't survive a successful write.
     assert not path.with_suffix(path.suffix + ".tmp").exists()
-    # The payload roundtrips.
+    # Full schema contract — every documented field round-trips.
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert payload["version"] == 1
     assert payload["packages"] == {"x": "1.0.0"}
+    # ``completed_at`` is the audit trail downstream tooling reads;
+    # dropping it would silently break consumers.
+    from datetime import datetime
+
+    assert datetime.fromisoformat(payload["completed_at"])
 
 
 def test_clear_stamp_removes_file_returns_true(monkeypatch) -> None:

@@ -106,8 +106,14 @@ def needs_setup() -> SetupVerdict:
     to be cheap enough to call on every TUI startup.
     """
     path = stamp_path()
-    if not path.is_file():
+    if not path.exists():
         return SetupVerdict.FIRST_RUN
+    if not path.is_file():
+        # Something at the stamp location, but not a regular file — a
+        # directory or device left there by a misbehaving sync tool.
+        # That's not "user hasn't run setup" (FIRST_RUN); it's a corrupt
+        # state the next ``write_stamp`` would also fail on.
+        return SetupVerdict.STAMP_CORRUPT
 
     try:
         stamped = _read_stamp(path)
