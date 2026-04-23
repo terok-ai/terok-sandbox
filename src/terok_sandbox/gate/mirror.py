@@ -3,20 +3,28 @@
 
 """Host-side git gate (mirror) management and upstream comparison.
 
-The git gate is a bare mirror of the upstream repository stored on the host.
-In **gatekeeping mode**, it is the *only* repository the container can access,
-enforcing human review before changes reach upstream.  In **online mode**, it
-serves as a read-only clone accelerator (faster than cloning over the network).
+The git gate is a bare git repository stored on the host.  Its role varies
+with how the caller configures it:
+
+- **Upstream set, gatekeeping mode** — the gate is a mirror of upstream
+  and is the *only* repository the container can access, enforcing human
+  review before changes reach upstream.
+- **Upstream set, online mode** — the gate mirrors upstream and serves as
+  a read-only clone accelerator (faster than cloning over the network).
+- **No upstream** — ``sync()`` initialises the gate as a remoteless bare
+  repo that the container can still push to.  Nothing is fetched because
+  there is no remote; subsequent syncs are no-ops.
 
 :class:`GitGate` is the main service class — wraps git CLI operations for
-syncing, comparing, and querying the mirror.
+syncing, comparing, and querying the gate.
 
 All constructor parameters are plain values (strings, paths) — no
 terok-specific types like ``ProjectConfig``.
 
 Value types returned by ``GitGate`` methods:
 
-- :class:`GateSyncResult` — full sync outcome (created, updated branches, errors)
+- :class:`GateSyncResult` — full sync outcome (created, updated branches,
+  errors; ``upstream_url`` is ``None`` for remoteless gates)
 - :class:`BranchSyncResult` — selective branch sync outcome
 - :class:`CommitInfo` — single commit metadata (hash, date, author, message)
 - :class:`GateStalenessInfo` — frozen comparison of gate HEAD vs upstream HEAD
