@@ -48,6 +48,8 @@ from .commands import (
     VAULT_COMMANDS,
     CommandDef,
     KeyRow,
+    _handle_sandbox_setup as sandbox_setup,
+    _handle_sandbox_uninstall as sandbox_uninstall,
 )
 from .config import CONTAINER_RUNTIME_DIR, SandboxConfig
 from .config_schema import (
@@ -458,6 +460,10 @@ __all__ = [
     "SANDBOX_COMMANDS",
     "SHIELD_COMMANDS",
     "SSH_COMMANDS",
+    # Aggregator entry points — one-call install/teardown of the
+    # full shield+vault+gate+clearance stack.
+    "sandbox_setup",
+    "sandbox_uninstall",
     # Facade
     "READY_MARKER",
     "LifecycleHooks",
