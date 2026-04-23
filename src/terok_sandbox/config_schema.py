@@ -227,6 +227,41 @@ class SandboxConfigView(BaseModel):
     ssh: RawSSHSection = Field(default_factory=RawSSHSection)
 
 
+# ── Section readers ───────────────────────────────────────────────────
+
+
+def gate_use_personal_ssh_default() -> bool:
+    """Resolve the host gate's ``ssh.use_personal`` global default.
+
+    Reads the ``ssh:`` section from the shared ``config.yml``, validates
+    via :class:`RawSSHSection`, and returns the bool.  An unset section,
+    a missing key, or a malformed value collapses to ``False`` — the
+    safe historical default ("terok never touches your real keys").
+
+    Higher layers compose this with project-level and per-invocation
+    overrides; the resolution chain ends up:
+
+        CLI ``--use-personal-ssh``     (highest)
+        project ``project.yml`` ssh
+        global ``config.yml`` ssh      ← THIS function
+        False                          (default)
+
+    Lives in sandbox because the consumer
+    (:func:`~terok_sandbox.gate.mirror._git_env_with_ssh`) is here too —
+    same package owns the schema and the reader.
+    """
+    from .paths import read_config_section
+
+    raw = read_config_section("ssh")
+    if not raw:
+        return False
+    try:
+        section = RawSSHSection.model_validate(raw)
+    except Exception:  # noqa: BLE001 — malformed config falls back to safe default
+        return False
+    return bool(section.use_personal)
+
+
 __all__ = [
     "SERVICES_TCP_OPTOUT_YAML",
     "RawCredentialsSection",
@@ -238,4 +273,5 @@ __all__ = [
     "RawShieldSection",
     "RawVaultSection",
     "SandboxConfigView",
+    "gate_use_personal_ssh_default",
 ]

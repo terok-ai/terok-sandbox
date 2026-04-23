@@ -139,3 +139,52 @@ def test_subclass_can_compose_extra_sections_and_inherit_strictness() -> None:
     composed = _Composed.model_validate({"toy": {"toy_value": 42}, "paths": {"root": "/v"}})
     assert composed.toy.toy_value == 42
     assert composed.paths.root == "/v"
+
+
+# ── gate_use_personal_ssh_default reader ──────────────────────────────
+
+
+def test_gate_use_personal_ssh_default_returns_false_when_unset(monkeypatch) -> None:
+    """A missing or empty ``ssh:`` section collapses to ``False`` — the safe default."""
+    from terok_sandbox.config_schema import gate_use_personal_ssh_default
+
+    monkeypatch.setattr(
+        "terok_sandbox.config_schema.read_config_section",
+        lambda _section: {},
+        raising=False,
+    )
+    # The patch above doesn't take if the symbol isn't already a module-level
+    # attribute; the function imports lazily.  Patch the source module instead.
+    import terok_sandbox.paths as _paths
+
+    monkeypatch.setattr(_paths, "read_config_section", lambda _section: {})
+    assert gate_use_personal_ssh_default() is False
+
+
+def test_gate_use_personal_ssh_default_reads_true_from_config(monkeypatch) -> None:
+    """``ssh: {use_personal: true}`` in config.yml flips the default to True."""
+    import terok_sandbox.paths as _paths
+    from terok_sandbox.config_schema import gate_use_personal_ssh_default
+
+    monkeypatch.setattr(_paths, "read_config_section", lambda _section: {"use_personal": "true"})
+    # ``read_config_section`` returns ``dict[str, str]`` (everything stringified
+    # before merge); pydantic coerces the string to bool.  Verifying both that
+    # the wiring works and the coercion holds.
+    assert gate_use_personal_ssh_default() is True
+
+
+def test_gate_use_personal_ssh_default_swallows_malformed_section(monkeypatch) -> None:
+    """A typo inside ``ssh:`` doesn't crash the gate — falls back to False.
+
+    The reader is called by gate-sync paths that must be robust to a
+    partially-broken config; surfacing a pydantic error here would mean
+    a single bad key in the global config takes down ``terok task start``
+    on every project.  The strict validation path lives in terok's
+    top-level ``RawGlobalConfig`` (``extra="forbid"``) — by the time
+    the gate runs, terok would already have rejected the file there.
+    """
+    import terok_sandbox.paths as _paths
+    from terok_sandbox.config_schema import gate_use_personal_ssh_default
+
+    monkeypatch.setattr(_paths, "read_config_section", lambda _section: {"use_persoanl": "true"})
+    assert gate_use_personal_ssh_default() is False

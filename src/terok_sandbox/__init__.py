@@ -61,6 +61,7 @@ from .config_schema import (
     RawSSHSection,
     RawVaultSection,
     SandboxConfigView,
+    gate_use_personal_ssh_default,
 )
 from .config_stack import ConfigScope, ConfigStack
 from .credentials.db import CredentialDB, SSHKeyRecord, SSHKeyRow
@@ -352,6 +353,7 @@ __all__ = [
     "RawVaultSection",
     "SERVICES_TCP_OPTOUT_YAML",
     "SandboxConfigView",
+    "gate_use_personal_ssh_default",
     # Lifecycle managers
     "VaultManager",
     "GateServerManager",
