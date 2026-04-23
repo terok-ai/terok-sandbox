@@ -24,7 +24,7 @@ from terok_sandbox.commands import (
     _handle_ssh_remove,
 )
 from terok_sandbox.credentials.db import CredentialDB
-from terok_sandbox.credentials.ssh_keypair import generate_keypair
+from terok_sandbox.credentials.ssh_keypair import generate_keypair, openssh_pem_of
 
 
 @pytest.fixture()
@@ -62,7 +62,7 @@ def _seed_disk_pair(tmp_path: Path, scope_label: str) -> tuple[Path, Path]:
     kp = generate_keypair("ed25519", comment=f"tk-main:{scope_label}")
     priv = tmp_path / f"id_ed25519_{scope_label}"
     pub = priv.with_name(priv.name + ".pub")
-    priv.write_bytes(kp.private_pem)
+    priv.write_bytes(openssh_pem_of(kp.private_der))
     pub.write_text(kp.public_line + "\n")
     return priv, pub
 
@@ -72,7 +72,7 @@ def _seed_in_db(db: CredentialDB, scope: str) -> int:
     kp = generate_keypair("ed25519", comment=f"tk-main:{scope}")
     key_id = db.store_ssh_key(
         key_type=kp.key_type,
-        private_pem=kp.private_pem,
+        private_der=kp.private_der,
         public_blob=kp.public_blob,
         comment=kp.comment,
         fingerprint=kp.fingerprint,
@@ -190,7 +190,7 @@ class TestImportErrorMapping:
         kp_b = generate_keypair("ed25519", comment="b")
         priv = tmp_path / "priv"
         pub = tmp_path / "pub"
-        priv.write_bytes(kp_a.private_pem)
+        priv.write_bytes(openssh_pem_of(kp_a.private_der))
         pub.write_text(kp_b.public_line + "\n")
         with pytest.raises(SystemExit, match="Import failed:"):
             _handle_ssh_import(
@@ -204,7 +204,7 @@ class TestImportErrorMapping:
         kp = generate_keypair("ed25519", comment="clean")
         priv = tmp_path / "id"
         pub = tmp_path / "id.pub"
-        priv.write_bytes(kp.private_pem)
+        priv.write_bytes(openssh_pem_of(kp.private_der))
         pub.write_text(kp.public_line.rsplit(" ", 1)[0] + " bad\x1b[31m\n")
         with pytest.raises(SystemExit, match="Import failed:"):
             _handle_ssh_import(

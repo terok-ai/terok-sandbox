@@ -19,6 +19,7 @@ from terok_sandbox.credentials.ssh_keypair import (
     export_ssh_keypair,
     generate_keypair,
     import_ssh_keypair,
+    openssh_pem_of,
     parse_openssh_keypair,
 )
 
@@ -35,7 +36,7 @@ def disk_keypair(tmp_path: Path) -> tuple[Path, Path]:
     kp = generate_keypair("ed25519", comment="disk-comment")
     priv = tmp_path / "id_ed25519_disk"
     pub = tmp_path / "id_ed25519_disk.pub"
-    priv.write_bytes(kp.private_pem)
+    priv.write_bytes(openssh_pem_of(kp.private_der))
     pub.write_text(kp.public_line + "\n")
     return priv, pub
 
@@ -44,14 +45,17 @@ class TestGenerate:
     """Verify in-memory keypair generation."""
 
     def test_ed25519_shape(self) -> None:
-        """Generated ed25519 keypair carries PEM + wire blob + fingerprint."""
+        """Generated ed25519 keypair carries DER + wire blob + fingerprint."""
         kp = generate_keypair("ed25519", comment="hello")
         assert kp.key_type == "ed25519"
-        assert b"OPENSSH PRIVATE KEY" in kp.private_pem
+        # PKCS#8 DER: opaque binary, no banner strings.
+        assert b"PRIVATE KEY" not in kp.private_der
         assert len(kp.public_blob) > 0
         assert kp.public_line.startswith("ssh-ed25519 ")
         assert kp.public_line.endswith(" hello")
-        assert len(kp.fingerprint) == 64  # sha256 hex
+        # Standard OpenSSH fingerprint: ``SHA256:<43-char unpadded base64>``.
+        assert kp.fingerprint.startswith("SHA256:")
+        assert len(kp.fingerprint) == len("SHA256:") + 43
         assert kp.comment == "hello"
 
     def test_rsa_shape(self) -> None:
@@ -82,7 +86,7 @@ class TestImport:
         priv, pub = disk_keypair
         result = import_ssh_keypair(db, "proj", priv, pub_path=pub)
         assert result.already_present is False
-        assert len(result.fingerprint) == 64
+        assert result.fingerprint.startswith("SHA256:")
         rows = db.list_ssh_keys_for_scope("proj")
         assert len(rows) == 1
         assert rows[0].id == result.key_id
@@ -111,7 +115,7 @@ class TestImport:
         kp = generate_keypair("ed25519", comment="")
         priv = tmp_path / "id"
         pub = tmp_path / "id.pub"
-        priv.write_bytes(kp.private_pem)
+        priv.write_bytes(openssh_pem_of(kp.private_der))
         pub.write_text(kp.public_line + "\n")
         result = import_ssh_keypair(db, "proj-a", priv, pub_path=pub)
         assert result.already_present is False
@@ -124,7 +128,7 @@ class TestImport:
         kp = generate_keypair("ed25519", comment="")
         priv = tmp_path / "id"
         pub = tmp_path / "id.pub"
-        priv.write_bytes(kp.private_pem)
+        priv.write_bytes(openssh_pem_of(kp.private_der))
         pub.write_text(kp.public_line + "\n")
         import_ssh_keypair(db, "proj-a", priv, pub_path=pub)
         result = import_ssh_keypair(db, "proj-b", priv, pub_path=pub)
@@ -136,7 +140,7 @@ class TestImport:
         kp = generate_keypair("ed25519", comment="")
         priv = tmp_path / "id"
         pub = tmp_path / "id.pub"
-        priv.write_bytes(kp.private_pem)
+        priv.write_bytes(openssh_pem_of(kp.private_der))
         pub.write_text(kp.public_line + "\n")
         import_ssh_keypair(db, "proj-a", priv, pub_path=pub)
         result = import_ssh_keypair(db, "proj-a", priv, pub_path=pub)
@@ -148,7 +152,7 @@ class TestImport:
         kp = generate_keypair("rsa", comment="rsa-import")
         priv = tmp_path / "id_rsa"
         pub = tmp_path / "id_rsa.pub"
-        priv.write_bytes(kp.private_pem)
+        priv.write_bytes(openssh_pem_of(kp.private_der))
         pub.write_text(kp.public_line + "\n")
         result = import_ssh_keypair(db, "proj", priv, pub_path=pub)
         [row] = db.list_ssh_keys_for_scope("proj")
@@ -161,7 +165,7 @@ class TestImport:
         kp2 = generate_keypair("ed25519", comment="b")
         priv = tmp_path / "priv"
         pub = tmp_path / "pub"
-        priv.write_bytes(kp1.private_pem)
+        priv.write_bytes(openssh_pem_of(kp1.private_der))
         pub.write_text(kp2.public_line + "\n")
         with pytest.raises(KeypairMismatchError):
             import_ssh_keypair(db, "proj", priv, pub_path=pub)
@@ -210,7 +214,13 @@ class TestExport:
         assert result.private_path.exists()
         assert result.public_path.exists()
         assert result.public_path.suffix == ".pub"
-        assert f"_{result.fingerprint[:8]}" in result.private_path.name
+        # Filename stem embeds an 8-hex-char short id of the public blob —
+        # stable across display-format changes to the fingerprint string.
+        import hashlib
+
+        [record] = db.load_ssh_keys_for_scope("proj")
+        short_id = hashlib.sha256(record.public_blob).hexdigest()[:8]
+        assert f"_{short_id}" in result.private_path.name
 
         priv_mode = stat.S_IMODE(os.lstat(result.private_path).st_mode)
         pub_mode = stat.S_IMODE(os.lstat(result.public_path).st_mode)
@@ -308,7 +318,7 @@ class TestExport:
         kp2 = generate_keypair("ed25519", comment="second")
         second_priv = tmp_path / "id2"
         second_pub = tmp_path / "id2.pub"
-        second_priv.write_bytes(kp2.private_pem)
+        second_priv.write_bytes(openssh_pem_of(kp2.private_der))
         second_pub.write_text(kp2.public_line + "\n")
         import_ssh_keypair(db, "proj", second_priv, pub_path=second_pub)
 
@@ -398,7 +408,7 @@ class TestCommentGuard:
         kp = generate_keypair("ed25519", comment="clean")
         priv = tmp_path / "id"
         pub = tmp_path / "id.pub"
-        priv.write_bytes(kp.private_pem)
+        priv.write_bytes(openssh_pem_of(kp.private_der))
         # Replace the clean comment with a malicious one in the .pub file.
         pub.write_text(kp.public_line.rsplit(" ", 1)[0] + " bad\x1b[31m\n")
         with pytest.raises(UnsafeCommentError):
@@ -436,10 +446,10 @@ class TestPublicLine:
         rec = SSHKeyRecord(
             id=1,
             key_type="dsa",
-            private_pem=b"",
+            private_der=b"",
             public_blob=b"x",
             comment="",
-            fingerprint="deadbeef",
+            fingerprint="SHA256:deadbeef",
         )
         with pytest.raises(ValueError, match="unsupported key type"):
             public_line_of(rec)
@@ -452,7 +462,7 @@ def _record_from(kp, *, id: int):
     return SSHKeyRecord(
         id=id,
         key_type=kp.key_type,
-        private_pem=kp.private_pem,
+        private_der=kp.private_der,
         public_blob=kp.public_blob,
         comment=kp.comment,
         fingerprint=kp.fingerprint,
@@ -466,11 +476,11 @@ class TestParseErrors:
         """A ``.pub`` file with fewer than two whitespace-separated fields is rejected."""
         kp = generate_keypair("ed25519", comment="")
         priv = tmp_path / "k"
-        priv.write_bytes(kp.private_pem)
+        priv.write_bytes(openssh_pem_of(kp.private_der))
         with pytest.raises(ValueError, match="malformed public key file"):
             parse_openssh_keypair(priv.read_bytes(), b"only-one-field")
 
-    def test_malformed_private_pem_raises(self, tmp_path: Path) -> None:
-        """A garbage private PEM bubbles up as a plain ``ValueError``, not the passphrase one."""
+    def test_malformed_private_key_raises(self, tmp_path: Path) -> None:
+        """A garbage private key bubbles up as a plain ``ValueError``, not the passphrase one."""
         with pytest.raises(ValueError):
             parse_openssh_keypair(b"not-a-real-pem")

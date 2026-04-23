@@ -39,7 +39,7 @@ def _seed_key(db: CredentialDB, scope: str, comment: str = "test-comment") -> by
     kp = generate_keypair("ed25519", comment=comment)
     key_id = db.store_ssh_key(
         key_type=kp.key_type,
-        private_pem=kp.private_pem,
+        private_der=kp.private_der,
         public_blob=kp.public_blob,
         comment=kp.comment,
         fingerprint=kp.fingerprint,
@@ -168,18 +168,18 @@ class TestDecodeRecord:
         from terok_sandbox.vault.ssh_signer import _decode_record
 
         ec_key = generate_private_key(SECP256R1())
-        pem = ec_key.private_bytes(
-            encoding=Encoding.PEM,
+        der = ec_key.private_bytes(
+            encoding=Encoding.DER,
             format=PrivateFormat.PKCS8,
             encryption_algorithm=NoEncryption(),
         )
         rec = SSHKeyRecord(
             id=1,
             key_type="ecdsa",  # not what the cache accepts
-            private_pem=pem,
+            private_der=der,
             public_blob=b"x",
             comment="c",
-            fingerprint="00" * 32,
+            fingerprint="SHA256:" + "A" * 43,
         )
         with pytest.raises(ValueError, match="Unsupported key type"):
             _decode_record(rec)
@@ -436,14 +436,14 @@ class TestKeyCacheErrorRecovery:
         db = CredentialDB(db_path)
         # First key: valid.
         good_blob = _seed_key(db, "proj", comment="good")
-        # Second key: corrupt PEM but valid blob/fingerprint metadata.
+        # Second key: corrupt bytes but valid blob/fingerprint metadata.
         kp = generate_keypair("ed25519", comment="sibling")
         bad_id = db.store_ssh_key(
             key_type="ed25519",
-            private_pem=b"GARBAGE",  # cryptography will reject this
+            private_der=b"GARBAGE",  # cryptography will reject this
             public_blob=kp.public_blob,
             comment="sibling",
-            fingerprint="f" * 64,
+            fingerprint="SHA256:" + "A" * 43,
         )
         db.assign_ssh_key("proj", bad_id)
 

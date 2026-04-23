@@ -22,7 +22,7 @@ def _store_key(db: CredentialDB, fp: str, *, comment: str = "c") -> int:
     """Insert an SSH key with the given fingerprint; return its id."""
     return db.store_ssh_key(
         key_type="ed25519",
-        private_pem=b"priv-pem-" + fp.encode(),
+        private_der=b"priv-der-" + fp.encode(),
         public_blob=b"pub-blob-" + fp.encode(),
         comment=comment,
         fingerprint=fp,
@@ -130,14 +130,14 @@ class TestLoadRecords:
     """Verify load_ssh_keys_for_scope returns full records with raw bytes."""
 
     def test_carries_bytes(self, db: CredentialDB) -> None:
-        """The raw PEM and public blob round-trip through the DB."""
+        """The raw DER and public blob round-trip through the DB."""
         key_id = _store_key(db, "fp-raw", comment="hello")
         db.assign_ssh_key("proj", key_id)
         records = db.load_ssh_keys_for_scope("proj")
         assert len(records) == 1
         r = records[0]
         assert r.id == key_id
-        assert r.private_pem.startswith(b"priv-pem-fp-raw")
+        assert r.private_der.startswith(b"priv-der-fp-raw")
         assert r.public_blob == b"pub-blob-fp-raw"
         assert r.comment == "hello"
         assert r.fingerprint == "fp-raw"

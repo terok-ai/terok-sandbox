@@ -8,8 +8,9 @@ mediates:
 
 - **Provider credentials** (API keys, OAuth tokens) stored as JSON blobs keyed
   by ``(credential_set, provider)``.
-- **SSH keys** stored as OpenSSH PEM + SSH wire-format public blob, deduplicated
-  by fingerprint, linked to project scopes through an assignments join table.
+- **SSH keys** stored as unencrypted PKCS#8 DER + SSH wire-format public blob,
+  deduplicated by standard-format fingerprint, linked to project scopes through
+  an assignments join table.
 - **Phantom tokens** minted per-task so containers can authenticate to the
   vault without ever seeing real credentials.
 
@@ -18,7 +19,7 @@ reads it.  sqlite3 in WAL mode gives lock-free concurrent reads across multiple
 terok processes (CLI commands, vault daemon, task runners).  Zero external
 dependencies.
 
-Encryption upgrade path: wrap the ``data`` / ``private_pem`` columns with
+Encryption upgrade path: wrap the ``data`` / ``private_der`` columns with
 ``cryptography.fernet`` before INSERT, or swap ``sqlite3`` for ``sqlcipher3``
 (drop-in API replacement).  A single wrap applies uniformly to both API
 credentials and SSH keys.
@@ -32,6 +33,63 @@ import re
 import secrets
 import sqlite3
 from pathlib import Path
+
+_SCHEMA_VERSION = 1
+"""SSH-key table schema version — bumped when the on-disk encoding changes
+so :func:`migrate_ssh_keys_schema` can route legacy rows forward on first open."""
+
+
+def migrate_ssh_keys_schema(conn: sqlite3.Connection) -> None:
+    """Migrate legacy ``ssh_keys`` rows forward to the current schema.
+
+    Tracked via ``PRAGMA user_version`` so the whole function is a no-op on
+    already-upgraded DBs.  The only current upgrade converts v0 rows —
+    OpenSSH PEM in a ``private_pem`` column, hex fingerprints — to v1:
+    PKCS#8 DER in ``private_der`` with ``SHA256:<base64>`` fingerprints.
+
+    Exposed at module level so every opener of the DB file (``CredentialDB``
+    for writers, ``_TokenDB`` in the vault daemon for readers) runs it
+    before issuing queries — otherwise a daemon that restarts before any
+    CLI command has touched the DB would hit "no such column: private_der"
+    on a freshly-upgraded host.
+
+    The ``cryptography`` import is scoped to the migration branch so
+    already-migrated DBs (the common case) don't pay an import cost, and
+    the storage module keeps tach-clean at import time.
+    """
+    (current,) = conn.execute("PRAGMA user_version").fetchone()
+    if current >= _SCHEMA_VERSION:
+        return
+
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(ssh_keys)").fetchall()}
+    if "private_pem" in cols and "private_der" not in cols:
+        import base64 as _b64
+        import hashlib as _sha
+
+        from cryptography.hazmat.primitives.serialization import (
+            Encoding,
+            NoEncryption,
+            PrivateFormat,
+            load_ssh_private_key,
+        )
+
+        def _fp(pub: bytes) -> str:
+            """Re-format a public blob's fingerprint as ``SHA256:<base64>``."""
+            digest = _sha.sha256(pub).digest()
+            return f"SHA256:{_b64.b64encode(digest).decode('ascii').rstrip('=')}"
+
+        rows = conn.execute("SELECT id, private_pem, public_blob FROM ssh_keys").fetchall()
+        for row_id, priv_pem, pub_blob in rows:
+            key = load_ssh_private_key(bytes(priv_pem), password=None)
+            der = key.private_bytes(Encoding.DER, PrivateFormat.PKCS8, NoEncryption())
+            conn.execute(
+                "UPDATE ssh_keys SET private_pem = ?, fingerprint = ? WHERE id = ?",
+                (der, _fp(bytes(pub_blob)), row_id),
+            )
+        conn.execute("ALTER TABLE ssh_keys RENAME COLUMN private_pem TO private_der")
+    conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+    conn.commit()
+
 
 # ── Scope-name guard ────────────────────────────────────────────────────────
 
@@ -94,7 +152,7 @@ class SSHKeyRecord:
 
     id: int
     key_type: str
-    private_pem: bytes
+    private_der: bytes
     public_blob: bytes
     comment: str
     fingerprint: str
@@ -103,7 +161,7 @@ class SSHKeyRecord:
 class CredentialDB:
     """SQLite-backed store for provider credentials, SSH keys, and phantom tokens.
 
-    Stores captured provider credentials, SSH keypairs (private PEM + public
+    Stores captured provider credentials, SSH keypairs (private DER + public
     blob, assigned to scopes), and issues per-task phantom tokens consumed
     by the vault's token broker and SSH signer.
 
@@ -118,6 +176,7 @@ class CredentialDB:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._create_tables()
+        self._migrate_schema()
 
     def _create_tables(self) -> None:
         """Ensure all tables exist (idempotent)."""
@@ -131,7 +190,7 @@ class CredentialDB:
             CREATE TABLE IF NOT EXISTS ssh_keys (
                 id           INTEGER PRIMARY KEY AUTOINCREMENT,
                 key_type     TEXT    NOT NULL CHECK (key_type IN ('ed25519','rsa')),
-                private_pem  BLOB    NOT NULL,
+                private_der  BLOB    NOT NULL,
                 public_blob  BLOB    NOT NULL,
                 comment      TEXT    NOT NULL DEFAULT '',
                 fingerprint  TEXT    NOT NULL UNIQUE,
@@ -156,6 +215,10 @@ class CredentialDB:
                 provider       TEXT NOT NULL
             );
         """)
+
+    def _migrate_schema(self) -> None:
+        """Apply any pending SSH-key schema migrations (delegates to module helper)."""
+        migrate_ssh_keys_schema(self._conn)
 
     # ── Provider credentials ────────────────────────────────────────────
 
@@ -196,7 +259,7 @@ class CredentialDB:
     def store_ssh_key(
         self,
         key_type: str,
-        private_pem: bytes,
+        private_der: bytes,
         public_blob: bytes,
         comment: str,
         fingerprint: str,
@@ -209,9 +272,9 @@ class CredentialDB:
         """
         cur = self._conn.execute(
             "INSERT OR IGNORE INTO ssh_keys"
-            " (key_type, private_pem, public_blob, comment, fingerprint)"
+            " (key_type, private_der, public_blob, comment, fingerprint)"
             " VALUES (?, ?, ?, ?, ?)",
-            (key_type, private_pem, public_blob, comment, fingerprint),
+            (key_type, private_der, public_blob, comment, fingerprint),
         )
         if cur.rowcount:
             self._bump_ssh_keys_version()
@@ -333,7 +396,7 @@ class CredentialDB:
     def load_ssh_keys_for_scope(self, scope: str) -> list[SSHKeyRecord]:
         """Return full records (with raw bytes) for every key assigned to *scope*."""
         rows = self._conn.execute(
-            "SELECT k.id, k.key_type, k.private_pem, k.public_blob,"
+            "SELECT k.id, k.key_type, k.private_der, k.public_blob,"
             " k.comment, k.fingerprint"
             " FROM ssh_keys k"
             " JOIN ssh_key_assignments a ON a.key_id = k.id"

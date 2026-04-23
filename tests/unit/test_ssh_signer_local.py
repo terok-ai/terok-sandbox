@@ -50,7 +50,7 @@ class TestLocalSigner:
         kp = generate_keypair("ed25519", comment="tk-main:proj")
         key_id = db.store_ssh_key(
             key_type=kp.key_type,
-            private_pem=kp.private_pem,
+            private_der=kp.private_der,
             public_blob=kp.public_blob,
             comment=kp.comment,
             fingerprint=kp.fingerprint,

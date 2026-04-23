@@ -65,6 +65,7 @@ from .credentials.ssh_keypair import (
     fingerprint_of,
     generate_keypair,
     import_ssh_keypair,
+    openssh_pem_of,
     parse_openssh_keypair,
     public_line_of,
 )
@@ -453,6 +454,7 @@ __all__ = [
     "generate_keypair",
     "import_ssh_keypair",
     "fingerprint_of",
+    "openssh_pem_of",
     "parse_openssh_keypair",
     "public_line_of",
     # Port registry

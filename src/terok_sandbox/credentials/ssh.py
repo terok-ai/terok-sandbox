@@ -132,7 +132,7 @@ class SSHManager:
         keypair = generate_keypair(key_type, comment=effective_comment)
         key_id = self._db.store_ssh_key(
             key_type=keypair.key_type,
-            private_pem=keypair.private_pem,
+            private_der=keypair.private_der,
             public_blob=keypair.public_blob,
             comment=keypair.comment,
             fingerprint=keypair.fingerprint,

@@ -512,7 +512,7 @@ def _build_key_rows(cfg: SandboxConfig) -> list[KeyRow]:
                         scope=scope,
                         comment=r.comment or f"id={r.id}",
                         key_type=r.key_type,
-                        fingerprint=f"SHA256:{r.fingerprint}",
+                        fingerprint=r.fingerprint,
                         private_key=f"db:ssh_keys/{r.id}",
                         public_key=f"db:ssh_keys/{r.id}",
                     )
@@ -635,7 +635,7 @@ def _handle_ssh_import(
         print(
             f"{headline}\n"
             f"  id:          {result.key_id}\n"
-            f"  fingerprint: SHA256:{sanitize_tty(result.fingerprint)}\n"
+            f"  fingerprint: {sanitize_tty(result.fingerprint)}\n"
             f"  comment:     {sanitize_tty(result.comment)}"
         )
     finally:
@@ -667,7 +667,7 @@ def _handle_ssh_add(
         print(f"SSH key ready for scope '{sanitize_tty(scope)}':")
         print(f"  id:          {result['key_id']}")
         print(f"  type:        {sanitize_tty(result['key_type'])}")
-        print(f"  fingerprint: SHA256:{sanitize_tty(result['fingerprint'])}")
+        print(f"  fingerprint: {sanitize_tty(result['fingerprint'])}")
         print(f"  comment:     {sanitize_tty(result['comment'])}")
         print("Public key (register as a deploy key):")
         print(f"  {sanitize_tty(result['public_line'])}")
@@ -708,7 +708,7 @@ def _handle_ssh_export(
         except FileExistsError as exc:
             raise SystemExit(f"Refusing to overwrite existing file: {exc.filename}") from exc
 
-        print(f"Exported key id={result.key_id} (SHA256:{sanitize_tty(result.fingerprint)}):")
+        print(f"Exported key id={result.key_id} ({sanitize_tty(result.fingerprint)}):")
         print(f"  private key: {sanitize_tty(str(result.private_path))}")
         print(f"  public key:  {sanitize_tty(str(result.public_path))}")
     finally:

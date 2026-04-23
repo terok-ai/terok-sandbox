@@ -9,13 +9,18 @@ and out of that form:
 - :func:`generate_keypair` creates a fresh keypair in memory.
 - :func:`import_ssh_keypair` reads an existing OpenSSH keypair from files
   and registers it against a scope.
-- :func:`export_ssh_keypair` writes a scope's key to a standard
-  ``id_<type>_<fingerprint>`` / ``.pub`` file pair for handing to tools
-  that cannot use the SSH agent.
+- :func:`export_ssh_keypair` writes a scope's key back to an OpenSSH file
+  pair for handing to tools that cannot use the SSH agent.
+
+Internally, private keys live in the DB as unencrypted PKCS#8 DER — the
+single, opaque binary form the signer loads directly via
+``load_der_private_key``.  Import converts any supported inbound PEM to
+that form at the boundary, and export re-armors it as OpenSSH PEM.
 
 All flows share one vocabulary: the :class:`GeneratedKeypair` dataclass is
 the portable in-memory form, and :func:`fingerprint_of` defines the
-cross-call dedup key (SHA-256 hex of the SSH wire-format public blob).
+cross-call dedup key — the standard OpenSSH ``SHA256:<base64>`` fingerprint
+of the SSH wire-format public blob.
 """
 
 from __future__ import annotations
@@ -33,6 +38,7 @@ from cryptography.hazmat.primitives.serialization import (
     NoEncryption,
     PrivateFormat,
     PublicFormat,
+    load_der_private_key,
     load_ssh_private_key,
     load_ssh_public_key,
 )
@@ -69,10 +75,15 @@ listing/export/stream indefinitely."""
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class GeneratedKeypair:
-    """A keypair in the portable bytes form the vault stores."""
+    """A keypair in the portable bytes form the vault stores.
+
+    ``private_der`` is unencrypted PKCS#8 DER — the raw-binary form we
+    persist and feed straight to the signer.  The public half stays in its
+    usual SSH wire-format blob plus a pre-rendered ``public_line``.
+    """
 
     key_type: str
-    private_pem: bytes
+    private_der: bytes
     public_blob: bytes
     public_line: str
     comment: str
@@ -165,16 +176,12 @@ def generate_keypair(key_type: str, *, comment: str) -> GeneratedKeypair:
     else:
         raise ValueError(f"Unsupported key type: {key_type!r} (expected ed25519 or rsa)")
 
-    private_pem = private_key.private_bytes(
-        encoding=Encoding.PEM,
-        format=PrivateFormat.OpenSSH,
-        encryption_algorithm=NoEncryption(),
-    )
+    private_der = _serialize_private_der(private_key)
     public_key = private_key.public_key()
     public_blob, public_line = _serialize_public(public_key, comment=comment)
     return GeneratedKeypair(
         key_type=key_type,
-        private_pem=private_pem,
+        private_der=private_der,
         public_blob=public_blob,
         public_line=public_line,
         comment=comment,
@@ -212,7 +219,7 @@ def import_ssh_keypair(
 
     key_id = db.store_ssh_key(
         key_type=parsed.key_type,
-        private_pem=parsed.private_pem,
+        private_der=parsed.private_der,
         public_blob=parsed.public_blob,
         comment=parsed.comment,
         fingerprint=parsed.fingerprint,
@@ -250,11 +257,7 @@ def parse_openssh_keypair(
         raise
 
     key_type = _classify_key(private_key)
-    private_pem = private_key.private_bytes(
-        encoding=Encoding.PEM,
-        format=PrivateFormat.OpenSSH,
-        encryption_algorithm=NoEncryption(),
-    )
+    private_der = _serialize_private_der(private_key)
     derived_blob, _derived_line = _serialize_public(private_key.public_key(), comment="")
 
     if pub_bytes is None:
@@ -271,7 +274,7 @@ def parse_openssh_keypair(
     public_line = f"{algo} {base64.b64encode(public_blob).decode('ascii')} {comment}".rstrip()
     return GeneratedKeypair(
         key_type=key_type,
-        private_pem=private_pem,
+        private_der=private_der,
         public_blob=public_blob,
         public_line=public_line,
         comment=comment,
@@ -291,20 +294,23 @@ def export_ssh_keypair(
 ) -> ExportResult:
     """Write a scope's key back out as a standard OpenSSH file pair.
 
-    The directory is allowed to contain unrelated files; only the *output*
-    files are protected with ``O_EXCL`` so nothing gets silently clobbered.
-    Default filename stem: ``id_<keytype>_<fp8>`` where ``fp8`` is the
-    first eight hex chars of the fingerprint — stable, collision-safe
-    across scopes sharing an ``out_dir``.
+    The private bytes come out of the DB as PKCS#8 DER; this function
+    re-armors them as OpenSSH PEM — the same format ``ssh-keygen`` writes
+    and that ``ssh -i`` consumes.  The directory is allowed to contain
+    unrelated files; only the *output* files are protected with ``O_EXCL``
+    so nothing gets silently clobbered.  Default filename stem:
+    ``id_<keytype>_<fp8>`` where ``fp8`` is the first eight hex chars of
+    the raw SHA-256 digest of the public blob — stable and format-agnostic
+    for the user-facing fingerprint string.
     """
     record = _pick_key_for_export(db, scope, key_id)
-    stem = _sanitize_out_name(out_name) or f"id_{record.key_type}_{record.fingerprint[:8]}"
+    stem = _sanitize_out_name(out_name) or f"id_{record.key_type}_{_short_id(record.public_blob)}"
     out_dir = out_dir.expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     priv_path = out_dir / stem
     pub_path = out_dir / f"{stem}.pub"
 
-    _write_exclusive(priv_path, record.private_pem, PRIVATE_KEY_MODE)
+    _write_exclusive(priv_path, openssh_pem_of(record.private_der), PRIVATE_KEY_MODE)
     try:
         _write_exclusive(
             pub_path,
@@ -330,8 +336,34 @@ def export_ssh_keypair(
 
 
 def fingerprint_of(public_blob: bytes) -> str:
-    """Return the canonical fingerprint — hex SHA-256 of the SSH wire blob."""
-    return hashlib.sha256(public_blob).hexdigest()
+    """Return the canonical OpenSSH fingerprint of *public_blob*.
+
+    Format matches what ``ssh-keygen -lf``, ``ssh-add -l``, GitHub's UI,
+    and ``gh ssh-key list`` all print: ``SHA256:<base64-unpadded>`` over
+    the raw SHA-256 digest of the SSH wire-format public blob.
+    """
+    digest = hashlib.sha256(public_blob).digest()
+    return f"SHA256:{base64.b64encode(digest).decode('ascii').rstrip('=')}"
+
+
+def _short_id(public_blob: bytes) -> str:
+    """8-char hex stem for file naming, independent of fingerprint display format."""
+    return hashlib.sha256(public_blob).hexdigest()[:8]
+
+
+def openssh_pem_of(private_der: bytes) -> bytes:
+    """Re-armor a stored PKCS#8 DER blob as OpenSSH PEM — the on-disk wire format.
+
+    This is what ``ssh-keygen`` writes and what ``ssh -i`` reads.  Exposed for
+    the CLI export path and for test fixtures that need to round-trip a key
+    through the OpenSSH-file form.
+    """
+    key = load_der_private_key(private_der, password=None)
+    return key.private_bytes(
+        encoding=Encoding.PEM,
+        format=PrivateFormat.OpenSSH,
+        encryption_algorithm=NoEncryption(),
+    )
 
 
 def public_line_of(record: SSHKeyRecord) -> str:
@@ -348,6 +380,15 @@ def public_line_of(record: SSHKeyRecord) -> str:
 
 
 # ── Private helpers ─────────────────────────────────────────────────────────
+
+
+def _serialize_private_der(private_key) -> bytes:
+    """Serialize *private_key* as unencrypted PKCS#8 DER — the on-disk form."""
+    return private_key.private_bytes(
+        encoding=Encoding.DER,
+        format=PrivateFormat.PKCS8,
+        encryption_algorithm=NoEncryption(),
+    )
 
 
 def _serialize_public(public_key, *, comment: str) -> tuple[bytes, str]:

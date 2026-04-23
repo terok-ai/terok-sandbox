@@ -14,9 +14,9 @@ one connection handler:
   filesystem permissions are the whole access control — host processes
   don't cross a trust boundary.
 
-Private keys live in ``credentials.db`` (``ssh_keys`` table) and never touch
-the filesystem; the ``_DBKeyCache`` reloads them only when the DB version
-counter advances.
+Private keys live in ``credentials.db`` (``ssh_keys`` table) as unencrypted
+PKCS#8 DER and never touch the filesystem; the ``_DBKeyCache`` reloads them
+only when the DB version counter advances.
 
 .. _SSH agent protocol: https://datatracker.ietf.org/doc/html/draft-miller-ssh-agent
 """
@@ -32,10 +32,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.asymmetric.padding import PKCS1v15
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
 from cryptography.hazmat.primitives.hashes import SHA256, SHA512
-from cryptography.hazmat.primitives.serialization import (
-    load_pem_private_key,
-    load_ssh_private_key,
-)
+from cryptography.hazmat.primitives.serialization import load_der_private_key
 
 from ..credentials.db import SSHKeyRecord
 
@@ -149,11 +146,8 @@ class _DBKeyCache:
 
 
 def _decode_record(record: SSHKeyRecord) -> _ResolvedKey:
-    """Decode ``record.private_pem`` into a cryptography private key object."""
-    if b"OPENSSH PRIVATE KEY" in record.private_pem:
-        key = load_ssh_private_key(record.private_pem, password=None)
-    else:
-        key = load_pem_private_key(record.private_pem, password=None)
+    """Decode ``record.private_der`` (unencrypted PKCS#8) into a private key object."""
+    key = load_der_private_key(record.private_der, password=None)
     if not isinstance(key, (Ed25519PrivateKey, RSAPrivateKey)):
         raise ValueError(f"Unsupported key type: {type(key).__name__}")
     return key, record.public_blob, record.comment
