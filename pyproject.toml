@@ -4,7 +4,7 @@ build-backend = "poetry_dynamic_versioning.backend"
 
 [tool.poetry]
 name = "terok-sandbox"
-version = "0.0.92"
+version = "0.0.93"
 description = "Hardened Podman container runner with gate server and shield integration"
 readme = "README.md"
 license = "Apache-2.0"
@@ -27,7 +27,7 @@ python = ">=3.12,<4.0"
 # DEV-TIME BRANCH PIN — bridges the propagate-pythonpath chain so the
 # same sys.path env shim lands in sandbox + shield together; the
 # release script flips this back to the shield wheel URL pre-merge.
-terok-shield = {url = "https://github.com/terok-ai/terok-shield/releases/download/v0.6.30/terok_shield-0.6.30-py3-none-any.whl"}
+terok-shield = {url = "https://github.com/terok-ai/terok-shield/releases/download/v0.6.31/terok_shield-0.6.31-py3-none-any.whl"}
 # DEV-TIME BRANCH PIN — follows terok-clearance's feat/notifier-migration
 # which hosts the ContainerInspector protocol + ContainerInfo data type
 # this package now imports.  Release script flips to the wheel URL.
