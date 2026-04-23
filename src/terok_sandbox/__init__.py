@@ -50,6 +50,18 @@ from .commands import (
     KeyRow,
 )
 from .config import CONTAINER_RUNTIME_DIR, SandboxConfig
+from .config_schema import (
+    SERVICES_TCP_OPTOUT_YAML,
+    RawCredentialsSection,
+    RawGateServerSection,
+    RawNetworkSection,
+    RawPathsSection,
+    RawServicesSection,
+    RawShieldSection,
+    RawSSHSection,
+    RawVaultSection,
+    SandboxConfigView,
+)
 from .config_stack import ConfigScope, ConfigStack
 from .credentials.db import CredentialDB, SSHKeyRecord, SSHKeyRow
 from .credentials.ssh import SSHInitResult, SSHManager
@@ -329,6 +341,17 @@ __all__ = [
     "ConfigScope",
     "ConfigStack",
     "SandboxConfig",
+    # Config schema (sandbox-owned slice of the shared config.yml)
+    "RawCredentialsSection",
+    "RawGateServerSection",
+    "RawNetworkSection",
+    "RawPathsSection",
+    "RawSSHSection",
+    "RawServicesSection",
+    "RawShieldSection",
+    "RawVaultSection",
+    "SERVICES_TCP_OPTOUT_YAML",
+    "SandboxConfigView",
     # Lifecycle managers
     "VaultManager",
     "GateServerManager",

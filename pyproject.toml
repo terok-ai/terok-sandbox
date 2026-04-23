@@ -35,6 +35,7 @@ terok-clearance = {url = "https://github.com/terok-ai/terok-clearance/releases/d
 platformdirs = ">=4.9.6"
 aiohttp = ">=3.9"
 cryptography = ">=46.0.7"
+pydantic = ">=2.9"
 
 [tool.poetry.group.dev.dependencies]
 ruff = ">=0.15.10"
