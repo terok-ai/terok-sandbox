@@ -2748,24 +2748,23 @@ tomli-w = ">=1.0,<2.0"
 
 [[package]]
 name = "terok-clearance"
-version = "0.6.1"
+version = "0.6.3"
 description = "Shield clearance and desktop notifications for terok"
 optional = false
 python-versions = ">=3.12,<4.0"
 groups = ["main"]
-files = []
-develop = false
+files = [
+    {file = "terok_clearance-0.6.3-py3-none-any.whl", hash = "sha256:4817075644bfe8221430598c8ee2c9bbd7b37440f685d2755da31223bf62484f"},
+]
 
 [package.dependencies]
-asyncvarlink = "^0.3.1"
+asyncvarlink = ">=0.3.1,<0.4.0"
 dbus-fast = ">=2.0,<5.0"
-pyyaml = "^6.0"
+pyyaml = ">=6.0,<7.0"
 
 [package.source]
-type = "git"
-url = "https://github.com/sliwowitz/terok-dbus.git"
-reference = "feat/notifier-migration"
-resolved_reference = "fbfc29212b5a03e3bcb14c589d3c9e8c4718f59d"
+type = "url"
+url = "https://github.com/terok-ai/terok-clearance/releases/download/v0.6.3/terok_clearance-0.6.3-py3-none-any.whl"
 
 [[package]]
 name = "terok-shield"
@@ -3184,4 +3183,4 @@ propcache = ">=0.2.1"
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<4.0"
-content-hash = "5180f75f3874f26068785212d204d9e59eb03c55b9c187651f31316f3f536b98"
+content-hash = "65b1fe7999b076080633cc46a6f3e814cf9dfc7cf6b516c11dfbfe89d2005e85"
