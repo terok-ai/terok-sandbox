@@ -139,62 +139,79 @@ class TestDBLifecycle:
         db.close()
 
 
+def _seed_legacy_v0_db(db_path: Path) -> bytes:
+    """Hand-build a v0 ``ssh_keys`` table with one row; return the public blob."""
+    import base64
+    import hashlib
+    import sqlite3
+
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+    from cryptography.hazmat.primitives.serialization import (
+        Encoding,
+        NoEncryption,
+        PrivateFormat,
+        PublicFormat,
+    )
+
+    priv = ed25519.Ed25519PrivateKey.generate()
+    pem = priv.private_bytes(Encoding.PEM, PrivateFormat.OpenSSH, NoEncryption())
+    pub_wire = priv.public_key().public_bytes(Encoding.OpenSSH, PublicFormat.OpenSSH)
+    pub_blob = base64.b64decode(pub_wire.decode("ascii").split()[1])
+    hex_fp = hashlib.sha256(pub_blob).hexdigest()
+
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript("""
+        CREATE TABLE ssh_keys (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            key_type     TEXT    NOT NULL,
+            private_pem  BLOB    NOT NULL,
+            public_blob  BLOB    NOT NULL,
+            comment      TEXT    NOT NULL DEFAULT '',
+            fingerprint  TEXT    NOT NULL UNIQUE,
+            created_at   TEXT    NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE TABLE ssh_key_assignments (
+            scope        TEXT    NOT NULL,
+            key_id       INTEGER NOT NULL REFERENCES ssh_keys(id) ON DELETE CASCADE,
+            assigned_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (scope, key_id)
+        );
+        CREATE TABLE ssh_keys_version (
+            id      INTEGER PRIMARY KEY CHECK (id = 0),
+            version INTEGER NOT NULL
+        );
+        INSERT OR IGNORE INTO ssh_keys_version (id, version) VALUES (0, 0);
+    """)
+    conn.execute(
+        "INSERT INTO ssh_keys (key_type, private_pem, public_blob, fingerprint)"
+        " VALUES (?, ?, ?, ?)",
+        ("ed25519", pem, pub_blob, hex_fp),
+    )
+    conn.execute(
+        "INSERT INTO ssh_key_assignments (scope, key_id) VALUES (?, ?)",
+        ("proj", 1),
+    )
+    conn.commit()
+    conn.close()
+    return pub_blob
+
+
 class TestSchemaMigration:
     """Verify legacy v0 rows (OpenSSH PEM + hex fingerprint) migrate cleanly."""
 
-    def test_v0_to_v1_rewrites_private_and_fingerprint(self, tmp_path: Path) -> None:
-        """A DB built with the old schema gets re-encoded on the next open.
+    def test_credential_db_open_migrates_v0_to_v1(self, tmp_path: Path) -> None:
+        """Opening a v0 DB through :class:`CredentialDB` rewrites every row.
 
         The old shape stored OpenSSH PEM in a ``private_pem`` column with
         64-char hex fingerprints.  The new shape stores PKCS#8 DER in
-        ``private_der`` with ``SHA256:<base64>`` fingerprints.  Opening a
-        legacy DB through :class:`CredentialDB` must transparently convert
-        every row and bump ``PRAGMA user_version`` so subsequent opens skip
-        the work.
+        ``private_der`` with ``SHA256:<base64>`` fingerprints.
         """
-        import hashlib
-        import sqlite3
-
         from cryptography.hazmat.primitives.asymmetric import ed25519
-        from cryptography.hazmat.primitives.serialization import (
-            Encoding,
-            NoEncryption,
-            PrivateFormat,
-            PublicFormat,
-            load_der_private_key,
-        )
+        from cryptography.hazmat.primitives.serialization import load_der_private_key
 
         db_path = tmp_path / "legacy.db"
-        priv = ed25519.Ed25519PrivateKey.generate()
-        pem = priv.private_bytes(Encoding.PEM, PrivateFormat.OpenSSH, NoEncryption())
-        pub_wire = priv.public_key().public_bytes(Encoding.OpenSSH, PublicFormat.OpenSSH)
-        import base64
+        _seed_legacy_v0_db(db_path)
 
-        pub_blob = base64.b64decode(pub_wire.decode("ascii").split()[1])
-        hex_fp = hashlib.sha256(pub_blob).hexdigest()
-
-        # Hand-build the v0 schema with a row that mirrors what the old code wrote.
-        conn = sqlite3.connect(str(db_path))
-        conn.executescript("""
-            CREATE TABLE ssh_keys (
-                id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                key_type     TEXT    NOT NULL,
-                private_pem  BLOB    NOT NULL,
-                public_blob  BLOB    NOT NULL,
-                comment      TEXT    NOT NULL DEFAULT '',
-                fingerprint  TEXT    NOT NULL UNIQUE,
-                created_at   TEXT    NOT NULL DEFAULT (datetime('now'))
-            );
-        """)
-        conn.execute(
-            "INSERT INTO ssh_keys (key_type, private_pem, public_blob, fingerprint)"
-            " VALUES (?, ?, ?, ?)",
-            ("ed25519", pem, pub_blob, hex_fp),
-        )
-        conn.commit()
-        conn.close()
-
-        # Opening through the high-level API triggers migration.
         db = CredentialDB(db_path)
         try:
             cols = {r[1] for r in db._conn.execute("PRAGMA table_info(ssh_keys)").fetchall()}
@@ -218,3 +235,28 @@ class TestSchemaMigration:
             assert version == 1
         finally:
             db2.close()
+
+    def test_token_db_open_also_migrates_v0(self, tmp_path: Path) -> None:
+        """The vault daemon's ``_TokenDB`` also runs the migration on open.
+
+        Guards against the upgrade race where the vault daemon restarts
+        (via systemd) after a package bump and hits the DB before any
+        user-facing CLI command has had a chance to go through
+        ``CredentialDB``.  Without this path the daemon would crash on
+        its first key lookup with "no such column: private_der".
+        """
+        from terok_sandbox.vault.token_broker import _TokenDB
+
+        db_path = tmp_path / "legacy.db"
+        pub_blob = _seed_legacy_v0_db(db_path)
+
+        token_db = _TokenDB(str(db_path))
+        try:
+            (version,) = token_db._conn.execute("PRAGMA user_version").fetchone()
+            assert version == 1
+            [record] = token_db.load_ssh_keys_for_scope("proj")
+            assert record.public_blob == pub_blob
+            assert record.fingerprint.startswith("SHA256:")
+            assert len(record.private_der) > 0
+        finally:
+            token_db.close()
