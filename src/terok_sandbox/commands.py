@@ -124,13 +124,13 @@ def _handle_sandbox_setup(
 
     failed = False
     if not no_shield:
-        failed |= not run_shield_install_phase(root=root).ok
+        failed |= not run_shield_install_phase(root=root)
     if not no_vault:
-        failed |= not run_vault_install_phase(cfg).ok
+        failed |= not run_vault_install_phase(cfg)
     if not no_gate:
-        failed |= not run_gate_install_phase(cfg).ok
+        failed |= not run_gate_install_phase(cfg)
     if not no_clearance:
-        failed |= not run_clearance_install_phase().ok
+        failed |= not run_clearance_install_phase()
 
     if failed:
         raise SystemExit(1)

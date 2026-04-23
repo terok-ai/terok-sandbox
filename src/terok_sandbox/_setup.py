@@ -29,7 +29,7 @@ import shutil
 import subprocess  # nosec B404 — systemctl is a trusted host binary
 import sys
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from enum import StrEnum
 
 from ._util._selinux import (
     SelinuxStatus,
@@ -37,22 +37,32 @@ from ._util._selinux import (
     install_command as selinux_install_command,
 )
 from .config import SandboxConfig, _services_mode
-from .shield import check_environment
 
-#: Padding width for stage-line labels — widest label is "Clearance
-#: notifier" (18 chars) plus a 2-char gutter before the status marker.
+# Widest label is "Clearance notifier" (18); recompute the gutter if
+# a new phase ships with a longer label so the status markers align.
 _STAGE_WIDTH = 20
 
-#: Host binaries that terok-sandbox's own code shells out to during
-#: container runtime.  Other packages (terok-shield, terok-clearance)
-#: publish their own lists and the prereq phase reports all of them.
 _HOST_BINARIES: tuple[str, ...] = ("podman", "git", "ssh-keygen")
+
+
+class Marker(StrEnum):
+    """Status tokens rendered in each stage line.
+
+    Typed so a typo (`"Warn"` vs `"WARN"`) is a load-time error, not a
+    silent drift in output the test assertions keep passing against.
+    """
+
+    OK = "ok"
+    WARN = "WARN"
+    FAIL = "FAIL"
+    MISSING = "MISSING"
+    SKIP = "skip"
 
 
 # ── Stage-line primitive ──────────────────────────────────────────────
 
 
-def _stage(label: str, marker: str, detail: str = "") -> None:
+def _stage(label: str, marker: Marker, detail: str = "") -> None:
     """Write one ``'  <label>  <marker> (<detail>)'`` line."""
     suffix = f" ({detail})" if detail else ""
     print(f"  {label:<{_STAGE_WIDTH}} {marker}{suffix}")
@@ -62,12 +72,7 @@ def _stage(label: str, marker: str, detail: str = "") -> None:
 
 
 def run_prereq_report(cfg: SandboxConfig) -> None:
-    """Print host prerequisites.  Never blocks — purely informational.
-
-    A missing binary here surfaces as a ``MISSING`` stage line; the
-    install phase that actually needs it will fail with a more
-    specific error if the operator proceeds without fixing it.
-    """
+    """Print host prerequisites.  Never blocks — purely informational."""
     print("Prerequisites:")
     _report_host_binaries()
     _report_firewall_binaries()
@@ -75,145 +80,86 @@ def run_prereq_report(cfg: SandboxConfig) -> None:
 
 
 def _report_host_binaries() -> None:
-    """Check that sandbox's own runtime dependencies are on PATH."""
     for name in _HOST_BINARIES:
         path = shutil.which(name)
         if path:
-            _stage(name, "ok", path)
+            _stage(name, Marker.OK, path)
         else:
-            _stage(name, "MISSING", "not on PATH")
+            _stage(name, Marker.MISSING, "not on PATH")
 
 
 def _report_firewall_binaries() -> None:
-    """Delegate the nft / dnsmasq / dig probes to terok-shield.
-
-    Shield owns the binaries its own hooks invoke; publishing them
-    there keeps the list honest when shield's dependencies change.
-    """
+    """Delegate the nft / dnsmasq / dig probes to terok-shield's own list."""
     from terok_shield import check_firewall_binaries
 
     for check in check_firewall_binaries():
         if check.ok:
-            _stage(check.name, "ok", check.path)
+            _stage(check.name, Marker.OK, check.path)
         else:
-            _stage(check.name, "MISSING", check.purpose)
+            _stage(check.name, Marker.MISSING, check.purpose)
 
 
 def _report_selinux(cfg: SandboxConfig) -> None:
-    """Check SELinux policy — prints only when the host needs policy installed.
-
-    ``NOT_APPLICABLE_*`` statuses mean SELinux isn't enforcing or the
-    active transport doesn't need a policy (TCP mode); in those cases
-    the prereq report stays silent to keep the output compact on the
-    common-case host.
-    """
+    """Print SELinux policy status; stay silent when the host doesn't need one."""
     result = check_selinux_status(services_mode=_services_mode())
     match result.status:
         case SelinuxStatus.NOT_APPLICABLE_TCP_MODE | SelinuxStatus.NOT_APPLICABLE_PERMISSIVE:
             return
         case SelinuxStatus.OK:
-            _stage("SELinux policy", "ok", "installed")
+            _stage("SELinux policy", Marker.OK, "installed")
         case SelinuxStatus.POLICY_MISSING:
-            _stage("SELinux policy", "MISSING", f"install: {selinux_install_command()}")
+            _stage("SELinux policy", Marker.MISSING, f"install: {selinux_install_command()}")
         case SelinuxStatus.LIBSELINUX_MISSING:
-            _stage("SELinux policy", "MISSING", "libselinux.so.1 not loadable")
+            _stage("SELinux policy", Marker.MISSING, "libselinux.so.1 not loadable")
 
 
 # ── Service install phases ────────────────────────────────────────────
 
 
-@dataclass(frozen=True)
-class _PhaseResult:
-    """Return value from each service install phase — structured for the aggregator's summary."""
-
-    ok: bool
-    """True when the service is installed and (where applicable) reachable."""
-
-
-def run_shield_install_phase(*, root: bool) -> _PhaseResult:
+def run_shield_install_phase(*, root: bool) -> bool:
     """Install shield OCI hooks — per-user or system-wide depending on *root*."""
-    from .shield import run_setup
+    from .shield import check_environment, run_setup
 
     try:
         run_setup(root=root, user=not root)
     except Exception as exc:  # noqa: BLE001 — aggregator reports all failures uniformly
-        _stage("Shield hooks", "FAIL", str(exc))
-        return _PhaseResult(ok=False)
+        _stage("Shield hooks", Marker.FAIL, str(exc))
+        return False
 
-    # Verify the hooks landed in a working state.
     env = check_environment()
     if env.health == "ok":
-        _stage("Shield hooks", "ok", "active")
-        return _PhaseResult(ok=True)
+        _stage("Shield hooks", Marker.OK, "active")
+        return True
     if env.health == "bypass":
-        _stage("Shield hooks", "WARN", "bypass_firewall_no_protection is active")
-        return _PhaseResult(ok=True)
-    _stage("Shield hooks", "FAIL", f"installed but health: {env.health}")
-    return _PhaseResult(ok=False)
+        _stage("Shield hooks", Marker.WARN, "bypass_firewall_no_protection is active")
+        return True
+    _stage("Shield hooks", Marker.FAIL, f"installed but health: {env.health}")
+    return False
 
 
-def run_vault_install_phase(cfg: SandboxConfig) -> _PhaseResult:
+def run_vault_install_phase(cfg: SandboxConfig) -> bool:
     """Clean reinstall of the vault systemd units; verify reachability."""
     from .vault.lifecycle import VaultManager, VaultUnreachableError
 
-    mgr = VaultManager(cfg)
-    _stop_and_uninstall(mgr.stop_daemon, mgr.uninstall_systemd_units)
-
-    try:
-        mgr.install_systemd_units()
-    except SystemExit as exc:
-        _stage("Vault", "FAIL", str(exc))
-        return _PhaseResult(ok=False)
-    except Exception as exc:  # noqa: BLE001
-        _stage("Vault", "FAIL", f"install: {exc}")
-        return _PhaseResult(ok=False)
-
-    try:
-        mgr.ensure_reachable()
-    except (VaultUnreachableError, SystemExit) as exc:
-        _stage("Vault", "FAIL", f"installed but NOT reachable: {exc}")
-        return _PhaseResult(ok=False)
-    status = mgr.get_status()
-    _stage(
-        "Vault",
-        "ok",
-        f"{status.mode or 'systemd'}, {status.transport or 'tcp'}, reachable",
+    return _reinstall_systemd_service(
+        label="Vault",
+        mgr=VaultManager(cfg),
+        reachable_exc=(VaultUnreachableError, SystemExit),
     )
-    return _PhaseResult(ok=True)
 
 
-def run_gate_install_phase(cfg: SandboxConfig) -> _PhaseResult:
+def run_gate_install_phase(cfg: SandboxConfig) -> bool:
     """Clean reinstall of the gate systemd units; verify reachability."""
     from .gate.lifecycle import GateServerManager
 
     mgr = GateServerManager(cfg)
     if not mgr.is_systemd_available():
-        _stage("Gate server", "WARN", "systemd unavailable, skipping")
-        return _PhaseResult(ok=True)
-
-    _stop_and_uninstall(mgr.stop_daemon, mgr.uninstall_systemd_units)
-
-    try:
-        mgr.install_systemd_units()
-    except Exception as exc:  # noqa: BLE001
-        _stage("Gate server", "FAIL", f"install: {exc}")
-        return _PhaseResult(ok=False)
-
-    try:
-        mgr.ensure_reachable()
-    except SystemExit as exc:
-        _stage("Gate server", "FAIL", f"installed but NOT reachable: {exc}")
-        return _PhaseResult(ok=False)
-    status = mgr.get_status()
-    _stage(
-        "Gate server",
-        "ok",
-        f"{status.mode or 'systemd'}, {status.transport or 'tcp'}, reachable",
-    )
-    return _PhaseResult(ok=True)
+        _stage("Gate server", Marker.WARN, "systemd unavailable, skipping")
+        return True
+    return _reinstall_systemd_service(label="Gate server", mgr=mgr)
 
 
-def run_clearance_install_phase() -> _PhaseResult:
+def run_clearance_install_phase() -> bool:
     """Install the clearance hub + verdict + notifier units.
 
     Soft-skip when ``terok_clearance`` isn't importable — headless
@@ -229,8 +175,8 @@ def run_clearance_install_phase() -> _PhaseResult:
             install_service,
         )
     except ImportError:
-        _stage("Clearance", "skip", "terok_clearance not installed")
-        return _PhaseResult(ok=True)
+        _stage("Clearance", Marker.SKIP, "terok_clearance not installed")
+        return True
 
     # Avoid ``shutil.which("terok-clearance-hub")``: a hostile PATH
     # could otherwise poison the ExecStart= baked into the persistent
@@ -242,7 +188,7 @@ def run_clearance_install_phase() -> _PhaseResult:
         units_to_enable=(HUB_UNIT_NAME, VERDICT_UNIT_NAME),
     )
     # Notifier failure is non-fatal — the hub is the critical path;
-    # the notifier only enriches desktop popups.  The return value is
+    # the notifier only enriches desktop popups.  Return value is
     # discarded so a notifier glitch (e.g. missing session bus on a
     # remote SSH install) doesn't flip the aggregator's exit code.
     _install_clearance_unit_pair(
@@ -252,21 +198,68 @@ def run_clearance_install_phase() -> _PhaseResult:
         ),
         units_to_enable=(NOTIFIER_UNIT_NAME,),
     )
-    return _PhaseResult(ok=hub_ok)
+    return hub_ok
+
+
+# ── Shared service-install skeleton ───────────────────────────────────
+
+
+def _reinstall_systemd_service(
+    *,
+    label: str,
+    mgr,  # noqa: ANN001 — duck-typed manager; no shared base class across vault/gate
+    reachable_exc: tuple[type[BaseException], ...] = (SystemExit,),
+) -> bool:
+    """Run the full stop → uninstall → install → verify cycle for one service.
+
+    Shared between vault and gate because both sandbox-managed systemd
+    services follow the same lifecycle contract: a ``stop_daemon`` +
+    ``uninstall_systemd_units`` pair (best-effort), an
+    ``install_systemd_units()`` call (authoritative), and an
+    ``ensure_reachable()`` verify (fails with *reachable_exc*).  Shield
+    and clearance are different shapes so they stay inline.
+    """
+    _stop_and_uninstall(mgr.stop_daemon, mgr.uninstall_systemd_units)
+    try:
+        mgr.install_systemd_units()
+    except SystemExit as exc:
+        _stage(label, Marker.FAIL, str(exc))
+        return False
+    except Exception as exc:  # noqa: BLE001
+        _stage(label, Marker.FAIL, f"install: {exc}")
+        return False
+    try:
+        mgr.ensure_reachable()
+    except reachable_exc as exc:
+        _stage(label, Marker.FAIL, f"installed but NOT reachable: {exc}")
+        return False
+    status = mgr.get_status()
+    _stage(
+        label,
+        Marker.OK,
+        f"{status.mode or 'systemd'}, {status.transport or 'tcp'}, reachable",
+    )
+    return True
 
 
 def _install_clearance_unit_pair(
     *, label: str, install_fn: Callable[[], object], units_to_enable: Iterable[str]
 ) -> bool:
-    """Render the unit file(s), then enable + start each, reporting one stage line."""
+    """Render the unit file(s), then enable + start each, reporting one stage line.
+
+    Batches ``daemon-reload`` once at the top so installing the
+    hub/verdict pair doesn't pay three sequential ``daemon-reload``
+    round-trips when it should only need one.
+    """
     try:
         install_fn()
+        _systemctl_daemon_reload()
         for unit in units_to_enable:
-            _enable_user_unit(unit)
+            _enable_and_restart_user_unit(unit)
     except Exception as exc:  # noqa: BLE001 — aggregator uniform error surface
-        _stage(label, "FAIL", str(exc))
+        _stage(label, Marker.FAIL, str(exc))
         return False
-    _stage(label, "ok", "installed + enabled")
+    _stage(label, Marker.OK, "installed + enabled")
     return True
 
 
@@ -274,34 +267,36 @@ def _install_clearance_unit_pair(
 
 
 def _stop_and_uninstall(stop: Callable[[], None], uninstall: Callable[[], None]) -> None:
-    """Best-effort stop + uninstall; lets ``install_systemd_units`` start fresh.
-
-    Both steps soft-fail — the install afterwards is authoritative,
-    and a dangling daemon or unit file is reported by the verify step
-    below, not by this helper.
-    """
+    """Best-effort stop + uninstall; lets ``install_systemd_units`` start fresh."""
     with contextlib.suppress(Exception):
         stop()
     with contextlib.suppress(Exception):
         uninstall()
 
 
-def _enable_user_unit(unit: str) -> None:
-    """``systemctl --user daemon-reload`` + ``enable`` + ``restart`` for *unit*.
+def _systemctl_daemon_reload() -> None:
+    """Ask the user's systemd to re-read its unit files; silent without systemctl."""
+    systemctl = shutil.which("systemctl")
+    if not systemctl:
+        return
+    subprocess.run([systemctl, "--user", "daemon-reload"], check=False, capture_output=True)  # nosec B603
 
-    ``restart`` matters for pipx-upgrade scenarios: after
-    ``pipx install --force terok-sandbox``, the on-disk venv has fresh
-    code but the running daemon holds the old ExecStart's python
-    process.  Restarting guarantees the new code is loaded.  Silent
-    on hosts without ``systemctl`` so ``--check``-style callers on
-    CI images don't crash.
+
+def _enable_and_restart_user_unit(unit: str) -> None:
+    """``systemctl --user enable`` + ``restart`` for *unit*.
+
+    ``restart`` (not ``enable --now``) matters for pipx-upgrade
+    scenarios: after ``pipx install --force terok-sandbox``, the venv
+    has fresh code but the running daemon holds the old ExecStart's
+    python process.  Restarting guarantees the new code is loaded.
+    Caller is responsible for ``daemon-reload`` — batch it once per
+    install instead of once per unit so a three-unit clearance install
+    pays one reload, not three.
     """
     systemctl = shutil.which("systemctl")
     if not systemctl:
         return
-    for argv in (
-        [systemctl, "--user", "daemon-reload"],
-        [systemctl, "--user", "enable", unit],
-        [systemctl, "--user", "restart", unit],
-    ):
-        subprocess.run(argv, check=False, capture_output=True)  # nosec B603
+    for verb in ("enable", "restart"):
+        subprocess.run(  # nosec B603
+            [systemctl, "--user", verb, unit], check=False, capture_output=True
+        )

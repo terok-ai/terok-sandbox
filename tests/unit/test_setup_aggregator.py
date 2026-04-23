@@ -15,7 +15,6 @@ from unittest.mock import patch
 
 import pytest
 
-from terok_sandbox._setup import _PhaseResult
 from terok_sandbox.commands import (
     _handle_gate_install,
     _handle_gate_uninstall,
@@ -31,18 +30,17 @@ from terok_sandbox.commands import (
 def install_spies():
     """Replace every ``run_*_install_phase`` with a MagicMock so order is observable.
 
-    Default side-effects return an ``ok`` :class:`_PhaseResult` so the
-    aggregator walks the happy path unless a test overrides a phase.
-    Prereq reporting is stubbed out — it shells out for host binaries
-    which would noisily poll the CI runner's PATH.
+    Default return ``True`` so the aggregator walks the happy path
+    unless a test overrides a phase.  Prereq reporting is stubbed out
+    — it shells out for host binaries which would noisily poll the CI
+    runner's PATH.
     """
-    ok = _PhaseResult(ok=True)
     with (
         patch("terok_sandbox.commands.run_prereq_report") as prereq,
-        patch("terok_sandbox.commands.run_shield_install_phase", return_value=ok) as shield,
-        patch("terok_sandbox.commands.run_vault_install_phase", return_value=ok) as vault,
-        patch("terok_sandbox.commands.run_gate_install_phase", return_value=ok) as gate,
-        patch("terok_sandbox.commands.run_clearance_install_phase", return_value=ok) as clearance,
+        patch("terok_sandbox.commands.run_shield_install_phase", return_value=True) as shield,
+        patch("terok_sandbox.commands.run_vault_install_phase", return_value=True) as vault,
+        patch("terok_sandbox.commands.run_gate_install_phase", return_value=True) as gate,
+        patch("terok_sandbox.commands.run_clearance_install_phase", return_value=True) as clearance,
     ):
         yield {
             "prereq": prereq,
@@ -79,18 +77,10 @@ class TestSandboxSetup:
     def test_default_runs_all_phases_in_order(self, install_spies) -> None:
         order: list[str] = []
         install_spies["prereq"].side_effect = lambda _cfg: order.append("prereq")
-        install_spies["shield"].side_effect = lambda **_: (
-            order.append("shield") or _PhaseResult(ok=True)
-        )
-        install_spies["vault"].side_effect = lambda _cfg: (
-            order.append("vault") or _PhaseResult(ok=True)
-        )
-        install_spies["gate"].side_effect = lambda _cfg: (
-            order.append("gate") or _PhaseResult(ok=True)
-        )
-        install_spies["clearance"].side_effect = lambda: (
-            order.append("clearance") or _PhaseResult(ok=True)
-        )
+        install_spies["shield"].side_effect = lambda **_: order.append("shield") or True
+        install_spies["vault"].side_effect = lambda _cfg: order.append("vault") or True
+        install_spies["gate"].side_effect = lambda _cfg: order.append("gate") or True
+        install_spies["clearance"].side_effect = lambda: order.append("clearance") or True
 
         _handle_sandbox_setup()
 
@@ -120,7 +110,7 @@ class TestSandboxSetup:
 
     def test_failing_phase_exits_nonzero_after_others_run(self, install_spies) -> None:
         """A vault failure must not short-circuit the gate + clearance phases."""
-        install_spies["vault"].return_value = _PhaseResult(ok=False)
+        install_spies["vault"].return_value = False
         with pytest.raises(SystemExit) as exc:
             _handle_sandbox_setup()
         assert exc.value.code == 1
