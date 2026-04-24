@@ -324,12 +324,17 @@ def test_auto_clamps_out_of_range_preferred() -> None:
 
 
 def test_sandbox_config_auto_resolves(tmp_path: Path) -> None:
-    """SandboxConfig with default (None) ports auto-resolves and persists."""
+    """SandboxConfig with default (None) ports auto-resolves and persists.
+
+    Port registry only runs in ``services_mode="tcp"``; socket mode
+    leaves the ports unset on purpose (Unix sockets bypass the TCP
+    listener entirely).  The test opts in explicitly.
+    """
     from terok_sandbox import SandboxConfig
 
     state = tmp_path / "sandbox-state"
     state.mkdir()
-    cfg = SandboxConfig(state_dir=state)
+    cfg = SandboxConfig(state_dir=state, services_mode="tcp")
     assert isinstance(cfg.gate_port, int)
     assert len({cfg.gate_port, cfg.token_broker_port, cfg.ssh_signer_port}) == 3
     assert (state / reg._CLAIMS_FILENAME).exists()

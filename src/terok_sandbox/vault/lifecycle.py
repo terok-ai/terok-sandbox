@@ -321,13 +321,16 @@ class VaultManager:
             return "tcp"
         return None
 
-    def install_systemd_units(self, *, transport: str = "tcp") -> None:
+    def install_systemd_units(self) -> None:
         """Render and install systemd units, then enable+start.
 
-        When *transport* is ``"tcp"`` (default), installs the socket-activated
-        pair (socket + service).  When ``"socket"``, installs a single
-        long-running service that binds Unix sockets only.
+        The transport is read from ``self._cfg.services_mode``: ``"tcp"``
+        installs the socket-activated pair (socket + service), ``"socket"``
+        installs a single long-running service that binds Unix sockets only.
+        Transport resolution happens once at ``SandboxConfig`` construction
+        — callers can't smuggle a divergent mode past the config layer.
         """
+        transport = self._cfg.services_mode
         # A TCP install with no resolved port would render ``ListenStream=
         # 127.0.0.1:None`` into the ``.socket`` template; systemd rejects
         # that.  Fail early, naming the knobs that resolve it, instead of

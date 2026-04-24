@@ -246,12 +246,14 @@ class GateServerManager:
         """Check whether the TCP socket unit or socket-mode service is active."""
         return self._is_unit_active(_SOCKET_UNIT) or self._is_unit_active(_SOCKET_MODE_SERVICE)
 
-    def install_systemd_units(self, *, transport: str = "tcp") -> None:
+    def install_systemd_units(self) -> None:
         """Render and install systemd units, then enable+start.
 
-        When *transport* is ``"tcp"`` (default), installs the inetd-style
-        socket+service pair.  When ``"socket"``, installs a single long-running
-        service that binds a Unix socket.
+        The transport is read from ``self._cfg.services_mode``: ``"tcp"``
+        installs the inetd-style socket+service pair, ``"socket"``
+        installs a single long-running service that binds a Unix socket.
+        Transport resolution happens once at ``SandboxConfig`` construction
+        — callers can't smuggle a divergent mode past the config layer.
         """
         import shutil
 
@@ -260,6 +262,7 @@ class GateServerManager:
         from .._util import render_template
         from .tokens import TokenStore
 
+        transport = self._cfg.services_mode
         # A TCP install with no resolved port would render ``ListenStream=
         # 127.0.0.1:None`` and systemd would reject the unit.  Fail now,
         # naming the config knobs that resolve it, rather than emit a

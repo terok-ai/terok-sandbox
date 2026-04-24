@@ -74,6 +74,7 @@ def patched_install_env(unit_dir: Path) -> Iterator[None]:
     from terok_sandbox.config import SandboxConfig
 
     mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
+    mock_cfg.services_mode = "tcp"
     mock_cfg.gate_port = GATE_PORT
     mock_cfg.gate_base_path = GATE_BASE_PATH
     mock_cfg.token_file_path = STATE_ROOT_PATH / "gate" / "tokens.json"

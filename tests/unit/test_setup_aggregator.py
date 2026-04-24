@@ -282,3 +282,70 @@ class TestHandleShieldUninstall:
             _handle_shield_uninstall(root=True)
         mock_run.assert_called_once_with(root=True, user=False)
         assert "system" in capsys.readouterr().out
+
+
+# ── Regression: socket-mode aggregator doesn't trip the tcp port guard ─────
+
+
+class TestAggregatorSocketMode:
+    """Regression: ``services.mode: socket`` + aggregator path must not raise.
+
+    Before the services-mode SSOT refactor, the aggregator's
+    ``_reinstall_systemd_service`` called ``mgr.install_systemd_units()``
+    without a ``transport`` argument.  The manager defaulted to ``tcp``
+    and tripped the ``no port is set`` guard because socket mode skips
+    port allocation.  These tests walk the install phases directly with
+    a socket-mode cfg to pin the SSOT contract: transport comes off the
+    cfg the aggregator was handed, nowhere else.
+    """
+
+    @staticmethod
+    def _socket_cfg() -> SandboxConfig:
+        # Explicit mode; explicit ``None`` ports — the exact
+        # configuration the bug triggered on.
+        return SandboxConfig(services_mode="socket")
+
+    def test_vault_install_phase_reaches_install_without_port_guard(self) -> None:
+        """Socket-mode vault install must fall through to install_systemd_units."""
+        from terok_sandbox._setup import run_vault_install_phase
+        from terok_sandbox.vault.lifecycle import VaultManager
+
+        cfg = self._socket_cfg()
+        assert cfg.token_broker_port is None and cfg.ssh_signer_port is None
+
+        with (
+            patch.object(VaultManager, "stop_daemon"),
+            patch.object(VaultManager, "uninstall_systemd_units"),
+            patch.object(VaultManager, "install_systemd_units") as install,
+            patch.object(VaultManager, "ensure_reachable"),
+            patch.object(VaultManager, "get_status") as status,
+        ):
+            status.return_value.mode = "systemd"
+            status.return_value.transport = "socket"
+            ok = run_vault_install_phase(cfg)
+
+        assert ok is True
+        install.assert_called_once_with()  # no transport kwarg threaded in
+
+    def test_gate_install_phase_reaches_install_without_port_guard(self) -> None:
+        """Socket-mode gate install must fall through to install_systemd_units."""
+        from terok_sandbox._setup import run_gate_install_phase
+        from terok_sandbox.gate.lifecycle import GateServerManager
+
+        cfg = self._socket_cfg()
+        assert cfg.gate_port is None
+
+        with (
+            patch.object(GateServerManager, "is_systemd_available", return_value=True),
+            patch.object(GateServerManager, "stop_daemon"),
+            patch.object(GateServerManager, "uninstall_systemd_units"),
+            patch.object(GateServerManager, "install_systemd_units") as install,
+            patch.object(GateServerManager, "ensure_reachable"),
+            patch.object(GateServerManager, "get_status") as status,
+        ):
+            status.return_value.mode = "systemd"
+            status.return_value.transport = "socket"
+            ok = run_gate_install_phase(cfg)
+
+        assert ok is True
+        install.assert_called_once_with()

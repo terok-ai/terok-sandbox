@@ -74,6 +74,7 @@ from .config_schema import (
     RawSSHSection,
     RawVaultSection,
     SandboxConfigView,
+    ServicesMode,
     gate_use_personal_ssh_default,
 )
 from .config_stack import ConfigScope, ConfigStack
@@ -213,24 +214,6 @@ def get_server_status(cfg: SandboxConfig | None = None) -> GateServerStatus:
     return GateServerManager(cfg).get_status()
 
 
-def install_systemd_units(
-    cfg: SandboxConfig | None = None, *, transport: str | None = None
-) -> None:
-    """Render and install gate server systemd units.
-
-    When *transport* is ``None`` (the default), reads ``services.mode``
-    from the layered config so callers that don't thread the transport
-    explicitly (e.g. the TUI's gate-install action) still pick up the
-    user's ``socket`` vs ``tcp`` choice.  Pass an explicit string to
-    override the config.
-    """
-    if transport is None:
-        from .config import services_mode
-
-        transport = services_mode()
-    GateServerManager(cfg).install_systemd_units(transport=transport)
-
-
 def is_daemon_running(cfg: SandboxConfig | None = None) -> bool:
     """Check whether the gate daemon is alive."""
     return GateServerManager(cfg).is_daemon_running()
@@ -249,11 +232,6 @@ def start_daemon(port: int | None = None, cfg: SandboxConfig | None = None) -> N
 def stop_daemon(cfg: SandboxConfig | None = None) -> None:
     """Stop the managed gate daemon."""
     GateServerManager(cfg).stop_daemon()
-
-
-def uninstall_systemd_units(cfg: SandboxConfig | None = None) -> None:
-    """Disable+stop the gate socket and remove unit files."""
-    GateServerManager(cfg).uninstall_systemd_units()
 
 
 # -- Gate token wrappers -----------------------------------------------------
@@ -292,24 +270,6 @@ def get_ssh_signer_port(cfg: SandboxConfig | None = None) -> int:
     return VaultManager(cfg).ssh_signer_port
 
 
-def install_vault_systemd(
-    cfg: SandboxConfig | None = None, *, transport: str | None = None
-) -> None:
-    """Render and install vault systemd units for the selected transport.
-
-    When *transport* is ``None`` (the default), reads ``services.mode``
-    from the layered config so callers that don't thread the transport
-    explicitly (e.g. the TUI's vault-install action) still pick up the
-    user's ``socket`` vs ``tcp`` choice.  Pass an explicit string to
-    override the config.
-    """
-    if transport is None:
-        from .config import services_mode
-
-        transport = services_mode()
-    VaultManager(cfg).install_systemd_units(transport=transport)
-
-
 def is_vault_running(cfg: SandboxConfig | None = None) -> bool:
     """Check whether the managed vault daemon is alive."""
     return VaultManager(cfg).is_daemon_running()
@@ -345,11 +305,6 @@ def stop_vault(cfg: SandboxConfig | None = None) -> None:
     VaultManager(cfg).stop_daemon()
 
 
-def uninstall_vault_systemd(cfg: SandboxConfig | None = None) -> None:
-    """Disable+stop the socket and remove unit files."""
-    VaultManager(cfg).uninstall_systemd_units()
-
-
 __all__ = [
     # Config
     "CONTAINER_RUNTIME_DIR",
@@ -367,6 +322,7 @@ __all__ = [
     "RawVaultSection",
     "SERVICES_TCP_OPTOUT_YAML",
     "SandboxConfigView",
+    "ServicesMode",
     "gate_use_personal_ssh_default",
     # Setup stamp (epic #685 phase 1 — TUI's cheap "needs_setup" probe)
     "SetupVerdict",
@@ -409,12 +365,10 @@ __all__ = [
     "get_gate_base_path",
     "get_gate_server_port",
     "get_server_status",
-    "install_systemd_units",
     "is_daemon_running",
     "is_systemd_available",
     "start_daemon",
     "stop_daemon",
-    "uninstall_systemd_units",
     # Gate tokens
     "create_token",
     "revoke_token_for_task",
@@ -459,7 +413,6 @@ __all__ = [
     "get_token_broker_port",
     "get_vault_status",
     "get_ssh_signer_port",
-    "install_vault_systemd",
     "is_vault_running",
     "is_vault_service_active",
     "is_vault_socket_active",
@@ -467,7 +420,6 @@ __all__ = [
     "is_vault_systemd_available",
     "start_vault",
     "stop_vault",
-    "uninstall_vault_systemd",
     # Command registry
     "CommandDef",
     "KeyRow",

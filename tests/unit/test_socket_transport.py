@@ -532,45 +532,46 @@ class TestInstallSystemdPortGuards:
     Prevents the class of bug where ``services.mode: socket`` (which
     skips port allocation) reaches the tcp install path by mistake and
     emits ``ListenStream=127.0.0.1:None`` — systemd rejects that.
+
+    Since the refactor, transport lives on ``SandboxConfig.services_mode``
+    (not a per-call kwarg), so these tests set the mode directly on the
+    mock cfg and the manager picks it up via ``self._cfg.services_mode``.
     """
 
     def test_gate_tcp_install_without_port_raises(self) -> None:
-        """GateServerManager.install_systemd_units(transport='tcp') needs gate_port."""
+        """cfg.services_mode='tcp' + gate_port=None → refuses to render."""
         mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
+        mock_cfg.services_mode = "tcp"
         mock_cfg.gate_port = None
         with unittest.mock.patch.object(
             GateServerManager, "__init__", lambda self, cfg=None: setattr(self, "_cfg", mock_cfg)
         ):
             mgr = GateServerManager()
             with pytest.raises(SystemExit, match="no gate port is set"):
-                mgr.install_systemd_units(transport="tcp")
+                mgr.install_systemd_units()
 
     def test_gate_socket_install_without_port_is_fine(self) -> None:
-        """Socket transport never reads the port — ``None`` must pass the guard."""
-        from terok_sandbox.vault.token_broker import main as _unused_main  # noqa: F401
-
+        """cfg.services_mode='socket' skips the port guard — ``None`` must pass."""
         mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
+        mock_cfg.services_mode = "socket"
         mock_cfg.gate_port = None
         with unittest.mock.patch.object(
             GateServerManager, "__init__", lambda self, cfg=None: setattr(self, "_cfg", mock_cfg)
         ):
             mgr = GateServerManager()
-            # The full install body would touch systemd; we only care
-            # that the pre-flight guard in the new fail-loud branch does
-            # not fire for socket-transport installs.  Run just enough
-            # of the method to exercise the guard, then short-circuit.
+            # shutil.which returning None triggers the *next* SystemExit
+            # (missing binary) — reaching that proves the port guard did
+            # not fire for socket-mode installs.
             with unittest.mock.patch("shutil.which", return_value=None):
                 with pytest.raises(SystemExit, match="terok-gate"):
-                    # shutil.which returning None triggers the *next*
-                    # SystemExit (missing binary) — reaching that proves
-                    # the port guard did not fire.
-                    mgr.install_systemd_units(transport="socket")
+                    mgr.install_systemd_units()
 
     def test_vault_tcp_install_without_port_raises(self) -> None:
-        """VaultManager rejects tcp install with no token_broker_port."""
+        """cfg.services_mode='tcp' + token_broker_port=None → refuses to render."""
         from terok_sandbox.vault.lifecycle import VaultManager
 
         mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
+        mock_cfg.services_mode = "tcp"
         mock_cfg.token_broker_port = None
         mock_cfg.ssh_signer_port = 18732
         with unittest.mock.patch.object(
@@ -580,13 +581,14 @@ class TestInstallSystemdPortGuards:
         ):
             mgr = VaultManager()
             with pytest.raises(SystemExit, match="no port is set"):
-                mgr.install_systemd_units(transport="tcp")
+                mgr.install_systemd_units()
 
     def test_vault_tcp_install_without_ssh_signer_port_raises(self) -> None:
         """Same guard fires when only ssh_signer_port is unset."""
         from terok_sandbox.vault.lifecycle import VaultManager
 
         mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
+        mock_cfg.services_mode = "tcp"
         mock_cfg.token_broker_port = 18731
         mock_cfg.ssh_signer_port = None
         with unittest.mock.patch.object(
@@ -596,67 +598,59 @@ class TestInstallSystemdPortGuards:
         ):
             mgr = VaultManager()
             with pytest.raises(SystemExit, match="no port is set"):
-                mgr.install_systemd_units(transport="tcp")
+                mgr.install_systemd_units()
 
 
-class TestInstallSystemdTransportResolution:
-    """Verify the top-level wrappers default transport from ``services.mode``."""
+class TestServicesModeSSOT:
+    """Verify ``services.mode`` flows through ``SandboxConfig`` as the only path.
 
-    def test_gate_wrapper_resolves_transport_from_config(self) -> None:
-        """``install_systemd_units(transport=None)`` reads services.mode."""
-        from terok_sandbox import install_systemd_units
+    Replaces the old wrapper-resolution tests.  The refactor removed the
+    ``install_systemd_units`` / ``install_vault_systemd`` module-level
+    wrappers and their ``transport=`` kwarg; transport is now a
+    ``SandboxConfig`` field resolved once at construction.  These tests
+    verify that the control flow passes through the config layer and
+    nowhere else.
+    """
 
-        with (
-            unittest.mock.patch("terok_sandbox.config.services_mode", return_value="socket"),
-            unittest.mock.patch.object(GateServerManager, "install_systemd_units") as mock_install,
-            unittest.mock.patch.object(GateServerManager, "__init__", lambda self, cfg=None: None),
-        ):
-            install_systemd_units()
-        mock_install.assert_called_once_with(transport="socket")
+    def test_services_mode_default_factory_reads_config(self) -> None:
+        """``SandboxConfig()`` resolves ``services_mode`` through the pydantic schema."""
+        from terok_sandbox.config import SandboxConfig as _SandboxConfig
 
-    def test_gate_wrapper_honours_explicit_transport(self) -> None:
-        """An explicit ``transport=`` argument bypasses the config read."""
-        from terok_sandbox import install_systemd_units
+        with unittest.mock.patch(
+            "terok_sandbox.config.services_mode", return_value="tcp"
+        ) as mock_mode:
+            cfg = _SandboxConfig()
+        # The factory is called during construction; the ported value
+        # lives on the instance from then on.
+        mock_mode.assert_called_once()
+        assert cfg.services_mode == "tcp"
 
-        with (
-            unittest.mock.patch(
-                "terok_sandbox.config.services_mode", return_value="socket"
-            ) as mock_mode,
-            unittest.mock.patch.object(GateServerManager, "install_systemd_units") as mock_install,
-            unittest.mock.patch.object(GateServerManager, "__init__", lambda self, cfg=None: None),
-        ):
-            install_systemd_units(transport="tcp")
+    def test_explicit_services_mode_overrides_factory(self) -> None:
+        """Passing ``services_mode=`` to the constructor skips the factory."""
+        from terok_sandbox.config import SandboxConfig as _SandboxConfig
+
+        with unittest.mock.patch(
+            "terok_sandbox.config.services_mode", return_value="tcp"
+        ) as mock_mode:
+            cfg = _SandboxConfig(services_mode="socket")
         mock_mode.assert_not_called()
-        mock_install.assert_called_once_with(transport="tcp")
+        assert cfg.services_mode == "socket"
 
-    def test_vault_wrapper_resolves_transport_from_config(self) -> None:
-        """``install_vault_systemd(transport=None)`` reads services.mode."""
-        from terok_sandbox import install_vault_systemd
-        from terok_sandbox.vault.lifecycle import VaultManager
-
-        with (
-            unittest.mock.patch("terok_sandbox.config.services_mode", return_value="socket"),
-            unittest.mock.patch.object(VaultManager, "install_systemd_units") as mock_install,
-            unittest.mock.patch.object(VaultManager, "__init__", lambda self, cfg=None: None),
+    def test_manager_reads_services_mode_from_cfg(self) -> None:
+        """``GateServerManager`` reads transport from the cfg it was handed."""
+        mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
+        mock_cfg.services_mode = "socket"
+        mock_cfg.gate_port = None  # deliberately unset — socket mode should not care
+        with unittest.mock.patch.object(
+            GateServerManager, "__init__", lambda self, cfg=None: setattr(self, "_cfg", mock_cfg)
         ):
-            install_vault_systemd()
-        mock_install.assert_called_once_with(transport="socket")
-
-    def test_vault_wrapper_honours_explicit_transport(self) -> None:
-        """An explicit ``transport=`` argument bypasses the config read."""
-        from terok_sandbox import install_vault_systemd
-        from terok_sandbox.vault.lifecycle import VaultManager
-
-        with (
-            unittest.mock.patch(
-                "terok_sandbox.config.services_mode", return_value="socket"
-            ) as mock_mode,
-            unittest.mock.patch.object(VaultManager, "install_systemd_units") as mock_install,
-            unittest.mock.patch.object(VaultManager, "__init__", lambda self, cfg=None: None),
-        ):
-            install_vault_systemd(transport="tcp")
-        mock_mode.assert_not_called()
-        mock_install.assert_called_once_with(transport="tcp")
+            mgr = GateServerManager()
+            # Short-circuit past the TCP port guard and into the next
+            # branch — reaching shutil.which proves the mode was read
+            # from the cfg, not from a hard-coded default.
+            with unittest.mock.patch("shutil.which", return_value=None):
+                with pytest.raises(SystemExit, match="terok-gate"):
+                    mgr.install_systemd_units()
 
 
 class TestGateOrphanUnitSweep:

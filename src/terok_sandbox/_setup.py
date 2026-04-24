@@ -36,7 +36,7 @@ from ._util._selinux import (
     check_status as check_selinux_status,
     install_command as selinux_install_command,
 )
-from .config import SandboxConfig, services_mode
+from .config import SandboxConfig
 
 _HOST_BINARIES: tuple[str, ...] = ("podman", "git", "ssh-keygen")
 
@@ -74,7 +74,7 @@ def _report_firewall_binaries() -> None:
 
 def _report_selinux(cfg: SandboxConfig) -> None:
     """Print SELinux policy status; stay silent when the host doesn't need one."""
-    result = check_selinux_status(services_mode=services_mode())
+    result = check_selinux_status(services_mode=cfg.services_mode)
     match result.status:
         case SelinuxStatus.NOT_APPLICABLE_TCP_MODE | SelinuxStatus.NOT_APPLICABLE_PERMISSIVE:
             return

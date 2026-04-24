@@ -14,7 +14,9 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, get_args
+from typing import TYPE_CHECKING
+
+from pydantic import ValidationError
 
 from .paths import (
     config_root as _config_root,
@@ -24,36 +26,53 @@ from .paths import (
     vault_root as _vault_root,
 )
 
+if TYPE_CHECKING:
+    from .config_schema import ServicesMode
+
 CONTAINER_RUNTIME_DIR = "/run/terok"
 """Container-side mount point for the host runtime directory (socket mode)."""
 
-ServicesMode = Literal["tcp", "socket"]
-"""Allowed values for ``services.mode`` — runtime-checked via :func:`get_args`."""
-
 
 def services_mode() -> ServicesMode:
-    """Return the configured service transport.
+    """Resolve the ``services.mode`` setting through sandbox's own pydantic schema.
 
-    Reads the ``services.mode`` field from terok's layered ``config.yml``
-    via :func:`read_config_section` — the same mechanism already used for
-    the ``paths:`` section.  Keeping the setting in terok's config rather
-    than sandbox's dataclass preserves a single source of truth that all
-    terok packages can read without cross-package plumbing.
+    Sandbox owns the ``services:`` section (see
+    :class:`~terok_sandbox.config_schema.RawServicesSection`), so this
+    reader and the composed ``RawGlobalConfig`` validator up in terok
+    share one schema class: one default, one validator, one failure
+    mode.  A missing section, a missing key, or a malformed value all
+    collapse to the schema's own default — no hand-rolled fallback
+    drifting from the schema's intent.
 
-    Unrecognised values (e.g. a typo like ``soket``) are loud — we emit
-    a stderr warning and fall back to ``tcp``, the default — so config
-    mistakes are visible rather than silently downgraded.
+    An outright invalid value (a typo like ``soket``) still surfaces a
+    stderr warning before the default kicks in, since the caller asked
+    for a specific mode and silently ignoring the request would be
+    worse than a default mismatch.
     """
-    raw = read_config_section("services").get("mode", "tcp")
-    valid = get_args(ServicesMode)
-    if raw in valid:
-        return raw  # type: ignore[return-value]  # narrowed by membership
-    print(
-        f"warning: services.mode {raw!r} is not recognised "
-        f"(expected one of {', '.join(valid)}) — falling back to 'tcp'",
-        file=sys.stderr,
-    )
-    return "tcp"
+    from .config_schema import RawServicesSection
+
+    raw = read_config_section("services")
+    try:
+        return RawServicesSection.model_validate(raw).mode
+    except ValidationError as exc:
+        default = RawServicesSection().mode
+        print(
+            f"warning: invalid services section ({exc.errors()[0]['msg']}) "
+            f"— falling back to {default!r}",
+            file=sys.stderr,
+        )
+        return default
+
+
+def _default_services_mode() -> ServicesMode:
+    """Default-factory indirection for :attr:`SandboxConfig.services_mode`.
+
+    Lets tests patch ``terok_sandbox.config.services_mode`` and see the
+    patch take effect at construction time — a direct
+    ``default_factory=services_mode`` would capture the original function
+    reference at class-definition time and ignore later patches.
+    """
+    return services_mode()
 
 
 @dataclass(frozen=True)
@@ -100,6 +119,22 @@ class SandboxConfig:
     shield_bypass: bool = False
     """DANGEROUS: when True, the egress firewall is completely disabled."""
 
+    services_mode: ServicesMode = field(default_factory=_default_services_mode)
+    """Transport for host↔container IPC, resolved once at construction.
+
+    The default factory validates the layered ``config.yml`` through
+    :class:`~terok_sandbox.config_schema.RawServicesSection` — the same
+    schema that terok's ``RawGlobalConfig`` composes, so the standalone
+    and embedded paths can't disagree on a mode value.
+
+    Downstream sandbox operations (vault / gate install, SELinux checks)
+    read this field exclusively.  Making it an instance attribute rather
+    than a free-function call per site means the control flow can't
+    bypass config resolution: you can't construct a manager without a
+    ``SandboxConfig``, and every ``SandboxConfig`` carries a resolved
+    mode.
+    """
+
     def __post_init__(self) -> None:
         """Auto-resolve ``None`` ports via the shared port registry.
 
@@ -110,7 +145,7 @@ class SandboxConfig:
         multiple ``SandboxConfig()`` constructions raced from TUI worker
         threads).
         """
-        if services_mode() == "socket":
+        if self.services_mode == "socket":
             return
         if self.gate_port is None or self.token_broker_port is None or self.ssh_signer_port is None:
             from .port_registry import resolve_service_ports

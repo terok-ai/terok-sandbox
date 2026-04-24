@@ -37,6 +37,13 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+ServicesMode = Literal["tcp", "socket"]
+"""Type alias for the ``services.mode`` Literal; re-exported from
+:class:`RawServicesSection.model_fields['mode']` so downstream modules
+(sandbox's :class:`~terok_sandbox.config.SandboxConfig`, terok's
+``make_sandbox_config``) can annotate without re-declaring the shape."""
+
+
 # ── Owned top-level sections ──────────────────────────────────────────
 
 
@@ -114,7 +121,7 @@ class RawServicesSection(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    mode: Literal["tcp", "socket"] = "socket"
+    mode: ServicesMode = "socket"
     """Transport for host↔container IPC.  Default ``socket`` since 0.7.3;
     set to ``tcp`` to opt out.  See ``docs/selinux.md``."""
 
@@ -273,5 +280,6 @@ __all__ = [
     "RawShieldSection",
     "RawVaultSection",
     "SandboxConfigView",
+    "ServicesMode",
     "gate_use_personal_ssh_default",
 ]

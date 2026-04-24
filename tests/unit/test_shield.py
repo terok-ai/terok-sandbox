@@ -81,6 +81,8 @@ def make_mock_shield(
                 "shield_profiles": ("custom-a", "custom-b"),
                 "shield_audit": False,
                 "gate_port": CUSTOM_GATE_PORT,
+                "token_broker_port": 18741,
+                "ssh_signer_port": 18742,
             },
             ("custom-a", "custom-b"),
             CUSTOM_GATE_PORT,

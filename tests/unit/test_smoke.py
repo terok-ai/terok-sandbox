@@ -44,12 +44,12 @@ def test_import_paths():
 
 
 def test_import_config():
-    """SandboxConfig is constructible with defaults."""
+    """SandboxConfig is constructible with defaults; tcp mode auto-allocates ports."""
     from pathlib import Path
 
     from terok_sandbox.config import SandboxConfig
 
-    cfg = SandboxConfig()
+    cfg = SandboxConfig(services_mode="tcp")
     assert isinstance(cfg.state_dir, Path)
     assert isinstance(cfg.gate_port, int)
     from terok_sandbox.port_registry import PORT_RANGE

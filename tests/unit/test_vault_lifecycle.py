@@ -20,12 +20,18 @@ from terok_sandbox.vault.lifecycle import (
 )
 
 
-def _make_cfg(tmp_path: Path) -> SandboxConfig:
-    """Create a SandboxConfig rooted in tmp_path."""
+def _make_cfg(tmp_path: Path, *, services_mode: str = "tcp") -> SandboxConfig:
+    """Create a SandboxConfig rooted in tmp_path.
+
+    Defaults to tcp mode so port-allocating tests get int ports out of
+    ``__post_init__``; pass ``services_mode="socket"`` for tests that
+    verify the socket-transport code paths.
+    """
     return SandboxConfig(
         state_dir=tmp_path / "state",
         runtime_dir=tmp_path / "run",
         vault_dir=tmp_path / "vault",
+        services_mode=services_mode,  # type: ignore[arg-type]  # narrowed by runtime validation
     )
 
 
@@ -194,8 +200,7 @@ class TestStartDaemon:
 
     def test_socket_mode_omits_tcp_ports_and_adds_ssh_signer_socket(self, tmp_path: Path) -> None:
         """In socket mode, ``--port``/``--ssh-signer-port`` are dropped and ``--ssh-signer-socket-path`` is added."""
-        with patch("terok_sandbox.config.services_mode", return_value="socket"):
-            cfg = _make_cfg(tmp_path)
+        cfg = _make_cfg(tmp_path, services_mode="socket")
         mgr = VaultManager(cfg)
         assert cfg.token_broker_port is None and cfg.ssh_signer_port is None
 

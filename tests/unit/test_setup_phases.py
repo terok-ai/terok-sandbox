@@ -36,12 +36,16 @@ def bare_cfg() -> SandboxConfig:
     """A spec'd mock of :class:`SandboxConfig` — no XDG I/O, no port registry.
 
     Phases under test read ``cfg`` as an opaque handle that's passed to
-    a manager constructor (which is itself patched away); they never
-    reach into its fields.  A ``MagicMock(spec=…)`` still rejects typos
-    (attribute access on an unknown name raises) while skipping the
-    real ``__post_init__`` that resolves TCP ports via the registry.
+    a manager constructor (which is itself patched away); they only
+    reach into one real field — ``services_mode``, for the SELinux
+    check — which we set explicitly.  A ``MagicMock(spec=…)`` still
+    rejects typos (attribute access on an unknown name raises) while
+    skipping the real ``__post_init__`` that resolves TCP ports via
+    the registry.
     """
-    return MagicMock(spec=SandboxConfig)
+    mock = MagicMock(spec=SandboxConfig)
+    mock.services_mode = "socket"
+    return mock
 
 
 # ── Stage primitive ──────────────────────────────────────────────────

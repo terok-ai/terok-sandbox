@@ -30,16 +30,22 @@ class TestSocketModeSkipsPortResolution:
         assert cfg.ssh_signer_port is None
 
     def test_invalid_mode_warns_and_falls_back(self, capsys: pytest.CaptureFixture[str]) -> None:
-        """A typo in ``services.mode`` emits stderr warning and defaults to tcp."""
+        """A typo in ``services.mode`` emits stderr warning and defaults to schema value.
+
+        The fallback follows ``RawServicesSection`` — one schema default
+        across both terok's and sandbox's readers (since the refactor,
+        the hand-rolled ``"tcp"`` fallback is gone in favor of whatever
+        the pydantic schema declares).
+        """
         from terok_sandbox.config import services_mode
+        from terok_sandbox.config_schema import RawServicesSection
 
         with unittest.mock.patch(
             "terok_sandbox.config.read_config_section", return_value={"mode": "soket"}
         ):
-            assert services_mode() == "tcp"
+            assert services_mode() == RawServicesSection().mode
         captured = capsys.readouterr()
-        assert "services.mode" in captured.err
-        assert "soket" in captured.err
+        assert "invalid services section" in captured.err
 
     def test_tcp_mode_resolves_ports(self) -> None:
         """In tcp mode the registry is consulted and fields are populated."""

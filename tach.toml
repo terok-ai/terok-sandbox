@@ -68,9 +68,19 @@ path = "terok_sandbox._stage"
 layer = "foundation"
 depends_on = []
 
+# Pydantic schema for the sandbox-owned slice of config.yml — pure data
+# validation, composed by terok-executor and terok into the global config.
+[[modules]]
+path = "terok_sandbox.config_schema"
+layer = "foundation"
+depends_on = [
+    "terok_sandbox.paths",
+]
+
 # Configuration dataclass — same-layer dep on paths + port_registry,
 # plus credentials.db for the scope-name guard reused by per-scope
-# socket paths.
+# socket paths.  Reads ``services.mode`` through ``config_schema`` so
+# standalone sandbox and embedded (terok) paths share one validator.
 [[modules]]
 path = "terok_sandbox.config"
 layer = "foundation"
@@ -78,6 +88,7 @@ depends_on = [
     "terok_sandbox.paths",
     "terok_sandbox.port_registry",
     "terok_sandbox.credentials.db",
+    "terok_sandbox.config_schema",
 ]
 
 # Health check protocol + sandbox-level diagnostics
