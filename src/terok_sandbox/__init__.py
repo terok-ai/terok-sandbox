@@ -214,9 +214,9 @@ def install_systemd_units(
     override the config.
     """
     if transport is None:
-        from .config import _services_mode
+        from .config import services_mode
 
-        transport = _services_mode()
+        transport = services_mode()
     GateServerManager(cfg).install_systemd_units(transport=transport)
 
 
@@ -293,9 +293,9 @@ def install_vault_systemd(
     override the config.
     """
     if transport is None:
-        from .config import _services_mode
+        from .config import services_mode
 
-        transport = _services_mode()
+        transport = services_mode()
     VaultManager(cfg).install_systemd_units(transport=transport)
 
 

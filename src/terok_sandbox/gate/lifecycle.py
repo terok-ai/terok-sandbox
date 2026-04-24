@@ -34,6 +34,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from .._util import _systemctl
 from ..config import SandboxConfig
 
 # ---------- Constants ----------
@@ -88,28 +89,6 @@ class GateServerStatus:
 
     transport: str | None = None
     """Detected transport: ``"tcp"``, ``"socket"``, or ``None`` if not running."""
-
-
-# ---------- Helpers ----------
-
-
-def _run_systemctl_capturing(argv: list[str]) -> None:
-    """Run a systemctl command, raising with captured stderr on failure.
-
-    ``subprocess.run(check=True, capture_output=True)`` swallows the
-    captured stderr inside ``CalledProcessError`` — its ``str()`` only
-    includes exit status, so failures read as "command returned 1" with
-    no hint of ``Failed to connect to bus`` or ``Unit X not loaded``.
-    Re-raise as ``SystemExit`` with stderr attached so ``terok setup``'s
-    error row points the operator at the real cause.
-    """
-    try:
-        subprocess.run(argv, check=True, capture_output=True, timeout=10)
-    except subprocess.CalledProcessError as exc:
-        stderr = (exc.stderr or b"").decode("utf-8", errors="replace").strip()
-        raise SystemExit(
-            f"{' '.join(argv)} failed (exit {exc.returncode}){': ' + stderr if stderr else ''}"
-        ) from exc
 
 
 # ---------- Manager ----------
@@ -330,23 +309,18 @@ class GateServerManager:
             (unit_dir / template_name).write_text(content, encoding="utf-8")
 
         # Capture the "Created symlink ..." notice — otherwise it interleaves
-        # with `terok setup`'s progressive stage output.  A failure on either
-        # call is surfaced by re-raising with stderr attached, since
+        # with `terok setup`'s progressive stage output.  ``_systemctl.run``
+        # surfaces failures with stderr attached, since
         # CalledProcessError's default message omits captured output.
-        _run_systemctl_capturing(["systemctl", "--user", "daemon-reload"])
-        _run_systemctl_capturing(["systemctl", "--user", "enable", "--now", enable_unit])
+        _systemctl.run("daemon-reload")
+        _systemctl.run("enable", "--now", enable_unit)
 
     def _stop_all_units(self) -> None:
         """Stop and disable all gate units across both transport modes."""
         unit_dir = self._systemd_unit_dir()
         for unit in (_SOCKET_UNIT, _SOCKET_MODE_SERVICE):
             if (unit_dir / unit).is_file():
-                subprocess.run(
-                    ["systemctl", "--user", "disable", "--now", unit],
-                    check=False,
-                    capture_output=True,
-                    timeout=10,
-                )
+                _systemctl.run_best_effort("disable", "--now", unit)
 
     def _remove_unit_files(self) -> None:
         """Stop active units, sweep orphans from prior versions, remove current ones."""
@@ -387,20 +361,13 @@ class GateServerManager:
                 continue
             if not first_line.startswith(_OWNED_MARKER_PREFIX):
                 continue
-            subprocess.run(
-                ["systemctl", "--user", "disable", "--now", candidate.name],
-                check=False,
-                capture_output=True,
-                timeout=10,
-            )
+            _systemctl.run_best_effort("disable", "--now", candidate.name)
             candidate.unlink(missing_ok=True)
 
     def uninstall_systemd_units(self) -> None:
         """Disable+stop all gate units and remove unit files."""
         self._remove_unit_files()
-        subprocess.run(["systemctl", "--user", "daemon-reload"], check=False, timeout=10)
-
-        subprocess.run(["systemctl", "--user", "daemon-reload"], check=False, timeout=10)
+        _systemctl.run_best_effort("daemon-reload")
 
     # -- Daemon lifecycle ----------------------------------------------------
 
@@ -449,18 +416,11 @@ class GateServerManager:
         file but no active unit.  Running both paths also sweeps stray
         daemons that outlived their systemd unit.
         """
+        # ``_systemctl.run_best_effort`` swallows ``TimeoutExpired`` so a
+        # wedged unit can't block the PID-file path below.
         for unit in (_SOCKET_UNIT, _SOCKET_MODE_SERVICE):
             if self._is_unit_active(unit):
-                try:
-                    subprocess.run(
-                        ["systemctl", "--user", "stop", unit],
-                        check=False,
-                        capture_output=True,
-                        timeout=10,
-                    )
-                except subprocess.TimeoutExpired:
-                    # A wedged unit must not block the PID-file path below.
-                    pass
+                _systemctl.run_best_effort("stop", unit)
         pidfile = self._cfg.pid_file_path
         if not pidfile.is_file():
             return

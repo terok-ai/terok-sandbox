@@ -284,8 +284,8 @@ def check_status(*, services_mode: str) -> SelinuxCheckResult:
     *services_mode* is the caller's configured transport (``tcp`` or
     ``socket``) — passed in rather than read from sandbox config so the
     helper stays free of cross-package config plumbing.  Consumers
-    (``terok setup``, ``terok sickbay``) call ``get_services_mode()``
-    in terok's config layer themselves.
+    (``terok setup``, ``terok sickbay``) call
+    :func:`terok_sandbox.config.services_mode` themselves.
     """
     if services_mode != "socket":
         return SelinuxCheckResult(SelinuxStatus.NOT_APPLICABLE_TCP_MODE)

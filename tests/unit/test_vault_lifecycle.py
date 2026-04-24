@@ -194,7 +194,7 @@ class TestStartDaemon:
 
     def test_socket_mode_omits_tcp_ports_and_adds_ssh_signer_socket(self, tmp_path: Path) -> None:
         """In socket mode, ``--port``/``--ssh-signer-port`` are dropped and ``--ssh-signer-socket-path`` is added."""
-        with patch("terok_sandbox.config._services_mode", return_value="socket"):
+        with patch("terok_sandbox.config.services_mode", return_value="socket"):
             cfg = _make_cfg(tmp_path)
         mgr = VaultManager(cfg)
         assert cfg.token_broker_port is None and cfg.ssh_signer_port is None

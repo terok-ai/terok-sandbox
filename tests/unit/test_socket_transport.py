@@ -607,7 +607,7 @@ class TestInstallSystemdTransportResolution:
         from terok_sandbox import install_systemd_units
 
         with (
-            unittest.mock.patch("terok_sandbox.config._services_mode", return_value="socket"),
+            unittest.mock.patch("terok_sandbox.config.services_mode", return_value="socket"),
             unittest.mock.patch.object(GateServerManager, "install_systemd_units") as mock_install,
             unittest.mock.patch.object(GateServerManager, "__init__", lambda self, cfg=None: None),
         ):
@@ -620,7 +620,7 @@ class TestInstallSystemdTransportResolution:
 
         with (
             unittest.mock.patch(
-                "terok_sandbox.config._services_mode", return_value="socket"
+                "terok_sandbox.config.services_mode", return_value="socket"
             ) as mock_mode,
             unittest.mock.patch.object(GateServerManager, "install_systemd_units") as mock_install,
             unittest.mock.patch.object(GateServerManager, "__init__", lambda self, cfg=None: None),
@@ -635,7 +635,7 @@ class TestInstallSystemdTransportResolution:
         from terok_sandbox.vault.lifecycle import VaultManager
 
         with (
-            unittest.mock.patch("terok_sandbox.config._services_mode", return_value="socket"),
+            unittest.mock.patch("terok_sandbox.config.services_mode", return_value="socket"),
             unittest.mock.patch.object(VaultManager, "install_systemd_units") as mock_install,
             unittest.mock.patch.object(VaultManager, "__init__", lambda self, cfg=None: None),
         ):
@@ -649,7 +649,7 @@ class TestInstallSystemdTransportResolution:
 
         with (
             unittest.mock.patch(
-                "terok_sandbox.config._services_mode", return_value="socket"
+                "terok_sandbox.config.services_mode", return_value="socket"
             ) as mock_mode,
             unittest.mock.patch.object(VaultManager, "install_systemd_units") as mock_install,
             unittest.mock.patch.object(VaultManager, "__init__", lambda self, cfg=None: None),

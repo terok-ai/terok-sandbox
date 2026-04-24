@@ -18,7 +18,7 @@ class TestSocketModeSkipsPortResolution:
     def test_socket_mode_leaves_ports_unset(self) -> None:
         """No auto-allocation happens; port fields remain ``None``."""
         with (
-            unittest.mock.patch("terok_sandbox.config._services_mode", return_value="socket"),
+            unittest.mock.patch("terok_sandbox.config.services_mode", return_value="socket"),
             unittest.mock.patch(
                 "terok_sandbox.port_registry._default.resolve_service_ports"
             ) as resolve,
@@ -31,12 +31,12 @@ class TestSocketModeSkipsPortResolution:
 
     def test_invalid_mode_warns_and_falls_back(self, capsys: pytest.CaptureFixture[str]) -> None:
         """A typo in ``services.mode`` emits stderr warning and defaults to tcp."""
-        from terok_sandbox.config import _services_mode
+        from terok_sandbox.config import services_mode
 
         with unittest.mock.patch(
             "terok_sandbox.config.read_config_section", return_value={"mode": "soket"}
         ):
-            assert _services_mode() == "tcp"
+            assert services_mode() == "tcp"
         captured = capsys.readouterr()
         assert "services.mode" in captured.err
         assert "soket" in captured.err
@@ -47,7 +47,7 @@ class TestSocketModeSkipsPortResolution:
 
         fake_ports = ServicePorts(gate=18700, proxy=18701, ssh_agent=18702)
         with (
-            unittest.mock.patch("terok_sandbox.config._services_mode", return_value="tcp"),
+            unittest.mock.patch("terok_sandbox.config.services_mode", return_value="tcp"),
             unittest.mock.patch(
                 "terok_sandbox.port_registry._default.resolve_service_ports",
                 return_value=fake_ports,

@@ -26,17 +26,17 @@ from __future__ import annotations
 
 import contextlib
 import shutil
-import subprocess  # nosec B404 — systemctl is a trusted host binary
 import sys
 from collections.abc import Callable, Iterable
 from enum import StrEnum
 
+from ._util import _systemctl
 from ._util._selinux import (
     SelinuxStatus,
     check_status as check_selinux_status,
     install_command as selinux_install_command,
 )
-from .config import SandboxConfig, _services_mode
+from .config import SandboxConfig, services_mode
 
 # Widest label is "Clearance notifier" (18); recompute the gutter if
 # a new phase ships with a longer label so the status markers align.
@@ -92,7 +92,7 @@ def _report_firewall_binaries() -> None:
 
 def _report_selinux(cfg: SandboxConfig) -> None:
     """Print SELinux policy status; stay silent when the host doesn't need one."""
-    result = check_selinux_status(services_mode=_services_mode())
+    result = check_selinux_status(services_mode=services_mode())
     match result.status:
         case SelinuxStatus.NOT_APPLICABLE_TCP_MODE | SelinuxStatus.NOT_APPLICABLE_PERMISSIVE:
             return
@@ -192,6 +192,88 @@ def run_clearance_install_phase() -> bool:
     return hub_ok
 
 
+# ── Service uninstall phases ──────────────────────────────────────────
+
+
+def run_shield_uninstall_phase(*, root: bool) -> bool:
+    """Remove shield OCI hooks — per-user or system-wide depending on *root*."""
+    from .shield import run_uninstall
+
+    scope = "system" if root else "user"
+    try:
+        run_uninstall(root=root, user=not root)
+    except Exception as exc:  # noqa: BLE001 — aggregator uniform error surface
+        _stage("Shield hooks", Marker.FAIL, str(exc))
+        return False
+    _stage("Shield hooks", Marker.OK, f"removed ({scope})")
+    return True
+
+
+def run_vault_uninstall_phase(cfg: SandboxConfig) -> bool:
+    """Remove vault systemd units; WARN-skip without a systemd user session."""
+    from .vault.lifecycle import VaultManager
+
+    mgr = VaultManager(cfg)
+    if not mgr.is_systemd_available():
+        _stage("Vault", Marker.WARN, "systemd unavailable, skipping")
+        return True
+    try:
+        mgr.uninstall_systemd_units()
+    except SystemExit as exc:
+        _stage("Vault", Marker.FAIL, str(exc))
+        return False
+    except Exception as exc:  # noqa: BLE001
+        _stage("Vault", Marker.FAIL, f"uninstall: {exc}")
+        return False
+    _stage("Vault", Marker.OK, "removed")
+    return True
+
+
+def run_gate_uninstall_phase(cfg: SandboxConfig) -> bool:
+    """Stop any stray gate daemon, then remove systemd units."""
+    from .gate.lifecycle import GateServerManager
+
+    mgr = GateServerManager(cfg)
+    try:
+        if mgr.get_status().mode == "daemon":
+            mgr.stop_daemon()
+        if mgr.is_systemd_available():
+            mgr.uninstall_systemd_units()
+    except SystemExit as exc:
+        _stage("Gate server", Marker.FAIL, str(exc))
+        return False
+    except Exception as exc:  # noqa: BLE001
+        _stage("Gate server", Marker.FAIL, f"uninstall: {exc}")
+        return False
+    _stage("Gate server", Marker.OK, "removed")
+    return True
+
+
+def run_clearance_uninstall_phase() -> bool:
+    """Tear down the clearance hub + verdict + notifier units.
+
+    Mirrors :func:`run_clearance_install_phase` — soft-skips when
+    ``terok_clearance`` isn't importable so a headless host's teardown
+    stays a one-liner rather than a crash.
+    """
+    try:
+        from terok_clearance.runtime.installer import (
+            uninstall_notifier_service,
+            uninstall_service,
+        )
+    except ImportError:
+        _stage("Clearance", Marker.SKIP, "terok_clearance not installed")
+        return True
+    try:
+        uninstall_notifier_service()
+        uninstall_service()
+    except Exception as exc:  # noqa: BLE001
+        _stage("Clearance", Marker.FAIL, str(exc))
+        return False
+    _stage("Clearance", Marker.OK, "removed")
+    return True
+
+
 # ── Shared service-install skeleton ───────────────────────────────────
 
 
@@ -244,7 +326,7 @@ def _install_clearance_unit_pair(
     """
     try:
         install_fn()
-        _systemctl_daemon_reload()
+        _systemctl.run_best_effort("daemon-reload")
         for unit in units_to_enable:
             _enable_and_restart_user_unit(unit)
     except Exception as exc:  # noqa: BLE001 — aggregator uniform error surface
@@ -265,14 +347,6 @@ def _stop_and_uninstall(stop: Callable[[], None], uninstall: Callable[[], None])
         uninstall()
 
 
-def _systemctl_daemon_reload() -> None:
-    """Ask the user's systemd to re-read its unit files; silent without systemctl."""
-    systemctl = shutil.which("systemctl")
-    if not systemctl:
-        return
-    subprocess.run([systemctl, "--user", "daemon-reload"], check=False, capture_output=True)  # nosec B603
-
-
 def _enable_and_restart_user_unit(unit: str) -> None:
     """``systemctl --user enable`` + ``restart`` for *unit*.
 
@@ -284,13 +358,8 @@ def _enable_and_restart_user_unit(unit: str) -> None:
     install instead of once per unit so a three-unit clearance install
     pays one reload, not three.
     """
-    systemctl = shutil.which("systemctl")
-    if not systemctl:
-        return
     for verb in ("enable", "restart"):
-        subprocess.run(  # nosec B603
-            [systemctl, "--user", verb, unit], check=False, capture_output=True
-        )
+        _systemctl.run_best_effort(verb, unit)
 
 
 # ── Stage-line primitive ──────────────────────────────────────────────

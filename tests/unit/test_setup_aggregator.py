@@ -22,6 +22,7 @@ from terok_sandbox.commands import (
     _handle_sandbox_uninstall,
     _handle_shield_uninstall,
 )
+from terok_sandbox.config import SandboxConfig
 
 # ── Fixtures ──────────────────────────────────────────────────────────────
 
@@ -53,12 +54,26 @@ def install_spies():
 
 @pytest.fixture
 def uninstall_spies():
-    """Replace every uninstall phase handler with a MagicMock so order is observable."""
+    """Replace every ``run_*_uninstall_phase`` with a MagicMock so order is observable.
+
+    Default return ``True`` so the aggregator walks the happy path
+    unless a test overrides a phase.  Mirrors ``install_spies`` —
+    aggregator tests assert the phase contract, not the underlying
+    lifecycle handlers' internals (those have their own tests).
+    """
     with (
-        patch("terok_sandbox.commands._handle_shield_uninstall") as shield_uninstall,
-        patch("terok_sandbox.commands._handle_vault_uninstall") as vault_uninstall,
-        patch("terok_sandbox.commands._handle_gate_uninstall") as gate_uninstall,
-        patch("terok_sandbox.commands._handle_clearance_uninstall") as clearance_uninstall,
+        patch(
+            "terok_sandbox.commands.run_shield_uninstall_phase", return_value=True
+        ) as shield_uninstall,
+        patch(
+            "terok_sandbox.commands.run_vault_uninstall_phase", return_value=True
+        ) as vault_uninstall,
+        patch(
+            "terok_sandbox.commands.run_gate_uninstall_phase", return_value=True
+        ) as gate_uninstall,
+        patch(
+            "terok_sandbox.commands.run_clearance_uninstall_phase", return_value=True
+        ) as clearance_uninstall,
     ):
         yield {
             "shield_uninstall": shield_uninstall,
@@ -129,19 +144,22 @@ class TestSandboxUninstall:
     """``sandbox uninstall`` runs clearance → gate → vault → shield (reverse of install)."""
 
     def test_default_uninstalls_all_four_phases(self, uninstall_spies) -> None:
-        _handle_sandbox_uninstall()
+        cfg = SandboxConfig()
+        _handle_sandbox_uninstall(cfg=cfg)
         uninstall_spies["clearance_uninstall"].assert_called_once_with()
-        uninstall_spies["gate_uninstall"].assert_called_once_with()
-        uninstall_spies["vault_uninstall"].assert_called_once_with()
-        uninstall_spies["shield_uninstall"].assert_called_once_with(user=True, root=False)
+        uninstall_spies["gate_uninstall"].assert_called_once_with(cfg)
+        uninstall_spies["vault_uninstall"].assert_called_once_with(cfg)
+        uninstall_spies["shield_uninstall"].assert_called_once_with(root=False)
 
     def test_phases_run_in_reverse_install_order(self, uninstall_spies) -> None:
         """Clearance first (no dependants), shield last (most disruptive to live containers)."""
         order: list[str] = []
-        uninstall_spies["clearance_uninstall"].side_effect = lambda: order.append("clearance")
-        uninstall_spies["gate_uninstall"].side_effect = lambda: order.append("gate")
-        uninstall_spies["vault_uninstall"].side_effect = lambda: order.append("vault")
-        uninstall_spies["shield_uninstall"].side_effect = lambda **_: order.append("shield")
+        uninstall_spies["clearance_uninstall"].side_effect = lambda: (
+            order.append("clearance") or True
+        )
+        uninstall_spies["gate_uninstall"].side_effect = lambda _cfg: order.append("gate") or True
+        uninstall_spies["vault_uninstall"].side_effect = lambda _cfg: order.append("vault") or True
+        uninstall_spies["shield_uninstall"].side_effect = lambda **_: order.append("shield") or True
 
         _handle_sandbox_uninstall()
 
@@ -149,7 +167,7 @@ class TestSandboxUninstall:
 
     def test_root_flag_removes_shield_hooks_system_wide(self, uninstall_spies) -> None:
         _handle_sandbox_uninstall(root=True)
-        uninstall_spies["shield_uninstall"].assert_called_once_with(user=False, root=True)
+        uninstall_spies["shield_uninstall"].assert_called_once_with(root=True)
 
     @pytest.mark.parametrize(
         ("skip_kwarg", "skipped_spy_key"),
@@ -170,8 +188,8 @@ class TestSandboxUninstall:
                 assert uninstall_spies[key].called, f"{key} should still run"
 
     def test_failing_phase_does_not_abort_subsequent_phases(self, uninstall_spies) -> None:
-        """A vault uninstall that raises SystemExit must not skip shield cleanup."""
-        uninstall_spies["vault_uninstall"].side_effect = SystemExit("vault teardown broken")
+        """A vault uninstall that returns ``False`` must not skip shield cleanup."""
+        uninstall_spies["vault_uninstall"].return_value = False
         with pytest.raises(SystemExit):
             _handle_sandbox_uninstall()
         # Gate ran before the failure; shield must run after the failure.

@@ -14,16 +14,19 @@ Shield commands are delegated to terok-shield's own registry —
 
 from __future__ import annotations
 
-import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from ._setup import (
     run_clearance_install_phase,
+    run_clearance_uninstall_phase,
     run_gate_install_phase,
+    run_gate_uninstall_phase,
     run_prereq_report,
     run_shield_install_phase,
+    run_shield_uninstall_phase,
     run_vault_install_phase,
+    run_vault_uninstall_phase,
 )
 from ._util import sanitize_tty
 from .config import SandboxConfig
@@ -155,6 +158,7 @@ def _handle_sandbox_uninstall(
     no_vault: bool = False,
     no_gate: bool = False,
     no_clearance: bool = False,
+    cfg: SandboxConfig | None = None,
 ) -> None:
     """Tear down the stack in reverse install order.
 
@@ -169,55 +173,32 @@ def _handle_sandbox_uninstall(
     the next phase runs anyway, so a partial-install teardown still
     removes what it can instead of leaving orphans behind.  Exits
     non-zero only after every phase has had its attempt.
+
+    Output shape mirrors :func:`_handle_sandbox_setup` — one stage line
+    per phase under a ``Services:`` heading — so the two commands read
+    as symmetric halves of the same log when run back-to-back.
     """
     from .setup_stamp import clear_stamp
 
+    if cfg is None:
+        cfg = SandboxConfig()
+
+    print("Services:")
+
     failed = False
     if not no_clearance:
-        print("→ clearance uninstall")
-        failed |= _try_phase(_handle_clearance_uninstall)
+        failed |= not run_clearance_uninstall_phase()
     if not no_gate:
-        print("→ gate uninstall")
-        failed |= _try_phase(_handle_gate_uninstall)
+        failed |= not run_gate_uninstall_phase(cfg)
     if not no_vault:
-        print("→ vault uninstall")
-        failed |= _try_phase(_handle_vault_uninstall)
+        failed |= not run_vault_uninstall_phase(cfg)
     if not no_shield:
-        print("→ shield uninstall-hooks")
-        failed |= _try_phase(lambda: _handle_shield_uninstall(user=not root, root=root))
+        failed |= not run_shield_uninstall_phase(root=root)
+
     if clear_stamp():
         print("→ setup stamp removed")
     if failed:
         raise SystemExit(1)
-
-
-def _handle_clearance_uninstall() -> None:
-    """Delegate clearance teardown to ``terok_clearance``; soft-skip when absent."""
-    try:
-        from terok_clearance.runtime.installer import (
-            uninstall_notifier_service,
-            uninstall_service,
-        )
-    except ImportError:
-        print("  terok_clearance not installed — nothing to remove.")
-        return
-    uninstall_notifier_service()
-    uninstall_service()
-    print("Clearance hub + verdict + notifier removed.")
-
-
-def _try_phase(phase: Callable[[], None]) -> bool:
-    """Run one uninstall phase, reporting but not re-raising on failure.
-
-    Returns True when the phase failed so the aggregator can decide
-    the exit code after every phase has had its attempt.
-    """
-    try:
-        phase()
-    except SystemExit as exc:
-        print(f"  phase failed: {exc}", file=sys.stderr)
-        return True
-    return False
 
 
 def _handle_gate_install() -> None:

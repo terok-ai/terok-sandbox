@@ -22,7 +22,6 @@ from terok_sandbox._setup import (
     _reinstall_systemd_service,
     _stage,
     _stop_and_uninstall,
-    _systemctl_daemon_reload,
     run_clearance_install_phase,
     run_gate_install_phase,
     run_prereq_report,
@@ -34,14 +33,15 @@ from terok_sandbox.config import SandboxConfig
 
 @pytest.fixture
 def bare_cfg() -> SandboxConfig:
-    """An uninitialised :class:`SandboxConfig` — no XDG I/O, no port registry.
+    """A spec'd mock of :class:`SandboxConfig` — no XDG I/O, no port registry.
 
     Phases under test read ``cfg`` as an opaque handle that's passed to
     a manager constructor (which is itself patched away); they never
-    reach into its fields.  Constructing via ``__new__`` avoids the
-    real ``__post_init__`` which resolves TCP ports via the registry.
+    reach into its fields.  A ``MagicMock(spec=…)`` still rejects typos
+    (attribute access on an unknown name raises) while skipping the
+    real ``__post_init__`` that resolves TCP ports via the registry.
     """
-    return SandboxConfig.__new__(SandboxConfig)
+    return MagicMock(spec=SandboxConfig)
 
 
 # ── Stage primitive ──────────────────────────────────────────────────
@@ -357,7 +357,7 @@ class TestClearanceInstallPhase:
         with (
             patch("terok_clearance.runtime.installer.install_service") as install_hub,
             patch("terok_clearance.runtime.installer.install_notifier_service") as install_notifier,
-            patch("terok_sandbox._setup._systemctl_daemon_reload"),
+            patch("terok_sandbox._setup._systemctl.run_best_effort"),
             patch("terok_sandbox._setup._enable_and_restart_user_unit"),
         ):
             assert run_clearance_install_phase() is True
@@ -379,12 +379,14 @@ class TestClearanceInstallPhase:
         with (
             patch("terok_clearance.runtime.installer.install_service"),
             patch("terok_clearance.runtime.installer.install_notifier_service"),
-            patch("terok_sandbox._setup._systemctl_daemon_reload") as reload,
+            patch("terok_sandbox._setup._systemctl.run_best_effort") as run,
             patch("terok_sandbox._setup._enable_and_restart_user_unit"),
         ):
             run_clearance_install_phase()
-        # One reload for the hub/verdict install, one for the notifier install.
-        assert reload.call_count == 2
+        # One daemon-reload per clearance install call (hub/verdict + notifier),
+        # batched so a three-unit install doesn't pay three round-trips.
+        reloads = [call for call in run.call_args_list if call.args == ("daemon-reload",)]
+        assert len(reloads) == 2
 
     def test_hub_failure_reports_fail(self, capsys: pytest.CaptureFixture[str]) -> None:
         with (
@@ -393,7 +395,7 @@ class TestClearanceInstallPhase:
                 side_effect=RuntimeError("template missing"),
             ),
             patch("terok_clearance.runtime.installer.install_notifier_service"),
-            patch("terok_sandbox._setup._systemctl_daemon_reload"),
+            patch("terok_sandbox._setup._systemctl.run_best_effort"),
             patch("terok_sandbox._setup._enable_and_restart_user_unit"),
         ):
             assert run_clearance_install_phase() is False
@@ -409,7 +411,7 @@ class TestClearanceInstallPhase:
                 "terok_clearance.runtime.installer.install_notifier_service",
                 side_effect=RuntimeError("session bus missing"),
             ),
-            patch("terok_sandbox._setup._systemctl_daemon_reload"),
+            patch("terok_sandbox._setup._systemctl.run_best_effort"),
             patch("terok_sandbox._setup._enable_and_restart_user_unit"),
         ):
             assert run_clearance_install_phase() is True
@@ -439,48 +441,14 @@ class TestStopAndUninstall:
         _stop_and_uninstall(stop, uninstall)  # must not raise
 
 
-class TestSystemctlDaemonReload:
-    """``_systemctl_daemon_reload`` — single daemon-reload call, silent without systemctl."""
-
-    def test_missing_systemctl_silent(self) -> None:
-        with (
-            patch("terok_sandbox._setup.shutil.which", return_value=None),
-            patch("terok_sandbox._setup.subprocess.run") as run,
-        ):
-            _systemctl_daemon_reload()
-        run.assert_not_called()
-
-    def test_invokes_daemon_reload(self) -> None:
-        with (
-            patch("terok_sandbox._setup.shutil.which", return_value="/usr/bin/systemctl"),
-            patch("terok_sandbox._setup.subprocess.run") as run,
-        ):
-            _systemctl_daemon_reload()
-        run.assert_called_once()
-        assert run.call_args.args[0] == ["/usr/bin/systemctl", "--user", "daemon-reload"]
-
-
 class TestEnableAndRestartUserUnit:
     """``_enable_and_restart_user_unit`` — enable + restart, no daemon-reload."""
 
-    def test_missing_systemctl_silent(self) -> None:
-        with (
-            patch("terok_sandbox._setup.shutil.which", return_value=None),
-            patch("terok_sandbox._setup.subprocess.run") as run,
-        ):
+    def test_invokes_enable_then_restart_without_reload(self) -> None:
+        """Both verbs run in order; daemon-reload is the caller's batched responsibility."""
+        with patch("terok_sandbox._setup._systemctl.run_best_effort") as run:
             _enable_and_restart_user_unit("terok-vault")
-        run.assert_not_called()
-
-    def test_invokes_enable_and_restart(self) -> None:
-        with (
-            patch("terok_sandbox._setup.shutil.which", return_value="/usr/bin/systemctl"),
-            patch("terok_sandbox._setup.subprocess.run") as run,
-        ):
-            _enable_and_restart_user_unit("terok-vault")
-        argvs = [call.args[0] for call in run.call_args_list]
-        assert ["/usr/bin/systemctl", "--user", "enable", "terok-vault"] in argvs
-        assert ["/usr/bin/systemctl", "--user", "restart", "terok-vault"] in argvs
-        # daemon-reload is the caller's responsibility; a mis-factored
-        # helper that runs it per-unit would defeat the batching fix.
-        for argv in argvs:
-            assert "daemon-reload" not in argv
+        verbs = [call.args[0] for call in run.call_args_list]
+        assert verbs == ["enable", "restart"]
+        for call in run.call_args_list:
+            assert call.args[1] == "terok-vault"

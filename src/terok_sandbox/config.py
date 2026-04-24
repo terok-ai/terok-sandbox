@@ -31,7 +31,7 @@ ServicesMode = Literal["tcp", "socket"]
 """Allowed values for ``services.mode`` — runtime-checked via :func:`get_args`."""
 
 
-def _services_mode() -> ServicesMode:
+def services_mode() -> ServicesMode:
     """Return the configured service transport.
 
     Reads the ``services.mode`` field from terok's layered ``config.yml``
@@ -110,7 +110,7 @@ class SandboxConfig:
         multiple ``SandboxConfig()`` constructions raced from TUI worker
         threads).
         """
-        if _services_mode() == "socket":
+        if services_mode() == "socket":
             return
         if self.gate_port is None or self.token_broker_port is None or self.ssh_signer_port is None:
             from .port_registry import resolve_service_ports
