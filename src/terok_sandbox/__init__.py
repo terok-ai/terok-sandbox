@@ -24,6 +24,17 @@ from importlib.metadata import PackageNotFoundError, version as _meta_version
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ._stage import (
+    STAGE_WIDTH,
+    Marker,
+    bold,
+    red,
+    stage,
+    stage_begin,
+    stage_end,
+    supports_color,
+    yellow,
+)
 from ._util._selinux import (
     SELINUX_SOCKET_TYPE,
     SelinuxCheckResult,
@@ -471,6 +482,17 @@ __all__ = [
     # full shield+vault+gate+clearance stack.
     "sandbox_setup",
     "sandbox_uninstall",
+    # Stage-line rendering — shared with frontends so mixed logs
+    # share one column width and colour palette.
+    "Marker",
+    "STAGE_WIDTH",
+    "bold",
+    "red",
+    "stage",
+    "stage_begin",
+    "stage_end",
+    "supports_color",
+    "yellow",
     # Facade
     "READY_MARKER",
     "LifecycleHooks",
