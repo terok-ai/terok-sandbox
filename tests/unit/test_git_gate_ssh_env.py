@@ -6,6 +6,10 @@
 The gate prefers the vault-managed per-scope socket by default; explicit
 opt-in (``use_personal_ssh=True``) falls through to the user's ambient
 SSH; with neither, :class:`GateAuthNotConfigured` is raised.
+
+The vault branch additionally pins OpenSSH so personal keys can never
+leak in and no interactive prompt can ever leak out — asserted below as
+``IdentityAgent=<sock>`` + ``-F /dev/null`` + ``BatchMode=yes``.
 """
 
 from __future__ import annotations
@@ -95,9 +99,17 @@ class TestVaultPath:
 
         assert env["SSH_AUTH_SOCK"] == str(sock_path)
         cmd = env["GIT_SSH_COMMAND"]
+        # Vault agent is the pinned identity source.
+        assert f"IdentityAgent={sock_path}" in cmd
         assert "IdentityFile=none" in cmd
+        # User's ~/.ssh/config must not influence auth.
+        assert "-F /dev/null" in cmd
+        # No passphrase / host-key / password prompts may leak to the caller.
+        assert "BatchMode=yes" in cmd
         assert "StrictHostKeyChecking=no" in cmd
-        assert "IdentitiesOnly=yes" not in cmd  # agent must remain consulted
+        # Agent must remain consulted — IdentitiesOnly with IdentityFile=none
+        # would leave ssh with no identities at all.
+        assert "IdentitiesOnly=yes" not in cmd
 
     def test_non_socket_file_is_rejected(self, tmp_path: Path) -> None:
         """A regular file at the socket path must not pass the guard."""
