@@ -60,6 +60,14 @@ path = "terok_sandbox.setup_stamp"
 layer = "foundation"
 depends_on = ["terok_sandbox.paths"]
 
+# Stage-line renderer — colour palette + column width.  Zero internal
+# deps; imported by _setup and by downstream frontends via the package
+# re-export.
+[[modules]]
+path = "terok_sandbox._stage"
+layer = "foundation"
+depends_on = []
+
 # Configuration dataclass — same-layer dep on paths + port_registry,
 # plus credentials.db for the scope-name guard reused by per-scope
 # socket paths.

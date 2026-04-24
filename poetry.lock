@@ -2753,18 +2753,19 @@ description = "Shield clearance and desktop notifications for terok"
 optional = false
 python-versions = ">=3.12,<4.0"
 groups = ["main"]
-files = [
-    {file = "terok_clearance-0.6.3-py3-none-any.whl", hash = "sha256:4817075644bfe8221430598c8ee2c9bbd7b37440f685d2755da31223bf62484f"},
-]
+files = []
+develop = false
 
 [package.dependencies]
-asyncvarlink = ">=0.3.1,<0.4.0"
+asyncvarlink = "^0.3.1"
 dbus-fast = ">=2.0,<5.0"
-pyyaml = ">=6.0,<7.0"
+pyyaml = "^6.0"
 
 [package.source]
-type = "url"
-url = "https://github.com/terok-ai/terok-clearance/releases/download/v0.6.3/terok_clearance-0.6.3-py3-none-any.whl"
+type = "git"
+url = "https://github.com/sliwowitz/terok-clearance.git"
+reference = "feat/installer-default-argv"
+resolved_reference = "f3ebf97efa91c4805f5e725f8f45bbfcf41d71d5"
 
 [[package]]
 name = "terok-shield"
@@ -3183,4 +3184,4 @@ propcache = ">=0.2.1"
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<4.0"
-content-hash = "6ad675dcae24e20238ee424ef5c96f6aef489f6f31f581b01e8099f6d353cc29"
+content-hash = "a3ce8e74ae2c889eaacca040044f1ca534e286cc1cd79d0de006b1855805125b"

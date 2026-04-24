@@ -16,20 +16,20 @@ Each phase is self-contained and idempotent:
 * The clearance phase is optional — headless servers that skip the
   desktop bridge still get a working shield+vault+gate install.
 
-Printed output is plain-text stage lines; higher-level frontends that
-want ANSI colour can wrap the aggregator call in their own renderer.
-Kept internal (underscore-prefixed module) because every public
-entry point goes through :func:`commands._handle_sandbox_setup`.
+Stage-line output routes through :mod:`terok_sandbox._stage` (re-exported
+via the package's public surface) so frontends (terok, terok-executor)
+that mix their own stage lines in the same log share one renderer and
+one colour palette.  Kept internal (underscore-prefixed module) because
+every public entry point goes through :func:`commands._handle_sandbox_setup`.
 """
 
 from __future__ import annotations
 
 import contextlib
 import shutil
-import sys
 from collections.abc import Callable, Iterable
-from enum import StrEnum
 
+from ._stage import Marker, stage as _stage
 from ._util import _systemctl
 from ._util._selinux import (
     SelinuxStatus,
@@ -38,25 +38,7 @@ from ._util._selinux import (
 )
 from .config import SandboxConfig, services_mode
 
-# Widest label is "Clearance notifier" (18); recompute the gutter if
-# a new phase ships with a longer label so the status markers align.
-_STAGE_WIDTH = 20
-
 _HOST_BINARIES: tuple[str, ...] = ("podman", "git", "ssh-keygen")
-
-
-class Marker(StrEnum):
-    """Status tokens rendered in each stage line.
-
-    Typed so a typo (`"Warn"` vs `"WARN"`) is a load-time error, not a
-    silent drift in output the test assertions keep passing against.
-    """
-
-    OK = "ok"
-    WARN = "WARN"
-    FAIL = "FAIL"
-    MISSING = "MISSING"
-    SKIP = "skip"
 
 
 # ── Prereq reporting (host binaries, firewall binaries, SELinux) ─────
@@ -169,13 +151,14 @@ def run_clearance_install_phase() -> bool:
         _stage("Clearance", Marker.SKIP, "terok_clearance not installed")
         return True
 
-    # Avoid ``shutil.which("terok-clearance-hub")``: a hostile PATH
-    # could otherwise poison the ExecStart= baked into the persistent
-    # user unit.  ``sys.executable`` isn't resolved through PATH, so
-    # the pipx venv's own python is the one the unit invokes.
+    # ``install_service()`` / ``install_notifier_service()`` default
+    # their own argv internally — clearance owns the knowledge of
+    # which module serves its hub / notifier, so sandbox doesn't have
+    # to spell ``[sys.executable, "-m", "terok_clearance.cli.main"]``
+    # and leak that layout across the package boundary.
     hub_ok = _install_clearance_unit_pair(
         label="Clearance hub",
-        install_fn=lambda: install_service([sys.executable, "-m", "terok_clearance.cli.main"]),
+        install_fn=install_service,
         units_to_enable=(HUB_UNIT_NAME, VERDICT_UNIT_NAME),
     )
     # Notifier failure is non-fatal — the hub is the critical path;
@@ -184,9 +167,7 @@ def run_clearance_install_phase() -> bool:
     # remote SSH install) doesn't flip the aggregator's exit code.
     _install_clearance_unit_pair(
         label="Clearance notifier",
-        install_fn=lambda: install_notifier_service(
-            [sys.executable, "-m", "terok_clearance.notifier.app"]
-        ),
+        install_fn=install_notifier_service,
         units_to_enable=(NOTIFIER_UNIT_NAME,),
     )
     return hub_ok
@@ -360,12 +341,3 @@ def _enable_and_restart_user_unit(unit: str) -> None:
     """
     for verb in ("enable", "restart"):
         _systemctl.run_best_effort(verb, unit)
-
-
-# ── Stage-line primitive ──────────────────────────────────────────────
-
-
-def _stage(label: str, marker: Marker, detail: str = "") -> None:
-    """Write one ``'  <label>  <marker> (<detail>)'`` line."""
-    suffix = f" ({detail})" if detail else ""
-    print(f"  {label:<{_STAGE_WIDTH}} {marker}{suffix}")
