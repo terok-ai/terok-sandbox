@@ -29,7 +29,7 @@ import contextlib
 import shutil
 from collections.abc import Callable, Iterable
 
-from ._stage import Marker, stage as _stage
+from ._stage import stage_line as _stage_line
 from ._util import _systemctl
 from ._util._selinux import (
     SelinuxStatus,
@@ -54,11 +54,12 @@ def run_prereq_report(cfg: SandboxConfig) -> None:
 
 def _report_host_binaries() -> None:
     for name in _HOST_BINARIES:
-        path = shutil.which(name)
-        if path:
-            _stage(name, Marker.OK, path)
-        else:
-            _stage(name, Marker.MISSING, "not on PATH")
+        with _stage_line(name) as s:
+            path = shutil.which(name)
+            if path:
+                s.ok(path)
+            else:
+                s.missing("not on PATH")
 
 
 def _report_firewall_binaries() -> None:
@@ -66,24 +67,29 @@ def _report_firewall_binaries() -> None:
     from terok_shield import check_firewall_binaries
 
     for check in check_firewall_binaries():
-        if check.ok:
-            _stage(check.name, Marker.OK, check.path)
-        else:
-            _stage(check.name, Marker.MISSING, check.purpose)
+        with _stage_line(check.name) as s:
+            if check.ok:
+                s.ok(check.path)
+            else:
+                s.missing(check.purpose)
 
 
 def _report_selinux(cfg: SandboxConfig) -> None:
     """Print SELinux policy status; stay silent when the host doesn't need one."""
     result = check_selinux_status(services_mode=cfg.services_mode)
-    match result.status:
-        case SelinuxStatus.NOT_APPLICABLE_TCP_MODE | SelinuxStatus.NOT_APPLICABLE_PERMISSIVE:
-            return
-        case SelinuxStatus.OK:
-            _stage("SELinux policy", Marker.OK, "installed")
-        case SelinuxStatus.POLICY_MISSING:
-            _stage("SELinux policy", Marker.MISSING, f"install: {selinux_install_command()}")
-        case SelinuxStatus.LIBSELINUX_MISSING:
-            _stage("SELinux policy", Marker.MISSING, "libselinux.so.1 not loadable")
+    if result.status in (
+        SelinuxStatus.NOT_APPLICABLE_TCP_MODE,
+        SelinuxStatus.NOT_APPLICABLE_PERMISSIVE,
+    ):
+        return
+    with _stage_line("SELinux policy") as s:
+        match result.status:
+            case SelinuxStatus.OK:
+                s.ok("installed")
+            case SelinuxStatus.POLICY_MISSING:
+                s.missing(f"install: {selinux_install_command()}")
+            case SelinuxStatus.LIBSELINUX_MISSING:
+                s.missing("libselinux.so.1 not loadable")
 
 
 # ── Service install phases ────────────────────────────────────────────
@@ -93,21 +99,22 @@ def run_shield_install_phase(*, root: bool) -> bool:
     """Install shield OCI hooks — per-user or system-wide depending on *root*."""
     from .shield import check_environment, run_setup
 
-    try:
-        run_setup(root=root, user=not root)
-    except Exception as exc:  # noqa: BLE001 — aggregator reports all failures uniformly
-        _stage("Shield hooks", Marker.FAIL, str(exc))
-        return False
+    with _stage_line("Shield hooks") as s:
+        try:
+            run_setup(root=root, user=not root)
+        except Exception as exc:  # noqa: BLE001 — aggregator reports all failures uniformly
+            s.fail(str(exc))
+            return False
 
-    env = check_environment()
-    if env.health == "ok":
-        _stage("Shield hooks", Marker.OK, "active")
-        return True
-    if env.health == "bypass":
-        _stage("Shield hooks", Marker.WARN, "bypass_firewall_no_protection is active")
-        return True
-    _stage("Shield hooks", Marker.FAIL, f"installed but health: {env.health}")
-    return False
+        env = check_environment()
+        if env.health == "ok":
+            s.ok("active")
+            return True
+        if env.health == "bypass":
+            s.warn("bypass_firewall_no_protection is active")
+            return True
+        s.fail(f"installed but health: {env.health}")
+        return False
 
 
 def run_vault_install_phase(cfg: SandboxConfig) -> bool:
@@ -127,7 +134,8 @@ def run_gate_install_phase(cfg: SandboxConfig) -> bool:
 
     mgr = GateServerManager(cfg)
     if not mgr.is_systemd_available():
-        _stage("Gate server", Marker.WARN, "systemd unavailable, skipping")
+        with _stage_line("Gate server") as s:
+            s.warn("systemd unavailable, skipping")
         return True
     return _reinstall_systemd_service(label="Gate server", mgr=mgr)
 
@@ -148,7 +156,8 @@ def run_clearance_install_phase() -> bool:
             install_service,
         )
     except ImportError:
-        _stage("Clearance", Marker.SKIP, "terok_clearance not installed")
+        with _stage_line("Clearance") as s:
+            s.skip("terok_clearance not installed")
         return True
 
     # ``install_service()`` / ``install_notifier_service()`` default
@@ -181,13 +190,14 @@ def run_shield_uninstall_phase(*, root: bool) -> bool:
     from .shield import run_uninstall
 
     scope = "system" if root else "user"
-    try:
-        run_uninstall(root=root, user=not root)
-    except Exception as exc:  # noqa: BLE001 — aggregator uniform error surface
-        _stage("Shield hooks", Marker.FAIL, str(exc))
-        return False
-    _stage("Shield hooks", Marker.OK, f"removed ({scope})")
-    return True
+    with _stage_line("Shield hooks") as s:
+        try:
+            run_uninstall(root=root, user=not root)
+        except Exception as exc:  # noqa: BLE001 — aggregator uniform error surface
+            s.fail(str(exc))
+            return False
+        s.ok(f"removed ({scope})")
+        return True
 
 
 def run_vault_uninstall_phase(cfg: SandboxConfig) -> bool:
@@ -195,19 +205,20 @@ def run_vault_uninstall_phase(cfg: SandboxConfig) -> bool:
     from .vault.lifecycle import VaultManager
 
     mgr = VaultManager(cfg)
-    if not mgr.is_systemd_available():
-        _stage("Vault", Marker.WARN, "systemd unavailable, skipping")
+    with _stage_line("Vault") as s:
+        if not mgr.is_systemd_available():
+            s.warn("systemd unavailable, skipping")
+            return True
+        try:
+            mgr.uninstall_systemd_units()
+        except SystemExit as exc:
+            s.fail(str(exc))
+            return False
+        except Exception as exc:  # noqa: BLE001
+            s.fail(f"uninstall: {exc}")
+            return False
+        s.ok("removed")
         return True
-    try:
-        mgr.uninstall_systemd_units()
-    except SystemExit as exc:
-        _stage("Vault", Marker.FAIL, str(exc))
-        return False
-    except Exception as exc:  # noqa: BLE001
-        _stage("Vault", Marker.FAIL, f"uninstall: {exc}")
-        return False
-    _stage("Vault", Marker.OK, "removed")
-    return True
 
 
 def run_gate_uninstall_phase(cfg: SandboxConfig) -> bool:
@@ -215,19 +226,20 @@ def run_gate_uninstall_phase(cfg: SandboxConfig) -> bool:
     from .gate.lifecycle import GateServerManager
 
     mgr = GateServerManager(cfg)
-    try:
-        if mgr.get_status().mode == "daemon":
-            mgr.stop_daemon()
-        if mgr.is_systemd_available():
-            mgr.uninstall_systemd_units()
-    except SystemExit as exc:
-        _stage("Gate server", Marker.FAIL, str(exc))
-        return False
-    except Exception as exc:  # noqa: BLE001
-        _stage("Gate server", Marker.FAIL, f"uninstall: {exc}")
-        return False
-    _stage("Gate server", Marker.OK, "removed")
-    return True
+    with _stage_line("Gate server") as s:
+        try:
+            if mgr.get_status().mode == "daemon":
+                mgr.stop_daemon()
+            if mgr.is_systemd_available():
+                mgr.uninstall_systemd_units()
+        except SystemExit as exc:
+            s.fail(str(exc))
+            return False
+        except Exception as exc:  # noqa: BLE001
+            s.fail(f"uninstall: {exc}")
+            return False
+        s.ok("removed")
+        return True
 
 
 def run_clearance_uninstall_phase() -> bool:
@@ -243,16 +255,18 @@ def run_clearance_uninstall_phase() -> bool:
             uninstall_service,
         )
     except ImportError:
-        _stage("Clearance", Marker.SKIP, "terok_clearance not installed")
+        with _stage_line("Clearance") as s:
+            s.skip("terok_clearance not installed")
         return True
-    try:
-        uninstall_notifier_service()
-        uninstall_service()
-    except Exception as exc:  # noqa: BLE001
-        _stage("Clearance", Marker.FAIL, str(exc))
-        return False
-    _stage("Clearance", Marker.OK, "removed")
-    return True
+    with _stage_line("Clearance") as s:
+        try:
+            uninstall_notifier_service()
+            uninstall_service()
+        except Exception as exc:  # noqa: BLE001
+            s.fail(str(exc))
+            return False
+        s.ok("removed")
+        return True
 
 
 # ── Shared service-install skeleton ───────────────────────────────────
@@ -273,27 +287,24 @@ def _reinstall_systemd_service(
     ``ensure_reachable()`` verify (fails with *reachable_exc*).  Shield
     and clearance are different shapes so they stay inline.
     """
-    _stop_and_uninstall(mgr.stop_daemon, mgr.uninstall_systemd_units)
-    try:
-        mgr.install_systemd_units()
-    except SystemExit as exc:
-        _stage(label, Marker.FAIL, str(exc))
-        return False
-    except Exception as exc:  # noqa: BLE001
-        _stage(label, Marker.FAIL, f"install: {exc}")
-        return False
-    try:
-        mgr.ensure_reachable()
-    except reachable_exc as exc:
-        _stage(label, Marker.FAIL, f"installed but NOT reachable: {exc}")
-        return False
-    status = mgr.get_status()
-    _stage(
-        label,
-        Marker.OK,
-        f"{status.mode or 'systemd'}, {status.transport or 'tcp'}, reachable",
-    )
-    return True
+    with _stage_line(label) as s:
+        _stop_and_uninstall(mgr.stop_daemon, mgr.uninstall_systemd_units)
+        try:
+            mgr.install_systemd_units()
+        except SystemExit as exc:
+            s.fail(str(exc))
+            return False
+        except Exception as exc:  # noqa: BLE001
+            s.fail(f"install: {exc}")
+            return False
+        try:
+            mgr.ensure_reachable()
+        except reachable_exc as exc:
+            s.fail(f"installed but NOT reachable: {exc}")
+            return False
+        status = mgr.get_status()
+        s.ok(f"{status.mode or 'systemd'}, {status.transport or 'tcp'}, reachable")
+        return True
 
 
 def _install_clearance_unit_pair(
@@ -305,16 +316,17 @@ def _install_clearance_unit_pair(
     hub/verdict pair doesn't pay three sequential ``daemon-reload``
     round-trips when it should only need one.
     """
-    try:
-        install_fn()
-        _systemctl.run_best_effort("daemon-reload")
-        for unit in units_to_enable:
-            _enable_and_restart_user_unit(unit)
-    except Exception as exc:  # noqa: BLE001 — aggregator uniform error surface
-        _stage(label, Marker.FAIL, str(exc))
-        return False
-    _stage(label, Marker.OK, "installed + enabled")
-    return True
+    with _stage_line(label) as s:
+        try:
+            install_fn()
+            _systemctl.run_best_effort("daemon-reload")
+            for unit in units_to_enable:
+                _enable_and_restart_user_unit(unit)
+        except Exception as exc:  # noqa: BLE001 — aggregator uniform error surface
+            s.fail(str(exc))
+            return False
+        s.ok("installed + enabled")
+        return True
 
 
 # ── Lifecycle helpers ─────────────────────────────────────────────────

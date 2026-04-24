@@ -27,11 +27,13 @@ from typing import TYPE_CHECKING
 from ._stage import (
     STAGE_WIDTH,
     Marker,
+    StageLine,
     bold,
     red,
     stage,
     stage_begin,
     stage_end,
+    stage_line,
     supports_color,
     yellow,
 )
@@ -438,11 +440,13 @@ __all__ = [
     # share one column width and colour palette.
     "Marker",
     "STAGE_WIDTH",
+    "StageLine",
     "bold",
     "red",
     "stage",
     "stage_begin",
     "stage_end",
+    "stage_line",
     "supports_color",
     "yellow",
     # Facade

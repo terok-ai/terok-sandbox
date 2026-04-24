@@ -16,17 +16,19 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from terok_sandbox._setup import (
-    Marker,
     SelinuxStatus,
     _enable_and_restart_user_unit,
     _reinstall_systemd_service,
-    _stage,
     _stop_and_uninstall,
     run_clearance_install_phase,
+    run_clearance_uninstall_phase,
     run_gate_install_phase,
+    run_gate_uninstall_phase,
     run_prereq_report,
     run_shield_install_phase,
+    run_shield_uninstall_phase,
     run_vault_install_phase,
+    run_vault_uninstall_phase,
 )
 from terok_sandbox.config import SandboxConfig
 
@@ -49,27 +51,9 @@ def bare_cfg() -> SandboxConfig:
 
 
 # ── Stage primitive ──────────────────────────────────────────────────
-
-
-class TestStage:
-    """The ``_stage`` helper is the one place unit output formatting lives."""
-
-    def test_writes_label_marker_and_detail(self, capsys: pytest.CaptureFixture[str]) -> None:
-        _stage("Vault", Marker.OK, "systemd, tcp, reachable")
-        out = capsys.readouterr().out
-        assert "Vault" in out
-        assert " ok " in out
-        assert "(systemd, tcp, reachable)" in out
-
-    def test_blank_detail_emits_no_parens(self, capsys: pytest.CaptureFixture[str]) -> None:
-        _stage("Shield hooks", Marker.OK)
-        assert "()" not in capsys.readouterr().out
-
-    def test_label_padded_to_consistent_column(self, capsys: pytest.CaptureFixture[str]) -> None:
-        _stage("x", Marker.OK, "a")
-        _stage("a_longer_label", Marker.OK, "b")
-        lines = capsys.readouterr().out.splitlines()
-        assert lines[0].index(" ok ") == lines[1].index(" ok ")
+# Formatter tests live in ``test_stage.py`` where the renderer does —
+# ``_setup`` only composes stage lines, so testing the same formatting
+# rules here was a duplication trap.
 
 
 # ── Prereq report ────────────────────────────────────────────────────
@@ -153,6 +137,57 @@ class TestPrereqReport:
         ):
             run_prereq_report(bare_cfg)
         assert "SELinux" not in capsys.readouterr().out
+
+    @pytest.mark.parametrize(
+        ("status", "detail_fragment"),
+        [
+            (SelinuxStatus.POLICY_MISSING, "install:"),
+            (SelinuxStatus.LIBSELINUX_MISSING, "libselinux.so.1"),
+        ],
+    )
+    def test_selinux_problem_statuses_render_missing_with_hint(
+        self,
+        bare_cfg: SandboxConfig,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+        status: SelinuxStatus,
+        detail_fragment: str,
+    ) -> None:
+        """Problem statuses route to MISSING with a pointer-to-fix in the detail."""
+        monkeypatch.setattr("terok_sandbox._setup.shutil.which", lambda _n: None)
+        with (
+            patch("terok_shield.check_firewall_binaries", return_value=()),
+            patch(
+                "terok_sandbox._setup.check_selinux_status",
+                return_value=MagicMock(status=status),
+            ),
+        ):
+            run_prereq_report(bare_cfg)
+        out = capsys.readouterr().out
+        assert "SELinux policy" in out
+        assert "MISSING" in out
+        assert detail_fragment in out
+
+    def test_missing_firewall_binary_renders_missing_line(
+        self,
+        bare_cfg: SandboxConfig,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A firewall binary with ``ok=False`` surfaces its ``purpose`` as the MISSING detail."""
+        monkeypatch.setattr("terok_sandbox._setup.shutil.which", lambda name: f"/usr/bin/{name}")
+        bad_check = MagicMock(path="", purpose="DNS resolver", ok=False)
+        bad_check.name = "dnsmasq"  # ``name=`` is a MagicMock kwarg, not an attr
+        with (
+            patch("terok_shield.check_firewall_binaries", return_value=(bad_check,)),
+            patch(
+                "terok_sandbox._setup.check_selinux_status",
+                return_value=MagicMock(status=SelinuxStatus.NOT_APPLICABLE_TCP_MODE),
+            ),
+        ):
+            run_prereq_report(bare_cfg)
+        out = capsys.readouterr().out
+        assert "dnsmasq" in out and "MISSING" in out and "DNS resolver" in out
 
 
 # ── Shield install phase ─────────────────────────────────────────────
@@ -456,3 +491,211 @@ class TestEnableAndRestartUserUnit:
         assert verbs == ["enable", "restart"]
         for call in run.call_args_list:
             assert call.args[1] == "terok-vault"
+
+
+# ── Uninstall phases ─────────────────────────────────────────────────
+
+
+class TestShieldUninstallPhase:
+    """Shield uninstall: removes hooks; reports scope in the OK line."""
+
+    def test_user_scope_reports_ok(self, capsys: pytest.CaptureFixture[str]) -> None:
+        with patch("terok_sandbox.shield.run_uninstall") as run:
+            assert run_shield_uninstall_phase(root=False) is True
+        run.assert_called_once_with(root=False, user=True)
+        assert "removed (user)" in capsys.readouterr().out
+
+    def test_root_scope_reports_ok(self, capsys: pytest.CaptureFixture[str]) -> None:
+        with patch("terok_sandbox.shield.run_uninstall") as run:
+            assert run_shield_uninstall_phase(root=True) is True
+        run.assert_called_once_with(root=True, user=False)
+        assert "removed (system)" in capsys.readouterr().out
+
+    def test_uninstall_raises_reports_fail(self, capsys: pytest.CaptureFixture[str]) -> None:
+        with patch(
+            "terok_sandbox.shield.run_uninstall", side_effect=RuntimeError("hook dir missing")
+        ):
+            assert run_shield_uninstall_phase(root=False) is False
+        out = capsys.readouterr().out
+        assert "FAIL" in out and "hook dir missing" in out
+
+
+class TestVaultUninstallPhase:
+    """Vault uninstall: WARN-skip without systemd, FAIL on unit removal errors."""
+
+    def test_no_systemd_warns_and_returns_ok(self, capsys: pytest.CaptureFixture[str]) -> None:
+        from terok_sandbox.vault.lifecycle import VaultManager
+
+        with patch.object(VaultManager, "is_systemd_available", return_value=False):
+            assert run_vault_uninstall_phase(SandboxConfig(services_mode="socket")) is True
+        out = capsys.readouterr().out
+        assert "WARN" in out and "systemd unavailable" in out
+
+    def test_clean_removal_reports_ok(self, capsys: pytest.CaptureFixture[str]) -> None:
+        from terok_sandbox.vault.lifecycle import VaultManager
+
+        with (
+            patch.object(VaultManager, "is_systemd_available", return_value=True),
+            patch.object(VaultManager, "uninstall_systemd_units") as un,
+        ):
+            assert run_vault_uninstall_phase(SandboxConfig(services_mode="socket")) is True
+        un.assert_called_once()
+        assert "removed" in capsys.readouterr().out
+
+    def test_systemexit_during_removal_is_reported(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A ``SystemExit`` from the manager is surfaced verbatim, not promoted."""
+        from terok_sandbox.vault.lifecycle import VaultManager
+
+        with (
+            patch.object(VaultManager, "is_systemd_available", return_value=True),
+            patch.object(
+                VaultManager, "uninstall_systemd_units", side_effect=SystemExit("cannot disable")
+            ),
+        ):
+            assert run_vault_uninstall_phase(SandboxConfig(services_mode="socket")) is False
+        out = capsys.readouterr().out
+        assert "FAIL" in out and "cannot disable" in out
+
+    def test_generic_exception_adds_uninstall_prefix(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Generic exceptions are prefixed ``uninstall:`` so the phase is named in the line."""
+        from terok_sandbox.vault.lifecycle import VaultManager
+
+        with (
+            patch.object(VaultManager, "is_systemd_available", return_value=True),
+            patch.object(
+                VaultManager, "uninstall_systemd_units", side_effect=RuntimeError("fs busy")
+            ),
+        ):
+            assert run_vault_uninstall_phase(SandboxConfig(services_mode="socket")) is False
+        out = capsys.readouterr().out
+        assert "FAIL" in out and "uninstall: fs busy" in out
+
+
+class TestGateUninstallPhase:
+    """Gate uninstall: stop daemon-mode process first, then remove units."""
+
+    def test_daemon_mode_stopped_before_unit_removal(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from terok_sandbox.gate.lifecycle import GateServerManager, GateServerStatus
+
+        status = GateServerStatus(mode="daemon", running=True, port=9418)
+        with (
+            patch.object(GateServerManager, "get_status", return_value=status),
+            patch.object(GateServerManager, "stop_daemon") as stop,
+            patch.object(GateServerManager, "is_systemd_available", return_value=True),
+            patch.object(GateServerManager, "uninstall_systemd_units") as un,
+        ):
+            assert run_gate_uninstall_phase(SandboxConfig(services_mode="socket")) is True
+        stop.assert_called_once()
+        un.assert_called_once()
+        assert "removed" in capsys.readouterr().out
+
+    def test_systemd_only_skips_daemon_stop(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """When only systemd is active, no daemon stop happens."""
+        from terok_sandbox.gate.lifecycle import GateServerManager, GateServerStatus
+
+        status = GateServerStatus(mode="systemd", running=True, port=9418)
+        with (
+            patch.object(GateServerManager, "get_status", return_value=status),
+            patch.object(GateServerManager, "stop_daemon") as stop,
+            patch.object(GateServerManager, "is_systemd_available", return_value=True),
+            patch.object(GateServerManager, "uninstall_systemd_units") as un,
+        ):
+            assert run_gate_uninstall_phase(SandboxConfig(services_mode="socket")) is True
+        stop.assert_not_called()
+        un.assert_called_once()
+
+    def test_no_systemd_skips_unit_removal(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Hosts without systemd still report ok — nothing to uninstall is not a failure."""
+        from terok_sandbox.gate.lifecycle import GateServerManager, GateServerStatus
+
+        status = GateServerStatus(mode="none", running=False, port=None)
+        with (
+            patch.object(GateServerManager, "get_status", return_value=status),
+            patch.object(GateServerManager, "is_systemd_available", return_value=False),
+            patch.object(GateServerManager, "uninstall_systemd_units") as un,
+        ):
+            assert run_gate_uninstall_phase(SandboxConfig(services_mode="socket")) is True
+        un.assert_not_called()
+
+    def test_systemexit_during_removal_is_reported(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from terok_sandbox.gate.lifecycle import GateServerManager, GateServerStatus
+
+        status = GateServerStatus(mode="systemd", running=True, port=9418)
+        with (
+            patch.object(GateServerManager, "get_status", return_value=status),
+            patch.object(GateServerManager, "is_systemd_available", return_value=True),
+            patch.object(
+                GateServerManager, "uninstall_systemd_units", side_effect=SystemExit("permission")
+            ),
+        ):
+            assert run_gate_uninstall_phase(SandboxConfig(services_mode="socket")) is False
+        out = capsys.readouterr().out
+        assert "FAIL" in out and "permission" in out
+
+    def test_generic_exception_adds_uninstall_prefix(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from terok_sandbox.gate.lifecycle import GateServerManager, GateServerStatus
+
+        status = GateServerStatus(mode="systemd", running=True, port=9418)
+        with (
+            patch.object(GateServerManager, "get_status", return_value=status),
+            patch.object(GateServerManager, "is_systemd_available", return_value=True),
+            patch.object(
+                GateServerManager, "uninstall_systemd_units", side_effect=RuntimeError("fs busy")
+            ),
+        ):
+            assert run_gate_uninstall_phase(SandboxConfig(services_mode="socket")) is False
+        out = capsys.readouterr().out
+        assert "FAIL" in out and "uninstall: fs busy" in out
+
+
+class TestClearanceUninstallPhase:
+    """Clearance uninstall: soft-skip without the package, FAIL on teardown errors."""
+
+    def test_clean_teardown_reports_ok(self, capsys: pytest.CaptureFixture[str]) -> None:
+        with (
+            patch("terok_clearance.runtime.installer.uninstall_notifier_service") as un_n,
+            patch("terok_clearance.runtime.installer.uninstall_service") as un_s,
+        ):
+            assert run_clearance_uninstall_phase() is True
+        un_n.assert_called_once()
+        un_s.assert_called_once()
+        assert "removed" in capsys.readouterr().out
+
+    def test_import_error_skips_soft(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """A host without terok_clearance installed skips rather than fails."""
+        with patch.dict("sys.modules", {"terok_clearance.runtime.installer": None}):
+            assert run_clearance_uninstall_phase() is True
+        out = capsys.readouterr().out
+        assert "skip" in out and "terok_clearance not installed" in out
+
+    def test_teardown_exception_reports_fail(self, capsys: pytest.CaptureFixture[str]) -> None:
+        with (
+            patch(
+                "terok_clearance.runtime.installer.uninstall_notifier_service",
+                side_effect=RuntimeError("unit stuck"),
+            ),
+            patch("terok_clearance.runtime.installer.uninstall_service"),
+        ):
+            assert run_clearance_uninstall_phase() is False
+        out = capsys.readouterr().out
+        assert "FAIL" in out and "unit stuck" in out
+
+
+class TestClearanceInstallImportMissing:
+    """Fills the import-missing branch of :func:`run_clearance_install_phase`."""
+
+    def test_import_error_skips_soft(self, capsys: pytest.CaptureFixture[str]) -> None:
+        with patch.dict("sys.modules", {"terok_clearance.runtime.installer": None}):
+            assert run_clearance_install_phase() is True
+        out = capsys.readouterr().out
+        assert "skip" in out and "terok_clearance not installed" in out
