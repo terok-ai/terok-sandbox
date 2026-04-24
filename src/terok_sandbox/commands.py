@@ -120,7 +120,10 @@ def _handle_sandbox_setup(
     Args:
         root: Install shield hooks system-wide (requires sudo); vault
             and gate stay per-user.
-        no_shield / no_vault / no_gate / no_clearance: Skip the named phase.
+        no_shield: Skip the shield install phase.
+        no_vault: Skip the vault install phase.
+        no_gate: Skip the gate install phase.
+        no_clearance: Skip the clearance (hub + verdict + notifier) phase.
         cfg: Optional :class:`SandboxConfig` override.  Defaults to the
             layered config — passed through so terok's config stays
             the single source of truth for paths.

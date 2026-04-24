@@ -33,10 +33,17 @@ _TIMEOUT_SECONDS = 10
 def run(verb: str, *args: str) -> None:
     """Run ``systemctl --user <verb> <args…>``; raise on failure with captured stderr.
 
-    ``subprocess.run(check=True, capture_output=True)`` otherwise
-    swallows stderr inside :class:`subprocess.CalledProcessError` —
-    its ``str()`` only includes the exit status, so failures read as
-    "command returned 1" with no hint of the underlying cause.
+    Every known failure mode is normalised to :class:`SystemExit` with a
+    human-readable message, so the setup aggregator's error row points
+    the operator at the real cause rather than a raw Python traceback:
+
+    * ``CalledProcessError`` — captured stderr is attached (default
+      ``str()`` only includes the exit code).
+    * ``TimeoutExpired`` — include the timeout value and any captured
+      stdout/stderr so ``Failed to connect to bus`` surfaces through
+      even a wedged call.
+    * ``FileNotFoundError`` — name the missing binary rather than leak
+      a ``[Errno 2] No such file or directory: 'systemctl'`` line.
     """
     argv = ["systemctl", "--user", verb, *args]
     try:
@@ -46,6 +53,11 @@ def run(verb: str, *args: str) -> None:
         raise SystemExit(
             f"{' '.join(argv)} failed (exit {exc.returncode}){': ' + stderr if stderr else ''}"
         ) from exc
+    except subprocess.TimeoutExpired as exc:
+        captured = _format_captured(exc.stdout, exc.stderr)
+        raise SystemExit(f"{' '.join(argv)} timed out after {exc.timeout}s{captured}") from exc
+    except FileNotFoundError as exc:
+        raise SystemExit(f"{argv[0]}: command not found on PATH") from exc
 
 
 def run_best_effort(verb: str, *args: str) -> None:
@@ -61,5 +73,24 @@ def run_best_effort(verb: str, *args: str) -> None:
     argv = ["systemctl", "--user", verb, *args]
     try:
         subprocess.run(argv, check=False, capture_output=True, timeout=_TIMEOUT_SECONDS)  # nosec B603
-    except subprocess.TimeoutExpired:
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        # ``FileNotFoundError`` catches the TOCTOU window between the
+        # ``which`` probe above and ``subprocess.run`` — the binary
+        # could theoretically vanish under us on a live pipx upgrade.
         pass
+
+
+def _format_captured(stdout: bytes | str | None, stderr: bytes | str | None) -> str:
+    """Return a ``"; <details>"`` suffix from captured output, or ``""`` if empty."""
+    parts = [_coerce(stream).strip() for stream in (stderr, stdout)]
+    rendered = " ".join(p for p in parts if p)
+    return f"; {rendered}" if rendered else ""
+
+
+def _coerce(stream: bytes | str | None) -> str:
+    """Decode bytes leniently, pass strings through, treat ``None`` as empty."""
+    if stream is None:
+        return ""
+    if isinstance(stream, bytes):
+        return stream.decode("utf-8", errors="replace")
+    return stream
