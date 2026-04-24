@@ -217,6 +217,32 @@ class TestReinstallSystemdService:
         mgr.ensure_reachable.assert_called_once()
         assert "reachable" in capsys.readouterr().out
 
+    def test_stage_begin_fires_before_slow_install(self) -> None:
+        """Progressive output: the label lands BEFORE the slow ``install_systemd_units`` call.
+
+        Regression guard for the original cutover oversight where the
+        public ``stage_begin`` / ``stage_end`` helpers shipped but the
+        aggregator's phase runners kept calling one-shot ``stage()``
+        — the operator saw a frozen terminal during the slow install
+        and the whole line landed at once.
+        """
+        order: list[str] = []
+        mgr = MagicMock()
+        mgr.stop_daemon.side_effect = lambda: order.append("stop")
+        mgr.uninstall_systemd_units.side_effect = lambda: order.append("old_units")
+        mgr.install_systemd_units.side_effect = lambda: order.append("install")
+        mgr.ensure_reachable.side_effect = lambda: order.append("verify")
+        mgr.get_status.return_value = MagicMock(mode="systemd", transport="tcp")
+
+        with patch(
+            "terok_sandbox._setup.stage_begin",
+            side_effect=lambda label: order.append(f"begin:{label}"),
+        ):
+            _reinstall_systemd_service(label="Vault", mgr=mgr)
+
+        assert order[0] == "begin:Vault"
+        assert order.index("begin:Vault") < order.index("install")
+
     def test_install_systemexit_reports_fail(self, capsys: pytest.CaptureFixture[str]) -> None:
         mgr = MagicMock()
         mgr.install_systemd_units.side_effect = SystemExit("no ports")

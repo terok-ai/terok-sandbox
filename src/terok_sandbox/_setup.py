@@ -29,7 +29,7 @@ import contextlib
 import shutil
 from collections.abc import Callable, Iterable
 
-from ._stage import Marker, stage as _stage
+from ._stage import Marker, stage as _stage, stage_begin, stage_end
 from ._util import _systemctl
 from ._util._selinux import (
     SelinuxStatus,
@@ -93,20 +93,21 @@ def run_shield_install_phase(*, root: bool) -> bool:
     """Install shield OCI hooks — per-user or system-wide depending on *root*."""
     from .shield import check_environment, run_setup
 
+    stage_begin("Shield hooks")
     try:
         run_setup(root=root, user=not root)
     except Exception as exc:  # noqa: BLE001 — aggregator reports all failures uniformly
-        _stage("Shield hooks", Marker.FAIL, str(exc))
+        stage_end(Marker.FAIL, str(exc))
         return False
 
     env = check_environment()
     if env.health == "ok":
-        _stage("Shield hooks", Marker.OK, "active")
+        stage_end(Marker.OK, "active")
         return True
     if env.health == "bypass":
-        _stage("Shield hooks", Marker.WARN, "bypass_firewall_no_protection is active")
+        stage_end(Marker.WARN, "bypass_firewall_no_protection is active")
         return True
-    _stage("Shield hooks", Marker.FAIL, f"installed but health: {env.health}")
+    stage_end(Marker.FAIL, f"installed but health: {env.health}")
     return False
 
 
@@ -181,12 +182,13 @@ def run_shield_uninstall_phase(*, root: bool) -> bool:
     from .shield import run_uninstall
 
     scope = "system" if root else "user"
+    stage_begin("Shield hooks")
     try:
         run_uninstall(root=root, user=not root)
     except Exception as exc:  # noqa: BLE001 — aggregator uniform error surface
-        _stage("Shield hooks", Marker.FAIL, str(exc))
+        stage_end(Marker.FAIL, str(exc))
         return False
-    _stage("Shield hooks", Marker.OK, f"removed ({scope})")
+    stage_end(Marker.OK, f"removed ({scope})")
     return True
 
 
@@ -198,15 +200,16 @@ def run_vault_uninstall_phase(cfg: SandboxConfig) -> bool:
     if not mgr.is_systemd_available():
         _stage("Vault", Marker.WARN, "systemd unavailable, skipping")
         return True
+    stage_begin("Vault")
     try:
         mgr.uninstall_systemd_units()
     except SystemExit as exc:
-        _stage("Vault", Marker.FAIL, str(exc))
+        stage_end(Marker.FAIL, str(exc))
         return False
     except Exception as exc:  # noqa: BLE001
-        _stage("Vault", Marker.FAIL, f"uninstall: {exc}")
+        stage_end(Marker.FAIL, f"uninstall: {exc}")
         return False
-    _stage("Vault", Marker.OK, "removed")
+    stage_end(Marker.OK, "removed")
     return True
 
 
@@ -215,18 +218,19 @@ def run_gate_uninstall_phase(cfg: SandboxConfig) -> bool:
     from .gate.lifecycle import GateServerManager
 
     mgr = GateServerManager(cfg)
+    stage_begin("Gate server")
     try:
         if mgr.get_status().mode == "daemon":
             mgr.stop_daemon()
         if mgr.is_systemd_available():
             mgr.uninstall_systemd_units()
     except SystemExit as exc:
-        _stage("Gate server", Marker.FAIL, str(exc))
+        stage_end(Marker.FAIL, str(exc))
         return False
     except Exception as exc:  # noqa: BLE001
-        _stage("Gate server", Marker.FAIL, f"uninstall: {exc}")
+        stage_end(Marker.FAIL, f"uninstall: {exc}")
         return False
-    _stage("Gate server", Marker.OK, "removed")
+    stage_end(Marker.OK, "removed")
     return True
 
 
@@ -245,13 +249,14 @@ def run_clearance_uninstall_phase() -> bool:
     except ImportError:
         _stage("Clearance", Marker.SKIP, "terok_clearance not installed")
         return True
+    stage_begin("Clearance")
     try:
         uninstall_notifier_service()
         uninstall_service()
     except Exception as exc:  # noqa: BLE001
-        _stage("Clearance", Marker.FAIL, str(exc))
+        stage_end(Marker.FAIL, str(exc))
         return False
-    _stage("Clearance", Marker.OK, "removed")
+    stage_end(Marker.OK, "removed")
     return True
 
 
@@ -272,27 +277,29 @@ def _reinstall_systemd_service(
     ``install_systemd_units()`` call (authoritative), and an
     ``ensure_reachable()`` verify (fails with *reachable_exc*).  Shield
     and clearance are different shapes so they stay inline.
+
+    Owns the ``stage_begin`` / ``stage_end`` pair: the cycle is the
+    slowest stage in setup (network round-trips + systemctl restart
+    + reachability probe) and the operator deserves to see *which*
+    label is currently grinding before the marker lands.
     """
+    stage_begin(label)
     _stop_and_uninstall(mgr.stop_daemon, mgr.uninstall_systemd_units)
     try:
         mgr.install_systemd_units()
     except SystemExit as exc:
-        _stage(label, Marker.FAIL, str(exc))
+        stage_end(Marker.FAIL, str(exc))
         return False
     except Exception as exc:  # noqa: BLE001
-        _stage(label, Marker.FAIL, f"install: {exc}")
+        stage_end(Marker.FAIL, f"install: {exc}")
         return False
     try:
         mgr.ensure_reachable()
     except reachable_exc as exc:
-        _stage(label, Marker.FAIL, f"installed but NOT reachable: {exc}")
+        stage_end(Marker.FAIL, f"installed but NOT reachable: {exc}")
         return False
     status = mgr.get_status()
-    _stage(
-        label,
-        Marker.OK,
-        f"{status.mode or 'systemd'}, {status.transport or 'tcp'}, reachable",
-    )
+    stage_end(Marker.OK, f"{status.mode or 'systemd'}, {status.transport or 'tcp'}, reachable")
     return True
 
 
@@ -303,17 +310,21 @@ def _install_clearance_unit_pair(
 
     Batches ``daemon-reload`` once at the top so installing the
     hub/verdict pair doesn't pay three sequential ``daemon-reload``
-    round-trips when it should only need one.
+    round-trips when it should only need one.  Uses the progressive
+    ``stage_begin`` / ``stage_end`` pair: the unit-render +
+    daemon-reload + per-unit enable/restart cycle is slow enough
+    (1-3 s typical) that one-shot output looks frozen.
     """
+    stage_begin(label)
     try:
         install_fn()
         _systemctl.run_best_effort("daemon-reload")
         for unit in units_to_enable:
             _enable_and_restart_user_unit(unit)
     except Exception as exc:  # noqa: BLE001 — aggregator uniform error surface
-        _stage(label, Marker.FAIL, str(exc))
+        stage_end(Marker.FAIL, str(exc))
         return False
-    _stage(label, Marker.OK, "installed + enabled")
+    stage_end(Marker.OK, "installed + enabled")
     return True
 
 
