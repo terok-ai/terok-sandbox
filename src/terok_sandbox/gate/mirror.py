@@ -556,15 +556,21 @@ def _git_env_with_ssh(*, scope: str, use_personal_ssh: bool = False) -> dict:
 
     Three branches:
 
-    - **Vault-only (default).**  When the per-scope vault agent socket
-      exists, point ``SSH_AUTH_SOCK`` at it and set ``GIT_SSH_COMMAND`` to
-      ``ssh -o IdentityFile=none``.  The explicit ``IdentityFile=none``
-      suppresses OpenSSH's default ``~/.ssh/id_*`` list, so the vault's
-      agent is the only identity source — the user's personal keys are
-      never offered.
+    - **Vault-only (default).**  The per-scope vault agent is the sole
+      identity source.  ``GIT_SSH_COMMAND`` pins OpenSSH to the vault
+      socket (``IdentityAgent=<sock>``), ignores the user's
+      ``~/.ssh/config`` (``-F /dev/null``), suppresses default
+      ``~/.ssh/id_*`` (``IdentityFile=none``), and forbids interactive
+      prompts (``BatchMode=yes``).  This combination guarantees the
+      user's personal keys are never offered *and* no passphrase,
+      host-key, or password prompt can ever leak out to the caller's
+      terminal — auth either succeeds from the vault or fails cleanly.
     - **Personal-SSH opt-in.**  ``use_personal_ssh=True`` returns the
       process env unmodified so OpenSSH behaves normally (user's loaded
-      agent, default ``~/.ssh/id_*`` files).
+      agent, ``~/.ssh/config``, default ``~/.ssh/id_*`` files, and any
+      passphrase prompts go through the user's ambient askpass / tty).
+      This branch is *either-or* with the vault — personal opt-in
+      bypasses the vault entirely; it is not additive.
     - **Unconfigured.**  No vault socket and no opt-in — raise
       :class:`GateAuthNotConfigured` so the CLI layer can surface the
       two remediation paths.
@@ -592,8 +598,14 @@ def _git_env_with_ssh(*, scope: str, use_personal_ssh: bool = False) -> dict:
     env["GIT_SSH_COMMAND"] = shlex.join(
         [
             "ssh",
+            "-F",
+            "/dev/null",
+            "-o",
+            f"IdentityAgent={sock}",
             "-o",
             "IdentityFile=none",
+            "-o",
+            "BatchMode=yes",
             "-o",
             "StrictHostKeyChecking=no",
         ]
