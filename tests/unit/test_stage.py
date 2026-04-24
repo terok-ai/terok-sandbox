@@ -14,9 +14,11 @@ from terok_sandbox._stage import (
     STAGE_WIDTH,
     Marker,
     bold,
+    red,
     stage,
     stage_begin,
     stage_end,
+    yellow,
 )
 
 
@@ -117,16 +119,28 @@ class TestStageBeginEnd:
         assert combined == joined
 
 
-class TestBold:
-    """``bold`` wraps text in ANSI bold only when colour is enabled."""
+class TestBannerColour:
+    """``bold`` / ``red`` / ``yellow`` wrap banner text with the same gate as stage markers."""
 
-    def test_passthrough_when_disabled(self, plain: None) -> None:
+    def test_bold_passthrough_when_disabled(self, plain: None) -> None:
         assert bold("Setup complete.") == "Setup complete."
 
-    def test_wraps_in_bold_when_enabled(self, coloured: None) -> None:
+    def test_bold_wraps_when_enabled(self, coloured: None) -> None:
         wrapped = bold("Setup complete.")
         assert wrapped.startswith("\x1b[1m")
         assert wrapped.endswith("\x1b[0m")
+
+    def test_red_passthrough_when_disabled(self, plain: None) -> None:
+        assert red("Setup failed.") == "Setup failed."
+
+    def test_red_wraps_when_enabled(self, coloured: None) -> None:
+        assert red("Setup failed.").startswith("\x1b[31m")
+
+    def test_yellow_passthrough_when_disabled(self, plain: None) -> None:
+        assert yellow("Warning.") == "Warning."
+
+    def test_yellow_wraps_when_enabled(self, coloured: None) -> None:
+        assert yellow("Warning.").startswith("\x1b[33m")
 
 
 def test_stage_width_fits_widest_shipped_label() -> None:

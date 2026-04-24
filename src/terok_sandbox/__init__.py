@@ -28,10 +28,12 @@ from ._stage import (
     STAGE_WIDTH,
     Marker,
     bold,
+    red,
     stage,
     stage_begin,
     stage_end,
     supports_color,
+    yellow,
 )
 from ._util._selinux import (
     SELINUX_SOCKET_TYPE,
@@ -485,10 +487,12 @@ __all__ = [
     "Marker",
     "STAGE_WIDTH",
     "bold",
+    "red",
     "stage",
     "stage_begin",
     "stage_end",
     "supports_color",
+    "yellow",
     # Facade
     "READY_MARKER",
     "LifecycleHooks",

@@ -53,10 +53,10 @@ class Marker(StrEnum):
 # even when colour is on" — ``skip`` is a user-chosen soft state, not
 # a success or failure, so it stays neutral.
 _PALETTE: dict[Marker, str | None] = {
-    Marker.OK: "32",  # green
-    Marker.WARN: "33",  # yellow
-    Marker.FAIL: "31",  # red
-    Marker.MISSING: "31",  # red — a missing binary will fail the install
+    Marker.OK: "32",
+    Marker.WARN: "33",
+    Marker.FAIL: "31",
+    Marker.MISSING: "31",
     Marker.SKIP: None,
 }
 
@@ -107,13 +107,18 @@ def supports_color() -> bool:
 
 
 def bold(text: str) -> str:
-    """Return *text* wrapped in ANSI bold when :func:`supports_color` is true.
-
-    Exposed because frontend callers print titles and closing banners
-    that sit outside the stage-line column — keeping the bold helper
-    here means those callers don't grow a second colour import.
-    """
+    """Return *text* wrapped in ANSI bold when :func:`supports_color` is true."""
     return _color(text, "1")
+
+
+def red(text: str) -> str:
+    """Return *text* wrapped in ANSI red for failure banners when colour is on."""
+    return _color(text, "31")
+
+
+def yellow(text: str) -> str:
+    """Return *text* wrapped in ANSI yellow for warning banners when colour is on."""
+    return _color(text, "33")
 
 
 def _render_marker(marker: Marker) -> str:
@@ -130,7 +135,15 @@ def _color(text: str, code: str | None) -> str:
 
 
 def _detect_colour() -> bool:
-    """Apply the NO_COLOR / FORCE_COLOR / isatty precedence."""
+    """Apply the NO_COLOR / FORCE_COLOR / isatty precedence.
+
+    Intentional copy of ``terok.lib.util.ansi.supports_color`` —
+    sandbox can't import from terok (wrong direction in the dep
+    graph), and extracting a fifth sibling package for eight lines
+    of env-var logic would cost more than the drift risk.  Keep the
+    two implementations byte-identical; if one ever changes, update
+    the other in the same PR.
+    """
     if "NO_COLOR" in os.environ:
         return False
     force = os.environ.get("FORCE_COLOR")
