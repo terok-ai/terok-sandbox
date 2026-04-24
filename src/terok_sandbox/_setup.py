@@ -59,15 +59,6 @@ class Marker(StrEnum):
     SKIP = "skip"
 
 
-# ── Stage-line primitive ──────────────────────────────────────────────
-
-
-def _stage(label: str, marker: Marker, detail: str = "") -> None:
-    """Write one ``'  <label>  <marker> (<detail>)'`` line."""
-    suffix = f" ({detail})" if detail else ""
-    print(f"  {label:<{_STAGE_WIDTH}} {marker}{suffix}")
-
-
 # ── Prereq reporting (host binaries, firewall binaries, SELinux) ─────
 
 
@@ -300,3 +291,12 @@ def _enable_and_restart_user_unit(unit: str) -> None:
         subprocess.run(  # nosec B603
             [systemctl, "--user", verb, unit], check=False, capture_output=True
         )
+
+
+# ── Stage-line primitive ──────────────────────────────────────────────
+
+
+def _stage(label: str, marker: Marker, detail: str = "") -> None:
+    """Write one ``'  <label>  <marker> (<detail>)'`` line."""
+    suffix = f" ({detail})" if detail else ""
+    print(f"  {label:<{_STAGE_WIDTH}} {marker}{suffix}")
