@@ -39,6 +39,55 @@ _SCHEMA_VERSION = 1
 so :func:`migrate_ssh_keys_schema` can route legacy rows forward on first open."""
 
 
+def ensure_credentials_schema(conn: sqlite3.Connection) -> None:
+    """Create the credential / SSH-key / phantom-token tables if missing.
+
+    Idempotent (every statement is ``IF NOT EXISTS``).  Exposed at module
+    level alongside :func:`migrate_ssh_keys_schema` so every opener of
+    the DB file — :class:`CredentialDB` for writers and the vault
+    daemon's read-only ``_TokenDB`` — runs it before issuing queries.
+    Without it, a daemon that opens an empty DB on a fresh install
+    (before any CLI command has touched the file) hits ``no such table:
+    credentials`` on the first query and crashes the unit.
+    """
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS credentials (
+            credential_set TEXT NOT NULL,
+            provider       TEXT NOT NULL,
+            data           TEXT NOT NULL,
+            PRIMARY KEY (credential_set, provider)
+        );
+        CREATE TABLE IF NOT EXISTS ssh_keys (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            key_type     TEXT    NOT NULL CHECK (key_type IN ('ed25519','rsa')),
+            private_der  BLOB    NOT NULL,
+            public_blob  BLOB    NOT NULL,
+            comment      TEXT    NOT NULL DEFAULT '',
+            fingerprint  TEXT    NOT NULL UNIQUE,
+            created_at   TEXT    NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS ssh_key_assignments (
+            scope        TEXT    NOT NULL,
+            key_id       INTEGER NOT NULL REFERENCES ssh_keys(id) ON DELETE CASCADE,
+            assigned_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (scope, key_id)
+        );
+        CREATE TABLE IF NOT EXISTS ssh_keys_version (
+            id      INTEGER PRIMARY KEY CHECK (id = 0),
+            version INTEGER NOT NULL
+        );
+        INSERT OR IGNORE INTO ssh_keys_version (id, version) VALUES (0, 0);
+        CREATE TABLE IF NOT EXISTS proxy_tokens (
+            token          TEXT PRIMARY KEY,
+            scope          TEXT NOT NULL,
+            task           TEXT NOT NULL,
+            credential_set TEXT NOT NULL,
+            provider       TEXT NOT NULL
+        );
+    """)
+    conn.commit()
+
+
 def migrate_ssh_keys_schema(conn: sqlite3.Connection) -> None:
     """Migrate legacy ``ssh_keys`` rows forward to the current schema.
 
@@ -175,49 +224,7 @@ class CredentialDB:
         self._conn = sqlite3.connect(str(db_path), isolation_level="DEFERRED")
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
-        self._create_tables()
-        self._migrate_schema()
-
-    def _create_tables(self) -> None:
-        """Ensure all tables exist (idempotent)."""
-        self._conn.executescript("""
-            CREATE TABLE IF NOT EXISTS credentials (
-                credential_set TEXT NOT NULL,
-                provider       TEXT NOT NULL,
-                data           TEXT NOT NULL,
-                PRIMARY KEY (credential_set, provider)
-            );
-            CREATE TABLE IF NOT EXISTS ssh_keys (
-                id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                key_type     TEXT    NOT NULL CHECK (key_type IN ('ed25519','rsa')),
-                private_der  BLOB    NOT NULL,
-                public_blob  BLOB    NOT NULL,
-                comment      TEXT    NOT NULL DEFAULT '',
-                fingerprint  TEXT    NOT NULL UNIQUE,
-                created_at   TEXT    NOT NULL DEFAULT (datetime('now'))
-            );
-            CREATE TABLE IF NOT EXISTS ssh_key_assignments (
-                scope        TEXT    NOT NULL,
-                key_id       INTEGER NOT NULL REFERENCES ssh_keys(id) ON DELETE CASCADE,
-                assigned_at  TEXT    NOT NULL DEFAULT (datetime('now')),
-                PRIMARY KEY (scope, key_id)
-            );
-            CREATE TABLE IF NOT EXISTS ssh_keys_version (
-                id      INTEGER PRIMARY KEY CHECK (id = 0),
-                version INTEGER NOT NULL
-            );
-            INSERT OR IGNORE INTO ssh_keys_version (id, version) VALUES (0, 0);
-            CREATE TABLE IF NOT EXISTS proxy_tokens (
-                token          TEXT PRIMARY KEY,
-                scope          TEXT NOT NULL,
-                task           TEXT NOT NULL,
-                credential_set TEXT NOT NULL,
-                provider       TEXT NOT NULL
-            );
-        """)
-
-    def _migrate_schema(self) -> None:
-        """Apply any pending SSH-key schema migrations (delegates to module helper)."""
+        ensure_credentials_schema(self._conn)
         migrate_ssh_keys_schema(self._conn)
 
     # ── Provider credentials ────────────────────────────────────────────

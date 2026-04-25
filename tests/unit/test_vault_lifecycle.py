@@ -509,6 +509,65 @@ class TestEnsureVaultReachable:
         ):
             mgr.ensure_reachable()
 
+    def test_socket_mode_passes_when_unix_sockets_reachable(self, tmp_path: Path) -> None:
+        """Socket transport: success path probes both Unix sockets, never TCP."""
+        mgr = VaultManager(_make_cfg(tmp_path, services_mode="socket"))
+        with (
+            patch.object(VaultManager, "is_socket_active", return_value=True),
+            patch.object(VaultManager, "_installed_transport", return_value="socket"),
+            patch(f"{_LIFECYCLE}.subprocess"),
+            patch.object(VaultManager, "_wait_for_unix_socket", return_value=True) as wait_unix,
+            patch.object(VaultManager, "_wait_for_ready") as wait_tcp,
+        ):
+            mgr.ensure_reachable()  # should not raise
+        # Both broker + signer sockets probed; TCP probe never invoked.
+        assert wait_unix.call_count == 2
+        wait_tcp.assert_not_called()
+
+    def test_socket_mode_error_names_socket_not_tcp(self, tmp_path: Path) -> None:
+        """Socket transport: the broker-socket failure error references the socket path.
+
+        Regression: a TCP fallback that ran in socket mode rendered
+        ``port=None`` into the error string ("token-broker TCP port None
+        is not reachable"), masking the real cause (typically a crashed
+        daemon).  The corrected path emits a socket-path error and a
+        journalctl hint instead.
+        """
+        cfg = _make_cfg(tmp_path, services_mode="socket")
+        mgr = VaultManager(cfg)
+        with (
+            patch.object(VaultManager, "is_socket_active", return_value=True),
+            patch.object(VaultManager, "_installed_transport", return_value="socket"),
+            patch(f"{_LIFECYCLE}.subprocess"),
+            patch.object(VaultManager, "_wait_for_unix_socket", return_value=False),
+            patch.object(VaultManager, "_wait_for_ready") as wait_tcp,
+            pytest.raises(SystemExit) as exc,
+        ):
+            mgr.ensure_reachable()
+        message = str(exc.value)
+        assert "Unix socket" in message
+        assert str(cfg.vault_socket_path) in message
+        assert "TCP" not in message
+        assert "None" not in message
+        wait_tcp.assert_not_called()
+
+    def test_socket_mode_error_names_signer_socket(self, tmp_path: Path) -> None:
+        """Socket transport: signer-socket failure references the signer path."""
+        cfg = _make_cfg(tmp_path, services_mode="socket")
+        mgr = VaultManager(cfg)
+        # Broker socket up, signer socket down — second probe call must miss.
+        with (
+            patch.object(VaultManager, "is_socket_active", return_value=True),
+            patch.object(VaultManager, "_installed_transport", return_value="socket"),
+            patch(f"{_LIFECYCLE}.subprocess"),
+            patch.object(VaultManager, "_wait_for_unix_socket", side_effect=[True, False]),
+            pytest.raises(SystemExit) as exc,
+        ):
+            mgr.ensure_reachable()
+        message = str(exc.value)
+        assert "SSH signer socket" in message
+        assert str(cfg.ssh_signer_socket_path) in message
+
 
 class TestSystemdHelpers:
     """Verify systemd detection and socket status helpers."""

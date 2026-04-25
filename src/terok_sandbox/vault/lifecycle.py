@@ -147,12 +147,12 @@ class VaultManager:
     # -- Public API ----------------------------------------------------------
 
     def ensure_reachable(self) -> None:
-        """Verify the vault is running and its TCP ports are up.
+        """Verify the vault is running and its listeners are up.
 
         For **systemd** socket activation the service may not have started yet
         (e.g. after a fresh boot).  This function triggers a start via
-        ``systemctl --user start`` and waits for the HTTP and SSH signer TCP
-        ports to become reachable via ``/-/health`` and raw TCP probes.
+        ``systemctl --user start`` and then probes the configured transport
+        — Unix socket in socket mode, ``/-/health`` + raw TCP in TCP mode.
 
         Raises :class:`VaultUnreachableError` if the vault is unreachable.
         Called before task creation when vault is enabled.
@@ -175,18 +175,35 @@ class VaultManager:
                 timeout=10,
             )
 
-        # Prefer Unix socket probe (works in both transport modes — the
-        # vault binds vault.sock regardless of whether TCP ports are bound).
-        if self._wait_for_unix_socket(self._cfg.vault_socket_path):
+        # Probe the actually-configured transport — falling back to TCP in
+        # socket mode would hit ``port=None`` and emit the famously confusing
+        # "TCP port None is not reachable" message that hides the real
+        # underlying issue (typically a crashed daemon visible in the unit
+        # journal).
+        if self._installed_transport() == "socket":
+            if not self._wait_for_unix_socket(self._cfg.vault_socket_path):
+                raise SystemExit(
+                    f"Vault service started but Unix socket "
+                    f"{self._cfg.vault_socket_path} is not reachable.\n"
+                    f"Check ``journalctl --user -u {_SOCKET_MODE_SERVICE}`` for the cause."
+                )
+            if not self._wait_for_unix_socket(self._cfg.ssh_signer_socket_path):
+                raise SystemExit(
+                    f"Vault service started but SSH signer socket "
+                    f"{self._cfg.ssh_signer_socket_path} is not reachable.\n"
+                    f"Check ``journalctl --user -u {_SOCKET_MODE_SERVICE}`` for the cause."
+                )
             return
 
-        # Fallback: TCP health probe + SSH signer port (TCP mode only).
+        # TCP transport: the broker also binds vault.sock so try the cheap
+        # Unix probe first; only fall back to TCP probes when it misses.
+        if self._wait_for_unix_socket(self._cfg.vault_socket_path):
+            return
         if not self._wait_for_ready(self._cfg.token_broker_port):
             raise SystemExit(
                 f"Vault service started but token-broker TCP port "
                 f"{self._cfg.token_broker_port} is not reachable."
             )
-
         if not self._wait_for_tcp_port(self._cfg.ssh_signer_port):
             raise SystemExit(
                 f"Vault service started but SSH signer TCP port "

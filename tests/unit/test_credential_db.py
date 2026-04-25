@@ -260,3 +260,53 @@ class TestSchemaMigration:
             assert len(record.private_der) > 0
         finally:
             token_db.close()
+
+    def test_token_db_bootstraps_schema_on_empty_db(self, tmp_path: Path) -> None:
+        """Fresh-install path: ``_TokenDB`` opens an untouched DB without crashing.
+
+        On a clean host the vault daemon is the *first* thing to open
+        ``credentials.db`` — no CLI ``terok auth`` has run yet, so the
+        file either does not exist or exists as an empty sqlite3 image
+        with no tables.  Without schema bootstrap, the OAuth refresh
+        loop's ``SELECT ... FROM credentials`` and the SSH reconciler's
+        ``SELECT ... FROM ssh_keys_version`` both raise
+        ``OperationalError: no such table`` and the systemd unit dies
+        on startup.
+        """
+        from terok_sandbox.vault.token_broker import _TokenDB
+
+        db_path = tmp_path / "fresh.db"
+        # Path doesn't exist yet — sqlite3.connect() creates an empty file.
+        token_db = _TokenDB(str(db_path))
+        try:
+            assert token_db.list_refreshable() == []
+            assert token_db.ssh_keys_version() == 0
+            assert token_db.load_ssh_keys_for_scope("any") == []
+            assert token_db.lookup_token("nonexistent") is None
+        finally:
+            token_db.close()
+
+    def test_ensure_credentials_schema_is_idempotent(self, tmp_path: Path) -> None:
+        """Calling the bootstrap helper twice on the same connection is harmless."""
+        import sqlite3
+
+        from terok_sandbox.credentials.db import ensure_credentials_schema
+
+        conn = sqlite3.connect(str(tmp_path / "twice.db"))
+        try:
+            ensure_credentials_schema(conn)
+            ensure_credentials_schema(conn)
+            tables = {
+                r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
+            assert {
+                "credentials",
+                "ssh_keys",
+                "ssh_key_assignments",
+                "ssh_keys_version",
+                "proxy_tokens",
+            } <= tables
+            (version,) = conn.execute("SELECT version FROM ssh_keys_version WHERE id=0").fetchone()
+            assert version == 0
+        finally:
+            conn.close()
