@@ -94,6 +94,18 @@ class TestRouteTable:
         """Unknown provider returns None."""
         assert routes.get("nonexistent") is None
 
+    def test_rejects_invalid_path_upstreams(self, tmp_path: Path) -> None:
+        """Path-prefix upstream overrides must be a ``/``-prefixed mapping."""
+        routes_file = tmp_path / "bad-routes.json"
+        routes_file.write_text(
+            json.dumps(
+                {"codex": {"upstream": "https://api.openai.com", "path_upstreams": {"x": ""}}}
+            )
+        )
+
+        with pytest.raises(ValueError, match="path_upstreams"):
+            _RouteTable(str(routes_file))
+
 
 # ── Token extraction ─────────────────────────────────────────────────────
 
@@ -316,16 +328,24 @@ class TestHandlerEdgeCases:
 
 @pytest.fixture()
 def _static_marker_env(tmp_path: Path):
-    """Set up DB with Claude OAuth credential and routes for static marker tests."""
+    """Set up DB with shared OAuth credentials and routes for static marker tests."""
     db = CredentialDB(tmp_path / "test.db")
     db.store_credential(
         "default", "claude", {"type": "oauth", "access_token": "sk-real-oauth-static"}
+    )
+    db.store_credential(
+        "default", "codex", {"type": "oauth", "access_token": "sk-real-codex-static"}
     )
     db.close()
 
     routes = tmp_path / "routes.json"
     routes.write_text(
-        json.dumps({"claude": {"upstream": "http://127.0.0.1:1", "auth_header": "dynamic"}})
+        json.dumps(
+            {
+                "claude": {"upstream": "http://127.0.0.1:1", "auth_header": "dynamic"},
+                "codex": {"upstream": "http://127.0.0.1:1", "auth_header": "Authorization"},
+            }
+        )
     )
     return _build_app(str(tmp_path / "test.db"), str(routes))
 
@@ -347,6 +367,20 @@ class TestStaticPhantomMarker:
                 headers={"Authorization": f"Bearer {PHANTOM_CREDENTIALS_MARKER}"},
             )
             # 502 = upstream unreachable, which means auth succeeded and routing worked
+            assert resp.status == 502
+
+    async def test_codex_static_marker_routes_to_codex(self, _static_marker_env) -> None:
+        """Codex shared auth.json marker resolves to the Codex credential."""
+        from aiohttp.test_utils import TestClient, TestServer
+
+        from terok_sandbox.vault.constants import CODEX_SHARED_OAUTH_MARKER
+
+        app = _static_marker_env
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get(
+                "/v1/responses",
+                headers={"Authorization": f"Bearer {CODEX_SHARED_OAUTH_MARKER}"},
+            )
             assert resp.status == 502
 
     async def test_static_marker_rejected_without_claude_credential(self, tmp_path: Path) -> None:
@@ -524,6 +558,116 @@ class TestForwardingPath:
             body = await resp.json()
             assert body["private_token"] == "glpat-real"
             assert body["path"] == "/api/v4/projects"
+
+        await upstream_server.close()
+
+    async def test_path_upstreams_route_backend_api_to_chatgpt(self, tmp_path: Path) -> None:
+        """Codex ``/backend-api`` traffic can target a distinct upstream host."""
+        from aiohttp import web as _web
+        from aiohttp.test_utils import TestClient, TestServer
+
+        async def _api_echo(request: _web.Request) -> _web.Response:
+            return _web.json_response({"service": "api", "path": request.path})
+
+        async def _chatgpt_echo(request: _web.Request) -> _web.Response:
+            return _web.json_response({"service": "chatgpt", "path": request.path})
+
+        api_app = _web.Application()
+        api_app.router.add_route("*", "/{tail:.*}", _api_echo)
+        chatgpt_app = _web.Application()
+        chatgpt_app.router.add_route("*", "/{tail:.*}", _chatgpt_echo)
+
+        api_server = TestServer(api_app)
+        chatgpt_server = TestServer(chatgpt_app)
+        await api_server.start_server()
+        await chatgpt_server.start_server()
+
+        db = CredentialDB(tmp_path / "test.db")
+        db.store_credential("default", "codex", {"type": "oauth", "access_token": "sk-real-codex"})
+        codex_token = db.create_token("proj", "t1", "default", "codex")
+        db.close()
+
+        routes = tmp_path / "routes.json"
+        routes.write_text(
+            json.dumps(
+                {
+                    "codex": {
+                        "upstream": f"http://127.0.0.1:{api_server.port}",
+                        "path_upstreams": {
+                            "/backend-api/": f"http://127.0.0.1:{chatgpt_server.port}"
+                        },
+                    }
+                }
+            )
+        )
+
+        broker_app = _build_app(str(tmp_path / "test.db"), str(routes))
+        async with TestClient(TestServer(broker_app)) as client:
+            api_resp = await client.get(
+                "/v1/responses",
+                headers={"Authorization": f"Bearer {codex_token}"},
+            )
+            backend_resp = await client.get(
+                "/backend-api/me",
+                headers={"Authorization": f"Bearer {codex_token}"},
+            )
+            assert api_resp.status == 200
+            assert backend_resp.status == 200
+            assert (await api_resp.json())["service"] == "api"
+            assert (await backend_resp.json())["service"] == "chatgpt"
+
+        await api_server.close()
+        await chatgpt_server.close()
+
+    async def test_websocket_proxy_injects_real_bearer(self, tmp_path: Path) -> None:
+        """Realtime websocket traffic proxies through the broker with real auth."""
+        from aiohttp import web as _web
+        from aiohttp.test_utils import TestClient, TestServer
+
+        async def _ws_echo(request: _web.Request) -> _web.WebSocketResponse:
+            ws = _web.WebSocketResponse()
+            await ws.prepare(request)
+            await ws.send_json(
+                {
+                    "auth": request.headers.get("Authorization", ""),
+                    "path": request.path,
+                }
+            )
+            msg = await ws.receive()
+            await ws.send_str(f"echo:{msg.data}")
+            await ws.close()
+            return ws
+
+        upstream_app = _web.Application()
+        upstream_app.router.add_route("*", "/{tail:.*}", _ws_echo)
+        upstream_server = TestServer(upstream_app)
+        await upstream_server.start_server()
+
+        db = CredentialDB(tmp_path / "test.db")
+        db.store_credential(
+            "default",
+            "codex",
+            {"type": "oauth", "access_token": "sk-real-codex-ws"},
+        )
+        codex_token = db.create_token("proj", "t1", "default", "codex")
+        db.close()
+
+        routes = tmp_path / "routes.json"
+        routes.write_text(
+            json.dumps({"codex": {"upstream": f"http://127.0.0.1:{upstream_server.port}"}})
+        )
+
+        broker_app = _build_app(str(tmp_path / "test.db"), str(routes))
+        async with TestClient(TestServer(broker_app)) as client:
+            async with client.ws_connect(
+                "/v1/realtime",
+                headers={"Authorization": f"Bearer {codex_token}"},
+            ) as ws:
+                first = await ws.receive_json()
+                assert first["auth"] == "Bearer sk-real-codex-ws"
+                assert first["path"] == "/v1/realtime"
+                await ws.send_str("hello")
+                assert await ws.receive_str() == "echo:hello"
 
         await upstream_server.close()
 
