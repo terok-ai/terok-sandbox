@@ -179,8 +179,12 @@ class VaultManager:
         # socket mode would hit ``port=None`` and emit the famously confusing
         # "TCP port None is not reachable" message that hides the real
         # underlying issue (typically a crashed daemon visible in the unit
-        # journal).
-        if self._installed_transport() == "socket":
+        # journal).  Gates on ``services_mode`` (the SSOT on
+        # ``SandboxConfig``) rather than the filesystem-derived
+        # ``_installed_transport()`` so the manual-daemon path (no
+        # systemd units installed) also takes the socket branch when
+        # configured for it.
+        if self._cfg.services_mode == "socket":
             if not self._wait_for_unix_socket(self._cfg.vault_socket_path):
                 raise SystemExit(
                     f"Vault service started but Unix socket "

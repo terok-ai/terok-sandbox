@@ -514,7 +514,6 @@ class TestEnsureVaultReachable:
         mgr = VaultManager(_make_cfg(tmp_path, services_mode="socket"))
         with (
             patch.object(VaultManager, "is_socket_active", return_value=True),
-            patch.object(VaultManager, "_installed_transport", return_value="socket"),
             patch(f"{_LIFECYCLE}.subprocess"),
             patch.object(VaultManager, "_wait_for_unix_socket", return_value=True) as wait_unix,
             patch.object(VaultManager, "_wait_for_ready") as wait_tcp,
@@ -537,7 +536,6 @@ class TestEnsureVaultReachable:
         mgr = VaultManager(cfg)
         with (
             patch.object(VaultManager, "is_socket_active", return_value=True),
-            patch.object(VaultManager, "_installed_transport", return_value="socket"),
             patch(f"{_LIFECYCLE}.subprocess"),
             patch.object(VaultManager, "_wait_for_unix_socket", return_value=False),
             patch.object(VaultManager, "_wait_for_ready") as wait_tcp,
@@ -558,7 +556,6 @@ class TestEnsureVaultReachable:
         # Broker socket up, signer socket down — second probe call must miss.
         with (
             patch.object(VaultManager, "is_socket_active", return_value=True),
-            patch.object(VaultManager, "_installed_transport", return_value="socket"),
             patch(f"{_LIFECYCLE}.subprocess"),
             patch.object(VaultManager, "_wait_for_unix_socket", side_effect=[True, False]),
             pytest.raises(SystemExit) as exc,
@@ -567,6 +564,33 @@ class TestEnsureVaultReachable:
         message = str(exc.value)
         assert "SSH signer socket" in message
         assert str(cfg.ssh_signer_socket_path) in message
+
+    def test_socket_mode_daemon_only_takes_socket_branch(self, tmp_path: Path) -> None:
+        """Manual daemon, no systemd units → still socket-mode probes when configured.
+
+        ``_installed_transport()`` returns ``None`` when no systemd unit
+        files are on disk, so a transport-by-disk check would fall through
+        to TCP probes in this path and re-raise the misleading
+        "TCP port None is not reachable" error from #218.  Gating on
+        ``services_mode`` (the ``SandboxConfig`` SSOT) keeps the manual
+        daemon happy too.
+        """
+        cfg = _make_cfg(tmp_path, services_mode="socket")
+        mgr = VaultManager(cfg)
+        with (
+            patch.object(VaultManager, "is_socket_active", return_value=False),
+            patch.object(VaultManager, "is_daemon_running", return_value=True),
+            patch.object(VaultManager, "_installed_transport", return_value=None),
+            patch.object(VaultManager, "_wait_for_unix_socket", return_value=False),
+            patch.object(VaultManager, "_wait_for_ready") as wait_tcp,
+            pytest.raises(SystemExit) as exc,
+        ):
+            mgr.ensure_reachable()
+        message = str(exc.value)
+        assert "Unix socket" in message
+        assert "TCP" not in message
+        assert "None" not in message
+        wait_tcp.assert_not_called()
 
 
 class TestSystemdHelpers:
