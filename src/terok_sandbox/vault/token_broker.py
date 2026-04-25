@@ -88,11 +88,13 @@ class _TokenDB:
         # aiohttp runs handlers in a single event loop thread.
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
-        # Run schema migrations here too so the vault daemon can't race a
-        # post-upgrade open ahead of any CredentialDB-using CLI command and
-        # then crash on "no such column: private_der" against a v0 DB.
-        from ..credentials.db import migrate_ssh_keys_schema
+        # Bootstrap + migrate schema here too so the vault daemon can open
+        # an empty DB on a fresh install (no CLI write has touched the file
+        # yet) and a post-upgrade DB (v0 columns) without crashing on the
+        # first query.  Both helpers are idempotent.
+        from ..credentials.db import ensure_credentials_schema, migrate_ssh_keys_schema
 
+        ensure_credentials_schema(self._conn)
         migrate_ssh_keys_schema(self._conn)
 
     def lookup_token(self, token: str) -> dict | None:
