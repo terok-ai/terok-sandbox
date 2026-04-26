@@ -130,6 +130,29 @@ class TestPumpStreamHelper:
         # Should not raise — the pump logs and returns.
         _pump_stream(src, dst, label="t-closed")
 
+    def test_stdin_pump_closes_dst_on_eof(self) -> None:
+        """The stdin→child pump closes ``dst`` on EOF so the child sees EOF.
+
+        Without this, an ACP wrapper that exits on stdin EOF would
+        deadlock until ``_close_proc_streams`` runs after
+        ``proc.wait``, defeating the whole point of bidirectional
+        streaming.  The pump distinguishes itself by the
+        ``stdin→child`` label.
+        """
+        from terok_sandbox.runtime.podman import _STDIN_PUMP_LABEL
+
+        src = io.BytesIO(b"abc")
+        dst = io.BytesIO()
+        _pump_stream(src, dst, label=_STDIN_PUMP_LABEL)
+        assert dst.closed, "stdin pump must close dst on EOF"
+
+    def test_other_pumps_leave_dst_open(self) -> None:
+        """Non-stdin pumps leave ``dst`` open — the caller may still want to write."""
+        src = io.BytesIO(b"abc")
+        dst = io.BytesIO()
+        _pump_stream(src, dst, label="child→stdout")
+        assert not dst.closed
+
     def test_concurrent_pumps_finish(self) -> None:
         """Two pumps in threads each finish independently."""
         src1 = io.BytesIO(b"x" * 100)

@@ -997,12 +997,22 @@ class PodmanRuntime:
 _STDIO_PUMP_CHUNK = 64 * 1024
 
 
+_STDIN_PUMP_LABEL = "stdin→child"
+
+
 def _pump_stream(src: BinaryIO, dst: BinaryIO, *, label: str) -> None:
     """Copy *src* → *dst* in chunks until EOF or write error.
 
     Both ends are byte-oriented file objects.  Errors are logged and
     silently end the pump — the partner pump (or the child's exit) is
     expected to terminate the overall call.
+
+    For the *stdin→child* pump specifically, ``dst`` is the host-side
+    write-end of the child's stdin pipe.  When the source reaches EOF
+    we close ``dst`` so the child sees EOF on its stdin promptly,
+    rather than waiting for ``_close_proc_streams`` to run after
+    ``proc.wait()`` (which would deadlock any child that exits on
+    stdin EOF — most ACP wrappers do).
     """
     try:
         while True:
@@ -1016,9 +1026,11 @@ def _pump_stream(src: BinaryIO, dst: BinaryIO, *, label: str) -> None:
     except Exception as exc:  # noqa: BLE001
         log_warning(f"exec_stdio pump {label} unexpected error: {exc}")
     finally:
-        # Closing the destination signals EOF to whatever reads from it.
         with contextlib.suppress(OSError, ValueError):
             dst.flush()
+        if label == _STDIN_PUMP_LABEL:
+            with contextlib.suppress(OSError, ValueError):
+                dst.close()
 
 
 def _start_stdio_pumps(
@@ -1039,7 +1051,7 @@ def _start_stdio_pumps(
             threading.Thread(
                 target=_pump_stream,
                 args=(stdin, proc.stdin),
-                kwargs={"label": "stdin→child"},
+                kwargs={"label": _STDIN_PUMP_LABEL},
                 daemon=True,
             )
         )
