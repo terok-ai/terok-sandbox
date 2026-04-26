@@ -20,6 +20,8 @@ from terok_sandbox.vault.token_broker import (
     _KEY_CLIENT,
     _KEY_ROUTES,
     _KEY_TOKEN_DB,
+    _WEBSOCKET_INTERNAL_ERROR,
+    _WEBSOCKET_MAX_MSG_SIZE,
     _build_app,
     _build_upstream_url,
     _do_oauth_refresh,
@@ -570,6 +572,42 @@ class TestForwardingPath:
 
         await upstream_server.close()
 
+    async def test_oauth_extra_header_dedupes_by_exact_token(self, _forwarding_env) -> None:
+        """Route OAuth headers append exact missing values, not substrings."""
+        from aiohttp.test_utils import TestClient, TestServer
+
+        upstream_app, tmp_path, tokens = _forwarding_env
+        upstream_server = TestServer(upstream_app)
+        await upstream_server.start_server()
+
+        routes = tmp_path / "routes.json"
+        routes.write_text(
+            json.dumps(
+                {
+                    "claude": {
+                        "upstream": f"http://127.0.0.1:{upstream_server.port}",
+                        "oauth_extra_headers": {"anthropic-beta": "oauth-2025-04-20"},
+                    },
+                }
+            )
+        )
+
+        broker_app = _build_app(str(tmp_path / "test.db"), str(routes))
+        async with TestClient(TestServer(broker_app)) as client:
+            resp = await client.post(
+                "/v1/messages",
+                headers={
+                    "Authorization": f"Bearer {tokens['claude']}",
+                    "anthropic-beta": "oauth-2025-04-20-preview",
+                },
+                json={"model": "test"},
+            )
+            assert resp.status == 200
+            body = await resp.json()
+            assert body["beta"] == "oauth-2025-04-20-preview,oauth-2025-04-20"
+
+        await upstream_server.close()
+
     async def test_codex_oauth_does_not_inherit_anthropic_beta(self, _forwarding_env) -> None:
         """OAuth extra headers are route-scoped; Codex does not get Claude's beta header."""
         from aiohttp.test_utils import TestClient, TestServer
@@ -843,14 +881,18 @@ class TestWebsocketProxy:
             self,
             messages: list[SimpleNamespace],
             *,
+            close_code: int | None = 1001,
+            fail_send_str: bool = False,
             protocol: str | None = None,
             wait_forever: bool = False,
         ) -> None:
             self._messages = messages
             self._wait_forever = wait_forever
             self.protocol = protocol
-            self.close_code = 1001
+            self.close_code = close_code
             self.closed = False
+            self.fail_send_str = fail_send_str
+            self.prepared = False
             self.sent: list[tuple[str, object]] = []
 
         def __aiter__(self):
@@ -864,9 +906,11 @@ class TestWebsocketProxy:
             raise StopAsyncIteration
 
         async def prepare(self, _request: object) -> None:
-            return None
+            self.prepared = True
 
         async def send_str(self, data: str) -> None:
+            if self.fail_send_str:
+                raise RuntimeError("send failed")
             self.sent.append(("text", data))
 
         async def send_bytes(self, data: bytes) -> None:
@@ -911,14 +955,17 @@ class TestWebsocketProxy:
             ]
         )
         upstream_ws = self._FakeWebSocket([], protocol="realtime", wait_forever=True)
+        ws_connect_kwargs: dict[str, object] = {}
+        response_kwargs: dict[str, object] = {}
 
         class _Session:
-            def ws_connect(self, *_args: object, **_kwargs: object):
+            def ws_connect(self, *_args: object, **kwargs: object):
+                ws_connect_kwargs.update(kwargs)
                 return TestWebsocketProxy._WebSocketContext(upstream_ws)
 
         monkeypatch.setattr(
             "terok_sandbox.vault.token_broker.web.WebSocketResponse",
-            lambda **_kwargs: client_ws,
+            lambda **kwargs: response_kwargs.update(kwargs) or client_ws,
         )
 
         response = await _proxy_websocket(
@@ -930,6 +977,8 @@ class TestWebsocketProxy:
         )
 
         assert response is client_ws
+        assert ws_connect_kwargs["max_msg_size"] == _WEBSOCKET_MAX_MSG_SIZE
+        assert response_kwargs["max_msg_size"] == _WEBSOCKET_MAX_MSG_SIZE
         assert upstream_ws.sent == [
             ("text", "hello"),
             ("bytes", b"\x01"),
@@ -1002,6 +1051,35 @@ class TestWebsocketProxy:
 
         assert response.status == 502
         assert response.text == "Upstream websocket failed"
+
+    async def test_post_upgrade_failure_closes_websocket(self, monkeypatch) -> None:
+        """Once upgraded, errors close the websocket instead of returning HTTP."""
+        client_ws = self._FakeWebSocket([], fail_send_str=True, wait_forever=True)
+        upstream_ws = self._FakeWebSocket(
+            [self._msg(WSMsgType.TEXT, "boom")],
+            close_code=None,
+            protocol="realtime",
+        )
+
+        class _Session:
+            def ws_connect(self, *_args: object, **_kwargs: object):
+                return TestWebsocketProxy._WebSocketContext(upstream_ws)
+
+        monkeypatch.setattr(
+            "terok_sandbox.vault.token_broker.web.WebSocketResponse",
+            lambda **_kwargs: client_ws,
+        )
+
+        response = await _proxy_websocket(
+            SimpleNamespace(headers=CIMultiDict()),
+            session=_Session(),
+            upstream_url="ws://upstream.example/realtime",
+            headers={},
+            provider="codex",
+        )
+
+        assert response is client_ws
+        assert client_ws.sent == [("close", _WEBSOCKET_INTERNAL_ERROR)]
 
 
 # ── TokenDB refresh methods ──────────────────────────────────────────────

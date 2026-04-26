@@ -61,6 +61,8 @@ _KEY_REFRESH_TASK = web.AppKey("refresh_task", object)  # asyncio.Task
 _REFRESH_INTERVAL = 300  # seconds between background refresh checks
 _IDEMPOTENT_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 _REFRESH_BUFFER = 600  # refresh this many seconds before expiry
+_WEBSOCKET_MAX_MSG_SIZE = 16 * 1024 * 1024
+_WEBSOCKET_INTERNAL_ERROR = 1011
 
 # ---------------------------------------------------------------------------
 # Route + credential loading (inlined, no terok imports)
@@ -308,6 +310,7 @@ async def _proxy_websocket(
 ) -> web.StreamResponse:
     """Bridge a client websocket to the upstream websocket with auth injection."""
     protocols = _requested_websocket_protocols(request)
+    client_ws: web.WebSocketResponse | None = None
     try:
         async with session.ws_connect(
             upstream_url,
@@ -316,14 +319,14 @@ async def _proxy_websocket(
             autoping=False,
             autoclose=False,
             heartbeat=30,
-            max_msg_size=0,
+            max_msg_size=_WEBSOCKET_MAX_MSG_SIZE,
         ) as upstream_ws:
             response_protocols = [upstream_ws.protocol] if upstream_ws.protocol else []
             client_ws = web.WebSocketResponse(
                 protocols=response_protocols,
                 autoping=False,
                 autoclose=False,
-                max_msg_size=0,
+                max_msg_size=_WEBSOCKET_MAX_MSG_SIZE,
             )
             await client_ws.prepare(request)
 
@@ -370,6 +373,10 @@ async def _proxy_websocket(
             return client_ws
     except Exception as exc:
         _logger.error("Upstream websocket to %s failed: %s", provider, exc)
+        if client_ws is not None and client_ws.prepared:
+            if not client_ws.closed:
+                await client_ws.close(code=_WEBSOCKET_INTERNAL_ERROR)
+            return client_ws
         return web.Response(status=502, text="Upstream websocket failed")
 
 
@@ -455,9 +462,11 @@ async def _handle_request(request: web.Request) -> web.StreamResponse:
     headers[auth_header] = f"{auth_prefix}{real_token}"
     if is_oauth:
         for header, value in (route.get("oauth_extra_headers") or {}).items():
-            existing = headers.get(header, "")
-            if value not in existing:
-                headers[header] = f"{existing},{value}".lstrip(",")
+            existing_values = [
+                part.strip() for part in headers.get(header, "").split(",") if part.strip()
+            ]
+            if value not in existing_values:
+                headers[header] = ",".join([*existing_values, value])
 
     session: ClientSession = request.app[_KEY_CLIENT]
     if request.headers.get("Upgrade", "").lower() == "websocket":
