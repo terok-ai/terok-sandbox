@@ -5,12 +5,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from aiohttp import web
+from aiohttp import WSMsgType, web
+from multidict import CIMultiDict
 
 from terok_sandbox.credentials.db import CredentialDB
 from terok_sandbox.vault.token_broker import (
@@ -18,9 +21,13 @@ from terok_sandbox.vault.token_broker import (
     _KEY_ROUTES,
     _KEY_TOKEN_DB,
     _build_app,
+    _build_upstream_url,
     _do_oauth_refresh,
     _extract_phantom_token,
+    _path_matches_prefix,
+    _proxy_websocket,
     _refresh_all,
+    _requested_websocket_protocols,
     _RouteTable,
     _run_multi,
     _TokenDB,
@@ -122,6 +129,58 @@ class TestRouteTable:
 
         with pytest.raises(ValueError, match="oauth_extra_headers"):
             _RouteTable(str(routes_file))
+
+    @pytest.mark.parametrize(
+        "route",
+        [
+            {"upstream": "https://api.openai.com", "path_upstreams": []},
+            {"upstream": "https://api.openai.com", "path_upstreams": {"/api": ""}},
+            {"upstream": "https://api.anthropic.com", "oauth_extra_headers": []},
+            {"upstream": "https://api.anthropic.com", "oauth_extra_headers": {"": "x"}},
+        ],
+    )
+    def test_rejects_malformed_optional_route_maps(
+        self, tmp_path: Path, route: dict[str, object]
+    ) -> None:
+        """Route extension maps must be real, non-empty string mappings."""
+        routes_file = tmp_path / "bad-routes.json"
+        routes_file.write_text(json.dumps({"provider": route}))
+
+        with pytest.raises(ValueError):
+            _RouteTable(str(routes_file))
+
+
+# ── Routing helpers ─────────────────────────────────────────────────────
+
+
+class TestRoutingHelpers:
+    """Pin low-level route matching and URL-building helpers."""
+
+    def test_path_prefix_matching_respects_segment_boundaries(self) -> None:
+        """A prefix matches itself or child paths, not same-prefix siblings."""
+        assert _path_matches_prefix("/backend-api", "/backend-api") is True
+        assert _path_matches_prefix("/backend-api/me", "backend-api") is True
+        assert _path_matches_prefix("/backend-apix", "/backend-api") is False
+
+    def test_build_upstream_url_normalizes_relative_path_and_keeps_query(self) -> None:
+        """Relative request paths are normalized before the query is appended."""
+        assert (
+            _build_upstream_url("https://chatgpt.com", "conversation", "q=1")
+            == "https://chatgpt.com/conversation?q=1"
+        )
+
+    def test_requested_websocket_protocols_preserve_order(self) -> None:
+        """Multiple websocket protocol headers are split and flattened in order."""
+        request = SimpleNamespace(
+            headers=CIMultiDict(
+                [
+                    ("Sec-WebSocket-Protocol", "json, realtime"),
+                    ("Sec-WebSocket-Protocol", "terok"),
+                ]
+            )
+        )
+
+        assert _requested_websocket_protocols(request) == ["json", "realtime", "terok"]
 
 
 # ── Token extraction ─────────────────────────────────────────────────────
@@ -768,6 +827,181 @@ class TestForwardingPath:
             assert resp.status == 502
             text = await resp.text()
             assert "127.0.0.1" not in text
+
+
+# ── WebSocket proxy branch coverage ─────────────────────────────────────
+
+
+@pytest.mark.asyncio
+class TestWebsocketProxy:
+    """Exercise direct WebSocket frame forwarding without a real network hop."""
+
+    class _FakeWebSocket:
+        """Tiny async-iterator websocket double for frame forwarding tests."""
+
+        def __init__(
+            self,
+            messages: list[SimpleNamespace],
+            *,
+            protocol: str | None = None,
+            wait_forever: bool = False,
+        ) -> None:
+            self._messages = messages
+            self._wait_forever = wait_forever
+            self.protocol = protocol
+            self.close_code = 1001
+            self.closed = False
+            self.sent: list[tuple[str, object]] = []
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self._messages:
+                return self._messages.pop(0)
+            if self._wait_forever:
+                await asyncio.Event().wait()
+            raise StopAsyncIteration
+
+        async def prepare(self, _request: object) -> None:
+            return None
+
+        async def send_str(self, data: str) -> None:
+            self.sent.append(("text", data))
+
+        async def send_bytes(self, data: bytes) -> None:
+            self.sent.append(("bytes", data))
+
+        async def ping(self, data: bytes) -> None:
+            self.sent.append(("ping", data))
+
+        async def pong(self, data: bytes) -> None:
+            self.sent.append(("pong", data))
+
+        async def close(self, *, code: int = 1000) -> None:
+            self.closed = True
+            self.sent.append(("close", code))
+
+    class _WebSocketContext:
+        """Async context manager returned by the fake client session."""
+
+        def __init__(self, websocket: TestWebsocketProxy._FakeWebSocket) -> None:
+            self._websocket = websocket
+
+        async def __aenter__(self) -> TestWebsocketProxy._FakeWebSocket:
+            return self._websocket
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    @staticmethod
+    def _msg(frame_type: WSMsgType, data: object = b"") -> SimpleNamespace:
+        """Build the small message shape consumed by ``_proxy_websocket``."""
+        return SimpleNamespace(type=frame_type, data=data)
+
+    async def test_client_frames_are_forwarded_to_upstream(self, monkeypatch) -> None:
+        """Text, binary, ping, pong, and close frames from the client are relayed."""
+        client_ws = self._FakeWebSocket(
+            [
+                self._msg(WSMsgType.TEXT, "hello"),
+                self._msg(WSMsgType.BINARY, b"\x01"),
+                self._msg(WSMsgType.PING, b"ping"),
+                self._msg(WSMsgType.PONG, b"pong"),
+                self._msg(WSMsgType.CLOSE),
+            ]
+        )
+        upstream_ws = self._FakeWebSocket([], protocol="realtime", wait_forever=True)
+
+        class _Session:
+            def ws_connect(self, *_args: object, **_kwargs: object):
+                return TestWebsocketProxy._WebSocketContext(upstream_ws)
+
+        monkeypatch.setattr(
+            "terok_sandbox.vault.token_broker.web.WebSocketResponse",
+            lambda **_kwargs: client_ws,
+        )
+
+        response = await _proxy_websocket(
+            SimpleNamespace(headers=CIMultiDict()),
+            session=_Session(),
+            upstream_url="ws://upstream.example/realtime",
+            headers={},
+            provider="codex",
+        )
+
+        assert response is client_ws
+        assert upstream_ws.sent == [
+            ("text", "hello"),
+            ("bytes", b"\x01"),
+            ("ping", b"ping"),
+            ("pong", b"pong"),
+            ("close", 1000),
+        ]
+
+    async def test_upstream_frames_are_forwarded_to_client(self, monkeypatch) -> None:
+        """Text, binary, ping, pong, and close frames from upstream are relayed."""
+        client_ws = self._FakeWebSocket([], wait_forever=True)
+        upstream_ws = self._FakeWebSocket(
+            [
+                self._msg(WSMsgType.TEXT, "hello"),
+                self._msg(WSMsgType.BINARY, b"\x02"),
+                self._msg(WSMsgType.PING, b"ping"),
+                self._msg(WSMsgType.PONG, b"pong"),
+                self._msg(WSMsgType.CLOSE),
+            ],
+            protocol="realtime",
+        )
+
+        class _Session:
+            def ws_connect(self, *_args: object, **_kwargs: object):
+                return TestWebsocketProxy._WebSocketContext(upstream_ws)
+
+        monkeypatch.setattr(
+            "terok_sandbox.vault.token_broker.web.WebSocketResponse",
+            lambda **_kwargs: client_ws,
+        )
+
+        response = await _proxy_websocket(
+            SimpleNamespace(headers=CIMultiDict()),
+            session=_Session(),
+            upstream_url="ws://upstream.example/realtime",
+            headers={},
+            provider="codex",
+        )
+
+        assert response is client_ws
+        assert client_ws.sent == [
+            ("text", "hello"),
+            ("bytes", b"\x02"),
+            ("ping", b"ping"),
+            ("pong", b"pong"),
+            ("close", 1001),
+        ]
+
+    async def test_upstream_connection_failure_returns_502(self) -> None:
+        """WebSocket connect failures become a generic broker 502."""
+
+        class _BoomContext:
+            async def __aenter__(self) -> object:
+                raise RuntimeError("boom")
+
+            async def __aexit__(self, *_args: object) -> None:
+                return None
+
+        class _Session:
+            def ws_connect(self, *_args: object, **_kwargs: object) -> _BoomContext:
+                return _BoomContext()
+
+        response = await _proxy_websocket(
+            SimpleNamespace(headers=CIMultiDict()),
+            session=_Session(),
+            upstream_url="ws://upstream.example/realtime",
+            headers={},
+            provider="codex",
+        )
+
+        assert response.status == 502
+        assert response.text == "Upstream websocket failed"
 
 
 # ── TokenDB refresh methods ──────────────────────────────────────────────
