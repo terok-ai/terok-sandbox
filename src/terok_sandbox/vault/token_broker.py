@@ -88,6 +88,16 @@ class _RouteTable:
                     raise ValueError(
                         f"Route '{name}' path_upstreams entry for {prefix!r} is invalid"
                     )
+            oauth_extra_headers = cfg.get("oauth_extra_headers", {})
+            if not isinstance(oauth_extra_headers, dict):
+                raise ValueError(f"Route '{name}' has invalid 'oauth_extra_headers' field")
+            for header, value in oauth_extra_headers.items():
+                if not isinstance(header, str) or not header:
+                    raise ValueError(f"Route '{name}' oauth_extra_headers key is invalid")
+                if not isinstance(value, str):
+                    raise ValueError(
+                        f"Route '{name}' oauth_extra_headers value for {header!r} is invalid"
+                    )
 
     def get(self, provider: str) -> dict | None:
         """Return the route config for *provider*, or ``None``."""
@@ -418,7 +428,6 @@ async def _handle_request(request: web.Request) -> web.StreamResponse:
             return web.Response(status=502, text="Credential misconfigured")
         auth_header = "Authorization"
         auth_prefix = "Bearer "
-        oauth_beta_header = cred.get("beta_header", "oauth-2025-04-20")
     else:
         real_token = cred.get("token") or cred.get("key")
         if not real_token:
@@ -444,10 +453,11 @@ async def _handle_request(request: web.Request) -> web.StreamResponse:
     dropped.discard("")
     headers = {k: v for k, v in request.headers.items() if k.lower() not in dropped}
     headers[auth_header] = f"{auth_prefix}{real_token}"
-    if is_oauth and oauth_beta_header:
-        existing = headers.get("anthropic-beta", "")
-        if oauth_beta_header not in existing:
-            headers["anthropic-beta"] = f"{existing},{oauth_beta_header}".lstrip(",")
+    if is_oauth:
+        for header, value in (route.get("oauth_extra_headers") or {}).items():
+            existing = headers.get(header, "")
+            if value not in existing:
+                headers[header] = f"{existing},{value}".lstrip(",")
 
     session: ClientSession = request.app[_KEY_CLIENT]
     if request.headers.get("Upgrade", "").lower() == "websocket":

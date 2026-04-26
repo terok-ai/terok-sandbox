@@ -106,6 +106,23 @@ class TestRouteTable:
         with pytest.raises(ValueError, match="path_upstreams"):
             _RouteTable(str(routes_file))
 
+    def test_rejects_invalid_oauth_extra_headers(self, tmp_path: Path) -> None:
+        """OAuth extra headers must be a string-to-string mapping."""
+        routes_file = tmp_path / "bad-routes.json"
+        routes_file.write_text(
+            json.dumps(
+                {
+                    "claude": {
+                        "upstream": "https://api.anthropic.com",
+                        "oauth_extra_headers": {"anthropic-beta": 123},
+                    }
+                }
+            )
+        )
+
+        with pytest.raises(ValueError, match="oauth_extra_headers"):
+            _RouteTable(str(routes_file))
+
 
 # ── Token extraction ─────────────────────────────────────────────────────
 
@@ -469,6 +486,7 @@ class TestForwardingPath:
                     "claude": {
                         "upstream": f"http://127.0.0.1:{upstream_server.port}",
                         "auth_header": "dynamic",
+                        "oauth_extra_headers": {"anthropic-beta": "oauth-2025-04-20"},
                     },
                 }
             )
@@ -490,6 +508,38 @@ class TestForwardingPath:
             assert "oauth-2025-04-20" in body["beta"]
             assert "some-feature" in body["beta"]
             assert body["path"] == "/v1/messages"
+
+        await upstream_server.close()
+
+    async def test_codex_oauth_does_not_inherit_anthropic_beta(self, _forwarding_env) -> None:
+        """OAuth extra headers are route-scoped; Codex does not get Claude's beta header."""
+        from aiohttp.test_utils import TestClient, TestServer
+
+        upstream_app, tmp_path, _tokens = _forwarding_env
+        upstream_server = TestServer(upstream_app)
+        await upstream_server.start_server()
+
+        db = CredentialDB(tmp_path / "test.db")
+        db.store_credential("default", "codex", {"type": "oauth", "access_token": "sk-codex"})
+        codex_token = db.create_token("proj", "t1", "default", "codex")
+        db.close()
+
+        routes = tmp_path / "routes.json"
+        routes.write_text(
+            json.dumps({"codex": {"upstream": f"http://127.0.0.1:{upstream_server.port}"}})
+        )
+
+        broker_app = _build_app(str(tmp_path / "test.db"), str(routes))
+        async with TestClient(TestServer(broker_app)) as client:
+            resp = await client.post(
+                "/v1/responses",
+                headers={"Authorization": f"Bearer {codex_token}"},
+                json={"model": "test"},
+            )
+            assert resp.status == 200
+            body = await resp.json()
+            assert body["auth"] == "Bearer sk-codex"
+            assert body["beta"] == ""
 
         await upstream_server.close()
 
