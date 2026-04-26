@@ -154,7 +154,12 @@ class TestPumpStreamHelper:
         assert not dst.closed
 
     def test_concurrent_pumps_finish(self) -> None:
-        """Two pumps in threads each finish independently."""
+        """Two pumps in threads each finish independently.
+
+        Asserting ``is_alive() is False`` after the join makes a stuck
+        pump fail the test deterministically — bare ``join(timeout=...)``
+        otherwise silently swallows hangs.
+        """
         src1 = io.BytesIO(b"x" * 100)
         dst1 = io.BytesIO()
         src2 = io.BytesIO(b"y" * 100)
@@ -165,6 +170,8 @@ class TestPumpStreamHelper:
         t2.start()
         t1.join(timeout=5)
         t2.join(timeout=5)
+        assert not t1.is_alive(), "pump 1 stuck — join timed out"
+        assert not t2.is_alive(), "pump 2 stuck — join timed out"
         assert dst1.getvalue() == b"x" * 100
         assert dst2.getvalue() == b"y" * 100
 
@@ -201,6 +208,7 @@ class TestStartStdioPumpsHelper:
         )
         for t in threads:
             t.join(timeout=2)
+            assert not t.is_alive(), f"pump {t.name} stuck — join timed out"
         # stdin pump exits immediately on empty input; stdout pump consumes
         # and exits.  No stderr pump is created.
         assert len(threads) == 2
@@ -226,6 +234,7 @@ class TestStartStdioPumpsHelper:
         )
         for t in threads:
             t.join(timeout=2)
+            assert not t.is_alive(), f"pump {t.name} stuck — join timed out"
         assert len(threads) == 3
         assert out.getvalue() == b"out"
         assert err.getvalue() == b"err"
