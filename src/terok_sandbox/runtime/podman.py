@@ -15,6 +15,7 @@ replace ``Sandbox.run`` when Phase 3 lands).
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import select
@@ -23,8 +24,9 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
+from typing import BinaryIO
 
 from .._util import log_debug, log_warning
 from .protocol import (
@@ -808,6 +810,64 @@ class PodmanRuntime:
             stderr=proc.stderr or "",
         )
 
+    def exec_stdio(
+        self,
+        container: Container,
+        cmd: list[str],
+        *,
+        stdin: BinaryIO,
+        stdout: BinaryIO,
+        stderr: BinaryIO | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> int:
+        """Bridge byte streams to ``podman exec -i`` for *cmd* inside *container*.
+
+        Spawns a child process and runs three daemon pump threads — one per
+        direction — copying bytes until either side reaches EOF or the
+        child exits.  The threading model mirrors :func:`_stream_initial_logs`
+        (already in this module) rather than introducing asyncio at the
+        sandbox layer; callers using asyncio drive this via
+        :func:`asyncio.AbstractEventLoop.run_in_executor`.
+
+        Lets :class:`FileNotFoundError` (podman missing) propagate.  On
+        timeout, terminates the child (terminate → 2 s wait → kill) and
+        re-raises :class:`subprocess.TimeoutExpired`.
+        """
+        if not cmd:
+            raise ValueError("exec_stdio argv must not be empty")
+        log_debug(
+            f"PodmanRuntime.exec_stdio({container.name}, cmd[0]={cmd[0]!r}, "
+            f"argc={len(cmd)}, timeout={timeout})"
+        )
+        argv = ["podman", "exec", "-i"]
+        for k, v in (env or {}).items():
+            argv += ["-e", f"{k}={v}"]
+        argv += [container.name, *cmd]
+
+        proc = subprocess.Popen(  # noqa: S603 — argv built above
+            argv,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE if stderr is not None else subprocess.DEVNULL,
+        )
+
+        pumps = _start_stdio_pumps(proc, stdin, stdout, stderr)
+        try:
+            return proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+            raise
+        finally:
+            _close_proc_streams(proc)
+            for t in pumps:
+                t.join(timeout=1)
+
     def force_remove(self, containers: list[Container]) -> list[ContainerRemoveResult]:
         """Best-effort ``podman rm -f`` of each container.
 
@@ -929,6 +989,101 @@ class PodmanRuntime:
                 if parsed is not None:
                     result[parts[0]] = parsed
         return result
+
+
+# ── exec_stdio internals ──────────────────────────────────────────────────
+
+
+_STDIO_PUMP_CHUNK = 64 * 1024
+
+
+_STDIN_PUMP_LABEL = "stdin→child"
+
+
+def _pump_stream(src: BinaryIO, dst: BinaryIO, *, label: str) -> None:
+    """Copy *src* → *dst* in chunks until EOF or write error.
+
+    Both ends are byte-oriented file objects.  Errors are logged and
+    silently end the pump — the partner pump (or the child's exit) is
+    expected to terminate the overall call.
+
+    For the *stdin→child* pump specifically, ``dst`` is the host-side
+    write-end of the child's stdin pipe.  When the source reaches EOF
+    we close ``dst`` so the child sees EOF on its stdin promptly,
+    rather than waiting for ``_close_proc_streams`` to run after
+    ``proc.wait()`` (which would deadlock any child that exits on
+    stdin EOF — most ACP wrappers do).
+    """
+    try:
+        while True:
+            chunk = src.read(_STDIO_PUMP_CHUNK)
+            if not chunk:
+                break
+            dst.write(chunk)
+            dst.flush()
+    except (OSError, ValueError) as exc:  # closed pipe / detached fd
+        log_debug(f"exec_stdio pump {label} ended: {exc}")
+    except Exception as exc:  # noqa: BLE001
+        log_warning(f"exec_stdio pump {label} unexpected error: {exc}")
+    finally:
+        with contextlib.suppress(OSError, ValueError):
+            dst.flush()
+        if label == _STDIN_PUMP_LABEL:
+            with contextlib.suppress(OSError, ValueError):
+                dst.close()
+
+
+def _start_stdio_pumps(
+    proc: subprocess.Popen,
+    stdin: BinaryIO,
+    stdout: BinaryIO,
+    stderr: BinaryIO | None,
+) -> list[threading.Thread]:
+    """Spawn daemon pump threads bridging caller streams ↔ child stdio.
+
+    Returns the spawned threads so the caller can ``join`` them after the
+    child exits.  Threads are daemons so a wedged pump cannot keep the
+    process alive past interpreter shutdown.
+    """
+    threads: list[threading.Thread] = []
+    if proc.stdin is not None:
+        threads.append(
+            threading.Thread(
+                target=_pump_stream,
+                args=(stdin, proc.stdin),
+                kwargs={"label": _STDIN_PUMP_LABEL},
+                daemon=True,
+            )
+        )
+    if proc.stdout is not None:
+        threads.append(
+            threading.Thread(
+                target=_pump_stream,
+                args=(proc.stdout, stdout),
+                kwargs={"label": "child→stdout"},
+                daemon=True,
+            )
+        )
+    if proc.stderr is not None and stderr is not None:
+        threads.append(
+            threading.Thread(
+                target=_pump_stream,
+                args=(proc.stderr, stderr),
+                kwargs={"label": "child→stderr"},
+                daemon=True,
+            )
+        )
+    for t in threads:
+        t.start()
+    return threads
+
+
+def _close_proc_streams(proc: subprocess.Popen) -> None:
+    """Close the child's stdio pipes once the call is done."""
+    for stream in (proc.stdin, proc.stdout, proc.stderr):
+        if stream is not None:
+            with contextlib.suppress(OSError):
+                stream.close()
 
 
 # ── stream_initial_logs internals ─────────────────────────────────────────

@@ -14,8 +14,9 @@ and :meth:`NullRuntime.add_image` when tests need a specific shape.
 from __future__ import annotations
 
 import socket
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path  # noqa: TC003 — used in a Protocol argument type
+from typing import BinaryIO
 
 from .protocol import (
     Container,
@@ -25,6 +26,12 @@ from .protocol import (
     LogStream,
     PortReservation,
 )
+
+# A scripted stdio interaction for :meth:`NullRuntime.exec_stdio` — pairs of
+# ``("read", expected_bytes)`` and ``("write", bytes_to_emit)`` operations.
+# The reader half asserts what the caller pushes into ``stdin``; the writer
+# half emits what the caller will see on ``stdout`` / ``stderr``.
+ExecStdioStep = tuple[str, bytes]
 
 
 class NullLogStream:
@@ -236,6 +243,10 @@ class NullRuntime:
         self._image_labels: dict[str, dict[str, str]] = {}
         self._image_history: dict[str, tuple[str, ...]] = {}
         self._exec_results: dict[tuple[str, tuple[str, ...]], ExecResult] = {}
+        self._exec_stdio_scripts: dict[
+            tuple[str, tuple[str, ...]], tuple[tuple[ExecStdioStep, ...], int]
+        ] = {}
+        self._exec_stdio_calls: list[tuple[str, tuple[str, ...], dict[str, str]]] = []
         self._copy_in_calls: list[tuple[str, Path, str]] = []
         self._force_remove_calls: list[list[str]] = []
 
@@ -293,6 +304,24 @@ class NullRuntime:
         """Pre-register the result :meth:`exec` returns for exact *cmd*."""
         self._exec_results[(container_name, cmd)] = result
 
+    def set_exec_stdio_script(
+        self,
+        container_name: str,
+        cmd: tuple[str, ...],
+        script: tuple[ExecStdioStep, ...],
+        *,
+        exit_code: int = 0,
+    ) -> None:
+        """Pre-register a stdio interaction for :meth:`exec_stdio`.
+
+        *script* is a sequence of ``("read", bytes)`` / ``("write", bytes)``
+        steps replayed in order: ``read`` consumes the matching prefix from
+        the caller-supplied *stdin*; ``write`` emits the bytes to *stdout*.
+        Use this to drive deterministic ACP-handshake tests without spinning
+        up a real container.
+        """
+        self._exec_stdio_scripts[(container_name, cmd)] = (tuple(script), exit_code)
+
     # -- Protocol surface ---------------------------------------------------
 
     def container(self, name: str) -> Container:
@@ -330,6 +359,46 @@ class NullRuntime:
         """Return a pre-registered result, or a default empty success."""
         key = (container.name, tuple(cmd))
         return self._exec_results.get(key, ExecResult(exit_code=0, stdout="", stderr=""))
+
+    def exec_stdio(
+        self,
+        container: Container,
+        cmd: list[str],
+        *,
+        stdin: BinaryIO,
+        stdout: BinaryIO,
+        stderr: BinaryIO | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> int:
+        """Replay a pre-registered stdio script, or no-op with exit code 0.
+
+        Records every call (with env) for test inspection.  When a script is
+        registered for ``(container, cmd)``, replays it in order: ``read``
+        consumes from *stdin* and asserts a match; ``write`` pushes bytes to
+        *stdout*.  Without a script, returns immediately with exit code 0
+        — matches the empty-success default of :meth:`exec`.
+        """
+        key = (container.name, tuple(cmd))
+        self._exec_stdio_calls.append((container.name, tuple(cmd), dict(env or {})))
+        script_entry = self._exec_stdio_scripts.get(key)
+        if script_entry is None:
+            return 0
+        script, exit_code = script_entry
+        for direction, payload in script:
+            if direction == "read":
+                got = stdin.read(len(payload))
+                if got != payload:
+                    raise AssertionError(
+                        f"NullRuntime.exec_stdio script mismatch for {cmd!r}: "
+                        f"expected {payload!r}, got {got!r}"
+                    )
+            elif direction == "write":
+                stdout.write(payload)
+                stdout.flush()
+            else:
+                raise ValueError(f"unknown exec_stdio script direction: {direction!r}")
+        return exit_code
 
     def force_remove(self, containers: list[Container]) -> list[ContainerRemoveResult]:
         """Record the call and clear every fixture for each container."""
