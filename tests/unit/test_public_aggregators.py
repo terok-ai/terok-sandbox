@@ -13,6 +13,8 @@ silently leave the public names pointing at stale callables.
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import terok_sandbox
 from terok_sandbox.commands import _handle_sandbox_setup, _handle_sandbox_uninstall
 
@@ -29,3 +31,24 @@ def test_aggregators_are_in_all() -> None:
     """Listing in ``__all__`` — the contract ``from terok_sandbox import *`` promises."""
     assert "sandbox_setup" in terok_sandbox.__all__
     assert "sandbox_uninstall" in terok_sandbox.__all__
+
+
+def test_vault_systemd_wrappers_delegate_to_manager() -> None:
+    """Public vault systemd helpers are thin ``VaultManager`` delegators."""
+    cfg = object()
+    with patch("terok_sandbox.VaultManager") as manager_cls:
+        manager = manager_cls.return_value
+
+        terok_sandbox.install_vault_systemd(cfg)
+        terok_sandbox.uninstall_vault_systemd(cfg)
+
+    assert manager_cls.call_args_list[0].args == (cfg,)
+    assert manager_cls.call_args_list[1].args == (cfg,)
+    manager.install_systemd_units.assert_called_once_with()
+    manager.uninstall_systemd_units.assert_called_once_with()
+
+
+def test_vault_systemd_wrappers_are_public() -> None:
+    """The star-import contract includes the vault systemd helpers."""
+    assert "install_vault_systemd" in terok_sandbox.__all__
+    assert "uninstall_vault_systemd" in terok_sandbox.__all__
