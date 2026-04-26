@@ -204,3 +204,28 @@ class TestStartStdioPumpsHelper:
         # stdin pump exits immediately on empty input; stdout pump consumes
         # and exits.  No stderr pump is created.
         assert len(threads) == 2
+
+    def test_all_streams_create_three_pumps(self) -> None:
+        """All three streams present → three pump threads running in parallel.
+
+        Complements the skip-on-None test above so the full wiring path
+        is covered: stderr is plumbed end-to-end the same way stdout is.
+        """
+        proc = self._FakeProc(
+            stdin=io.BytesIO(),
+            stdout=io.BytesIO(b"out"),
+            stderr=io.BytesIO(b"err"),
+        )
+        out = io.BytesIO()
+        err = io.BytesIO()
+        threads = _start_stdio_pumps(
+            proc,  # type: ignore[arg-type]
+            stdin=io.BytesIO(),
+            stdout=out,
+            stderr=err,
+        )
+        for t in threads:
+            t.join(timeout=2)
+        assert len(threads) == 3
+        assert out.getvalue() == b"out"
+        assert err.getvalue() == b"err"
