@@ -18,6 +18,12 @@
 #: mode works correctly.  The token broker must then accept this static token.
 PHANTOM_CREDENTIALS_MARKER = "terok-proxy-phantom-token:vault-handles-real-auth"
 
+#: Static marker token written to Codex's shared ``auth.json``.  Codex's
+#: built-in ChatGPT auth flow is file-based, so task containers all share one
+#: synthetic auth store under ``~/.codex``.  The token broker recognises this
+#: marker and swaps it for the real host-side OAuth credential.
+CODEX_SHARED_OAUTH_MARKER = "terok-proxy-codex-oauth-marker:vault-handles-real-auth"
+
 #: Unauthenticated health-check path served by the vault's token broker.
 #: Used by the server, lifecycle probes, and sickbay doctor checks.
 HEALTH_PATH = "/-/health"
