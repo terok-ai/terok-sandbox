@@ -1,14 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""Podman backend for the [`.protocol`][] container runtime.
+"""Podman backend for the `.protocol` container runtime.
 
 This is the concrete default runtime.  Every ``subprocess`` call that
 ends in a ``podman`` invocation lives in this module — other layers
 speak only through the protocol.
 
-The public export is [`PodmanRuntime`][] plus the argv helpers that
-[`terok_sandbox.sandbox.Sandbox`][] uses to assemble ``podman run``
+The public export is [`PodmanRuntime`][terok_sandbox.runtime.podman.PodmanRuntime] plus the argv helpers that
+[`terok_sandbox.sandbox.Sandbox`][terok_sandbox.sandbox.Sandbox] uses to assemble ``podman run``
 commands (which remain podman-specific for now; a krun backend will
 replace ``Sandbox.run`` when Phase 3 lands).
 """
@@ -68,7 +68,7 @@ class GpuConfigError(RuntimeError):
 
 
 def check_gpu_error(exc: subprocess.CalledProcessError) -> None:
-    """Raise [`GpuConfigError`][] if *exc* looks like a CDI/NVIDIA issue.
+    """Raise [`GpuConfigError`][terok_sandbox.runtime.podman.GpuConfigError] if *exc* looks like a CDI/NVIDIA issue.
 
     Does nothing if the error does not match any known CDI patterns.
     Defensively handles both ``bytes`` and ``str`` stderr so callers
@@ -218,7 +218,7 @@ def _parse_human_size(text: str) -> int | None:
 
 
 class PodmanContainer:
-    """Podman implementation of [`Container`][].
+    """Podman implementation of [`Container`][terok_sandbox.runtime.podman.Container].
 
     Cheap to construct — does not verify existence.  Each property /
     method does a fresh ``podman inspect`` or equivalent.
@@ -314,7 +314,7 @@ class PodmanContainer:
         """Start the container.
 
         Every lifecycle failure — missing podman, timeout, or non-zero
-        exit — surfaces as [`RuntimeError`][] so callers have a
+        exit — surfaces as [`RuntimeError`][RuntimeError] so callers have a
         single exception type to catch.  The original exception is
         preserved via ``__cause__`` when applicable.
         """
@@ -343,8 +343,8 @@ class PodmanContainer:
     def stop(self, *, timeout: int = 10) -> None:
         """Stop the container, SIGKILL after *timeout* seconds.
 
-        Every lifecycle failure surfaces as [`RuntimeError`][]; see
-        [`start`][] for the rationale.
+        Every lifecycle failure surfaces as [`RuntimeError`][RuntimeError]; see
+        [`start`][terok_sandbox.runtime.podman.PodmanContainer.start] for the rationale.
         """
         log_debug(f"PodmanContainer.stop({self.name}, timeout={timeout})")
         try:
@@ -371,7 +371,7 @@ class PodmanContainer:
     def wait(self, timeout: float | None = None) -> int:
         """Block until the container exits; return its exit code.
 
-        Raises [`TimeoutError`][] on timeout, [`RuntimeError`][] on
+        Raises [`TimeoutError`][TimeoutError] on timeout, [`RuntimeError`][RuntimeError] on
         ``podman wait`` failures or non-numeric output.
         """
         try:
@@ -416,7 +416,7 @@ class PodmanContainer:
         *,
         command: tuple[str, ...] = _DEFAULT_LOGIN_COMMAND,
     ) -> list[str]:
-        """Return an argv for [`os.execvp`][] to attach interactively.
+        """Return an argv for [`os.execvp`][os.execvp] to attach interactively.
 
         Empty *command* uses the default tmux session.
         """
@@ -443,7 +443,7 @@ class PodmanContainer:
 
 
 class PodmanImage:
-    """Podman implementation of [`Image`][].
+    """Podman implementation of [`Image`][terok_sandbox.runtime.podman.Image].
 
     Values listed by ``podman images`` (``repository``, ``tag``, ``size``,
     ``created``) may be pre-populated at construction to avoid an extra
@@ -668,8 +668,8 @@ class PodmanLogStream:
 class PodmanPortReservation:
     """Holds a TCP port open until released.
 
-    Bind on construction; port number exposed via [`port`][].  Caller is
-    responsible for closing (directly via [`close`][] or via ``with``).
+    Bind on construction; port number exposed via [`port`][terok_sandbox.GateServerStatus.port].  Caller is
+    responsible for closing (directly via [`close`][terok_sandbox.runtime.podman.PodmanLogStream.close] or via ``with``).
     """
 
     def __init__(self, host: str = "127.0.0.1") -> None:
@@ -701,7 +701,7 @@ class PodmanPortReservation:
 
 
 class PodmanRuntime:
-    """The default [`ContainerRuntime`][] — talks to the podman CLI."""
+    """The default [`ContainerRuntime`][terok_sandbox.ContainerRuntime] — talks to the podman CLI."""
 
     def container(self, name: str) -> Container:
         """Return a handle to the container named *name*."""
@@ -782,10 +782,10 @@ class PodmanRuntime:
     ) -> ExecResult:
         """Run *cmd* inside *container* via ``podman exec``.
 
-        Lets [`FileNotFoundError`][] (podman missing) and
-        [`subprocess.TimeoutExpired`][] propagate unchanged.
+        Lets [`FileNotFoundError`][FileNotFoundError] (podman missing) and
+        [`subprocess.TimeoutExpired`][subprocess.TimeoutExpired] propagate unchanged.
 
-        Raises [`ValueError`][] if *cmd* is empty — podman exec with
+        Raises [`ValueError`][ValueError] if *cmd* is empty — podman exec with
         no argv is never a valid request and catching it here avoids a
         later ``IndexError`` in the debug log.
         """
@@ -867,7 +867,7 @@ class PodmanRuntime:
 
         Optimisation over ``[c.state for c in containers_with_prefix(prefix)]``
         — single ``podman ps -a`` instead of N inspects.  Backend-specific;
-        not part of the [`ContainerRuntime`][] protocol.
+        not part of the [`ContainerRuntime`][terok_sandbox.ContainerRuntime] protocol.
         """
         try:
             out = subprocess.check_output(
@@ -899,7 +899,7 @@ class PodmanRuntime:
 
         Single ``podman ps --size`` call — ``--size`` is expensive (overlay
         diffs) but one bulk call beats N inspects.  Backend-specific; not
-        part of the [`ContainerRuntime`][] protocol.
+        part of the [`ContainerRuntime`][terok_sandbox.ContainerRuntime] protocol.
         """
         try:
             out = subprocess.check_output(
@@ -950,14 +950,14 @@ _REAPER_KEY = "_terok_reaper"
 def _reap_logs_proc(proc: subprocess.Popen | None) -> None:
     """Terminate, wait, and close the ``podman logs`` child if still alive.
 
-    Shared by every exit path of [`_stream_initial_logs`][] so the
+    Shared by every exit path of `_stream_initial_logs` so the
     podman child never leaks as a zombie and its stdout pipe never
     leaks as an open file descriptor.  Safe to call with ``None`` or
     with a child that has already exited.
 
     Idempotent and thread-safe under two callers racing through (reader
     thread's ``finally`` and the main thread's fallback): a per-process
-    [`_Reaper`][] guard claims ownership under a short lock, then
+    `_Reaper` guard claims ownership under a short lock, then
     releases it so the winner can run the terminate/wait/close sequence
     unsynchronised — a wedged reader mustn't stall the main thread's
     fallback.  Writing via ``__dict__`` (not ``setattr``) keeps

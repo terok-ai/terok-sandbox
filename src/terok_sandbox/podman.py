@@ -1,14 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""Podman implementation of [`terok_clearance.ContainerInspector`][].
+"""Podman implementation of [`terok_clearance.ContainerInspector`][terok_clearance.ContainerInspector].
 
-Exposes [`PodmanInspector`][] (ID → [`ContainerInfo`][], with
-cache + bounded timeout + soft-fail) and [`create_container_inspector`][]
+Exposes [`PodmanInspector`][terok_sandbox.podman.PodmanInspector] (ID → `ContainerInfo`, with
+cache + bounded timeout + soft-fail) and [`create_container_inspector`][terok_sandbox.podman.create_container_inspector]
 (runtime-neutral factory — picks an inspector that matches whatever
 container runtime sandbox is configured for).
 
-The data type [`ContainerInfo`][] lives in terok-clearance because
+The data type `ContainerInfo` lives in terok-clearance because
 every clearance consumer reads it; keeping it there avoids forcing
 clearance to import back up from sandbox just to name the result of
 an inspection.  Sandbox owns the runtime-aware *production* of those
@@ -36,17 +36,17 @@ _INSPECT_TIMEOUT_S = 5
 
 
 class PodmanInspector:
-    """Cached ID → [`ContainerInfo`][] lookup backed by ``podman inspect``.
+    """Cached ID → `ContainerInfo` lookup backed by ``podman inspect``.
 
     Callable: instances act as ``Callable[[str], ContainerInfo]``.  On
     a cache miss it shells out to ``podman inspect --format=json --``
     with a bounded timeout and stores the result.  Soft-fails on
     missing binary / container / malformed JSON by returning an empty
-    [`ContainerInfo`][], so callers keep a usable fallback.
+    `ContainerInfo`, so callers keep a usable fallback.
 
     Cache lifetime is "per instance".  Container names CAN change at
     runtime; callers that need live-rename visibility should call
-    [`forget`][] on ``container_exited`` (or rebuild the inspector)
+    [`forget`][terok_sandbox.podman.PodmanInspector.forget] on ``container_exited`` (or rebuild the inspector)
     so the next lookup re-inspects.
     """
 
@@ -123,7 +123,7 @@ def _dict(obj: Any, key: str) -> dict:
 
 
 def _from_inspect(container_id: str, records: Any) -> ContainerInfo:
-    """Build a [`ContainerInfo`][] from a ``podman inspect`` JSON payload."""
+    """Build a `ContainerInfo` from a ``podman inspect`` JSON payload."""
     if not isinstance(records, list) or not records:
         return ContainerInfo()
     head = records[0]
@@ -145,12 +145,12 @@ def _from_inspect(container_id: str, records: Any) -> ContainerInfo:
 
 
 def create_container_inspector() -> ContainerInspector:
-    """Return a [`ContainerInspector`][] matched to the active runtime.
+    """Return a `ContainerInspector` matched to the active runtime.
 
     The runtime-neutral entry point for anyone (notifier, TUI, future
     diagnostic tools) who needs container introspection without
     knowing which backend sandbox is driving.  Today sandbox runs on
-    podman and the factory hands back a [`PodmanInspector`][];
+    podman and the factory hands back a [`PodmanInspector`][terok_sandbox.podman.PodmanInspector];
     when a second backend ships (krun, containerd, anything else),
     this is the single switch-site that grows to pick the right one.
     """

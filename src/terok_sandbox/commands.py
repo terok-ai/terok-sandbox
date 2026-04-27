@@ -3,7 +3,7 @@
 
 """Command registry for terok-sandbox.
 
-Follows the same [`CommandDef`][] / [`ArgDef`][] pattern as
+Follows the same [`CommandDef`][terok_sandbox.commands.CommandDef] / [`ArgDef`][terok_sandbox.commands.ArgDef] pattern as
 ``terok_shield.registry``.  Higher-level consumers (terok, terok-executor)
 can import ``COMMANDS`` to build their own CLI frontends without
 duplicating argument definitions or handler logic.
@@ -124,7 +124,7 @@ def _handle_sandbox_setup(
         no_vault: Skip the vault install phase.
         no_gate: Skip the gate install phase.
         no_clearance: Skip the clearance (hub + verdict + notifier) phase.
-        cfg: Optional [`SandboxConfig`][] override.  Defaults to the
+        cfg: Optional [`SandboxConfig`][terok_sandbox.commands.SandboxConfig] override.  Defaults to the
             layered config — passed through so terok's config stays
             the single source of truth for paths.
     """
@@ -177,7 +177,7 @@ def _handle_sandbox_uninstall(
     removes what it can instead of leaving orphans behind.  Exits
     non-zero only after every phase has had its attempt.
 
-    Output shape mirrors [`_handle_sandbox_setup`][] — one stage line
+    Output shape mirrors `_handle_sandbox_setup` — one stage line
     per phase under a ``Services:`` heading — so the two commands read
     as symmetric halves of the same log when run back-to-back.
     """
@@ -336,7 +336,7 @@ def _handle_shield_setup(*, root: bool = False, user: bool = False) -> None:
     """Install OCI hooks for the shield firewall.
 
     Validates the ``--root`` / ``--user`` choice at the CLI layer so
-    the library function ([`shield.run_setup`][]) can stay UX-agnostic:
+    the library function ([`shield.run_setup`][terok_sandbox.shield.run_setup]) can stay UX-agnostic:
     it raises ``ValueError`` on invalid combinations; this handler turns
     that into a ``SystemExit`` with CLI-specific remediation hints.
     """
@@ -355,7 +355,7 @@ def _handle_shield_uninstall(*, root: bool = False, user: bool = False) -> None:
     """Remove the OCI hooks previously installed by ``shield install-hooks``.
 
     Idempotent — missing files are treated as success.  Symmetric to
-    [`_handle_shield_setup`][]: ``--root`` uses sudo, ``--user``
+    `_handle_shield_setup`: ``--root`` uses sudo, ``--user``
     touches the user hooks directory.
     """
     if not root and not user:
@@ -564,7 +564,7 @@ def _open_db(cfg: SandboxConfig):
 
 
 def _build_key_rows(cfg: SandboxConfig) -> list[KeyRow]:
-    """Enumerate every registered SSH key as a displayable [`KeyRow`][].
+    """Enumerate every registered SSH key as a displayable [`KeyRow`][terok_sandbox.commands.KeyRow].
 
     Shared by ``list`` and ``remove`` so both present identical
     information.  Returns an empty list when no keys are registered.
@@ -629,7 +629,7 @@ def _print_key_table(rows: list[KeyRow], *, numbered: bool = False) -> None:
 
 
 def _validate_scope_name(scope: str) -> None:
-    """Raise [`SystemExit`][] if *scope* is not a safe identifier.
+    """Raise [`SystemExit`][SystemExit] if *scope* is not a safe identifier.
 
     Delegates to the canonical DB-layer validator so the character set
     *and* the length bound (derived from the AF_UNIX socket-path budget)

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for [`NullRuntime`][] — the in-memory backend used in tests."""
+"""Tests for [`NullRuntime`][terok_sandbox.NullRuntime] — the in-memory backend used in tests."""
 
 from __future__ import annotations
 
@@ -185,7 +185,7 @@ class TestNullRuntimeOperations:
         assert [img.ref for img in rt.images(dangling_only=True)] == ["b"]
 
     def test_exec_returns_registered_result(self) -> None:
-        """``exec`` returns the pre-registered [`ExecResult`][]."""
+        """``exec`` returns the pre-registered [`ExecResult`][terok_sandbox.ExecResult]."""
         rt = NullRuntime()
         rt.set_exec_result(
             "c",

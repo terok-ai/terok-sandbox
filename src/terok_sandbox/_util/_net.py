@@ -28,7 +28,7 @@ def prepare_socket_path(path: Path) -> None:
     """Ensure *path* is ready for ``bind()`` — remove stale sockets, create parents.
 
     Refuses to unlink non-socket files.  After ``bind()``, the caller should
-    call [`harden_socket`][] to restrict permissions.
+    call `harden_socket` to restrict permissions.
     """
     try:
         if not stat.S_ISSOCK(path.lstat().st_mode):

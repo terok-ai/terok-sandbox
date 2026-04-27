@@ -5,7 +5,7 @@
 
 Exercises the container-facing listener (``start_ssh_signer``) that gates
 connections behind a phantom token.  Key material is seeded straight into
-the vault DB via [`CredentialDB`][] — no sidecar JSON.
+the vault DB via [`CredentialDB`][terok_sandbox.CredentialDB] — no sidecar JSON.
 """
 
 from __future__ import annotations

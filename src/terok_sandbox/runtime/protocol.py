@@ -4,14 +4,14 @@
 """Container runtime protocol — the *how* behind running and observing containers.
 
 Defines the backend-neutral surface used by higher layers (executor, terok).
-Concrete implementations: [`.podman.PodmanRuntime`][] (default),
-[`.null.NullRuntime`][] (tests / dry-run).  A future ``KrunRuntime`` for
+Concrete implementations: `.podman.PodmanRuntime` (default),
+`.null.NullRuntime` (tests / dry-run).  A future ``KrunRuntime`` for
 microVM-isolated containers slots in alongside without touching callers.
 
 The protocol deliberately covers only *runtime* concerns — state queries,
 lifecycle, image inspection, exec.  Gate, shield, credentials, vault, and
 SSH are orthogonal services that compose *with* the runtime at a higher
-layer (see [`terok_sandbox.sandbox.Sandbox`][]).
+layer (see [`terok_sandbox.sandbox.Sandbox`][terok_sandbox.sandbox.Sandbox]).
 """
 
 from __future__ import annotations
@@ -29,10 +29,10 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class ExecResult:
-    """Outcome of [`ContainerRuntime.exec`][].
+    """Outcome of [`ContainerRuntime.exec`][terok_sandbox.runtime.protocol.ContainerRuntime.exec].
 
     Backend-neutral so a future SSH-over-vsock krun backend can fill it from
-    an SSH response without pretending to be a [`subprocess.CompletedProcess`][].
+    an SSH response without pretending to be a [`subprocess.CompletedProcess`][subprocess.CompletedProcess].
     """
 
     exit_code: int
@@ -47,7 +47,7 @@ class ExecResult:
 
 @dataclass(frozen=True)
 class ContainerRemoveResult:
-    """Per-container outcome from [`ContainerRuntime.force_remove`][]."""
+    """Per-container outcome from [`ContainerRuntime.force_remove`][terok_sandbox.runtime.protocol.ContainerRuntime.force_remove]."""
 
     name: str
     """Container name that was targeted."""
@@ -64,7 +64,7 @@ class ContainerRemoveResult:
 
 @runtime_checkable
 class Container(Protocol):
-    """Handle to a container managed by a [`ContainerRuntime`][].
+    """Handle to a container managed by a [`ContainerRuntime`][terok_sandbox.runtime.protocol.ContainerRuntime].
 
     Handles are cheap — construction does not verify that the container
     exists.  Operations return sensible defaults (``None``, ``False``, ``[]``)
@@ -94,7 +94,7 @@ class Container(Protocol):
         ...
 
     def start(self) -> None:
-        """Start the container.  Raises [`RuntimeError`][] on failure."""
+        """Start the container.  Raises [`RuntimeError`][RuntimeError] on failure."""
         ...
 
     def stop(self, *, timeout: int = 10) -> None:
@@ -104,7 +104,7 @@ class Container(Protocol):
     def wait(self, timeout: float | None = None) -> int:
         """Block until the container exits; return its exit code.
 
-        Raises [`TimeoutError`][] when *timeout* elapses.
+        Raises [`TimeoutError`][TimeoutError] when *timeout* elapses.
         """
         ...
 
@@ -113,7 +113,7 @@ class Container(Protocol):
         ...
 
     def login_command(self, *, command: tuple[str, ...] = ()) -> list[str]:
-        """Return an argv suitable for [`os.execvp`][] to attach interactively.
+        """Return an argv suitable for [`os.execvp`][os.execvp] to attach interactively.
 
         Empty *command* uses the backend default (typically ``tmux
         new-session -A -s main``).
@@ -243,7 +243,7 @@ class ContainerRuntime(Protocol):
     def container(self, name: str) -> Container:
         """Return a handle to the container named *name*.
 
-        Does not verify existence; call [`Container.state`][] for that.
+        Does not verify existence; call [`Container.state`][terok_sandbox.runtime.protocol.Container.state] for that.
         """
         ...
 
@@ -254,7 +254,7 @@ class ContainerRuntime(Protocol):
     def image(self, ref: str) -> Image:
         """Return a handle to the image identified by tag or ID *ref*.
 
-        Does not verify existence; call [`Image.exists`][] for that.
+        Does not verify existence; call [`Image.exists`][terok_sandbox.runtime.protocol.Image.exists] for that.
         """
         ...
 
@@ -286,7 +286,7 @@ class ContainerRuntime(Protocol):
         """Forcibly stop and remove *containers*.
 
         Best-effort — continues through individual failures and returns
-        one [`ContainerRemoveResult`][] per input.  An already-absent
+        one [`ContainerRemoveResult`][terok_sandbox.runtime.protocol.ContainerRemoveResult] per input.  An already-absent
         container counts as *removed* (the post-condition holds).
         """
         ...
@@ -294,7 +294,7 @@ class ContainerRuntime(Protocol):
     def reserve_port(self, host: str = "127.0.0.1") -> PortReservation:
         """Reserve a free TCP port on *host*.
 
-        The returned [`PortReservation`][] exposes the port number via
+        The returned [`PortReservation`][terok_sandbox.runtime.protocol.PortReservation] exposes the port number via
         ``reservation.port`` and releases the socket on close.  Use to
         pass a pre-reserved port to an external process.
         """

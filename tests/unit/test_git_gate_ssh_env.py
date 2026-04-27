@@ -5,7 +5,7 @@
 
 The gate prefers the vault-managed per-scope socket by default; explicit
 opt-in (``use_personal_ssh=True``) falls through to the user's ambient
-SSH; with neither, [`GateAuthNotConfigured`][] is raised.
+SSH; with neither, [`GateAuthNotConfigured`][terok_sandbox.GateAuthNotConfigured] is raised.
 
 The vault branch additionally pins OpenSSH so personal keys can never
 leak in and no interactive prompt can ever leak out — asserted below as
@@ -59,7 +59,7 @@ def _patch_config(tmp_path: Path, *, scopes_with_keys: list[str] | None = None):
     """Patch ``SandboxConfig`` so the socket dir and DB both point into *tmp_path*.
 
     When *scopes_with_keys* is ``None`` the DB file doesn't exist, which
-    forces [`_db_has_keys_for_scope`][] down its ``sqlite3.Error`` path
+    forces `_db_has_keys_for_scope` down its ``sqlite3.Error`` path
     and skips the wait-for-bind window — matching the "no keys assigned"
     scenario.
     """

@@ -4,7 +4,7 @@
 """Pydantic schema for the sandbox-owned slice of the shared ``config.yml``.
 
 The ecosystem uses one ``~/.config/terok/config.yml`` file shared across
-every package (Podman model — see [`terok_sandbox.paths`][] for the
+every package (Podman model — see [`terok_sandbox.paths`][terok_sandbox.paths] for the
 prior decision around umbrella roots).  Each package owns the schema
 for the sub-sections it consumes; higher-level packages compose the
 full file by importing from their dependencies.
@@ -13,7 +13,7 @@ This module is sandbox's contribution: the eight top-level sections
 sandbox actually reads (``paths``, ``credentials``, ``vault``,
 ``gate_server``, ``services``, ``shield``, ``network``, ``ssh``), each
 strict on its own keys (``extra="forbid"``), wrapped in
-[`SandboxConfigView`][] whose top level is *tolerant*
+[`SandboxConfigView`][terok_sandbox.config_schema.SandboxConfigView] whose top level is *tolerant*
 (``extra="allow"``) so unknown sections — those owned by terok-executor
 or terok — pass through silently when sandbox is run standalone.
 
@@ -26,7 +26,7 @@ Validation strategy:
   would make the standalone ``python -m terok_sandbox`` flow crash
   on any complete ecosystem config.
 
-Higher-level packages inherit from [`SandboxConfigView`][] and add
+Higher-level packages inherit from [`SandboxConfigView`][terok_sandbox.config_schema.SandboxConfigView] and add
 their own sections.  The topmost layer (terok) flips back to
 ``extra="forbid"`` because it knows every section in the v0 ecosystem.
 """
@@ -39,7 +39,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 ServicesMode = Literal["tcp", "socket"]
 """Type alias for the ``services.mode`` Literal; re-exported from
-[`RawServicesSection.model_fields['mode']`][] so downstream modules
+`RawServicesSection.model_fields['mode']` so downstream modules
 (sandbox's [`SandboxConfig`][terok_sandbox.config.SandboxConfig], terok's
 ``make_sandbox_config``) can annotate without re-declaring the shape."""
 
@@ -62,7 +62,7 @@ class RawPathsSection(BaseModel):
     """The ``paths:`` section — umbrella state root and per-purpose overrides.
 
     ``root`` is the namespace state root read by every ecosystem package
-    (Podman model — see also [`terok_sandbox.paths.umbrella_state_dir`][]).
+    (Podman model — see also `terok_sandbox.paths.umbrella_state_dir`).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -214,7 +214,7 @@ class SandboxConfigView(BaseModel):
     Higher layers compose by inheriting from this class and adding
     their own typed fields:
 
-    - [`terok_executor.config_schema.ExecutorConfigView`][]
+    - [`terok_executor.config_schema.ExecutorConfigView`][terok_executor.config_schema.ExecutorConfigView]
       inherits and adds the ``image:`` section.
     - terok's ``RawGlobalConfig`` inherits and adds the remaining
       five terok-owned sections, then flips to ``extra="forbid"`` —
@@ -241,7 +241,7 @@ def gate_use_personal_ssh_default() -> bool:
     """Resolve the host gate's ``ssh.use_personal`` global default.
 
     Reads the ``ssh:`` section from the shared ``config.yml``, validates
-    via [`RawSSHSection`][], and returns the bool.  An unset section,
+    via [`RawSSHSection`][terok_sandbox.config_schema.RawSSHSection], and returns the bool.  An unset section,
     a missing key, or a malformed value collapses to ``False`` — the
     safe historical default ("terok never touches your real keys").
 
@@ -254,7 +254,7 @@ def gate_use_personal_ssh_default() -> bool:
         False                          (default)
 
     Lives in sandbox because the consumer
-    ([`_git_env_with_ssh`][terok_sandbox.gate.mirror._git_env_with_ssh]) is here too —
+    (`_git_env_with_ssh`) is here too —
     same package owns the schema and the reader.
     """
     from .paths import read_config_section

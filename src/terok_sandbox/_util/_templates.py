@@ -11,7 +11,7 @@ _FORBIDDEN_CHARS = frozenset("\n\r\0")
 def render_template(template_path: Path, variables: dict[str, str]) -> str:
     """Read *template_path* and replace ``{{KEY}}`` tokens with *variables* values.
 
-    Raises [`ValueError`][] if any value contains control characters
+    Raises [`ValueError`][ValueError] if any value contains control characters
     (newline, carriage-return, NUL) that could inject extra directives
     into the rendered systemd unit.
     """

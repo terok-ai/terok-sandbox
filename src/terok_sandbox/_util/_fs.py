@@ -36,7 +36,7 @@ def systemd_user_unit_dir() -> Path:
     Refuses to run as root (``euid == 0``) and resolves ``$XDG_CONFIG_HOME``
     to ensure the result stays beneath the user's home directory.
 
-    Raises [`SystemExit`][] on validation failure.
+    Raises [`SystemExit`][SystemExit] on validation failure.
     """
     if os.geteuid() == 0:
         raise SystemExit(

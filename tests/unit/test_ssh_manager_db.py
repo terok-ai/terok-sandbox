@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for [`SSHManager`][] with the DB-backed storage."""
+"""Tests for [`SSHManager`][terok_sandbox.SSHManager] with the DB-backed storage."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ def db(tmp_path: Path) -> CredentialDB:
 
 
 class TestInit:
-    """Verify [`SSHManager.init`][] contract."""
+    """Verify [`SSHManager.init`][terok_sandbox.SSHManager.init] contract."""
 
     def test_creates_key_and_assignment(self, db: CredentialDB) -> None:
         """First init on an empty scope generates + assigns a new key."""
@@ -100,7 +100,7 @@ class TestInit:
 
 
 class TestOwnership:
-    """``SSHManager`` owns its DB iff constructed via [`SSHManager.open`][]."""
+    """``SSHManager`` owns its DB iff constructed via [`SSHManager.open`][terok_sandbox.SSHManager.open]."""
 
     def test_context_manager_closes_owned_db(self, tmp_path) -> None:
         """``SSHManager.open`` + ``with`` closes the DB at block exit."""

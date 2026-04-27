@@ -4,7 +4,7 @@
 
 """Adapter for terok-shield egress firewall.
 
-Creates per-task [`Shield`][] instances from the sandbox configuration.
+Creates per-task [`Shield`][terok_shield.Shield] instances from the sandbox configuration.
 Each task gets its own ``state_dir`` under ``{task_dir}/shield/``.
 """
 
@@ -55,14 +55,14 @@ _BYPASS_WARNING = (
 
 
 def _cfg(cfg: SandboxConfig | None = None) -> SandboxConfig:
-    """Return *cfg* or a default [`SandboxConfig`][]."""
+    """Return *cfg* or a default [`SandboxConfig`][terok_sandbox.SandboxConfig]."""
     return cfg or SandboxConfig()
 
 
 def make_shield(task_dir: Path, cfg: SandboxConfig | None = None) -> Shield:
-    """Construct a per-task [`Shield`][] from sandbox configuration.
+    """Construct a per-task [`Shield`][terok_shield.Shield] from sandbox configuration.
 
-    Builds a [`ShieldConfig`][] with ``state_dir`` scoped to *task_dir*.
+    Builds a `ShieldConfig` with ``state_dir`` scoped to *task_dir*.
     """
     c = _cfg(cfg)
     # Socket-mode transports emit no loopback traffic; filter ``None`` so
@@ -87,7 +87,7 @@ def pre_start(container: str, task_dir: Path, cfg: SandboxConfig | None = None) 
     Returns an empty list (no firewall args) when the dangerous
     ``bypass_firewall_no_protection`` override is active.
 
-    Raises [`SystemExit`][] with setup instructions when the
+    Raises [`SystemExit`][SystemExit] with setup instructions when the
     podman environment requires one-time hook installation.
     """
     if _cfg(cfg).shield_bypass:
@@ -121,7 +121,7 @@ def up(container: str, task_dir: Path, cfg: SandboxConfig | None = None) -> None
 def block(container: str, task_dir: Path, cfg: SandboxConfig | None = None) -> None:
     """Total network blackout — drop all traffic, log for forensics.
 
-    Unlike [`up`][] and [`down`][], this ignores ``shield_bypass``
+    Unlike [`up`][terok_sandbox.shield.up] and [`down`][terok_sandbox.shield.down], this ignores ``shield_bypass``
     because panic overrides all safety bypasses.
     """
     make_shield(task_dir, cfg).block(container)
@@ -152,7 +152,7 @@ def status(cfg: SandboxConfig | None = None) -> dict:
 def check_environment(cfg: SandboxConfig | None = None) -> EnvironmentCheck:
     """Check the podman environment for shield compatibility.
 
-    Returns a synthetic [`EnvironmentCheck`][] with bypass info when the
+    Returns a synthetic [`EnvironmentCheck`][terok_shield.EnvironmentCheck] with bypass info when the
     dangerous bypass override is active.
     """
     if _cfg(cfg).shield_bypass:
@@ -174,7 +174,7 @@ def shield_interactive_session(
     """Run the terminal clearance fallback for a task's shield.
 
     Thin wrapper that spares callers from reaching into
-    [`terok_shield.cli.simple_clearance`][] and rebuilding the
+    [`terok_shield.cli.simple_clearance`][terok_shield.cli.simple_clearance] and rebuilding the
     ``state_dir`` themselves.  Refuses to run when the D-Bus
     clearance hub is already handling the session.
     """
@@ -191,7 +191,7 @@ def shield_watch_session(
     """Stream shield blocked-access events for a task as JSON lines.
 
     Thin wrapper that spares callers from reaching into
-    [`terok_shield.cli.watch`][] and rebuilding the ``state_dir``
+    [`terok_shield.cli.watch`][terok_shield.cli.watch] and rebuilding the ``state_dir``
     themselves.
     """
     from terok_shield.cli.watch import run_watch
@@ -208,8 +208,8 @@ def run_setup(*, root: bool = False, user: bool = False) -> None:
     scopes so callers that want system-wide and per-user coverage can
     do it in a single call.
 
-    Raises [`ValueError`][] when neither flag is true.  The CLI
-    layer (``_handle_shield_setup`` in [`.commands`][]) maps this to
+    Raises [`ValueError`][ValueError] when neither flag is true.  The CLI
+    layer (``_handle_shield_setup`` in `.commands`) maps this to
     a ``SystemExit`` with actionable ``shield install-hooks …`` hints;
     the library stays UX-agnostic.
     """
@@ -257,7 +257,7 @@ def uninstall_hooks_direct(*, root: bool = False) -> None:
     """Delete shield hook files from the user or system hooks directory.
 
     Uses sudo for the system directory (matching the install path in
-    [`setup_hooks_direct`][]) so the Python process stays unprivileged.
+    [`setup_hooks_direct`][terok_sandbox.shield.setup_hooks_direct]) so the Python process stays unprivileged.
     Bridge hook files are removed when present so a plain
     ``shield uninstall-hooks`` leaves no residue from an earlier
     ``terok setup`` that registered the D-Bus bridge.

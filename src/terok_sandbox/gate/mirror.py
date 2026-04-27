@@ -15,7 +15,7 @@ with how the caller configures it:
   repo that the container can still push to.  Nothing is fetched because
   there is no remote; subsequent syncs are no-ops.
 
-[`GitGate`][] is the main service class — wraps git CLI operations for
+[`GitGate`][terok_sandbox.gate.mirror.GitGate] is the main service class — wraps git CLI operations for
 syncing, comparing, and querying the gate.
 
 All constructor parameters are plain values (strings, paths) — no
@@ -23,11 +23,11 @@ terok-specific types like ``ProjectConfig``.
 
 Value types returned by ``GitGate`` methods:
 
-- [`GateSyncResult`][] — full sync outcome (created, updated branches,
+- [`GateSyncResult`][terok_sandbox.gate.mirror.GateSyncResult] — full sync outcome (created, updated branches,
   errors; ``upstream_url`` is ``None`` for remoteless gates)
-- [`BranchSyncResult`][] — selective branch sync outcome
-- [`CommitInfo`][] — single commit metadata (hash, date, author, message)
-- [`GateStalenessInfo`][] — frozen comparison of gate HEAD vs upstream HEAD
+- [`BranchSyncResult`][terok_sandbox.gate.mirror.BranchSyncResult] — selective branch sync outcome
+- [`CommitInfo`][terok_sandbox.gate.mirror.CommitInfo] — single commit metadata (hash, date, author, message)
+- [`GateStalenessInfo`][terok_sandbox.gate.mirror.GateStalenessInfo] — frozen comparison of gate HEAD vs upstream HEAD
 """
 
 import logging
@@ -169,7 +169,7 @@ class GitGate:
             the orchestration layer; omitted for standalone use.
         clone_cache_base:
             Base directory for non-bare clone caches.  When set,
-            [`sync`][] refreshes a working-tree cache at
+            [`sync`][terok_sandbox.gate.mirror.GitGate.sync] refreshes a working-tree cache at
             ``clone_cache_base / scope`` after updating the bare mirror.
             The cache accelerates task startup by enabling a host-side
             file copy instead of a full ``git clone``.
@@ -543,12 +543,12 @@ _SOCKET_BIND_WAIT_SECONDS = 4.0
 """Client-side tolerance for the daemon's reconciler to bind a fresh scope socket.
 
 Roughly two of the reconciler's own poll ticks
-([`terok_sandbox.vault.scope_sockets._POLL_INTERVAL_SECONDS`][]) — enough to
+(`terok_sandbox.vault.scope_sockets._POLL_INTERVAL_SECONDS`) — enough to
 absorb one full miss plus the next bind attempt.
 """
 
 _SOCKET_POLL_INTERVAL = 0.1
-"""How often [`_wait_for_socket`][] rechecks while inside the grace window."""
+"""How often `_wait_for_socket` rechecks while inside the grace window."""
 
 
 def _git_env_with_ssh(*, scope: str, use_personal_ssh: bool = False) -> dict:
@@ -572,7 +572,7 @@ def _git_env_with_ssh(*, scope: str, use_personal_ssh: bool = False) -> dict:
       This branch is *either-or* with the vault — personal opt-in
       bypasses the vault entirely; it is not additive.
     - **Unconfigured.**  No vault socket and no opt-in — raise
-      [`GateAuthNotConfigured`][] so the CLI layer can surface the
+      [`GateAuthNotConfigured`][terok_sandbox.gate.mirror.GateAuthNotConfigured] so the CLI layer can surface the
       two remediation paths.
     """
     from ..config import SandboxConfig
@@ -629,7 +629,7 @@ def _db_has_keys_for_scope(db_path: Path, scope: str) -> bool:
     file raises cleanly instead of being auto-created as a side effect.
     Any ``sqlite3.Error`` — missing file, missing table, locked DB —
     collapses to ``False`` so the caller falls straight through to
-    [`GateAuthNotConfigured`][] instead of hanging.
+    [`GateAuthNotConfigured`][terok_sandbox.gate.mirror.GateAuthNotConfigured] instead of hanging.
     """
     try:
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)

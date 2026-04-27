@@ -102,7 +102,7 @@ class TestCLIBasics:
     def test_shield_install_hooks_requires_scope_flag(self) -> None:
         """``shield install-hooks`` with no flag surfaces CLI-specific hints.
 
-        The library function ([`terok_sandbox.shield.run_setup`][]) raises
+        The library function ([`terok_sandbox.shield.run_setup`][terok_sandbox.shield.run_setup]) raises
         ``ValueError`` on invalid combos — the CLI layer is what maps it to
         actionable ``install-hooks --root/--user`` remediation text.
         """

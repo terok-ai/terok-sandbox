@@ -4,9 +4,9 @@
 """High-level sandbox facade composing shield, gate, runtime, and SSH.
 
 Convenience composition layer — delegates container lifecycle to the
-injected [`ContainerRuntime`][], plus convenience wrappers for gate
-and shield services.  The launch path ([`Sandbox.run`][],
-[`Sandbox.create`][]) is still podman-specific and invokes the podman
+injected [`ContainerRuntime`][terok_sandbox.ContainerRuntime], plus convenience wrappers for gate
+and shield services.  The launch path ([`Sandbox.run`][terok_sandbox.sandbox.Sandbox.run],
+[`Sandbox.create`][terok_sandbox.sandbox.Sandbox.create]) is still podman-specific and invokes the podman
 CLI directly; Phase 3 will factor that through the runtime as well.
 """
 
@@ -112,7 +112,7 @@ class VolumeSpec:
     """Absolute path inside the container (e.g. ``"/workspace"``)."""
 
     sharing: str = Sharing.SHARED
-    """Sharing semantics: [`Sharing.PRIVATE`][] or [`Sharing.SHARED`][]."""
+    """Sharing semantics: [`Sharing.PRIVATE`][terok_sandbox.sandbox.Sharing.PRIVATE] or [`Sharing.SHARED`][terok_sandbox.sandbox.Sharing.SHARED]."""
 
     def to_mount_arg(self) -> str:
         """Format as a ``-v`` flag value for ``podman run``."""
@@ -183,10 +183,10 @@ class RunSpec:
 class Sandbox:
     """Per-task orchestrator composing runtime + services.
 
-    Holds a [`ContainerRuntime`][] (defaulting to [`PodmanRuntime`][])
-    and a [`SandboxConfig`][], and exposes gate / shield / lifecycle
+    Holds a [`ContainerRuntime`][terok_sandbox.ContainerRuntime] (defaulting to [`PodmanRuntime`][terok_sandbox.PodmanRuntime])
+    and a [`SandboxConfig`][terok_sandbox.SandboxConfig], and exposes gate / shield / lifecycle
     verbs bundled in one place.  Container lifecycle verbs delegate to the
-    runtime; the launch path ([`run`][], [`create`][]) still drives
+    runtime; the launch path ([`run`][terok_sandbox.sandbox.Sandbox.run], [`create`][terok_sandbox.sandbox.Sandbox.create]) still drives
     podman directly because shield / gate integration is podman-specific
     today.
     """
@@ -265,7 +265,7 @@ class Sandbox:
         shield, GPU, volumes, env, image, entrypoint) is identical.
 
         In **sealed** mode the volume specs are omitted from the command
-        (they are injected via [`copy_to`][] between create and start).
+        (they are injected via [`copy_to`][terok_sandbox.sandbox.Sandbox.copy_to] between create and start).
         """
         cmd: list[str] = ["podman", verb] + (["-d"] if verb == "run" else [])
         cmd += podman_userns_args()
@@ -342,7 +342,7 @@ class Sandbox:
         copied in via ``podman cp``, and the container is then started.
 
         Fires *hooks.pre_start* before creation and *hooks.post_start*
-        after a successful start.  Raises [`GpuConfigError`][] when the
+        after a successful start.  Raises [`GpuConfigError`][terok_sandbox.GpuConfigError] when the
         launch fails due to NVIDIA CDI misconfiguration.
         """
         if spec.sealed:
@@ -370,7 +370,7 @@ class Sandbox:
 
         Returns the container name.  Fires *hooks.pre_start* before
         ``podman create``.  The container can then receive injected files
-        via [`copy_to`][] before being started with [`start`][].
+        via [`copy_to`][terok_sandbox.sandbox.Sandbox.copy_to] before being started with [`start`][terok_sandbox.sandbox.Sandbox.start].
         """
         cmd = self._build_cmd(spec, verb="create")
         print("$", shlex.join(redact_env_args(cmd)))
@@ -448,7 +448,7 @@ class Sandbox:
     def stop(self, containers: list[str]) -> list[ContainerRemoveResult]:
         """Best-effort stop and remove *containers*.
 
-        Returns one [`ContainerRemoveResult`][] per entry.
+        Returns one [`ContainerRemoveResult`][terok_sandbox.ContainerRemoveResult] per entry.
         """
         handles = [self._runtime.container(name) for name in containers]
         return self._runtime.force_remove(handles)
@@ -459,9 +459,9 @@ class Sandbox:
         """Create an SSH manager for *scope* that owns its own ``CredentialDB``.
 
         Callers receive an ``SSHManager`` whose DB connection is opened
-        against [`SandboxConfig.db_path`][].  Use it as a context
+        against [`SandboxConfig.db_path`][terok_sandbox.SandboxConfig.db_path].  Use it as a context
         manager (``with sandbox.init_ssh(scope) as m: ...``) or call
-        [`SSHManager.close`][] when done.
+        [`SSHManager.close`][terok_sandbox.SSHManager.close] when done.
         """
         from .credentials.ssh import SSHManager
 

@@ -11,7 +11,7 @@ escape vector.
 Networking across Podman versions:
 
 - **terok-shield** handles container networking via its OCI hook.  The gate
-  server port is passed as ``loopback_ports`` in [`ShieldConfig`][] so that
+  server port is passed as ``loopback_ports`` in `ShieldConfig` so that
   shield's nftables rules allow containers to reach host loopback on that port.
 
 **Deployment modes (ordered by preference):**
@@ -99,7 +99,7 @@ class GateServerManager:
 
     Encapsulates configuration, systemd unit management, and daemon
     process control behind a single object.  Construct with an optional
-    [`SandboxConfig`][]; all methods use the bound configuration.
+    [`SandboxConfig`][terok_sandbox.SandboxConfig]; all methods use the bound configuration.
     """
 
     def __init__(self, cfg: SandboxConfig | None = None) -> None:
@@ -339,13 +339,13 @@ class GateServerManager:
         """Disable + remove gate unit files from prior versions.
 
         A unit file is considered ours (and eligible for removal) when
-        its first line begins with [`_OWNED_MARKER_PREFIX`][] — every
+        its first line begins with `_OWNED_MARKER_PREFIX` — every
         shipped template carries that marker.  Files matching the
-        [`_OWNED_UNIT_GLOB`][] but lacking the marker are left alone
+        `_OWNED_UNIT_GLOB` but lacking the marker are left alone
         (user-authored units that happen to share the ``terok-gate*``
         name prefix).  Current-version files are skipped here too;
         they're handled by the subsequent pass in
-        [`_remove_unit_files`][].
+        `_remove_unit_files`.
 
         This catches legacy filenames from previous releases — e.g. if
         a future rename moves ``terok-gate-socket.service`` to a new

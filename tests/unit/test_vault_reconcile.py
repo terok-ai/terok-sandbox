@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for [`ScopeSocketReconciler`][] — the per-scope socket manager."""
+"""Tests for [`ScopeSocketReconciler`][terok_sandbox.vault.scope_sockets.ScopeSocketReconciler] — the per-scope socket manager."""
 
 from __future__ import annotations
 

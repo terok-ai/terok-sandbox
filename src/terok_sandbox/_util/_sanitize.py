@@ -9,7 +9,7 @@ or other C0/C1 control characters.  Printing them raw to a terminal
 allows output spoofing, title manipulation, or clipboard injection via
 OSC 52 (CWE-150).
 
-[`sanitize_tty`][] strips these before display.
+`sanitize_tty` strips these before display.
 """
 
 import unicodedata

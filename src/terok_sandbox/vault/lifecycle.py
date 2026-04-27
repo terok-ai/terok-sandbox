@@ -9,7 +9,7 @@ and a manual daemon fallback.
 
 The systemd socket unit listens on both the Unix socket and the TCP
 port used by containers.  A connection to either triggers the service.
-[`VaultManager.ensure_reachable`][] also performs an explicit
+[`VaultManager.ensure_reachable`][terok_sandbox.vault.lifecycle.VaultManager.ensure_reachable] also performs an explicit
 start as a belt-and-suspenders measure before task creation.
 """
 
@@ -137,7 +137,7 @@ class VaultManager:
 
     Encapsulates configuration, systemd unit management, daemon process
     control, and health probing behind a single object.  Construct with
-    an optional [`SandboxConfig`][]; all methods use the bound
+    an optional [`SandboxConfig`][terok_sandbox.SandboxConfig]; all methods use the bound
     configuration.
     """
 
@@ -154,7 +154,7 @@ class VaultManager:
         ``systemctl --user start`` and then probes the configured transport
         — Unix socket in socket mode, ``/-/health`` + raw TCP in TCP mode.
 
-        Raises [`VaultUnreachableError`][] if the vault is unreachable.
+        Raises [`VaultUnreachableError`][terok_sandbox.vault.lifecycle.VaultUnreachableError] if the vault is unreachable.
         Called before task creation when vault is enabled.
         """
         if not self.is_socket_active() and not self.is_daemon_running():
@@ -327,7 +327,7 @@ class VaultManager:
         """Check whether the vault daemon itself is running.
 
         Checks both TCP-mode service and socket-mode service units.
-        Unlike [`is_socket_active`][], this tells whether the vault
+        Unlike [`is_socket_active`][terok_sandbox.vault.lifecycle.VaultManager.is_socket_active], this tells whether the vault
         daemon itself is bound (TCP ports bound), not just whether the
         socket is listening.  Does not trigger socket activation.
         """
@@ -431,12 +431,12 @@ class VaultManager:
         """Disable + remove proxy unit files from prior versions.
 
         A unit file is considered ours (and eligible for removal) when
-        its first line begins with [`_OWNED_MARKER_PREFIX`][] — every
+        its first line begins with `_OWNED_MARKER_PREFIX` — every
         shipped template carries that marker.  Files matching the
-        [`_OWNED_UNIT_GLOB`][] but lacking the marker are left alone
+        `_OWNED_UNIT_GLOB` but lacking the marker are left alone
         (user-authored units that happen to share the naming prefix).
         Current-version files are skipped here and handled by the
-        subsequent pass in [`_remove_unit_files`][].
+        subsequent pass in `_remove_unit_files`.
 
         This catches legacy filenames from previous releases — e.g. if
         a future rename changes a unit's filename, the sweep cleans up
@@ -661,7 +661,7 @@ class VaultManager:
     def _probe(port: int, *, timeout: float = 2.0) -> bool:
         """Return ``True`` if the vault's health endpoint responds 200.
 
-        Uses [`http.client`][] (stdlib only) to hit the TCP port.
+        Uses [`http.client`][http.client] (stdlib only) to hit the TCP port.
         """
         import http.client
 

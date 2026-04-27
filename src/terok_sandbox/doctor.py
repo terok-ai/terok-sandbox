@@ -3,7 +3,7 @@
 
 """Container health check protocol and sandbox-level diagnostics.
 
-Defines the shared [`DoctorCheck`][] / [`CheckVerdict`][] protocol
+Defines the shared [`DoctorCheck`][terok_sandbox.doctor.DoctorCheck] / [`CheckVerdict`][terok_sandbox.doctor.CheckVerdict] protocol
 used across the terok package chain (sandbox → agent → terok).  Each
 package contributes domain-specific checks; the top-level ``terok sickbay``
 orchestrates execution inside containers via ``podman exec``.
@@ -103,7 +103,7 @@ def sandbox_doctor_checks(
             file (``"up"``, ``"down"``, ``"down_all"``, or ``None`` to skip).
 
     Returns:
-        List of [`DoctorCheck`][] instances ready for orchestration.
+        List of [`DoctorCheck`][terok_sandbox.doctor.DoctorCheck] instances ready for orchestration.
     """
     checks: list[DoctorCheck] = []
     if token_broker_port is not None:

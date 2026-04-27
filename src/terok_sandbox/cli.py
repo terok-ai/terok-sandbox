@@ -4,7 +4,7 @@
 
 """CLI entry point for terok-sandbox.
 
-Built from the command registry in [`terok_sandbox.commands`][].
+Built from the command registry in [`terok_sandbox.commands`][terok_sandbox.commands].
 No command logic lives here — just argument wiring and dispatch.
 """
 
@@ -30,7 +30,7 @@ except PackageNotFoundError:
 
 
 def _wire_command(sub: argparse._SubParsersAction, cmd: CommandDef) -> None:
-    """Add a [`CommandDef`][] to an argparse subparser group."""
+    """Add a [`CommandDef`][terok_sandbox.cli.CommandDef] to an argparse subparser group."""
     p = sub.add_parser(cmd.name, help=cmd.help)
     for arg in cmd.args:
         kwargs: dict = {}

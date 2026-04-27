@@ -36,15 +36,15 @@ from pathlib import Path
 
 _SCHEMA_VERSION = 1
 """SSH-key table schema version — bumped when the on-disk encoding changes
-so [`migrate_ssh_keys_schema`][] can route legacy rows forward on first open."""
+so [`migrate_ssh_keys_schema`][terok_sandbox.credentials.db.migrate_ssh_keys_schema] can route legacy rows forward on first open."""
 
 
 def ensure_credentials_schema(conn: sqlite3.Connection) -> None:
     """Create the credential / SSH-key / phantom-token tables if missing.
 
     Idempotent (every statement is ``IF NOT EXISTS``).  Exposed at module
-    level alongside [`migrate_ssh_keys_schema`][] so every opener of
-    the DB file — [`CredentialDB`][] for writers and the vault
+    level alongside [`migrate_ssh_keys_schema`][terok_sandbox.credentials.db.migrate_ssh_keys_schema] so every opener of
+    the DB file — [`CredentialDB`][terok_sandbox.credentials.db.CredentialDB] for writers and the vault
     daemon's read-only ``_TokenDB`` — runs it before issuing queries.
     Without it, a daemon that opens an empty DB on a fresh install
     (before any CLI command has touched the file) hits ``no such table:
@@ -304,7 +304,7 @@ class CredentialDB:
     def assign_ssh_key(self, scope: str, key_id: int) -> None:
         """Grant *scope* access to *key_id* (idempotent).
 
-        Rejects unsafe scope names with [`InvalidScopeName`][] — the
+        Rejects unsafe scope names with [`InvalidScopeName`][terok_sandbox.credentials.db.InvalidScopeName] — the
         value is later embedded in per-scope Unix-socket paths, so
         traversal-like strings (``../``, ``/``) must not be persisted.
         """

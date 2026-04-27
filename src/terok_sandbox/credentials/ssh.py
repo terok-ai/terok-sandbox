@@ -3,12 +3,12 @@
 
 """SSH keypair generation for a project scope.
 
-[`SSHManager`][] generates an SSH keypair in memory, stores the private
+[`SSHManager`][terok_sandbox.credentials.ssh.SSHManager] generates an SSH keypair in memory, stores the private
 material in the credential DB, and assigns it to a project scope.  The
 generated key never touches the filesystem — the signer serves it over the
 per-scope agent socket managed by the vault.
 
-See [`.ssh_keypair`][] for import/export against OpenSSH files and for the
+See `.ssh_keypair` for import/export against OpenSSH files and for the
 bytes-level keypair vocabulary (``GeneratedKeypair``, fingerprint helpers).
 """
 
@@ -44,15 +44,15 @@ class SSHManager:
     Two constructors for two ownership stories:
 
     - ``SSHManager(scope=..., db=...)`` binds the manager to a
-      caller-owned [`CredentialDB`][].  The manager uses it and
+      caller-owned [`CredentialDB`][terok_sandbox.CredentialDB].  The manager uses it and
       never closes it.  Right shape for tests and pooled connections.
-    - [`SSHManager.open`][] opens its own DB against a path and
-      closes it on [`close`][] / context exit / garbage collection.
+    - [`SSHManager.open`][terok_sandbox.credentials.ssh.SSHManager.open] opens its own DB against a path and
+      closes it on [`close`][terok_sandbox.credentials.ssh.SSHManager.close] / context exit / garbage collection.
       Right shape for one-shot CLI commands.
     """
 
     def __init__(self, *, scope: str, db: CredentialDB) -> None:
-        """Bind the manager to a caller-provided [`CredentialDB`][]."""
+        """Bind the manager to a caller-provided [`CredentialDB`][terok_sandbox.CredentialDB]."""
         self._scope = scope
         self._db = db
         self._owned_db: CredentialDB | None = None

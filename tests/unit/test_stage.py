@@ -152,7 +152,7 @@ def test_stage_width_fits_widest_shipped_label() -> None:
 
 
 class TestColourDetection:
-    """Verify the NO_COLOR / FORCE_COLOR / isatty precedence in [`_detect_colour`][]."""
+    """Verify the NO_COLOR / FORCE_COLOR / isatty precedence in `_detect_colour`."""
 
     def test_no_color_env_disables_colour(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """``NO_COLOR`` always wins — per the no-color.org contract."""
@@ -269,7 +269,7 @@ class TestStageLine:
     ) -> None:
         """When the caller catches + ``.fail()``s + returns, the caller message wins.
 
-        Complement to [`test_uncaught_exception_overrides_earlier_ok`][] —
+        Complement to `test_uncaught_exception_overrides_earlier_ok` —
         showing the only way to put a caller-authored message in the
         log is to keep the exception out of the ``with`` block.
         """

@@ -80,7 +80,7 @@ class _TokenDB:
 
     Kept deliberately thin — only the SELECTs the vault daemon needs at
     request-handling time.  Writers go through
-    [`terok_sandbox.credentials.db.CredentialDB`][].
+    [`terok_sandbox.credentials.db.CredentialDB`][terok_sandbox.credentials.db.CredentialDB].
     """
 
     def __init__(self, db_path: str) -> None:

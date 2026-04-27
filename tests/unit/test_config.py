@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for [`SandboxConfig`][] — notably the services-mode branching."""
+"""Tests for [`SandboxConfig`][terok_sandbox.SandboxConfig] — notably the services-mode branching."""
 
 from __future__ import annotations
 

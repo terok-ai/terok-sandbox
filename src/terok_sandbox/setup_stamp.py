@@ -25,9 +25,9 @@ from any frontend without inverting the dep graph.
 Resolution detail
 =================
 
-Package versions are read via [`importlib.metadata.version`][] —
+Package versions are read via [`importlib.metadata.version`][importlib.metadata.version] —
 no subprocess, no parsing, sub-millisecond per package.  Total cost
-of [`needs_setup`][] on a happy path: one ``Path.is_file``, one
+of [`needs_setup`][terok_sandbox.setup_stamp.needs_setup] on a happy path: one ``Path.is_file``, one
 JSON decode, four to five ``importlib.metadata`` lookups.  Well under
 the 2 s budget.
 
@@ -55,7 +55,7 @@ from .paths import namespace_state_dir
 
 
 class SetupVerdict(Enum):
-    """Result of [`needs_setup`][] — five possible states a launch can be in."""
+    """Result of [`needs_setup`][terok_sandbox.setup_stamp.needs_setup] — five possible states a launch can be in."""
 
     OK = "ok"
     """Stamp matches all installed package versions exactly."""
@@ -102,7 +102,7 @@ def stamp_path() -> Path:
 def needs_setup() -> SetupVerdict:
     """Compare the on-disk stamp against currently-installed package versions.
 
-    See [`SetupVerdict`][] for the five possible outcomes.  Designed
+    See [`SetupVerdict`][terok_sandbox.setup_stamp.SetupVerdict] for the five possible outcomes.  Designed
     to be cheap enough to call on every TUI startup.
     """
     path = stamp_path()
@@ -183,7 +183,7 @@ def _installed_versions() -> dict[str, str]:
 def _read_stamp(path: Path) -> dict[str, str]:
     """Parse the stamp file, returning the ``packages`` mapping.
 
-    Raises [`ValueError`][] if the schema version doesn't match — a
+    Raises [`ValueError`][ValueError] if the schema version doesn't match — a
     schema bump should be handled explicitly, not silently coerced.
     """
     raw = json.loads(path.read_text(encoding="utf-8"))

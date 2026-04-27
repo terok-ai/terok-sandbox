@@ -35,7 +35,7 @@ from terok_sandbox.config import SandboxConfig
 
 @pytest.fixture
 def bare_cfg() -> SandboxConfig:
-    """A spec'd mock of [`SandboxConfig`][] — no XDG I/O, no port registry.
+    """A spec'd mock of [`SandboxConfig`][terok_sandbox.SandboxConfig] — no XDG I/O, no port registry.
 
     Phases under test read ``cfg`` as an opaque handle that's passed to
     a manager constructor (which is itself patched away); they only
@@ -692,7 +692,7 @@ class TestClearanceUninstallPhase:
 
 
 class TestClearanceInstallImportMissing:
-    """Fills the import-missing branch of [`run_clearance_install_phase`][]."""
+    """Fills the import-missing branch of `run_clearance_install_phase`."""
 
     def test_import_error_skips_soft(self, capsys: pytest.CaptureFixture[str]) -> None:
         with patch.dict("sys.modules", {"terok_clearance.runtime.installer": None}):

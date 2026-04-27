@@ -23,7 +23,7 @@ class TestExec:
 
     @patch("terok_sandbox.runtime.podman.subprocess.run")
     def test_calls_podman_exec(self, mock_run) -> None:
-        """Builds the expected argv and returns an [`ExecResult`][]."""
+        """Builds the expected argv and returns an [`ExecResult`][terok_sandbox.ExecResult]."""
         mock_run.return_value = subprocess.CompletedProcess(
             args=[], returncode=0, stdout="ok\n", stderr=""
         )
@@ -128,7 +128,7 @@ class TestContainerStart:
 
     @patch("terok_sandbox.runtime.podman.subprocess.run")
     def test_failure_raises_runtimeerror(self, mock_run) -> None:
-        """Non-zero returncode is translated to [`RuntimeError`][]."""
+        """Non-zero returncode is translated to [`RuntimeError`][RuntimeError]."""
         mock_run.return_value = subprocess.CompletedProcess(
             args=[], returncode=125, stderr="Error: no such container\n"
         )
@@ -184,7 +184,7 @@ class TestContainerStop:
 
     @patch("terok_sandbox.runtime.podman.subprocess.run")
     def test_failure_raises_runtimeerror(self, mock_run) -> None:
-        """Non-zero returncode is translated to [`RuntimeError`][]."""
+        """Non-zero returncode is translated to [`RuntimeError`][RuntimeError]."""
         mock_run.return_value = subprocess.CompletedProcess(
             args=[], returncode=125, stderr="Error: no such container\n"
         )

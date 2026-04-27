@@ -3,10 +3,10 @@
 
 """Sandbox configuration — plain dataclass for standalone and embedded use.
 
-[`SandboxConfig`][] captures directory paths and settings that sandbox
+[`SandboxConfig`][terok_sandbox.config.SandboxConfig] captures directory paths and settings that sandbox
 modules need.  In standalone ``terok-sandbox`` use, it is resolved from
 environment variables and XDG defaults.  When embedded in terok, the
-orchestration layer constructs it from [`core.config`][] values.
+orchestration layer constructs it from [`core.config`][terok.lib.core.config] values.
 """
 
 from __future__ import annotations
@@ -65,7 +65,7 @@ def services_mode() -> ServicesMode:
 
 
 def _default_services_mode() -> ServicesMode:
-    """Default-factory indirection for [`SandboxConfig.services_mode`][].
+    """Default-factory indirection for [`SandboxConfig.services_mode`][terok_sandbox.config.SandboxConfig.services_mode].
 
     Lets tests patch ``terok_sandbox.config.services_mode`` and see the
     patch take effect at construction time — a direct
@@ -79,7 +79,7 @@ def _default_services_mode() -> ServicesMode:
 class SandboxConfig:
     """Immutable configuration for the sandbox layer.
 
-    All paths default to the XDG/FHS-resolved values from [`paths`][].
+    All paths default to the XDG/FHS-resolved values from [`paths`][terok_sandbox.paths].
     Override individual fields when constructing from terok's global config
     or when using terok-sandbox standalone.
     """
@@ -93,7 +93,7 @@ class SandboxConfig:
     config_dir: Path = field(default_factory=_config_root)
     """Sandbox-scoped configuration root.
 
-    Note: shield profiles are resolved by [`shield_profiles_dir`][]
+    Note: shield profiles are resolved by [`shield_profiles_dir`][terok_sandbox.config.SandboxConfig.shield_profiles_dir]
     via [`namespace_config_root`][terok_sandbox.paths.namespace_config_root], not from
     this directory.
     """
@@ -238,9 +238,9 @@ class SandboxConfig:
         """Return the path to the SSH key mapping JSON.
 
         .. deprecated::
-            SSH keys are stored in [`db_path`][] (table ``ssh_keys``) and
+            SSH keys are stored in [`db_path`][terok_sandbox.config.SandboxConfig.db_path] (table ``ssh_keys``) and
             served via per-scope sockets at
-            [`ssh_signer_local_socket_path`][].  This path is retained
+            [`ssh_signer_local_socket_path`][terok_sandbox.config.SandboxConfig.ssh_signer_local_socket_path].  This path is retained
             only for transitional callers in sibling packages; new code
             must not read or write it.
         """
@@ -253,7 +253,7 @@ class SandboxConfig:
         assigned key, under the same ``runtime_dir`` as the main signer.
         Host-side ``gate-sync`` points ``SSH_AUTH_SOCK`` at this path.
 
-        Rejects unsafe scope names with [`InvalidScopeName`][credentials.db.InvalidScopeName]
+        Rejects unsafe scope names with [`InvalidScopeName`][terok_sandbox.credentials.db.InvalidScopeName]
         as a belt-and-braces guard — writers in the DB layer enforce the
         same policy, but the socket path is public API and may be called
         without a preceding DB write.

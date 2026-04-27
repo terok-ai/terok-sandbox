@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for [`PodmanInspector`][] + [`create_container_inspector`][]."""
+"""Tests for [`PodmanInspector`][terok_sandbox.PodmanInspector] + [`create_container_inspector`][terok_sandbox.create_container_inspector]."""
 
 from __future__ import annotations
 
@@ -202,7 +202,7 @@ class TestCreateContainerInspector:
         assert isinstance(create_container_inspector(), PodmanInspector)
 
     def test_satisfies_clearance_protocol(self) -> None:
-        """Return value ducks-in as a [`terok_clearance.ContainerInspector`][]."""
+        """Return value ducks-in as a [`terok_clearance.ContainerInspector`][terok_clearance.ContainerInspector]."""
         assert isinstance(create_container_inspector(), ContainerInspector)
 
     def test_returns_fresh_instances(self) -> None:

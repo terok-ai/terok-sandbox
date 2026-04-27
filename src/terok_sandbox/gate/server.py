@@ -71,7 +71,7 @@ def _validate_token_data(data: object) -> dict[str, dict[str, str]]:
 
 
 _ADMIN_WILDCARD = "*"
-"""Sentinel returned by [`TokenStore.validate`][] for admin tokens."""
+"""Sentinel returned by [`TokenStore.validate`][terok_sandbox.gate.server.TokenStore.validate] for admin tokens."""
 
 
 class TokenStore:
@@ -108,7 +108,7 @@ class TokenStore:
     def validate(self, token: str) -> str | None:
         """Return scope if *token* is valid, else ``None``.
 
-        Returns [`_ADMIN_WILDCARD`][] (``"*"``) for admin tokens,
+        Returns `_ADMIN_WILDCARD` (``"*"``) for admin tokens,
         granting access to any repo.  Reloads the token file when its
         mtime changes.
         """
@@ -488,7 +488,7 @@ def _create_unix_server(
 
     Stale socket files are removed if they are actual sockets (not regular
     files that happen to share the path).  The socket is labeled
-    ``terok_socket_t`` via [`socket_selinux_context`][] so that
+    ``terok_socket_t`` via `socket_selinux_context` so that
     rootless Podman containers (``container_t``) can ``connectto`` it.
     """
     try:

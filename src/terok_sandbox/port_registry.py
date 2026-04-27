@@ -4,12 +4,12 @@
 """Shared port registry for multi-user isolation.
 
 Every port allocation — infrastructure services and container web ports —
-flows through [`PortRegistry`][].  Claims are persisted as per-user
+flows through [`PortRegistry`][terok_sandbox.port_registry.PortRegistry].  Claims are persisted as per-user
 JSON files in a shared directory (default ``/tmp/terok-ports/``).  All
 users' claim files are read at allocation time to avoid collisions;
 socket bind tests verify the port is actually free.
 
-A module-level singleton ([`_default`][]) provides the convenience API
+A module-level singleton (`_default`) provides the convenience API
 (``claim_port``, ``release_port``, etc.) used by the rest of the stack.
 """
 
@@ -71,7 +71,7 @@ class PortRegistry:
     """File-based shared port registry for multi-user isolation.
 
     Each instance manages its own in-memory claim set and shared directory.
-    Use the module-level singleton ([`_default`][]) for production code;
+    Use the module-level singleton (`_default`) for production code;
     tests can construct isolated instances with a temporary directory.
     """
 
@@ -134,7 +134,7 @@ class PortRegistry:
         ssh_explicit: bool,
         state_dir: Path | None,
     ) -> ServicePorts:
-        """Lock-holder body of [`resolve_service_ports`][]."""
+        """Lock-holder body of [`resolve_service_ports`][terok_sandbox.port_registry.resolve_service_ports]."""
         if self._service_ports is not None:
             return self._service_ports
 
@@ -239,11 +239,11 @@ class PortRegistry:
 
         When *trusted* is True the port originates from a prior
         allocation by this user — either an installed systemd unit file
-        (see [`_read_installed_ports`][]) or a saved claims file
+        (see `_read_installed_ports`) or a saved claims file
         (``port-claims.json``).  Our own service may be listening, so
         the ``_is_port_free`` bind check is skipped; other-user
         collision checks still apply.  The ``trusted`` flag is set by
-        [`resolve_service_ports`][] during the preference resolution
+        [`resolve_service_ports`][terok_sandbox.port_registry.resolve_service_ports] during the preference resolution
         phase.
         """
         with self._lock:
@@ -257,7 +257,7 @@ class PortRegistry:
         explicit: bool,
         trusted: bool,
     ) -> int:
-        """Lock-holder body of [`claim`][]."""
+        """Lock-holder body of [`claim`][terok_sandbox.port_registry.PortRegistry.claim]."""
         if service_key in self._held:
             return self._held[service_key]
 

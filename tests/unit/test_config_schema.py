@@ -117,7 +117,7 @@ def test_view_default_construction_is_empty() -> None:
 def test_subclass_can_compose_extra_sections_and_inherit_strictness() -> None:
     """A higher-level package can subclass + add fields; sandbox validators still fire.
 
-    This is the contract [`terok_executor.config_schema.ExecutorConfigView`][]
+    This is the contract [`terok_executor.config_schema.ExecutorConfigView`][terok_executor.config_schema.ExecutorConfigView]
     and terok's ``RawGlobalConfig`` rely on — sandbox-section strictness must
     survive composition.
     """

@@ -200,7 +200,7 @@ class TestSchemaMigration:
     """Verify legacy v0 rows (OpenSSH PEM + hex fingerprint) migrate cleanly."""
 
     def test_credential_db_open_migrates_v0_to_v1(self, tmp_path: Path) -> None:
-        """Opening a v0 DB through [`CredentialDB`][] rewrites every row.
+        """Opening a v0 DB through [`CredentialDB`][terok_sandbox.CredentialDB] rewrites every row.
 
         The old shape stored OpenSSH PEM in a ``private_pem`` column with
         64-char hex fingerprints.  The new shape stores PKCS#8 DER in

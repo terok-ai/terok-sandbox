@@ -5,16 +5,16 @@
 
 Two flavours, both targeting the user session bus:
 
-* [`run`][] — the authoritative variant.  Raises [`SystemExit`][]
+* [`run`][terok_sandbox.Sandbox.run] — the authoritative variant.  Raises [`SystemExit`][SystemExit]
   with captured stderr on failure so setup phases that depend on the
   call succeeding (e.g. enabling a freshly rendered unit) surface the
   real ``Failed to connect to bus`` / ``Unit X not loaded`` line
   rather than the bare exit code ``subprocess.CalledProcessError``
   prints by default.
 
-* [`run_best_effort`][] — the idempotent variant.  Swallows every
+* `run_best_effort` — the idempotent variant.  Swallows every
   error, including a missing ``systemctl`` binary and a
-  [`subprocess.TimeoutExpired`][] on a wedged unit, so cleanup
+  [`subprocess.TimeoutExpired`][subprocess.TimeoutExpired] on a wedged unit, so cleanup
   passes (stop, disable, sweep orphans) can't turn a non-failure
   into a raised exception.
 
@@ -33,7 +33,7 @@ _TIMEOUT_SECONDS = 10
 def run(verb: str, *args: str) -> None:
     """Run ``systemctl --user <verb> <args…>``; raise on failure with captured stderr.
 
-    Every known failure mode is normalised to [`SystemExit`][] with a
+    Every known failure mode is normalised to [`SystemExit`][SystemExit] with a
     human-readable message, so the setup aggregator's error row points
     the operator at the real cause rather than a raw Python traceback:
 

@@ -69,7 +69,7 @@ def _config_file_paths() -> list[tuple[str, Path]]:
 def read_config_section(section: str) -> dict[str, str]:
     """Read a top-level section from layered terok configs (cached, fail-silent).
 
-    Merges system and user config files via [`ConfigStack`][] — user
+    Merges system and user config files via [`ConfigStack`][terok_sandbox.ConfigStack] — user
     values override system defaults at the leaf level.
     """
     if section in _config_section_cache:

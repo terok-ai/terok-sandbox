@@ -12,7 +12,7 @@ To work around this without disabling confinement:
 
 1. A custom policy module defines ``terok_socket_t`` and grants
    ``container_t → terok_socket_t:unix_stream_socket connectto``.
-2. Services call [`setsockcreatecon`][] *before* ``socket()`` so the
+2. Services call `setsockcreatecon` *before* ``socket()`` so the
    kernel assigns ``terok_socket_t`` to the socket object.
 3. After ``bind()``, the socket object carries ``terok_socket_t`` and
    containers can connect.
@@ -20,7 +20,7 @@ To work around this without disabling confinement:
 The ``sock_file { write }`` check (file-level access) is separately
 handled by Podman's ``:z`` volume relabeling.
 
-libselinux is loaded via [`ctypes`][] at call time, so this module has
+libselinux is loaded via [`ctypes`][ctypes] at call time, so this module has
 no runtime dependency on the ``python3-libselinux`` distribution package
 — ``libselinux.so.1`` from the base ``libselinux`` package is sufficient.
 All functions degrade gracefully on non-SELinux systems.
@@ -108,7 +108,7 @@ def missing_policy_tools() -> list[str]:
     """Return names of policy-compilation tools not found on ``PATH``.
 
     The ``terok_socket`` policy is compiled from its ``.te`` source at
-    install time by [`install_policy`][], which requires all three of
+    install time by `install_policy`, which requires all three of
     ``checkmodule``, ``semodule_package``, and ``semodule``.  An empty
     list means ``install_policy()`` will not fail with ``SystemExit`` for
     missing tools.  Names are returned in invocation order so callers
@@ -240,7 +240,7 @@ def _try_getsockcreatecon() -> str | None:
 
 
 class SelinuxStatus(Enum):
-    """Outcome of [`check_status`][] — the single decision tree behind
+    """Outcome of `check_status` — the single decision tree behind
     both ``terok setup``'s prereq check and ``terok sickbay``'s health check.
     """
 
@@ -263,7 +263,7 @@ class SelinuxStatus(Enum):
 
 @dataclass(frozen=True)
 class SelinuxCheckResult:
-    """Structured outcome of [`check_status`][].
+    """Structured outcome of `check_status`.
 
     Callers decide how to present the result; this struct only carries
     the decision tree's output so that ``terok setup`` (printed multi-
@@ -285,7 +285,7 @@ def check_status(*, services_mode: str) -> SelinuxCheckResult:
     ``socket``) — passed in rather than read from sandbox config so the
     helper stays free of cross-package config plumbing.  Consumers
     (``terok setup``, ``terok sickbay``) call
-    [`terok_sandbox.config.services_mode`][] themselves.
+    [`terok_sandbox.config.services_mode`][terok_sandbox.config.services_mode] themselves.
     """
     if services_mode != "socket":
         return SelinuxCheckResult(SelinuxStatus.NOT_APPLICABLE_TCP_MODE)

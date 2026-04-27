@@ -16,11 +16,11 @@ Each phase is self-contained and idempotent:
 * The clearance phase is optional — headless servers that skip the
   desktop bridge still get a working shield+vault+gate install.
 
-Stage-line output routes through [`terok_sandbox._stage`][] (re-exported
+Stage-line output routes through `terok_sandbox._stage` (re-exported
 via the package's public surface) so frontends (terok, terok-executor)
 that mix their own stage lines in the same log share one renderer and
 one colour palette.  Kept internal (underscore-prefixed module) because
-every public entry point goes through [`commands._handle_sandbox_setup`][].
+every public entry point goes through `commands._handle_sandbox_setup`.
 """
 
 from __future__ import annotations
@@ -245,7 +245,7 @@ def run_gate_uninstall_phase(cfg: SandboxConfig) -> bool:
 def run_clearance_uninstall_phase() -> bool:
     """Tear down the clearance hub + verdict + notifier units.
 
-    Mirrors [`run_clearance_install_phase`][] — soft-skips when
+    Mirrors `run_clearance_install_phase` — soft-skips when
     ``terok_clearance`` isn't importable so a headless host's teardown
     stays a one-liner rather than a crash.
     """

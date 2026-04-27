@@ -10,7 +10,7 @@ keys without a phantom-token handshake and without the daemon knowing or
 caring which process is connecting — filesystem permissions (0600 on a
 0700 parent) are the sole access control.
 
-The [`ScopeSocketReconciler`][] watches the DB's ``ssh_keys_version``
+The [`ScopeSocketReconciler`][terok_sandbox.vault.scope_sockets.ScopeSocketReconciler] watches the DB's ``ssh_keys_version``
 counter and binds / closes sockets as scopes gain and lose assignments.
 It runs as an asyncio background task inside the vault daemon.
 """
@@ -35,9 +35,9 @@ class ScopeSocketReconciler:
 
     Lifecycle:
 
-    * [`start`][] performs the initial bind pass and launches the polling
+    * [`start`][terok_sandbox.vault.scope_sockets.ScopeSocketReconciler.start] performs the initial bind pass and launches the polling
       task.
-    * [`stop`][] cancels the poller, closes every bound server, and
+    * [`stop`][terok_sandbox.vault.scope_sockets.ScopeSocketReconciler.stop] cancels the poller, closes every bound server, and
       unlinks every socket file.
     """
 

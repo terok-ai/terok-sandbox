@@ -63,8 +63,8 @@ class ConfigStack:
     def resolve_section(self, key: str) -> dict:
         """Resolve only a single top-level section across all scopes.
 
-        Respects the same semantics as [`resolve`][] — in particular,
-        ``None`` values trigger deletion via [`deep_merge`][].
+        Respects the same semantics as [`resolve`][terok_sandbox.config_stack.ConfigStack.resolve] — in particular,
+        ``None`` values trigger deletion via [`deep_merge`][terok_sandbox.config_stack.deep_merge].
         """
         wrapper: dict = {}
         for scope in self._scopes:
@@ -84,16 +84,16 @@ class ConfigStack:
 
 
 def load_yaml_scope(level: str, path: Path) -> ConfigScope:
-    """Load a YAML file into a [`ConfigScope`][].
+    """Load a YAML file into a [`ConfigScope`][terok_sandbox.config_stack.ConfigScope].
 
     Returns an empty-data scope when the file is missing or empty.
 
     Raises
     ------
     ValueError
-        If the parsed YAML is not a mapping.  [`ConfigScope`][] ``data``
-        must be a ``dict`` because [`ConfigStack.resolve`][] and
-        [`deep_merge`][] operate on mappings.
+        If the parsed YAML is not a mapping.  [`ConfigScope`][terok_sandbox.config_stack.ConfigScope] ``data``
+        must be a ``dict`` because [`ConfigStack.resolve`][terok_sandbox.config_stack.ConfigStack.resolve] and
+        [`deep_merge`][terok_sandbox.config_stack.deep_merge] operate on mappings.
     """
     if path.is_file():
         from yaml import safe_load  # lazy: PyYAML is a transitive dep
@@ -110,16 +110,16 @@ def load_yaml_scope(level: str, path: Path) -> ConfigScope:
 
 
 def load_json_scope(level: str, path: Path) -> ConfigScope:
-    """Load a JSON file into a [`ConfigScope`][].
+    """Load a JSON file into a [`ConfigScope`][terok_sandbox.config_stack.ConfigScope].
 
     Returns an empty-data scope when the file is missing or empty.
 
     Raises
     ------
     ValueError
-        If the parsed JSON is not a mapping.  [`ConfigScope`][] ``data``
-        must be a ``dict`` because [`ConfigStack.resolve`][] and
-        [`deep_merge`][] operate on mappings.
+        If the parsed JSON is not a mapping.  [`ConfigScope`][terok_sandbox.config_stack.ConfigScope] ``data``
+        must be a ``dict`` because [`ConfigStack.resolve`][terok_sandbox.config_stack.ConfigStack.resolve] and
+        [`deep_merge`][terok_sandbox.config_stack.deep_merge] operate on mappings.
     """
     if path.is_file():
         data = json.loads(path.read_text(encoding="utf-8")) or {}

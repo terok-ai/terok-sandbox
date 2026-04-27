@@ -356,7 +356,7 @@ async def start_ssh_signer(
         socket_path: Unix socket path to listen on.
 
     Returns:
-        The running [`asyncio.Server`][] — caller is responsible for closing it.
+        The running [`asyncio.Server`][asyncio.Server] — caller is responsible for closing it.
 
     Raises:
         ValueError: If neither TCP (host+port) nor socket_path is provided.

@@ -3,9 +3,9 @@
 
 """Tests for the setup-stamp primitive (epic #685 phase 1).
 
-Pins the five [`SetupVerdict`][] outcomes against a real on-disk
-stamp file, plus the round-trip through [`write_stamp`][] /
-[`needs_setup`][] and the atomic-write contract.
+Pins the five [`SetupVerdict`][terok_sandbox.SetupVerdict] outcomes against a real on-disk
+stamp file, plus the round-trip through [`write_stamp`][terok_sandbox.write_stamp] /
+[`needs_setup`][terok_sandbox.needs_setup] and the atomic-write contract.
 
 Each test relocates the stamp to a tmp dir via ``TEROK_ROOT`` so a
 real installed stamp on the dev machine can't pollute the assertions.

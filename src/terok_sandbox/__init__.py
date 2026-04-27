@@ -6,14 +6,14 @@
 
 Delegates to domain subsystems:
 
-- [`gate`][gate] — authenticated git serving: HTTP server, token CRUD, upstream
+- [`gate`][terok_sandbox.gate] — authenticated git serving: HTTP server, token CRUD, upstream
   mirror management, systemd/daemon lifecycle.
-- [`vault`][vault] — secret injection: token broker with phantom credentials,
+- [`vault`][terok_sandbox.vault] — secret injection: token broker with phantom credentials,
   SSH signing proxy, SQLite credential store, systemd/daemon lifecycle.
-- [`shield`][shield] — egress firewall adapter (delegates to terok-shield).
-- [`runtime`][runtime] — Podman CLI wrapper (state queries, GPU, log streaming).
-- [`sandbox`][sandbox] — facade composing the above behind [`SandboxConfig`][].
-- [`commands`][commands] — CLI command registry and handler implementations.
+- [`shield`][terok_sandbox.shield] — egress firewall adapter (delegates to terok-shield).
+- [`runtime`][terok_sandbox.runtime] — Podman CLI wrapper (state queries, GPU, log streaming).
+- [`sandbox`][terok_sandbox.sandbox] — facade composing the above behind [`SandboxConfig`][terok_sandbox.SandboxConfig].
+- [`commands`][terok_sandbox.commands] — CLI command registry and handler implementations.
 """
 
 from __future__ import annotations

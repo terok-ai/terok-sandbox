@@ -1,13 +1,13 @@
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""Path-consistency invariant: two [`SandboxConfig`][] instances agree.
+"""Path-consistency invariant: two [`SandboxConfig`][terok_sandbox.SandboxConfig] instances agree.
 
 A surprisingly common failure mode across the stack has been "the CLI
 resolved ``~/.local/state/terok/...`` here; the TUI resolved
 ``~/.config/terok/...`` there; now the install and the status check
 disagree about where the unit file lives."  The fix is a single
-source of truth per path — [`SandboxConfig`][] — that every
+source of truth per path — [`SandboxConfig`][terok_sandbox.SandboxConfig] — that every
 consumer threads through.  This test enforces that property by
 constructing two configs under identical XDG settings and asserting
 every path property matches.
@@ -19,7 +19,7 @@ from pathlib import Path
 
 from terok_sandbox.config import SandboxConfig
 
-#: Every public path property on [`SandboxConfig`][] that the
+#: Every public path property on [`SandboxConfig`][terok_sandbox.SandboxConfig] that the
 #: setup aggregator and its phases touch.  Listed here so a new path
 #: accessor shows up in the assertion without the maintainer having
 #: to remember to extend this test.
@@ -44,7 +44,7 @@ _PATH_PROPERTIES = (
 
 
 def test_two_configs_agree_on_every_path() -> None:
-    """Two [`SandboxConfig`][] instances resolve every path identically.
+    """Two [`SandboxConfig`][terok_sandbox.SandboxConfig] instances resolve every path identically.
 
     If a path resolver ever reached for an environment variable or
     global state *outside* of SandboxConfig's own fields in a way
