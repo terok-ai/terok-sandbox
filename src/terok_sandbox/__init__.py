@@ -110,7 +110,6 @@ from .paths import (
     port_registry_dir,
     vault_root,
 )
-from .podman import PodmanInspector, create_container_inspector
 
 # -- Port registry -----------------------------------------------------------
 from .port_registry import (
@@ -147,7 +146,6 @@ from .shield import (
     block,
     check_environment,
     down,
-    install_shield_bridge,
     make_shield,
     pre_start,
     reader_script_path,
@@ -160,7 +158,6 @@ from .shield import (
     state,
     status,
     uninstall_hooks_direct,
-    uninstall_shield_bridge,
     up,
 )
 from .vault.constants import PHANTOM_CREDENTIALS_MARKER
@@ -353,13 +350,6 @@ __all__ = [
     "NullRuntime",
     "PodmanRuntime",
     "PortReservation",
-    # Container introspection — concrete podman implementation + the
-    # runtime-neutral factory clearance's notifier reaches for.  The
-    # ``ContainerInfo`` / ``ContainerInspector`` abstraction itself
-    # lives in terok-clearance; sandbox only ships the implementation
-    # and the pick-by-runtime factory.
-    "PodmanInspector",
-    "create_container_inspector",
     # Gate server
     "GateServerStatus",
     "check_units_outdated",
@@ -382,7 +372,6 @@ __all__ = [
     "block",
     "check_environment",
     "down",
-    "install_shield_bridge",
     "make_shield",
     "pre_start",
     "reader_script_path",
@@ -395,7 +384,6 @@ __all__ = [
     "state",
     "status",
     "uninstall_hooks_direct",
-    "uninstall_shield_bridge",
     "up",
     # Git gate
     "GateAuthNotConfigured",

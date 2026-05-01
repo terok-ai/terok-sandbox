@@ -280,35 +280,3 @@ def _remove_hook_files_via_sudo(target_dir: Path) -> None:
 
     paths = [str(target_dir / name) for name in _HOOK_FILES]
     subprocess.run(["sudo", "rm", "-f", *paths], check=True)  # noqa: S603, S607
-
-
-def install_shield_bridge(reader_dest: Path | None = None) -> None:
-    """Install the optional shield D-Bus bridge: NFLOG reader + hook pair.
-
-    Idempotent — safe to call when the bridge hook pair is already registered.
-
-    Args:
-        reader_dest: Filesystem path where the reader script should land.
-            Defaults to the canonical XDG-aware location resolved by
-            ``terok_shield.reader_script_path()``.
-    """
-    from terok_shield.hooks.install import install_bridge_hooks
-    from terok_shield.hooks.reader_install import install_reader_resource
-
-    install_reader_resource(reader_dest)
-    hooks_dir = Path(USER_HOOKS_DIR).expanduser()
-    entrypoint = hooks_dir / HOOK_ENTRYPOINT_NAME
-    install_bridge_hooks(hook_entrypoint=entrypoint, hooks_dir=hooks_dir)
-
-
-def uninstall_shield_bridge() -> None:
-    """Remove the optional shield D-Bus bridge hook pair — leaves nft hooks intact.
-
-    Called by ``terok setup --no-dbus-bridge`` to revert to the
-    audit-minimal hook set.  Does not remove the reader resource file
-    (harmless to leave; absent bridge hooks mean it never runs).
-    """
-    from terok_shield.hooks.install import uninstall_bridge_hooks
-
-    hooks_dir = Path(USER_HOOKS_DIR).expanduser()
-    uninstall_bridge_hooks(hooks_dir=hooks_dir)

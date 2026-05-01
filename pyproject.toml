@@ -27,15 +27,16 @@ python = ">=3.12,<4.0"
 # DEV-TIME BRANCH PIN — bridges the propagate-pythonpath chain so the
 # same sys.path env shim lands in sandbox + shield together; the
 # release script flips this back to the shield wheel URL pre-merge.
-# DEV-TIME BRANCH PIN — tracks terok-shield's feat/audit-blocks (PR opens with
-# the bridge-phase work) which adds ``"action": "blocked"`` audit entries and
-# bumps BUNDLE_VERSION 9 → 10.  Release script flips to the wheel URL when the
-# next shield release ships.
-terok-shield = {url = "https://github.com/terok-ai/terok-shield/releases/download/v0.6.34/terok_shield-0.6.34-py3-none-any.whl"}
-# DEV-TIME BRANCH PIN — tracks terok-clearance's docs/clarify-pluggability,
-# the docs-only PR that closes the producer-axis "neutrality" framing.  Same
-# release pin will be the next clearance wheel after this lands.
-terok-clearance = {url = "https://github.com/terok-ai/terok-clearance/releases/download/v0.6.6/terok_clearance-0.6.6-py3-none-any.whl"}
+# DEV-TIME BRANCH PIN — tracks terok-shield's feat/dossier-in-events, which
+# wires orchestrator identity through the reader→hub event payload, splits
+# install into one ``setup_global_hooks`` call (nft + bridge + reader), and
+# bumps BUNDLE_VERSION 10 → 11.  Release script flips to the wheel URL when
+# the next shield release ships.
+terok-shield = {git = "https://github.com/sliwowitz/terok-shield.git", branch = "feat/dossier-in-events"}
+# DEV-TIME BRANCH PIN — tracks terok-clearance's feat/dossier-in-events, the
+# wire-format companion that consumes the dossier on the subscriber side and
+# drops ContainerInspector entirely.
+terok-clearance = {git = "https://github.com/sliwowitz/terok-clearance.git", branch = "feat/dossier-in-events"}
 platformdirs = ">=4.9.6"
 aiohttp = ">=3.9"
 cryptography = ">=46.0.7"
