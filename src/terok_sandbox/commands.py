@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from ._setup import (
+    run_bridge_install_phase,
+    run_bridge_uninstall_phase,
     run_clearance_install_phase,
     run_clearance_uninstall_phase,
     run_gate_install_phase,
@@ -146,6 +148,11 @@ def _handle_sandbox_setup(
         failed |= not run_gate_install_phase(cfg)
     if not no_clearance:
         failed |= not run_clearance_install_phase()
+    # The bridge wires shield (producer) to clearance (consumer); skip
+    # if either endpoint is opt-ed out — the wire would have nothing
+    # to carry or nowhere to deliver to.
+    if not no_clearance and not no_shield:
+        failed |= not run_bridge_install_phase()
 
     if failed:
         raise SystemExit(1)
@@ -189,6 +196,12 @@ def _handle_sandbox_uninstall(
     print("Services:")
 
     failed = False
+    # Bridge first — its hook files reference the reader resource
+    # which the clearance phase would otherwise leave in place;
+    # tearing the wire down before the endpoints keeps the
+    # uninstall log readable as a single dependency-ordered sequence.
+    if not no_clearance and not no_shield:
+        failed |= not run_bridge_uninstall_phase()
     if not no_clearance:
         failed |= not run_clearance_uninstall_phase()
     if not no_gate:
