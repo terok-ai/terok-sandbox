@@ -317,9 +317,13 @@ def run_bridge_install_phase() -> bool:
 def run_bridge_uninstall_phase() -> bool:
     """Symmetric teardown — paired with `run_bridge_install_phase`.
 
-    Removes the bridge hook pair and the reader resource.  Soft-skips
-    if ``terok-shield`` is unimportable so a partial-install cleanup
-    still proceeds rather than crashing on a missing dependency.
+    Removes the bridge hook pair (the per-stage JSON files); the
+    reader resource script is **left in place** because
+    `terok_sandbox.shield.uninstall_shield_bridge` documents it as
+    harmless to leave behind without the hooks that feed it.  Soft-
+    skips if ``terok-shield`` is unimportable so a partial-install
+    cleanup still proceeds rather than crashing on a missing
+    dependency.
     """
     try:
         from .shield import uninstall_shield_bridge
