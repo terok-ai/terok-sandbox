@@ -4,7 +4,7 @@ build-backend = "poetry_dynamic_versioning.backend"
 
 [tool.poetry]
 name = "terok-sandbox"
-version = "0.0.103"
+version = "0.0.104"
 description = "Hardened Podman container runner with gate server and shield integration"
 readme = "README.md"
 license = "Apache-2.0"
@@ -31,11 +31,11 @@ python = ">=3.12,<4.0"
 # the bridge-phase work) which adds ``"action": "blocked"`` audit entries and
 # bumps BUNDLE_VERSION 9 → 10.  Release script flips to the wheel URL when the
 # next shield release ships.
-terok-shield = {git = "https://github.com/sliwowitz/terok-shield.git", branch = "feat/audit-blocks"}
+terok-shield = {url = "https://github.com/terok-ai/terok-shield/releases/download/v0.6.34/terok_shield-0.6.34-py3-none-any.whl"}
 # DEV-TIME BRANCH PIN — tracks terok-clearance's docs/clarify-pluggability,
 # the docs-only PR that closes the producer-axis "neutrality" framing.  Same
 # release pin will be the next clearance wheel after this lands.
-terok-clearance = {git = "https://github.com/sliwowitz/terok-clearance.git", branch = "docs/clarify-pluggability"}
+terok-clearance = {url = "https://github.com/terok-ai/terok-clearance/releases/download/v0.6.6/terok_clearance-0.6.6-py3-none-any.whl"}
 platformdirs = ">=4.9.6"
 aiohttp = ">=3.9"
 cryptography = ">=46.0.7"
