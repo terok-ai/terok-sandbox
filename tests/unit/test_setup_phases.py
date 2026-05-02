@@ -20,8 +20,6 @@ from terok_sandbox._setup import (
     _enable_and_restart_user_unit,
     _reinstall_systemd_service,
     _stop_and_uninstall,
-    run_bridge_install_phase,
-    run_bridge_uninstall_phase,
     run_clearance_install_phase,
     run_clearance_uninstall_phase,
     run_gate_install_phase,
@@ -701,95 +699,3 @@ class TestClearanceInstallImportMissing:
             assert run_clearance_install_phase() is True
         out = capsys.readouterr().out
         assert "skip" in out and "terok_clearance not installed" in out
-
-
-class TestBridgeInstallPhase:
-    """Bridge phase: install the shield→clearance wire as a first-class stage.
-
-    The architectural payoff is in `test_install_returning_no_files_fails`:
-    a future regression where the install function silently no-ops or
-    writes to the wrong path is caught by the smoke check, instead of
-    being papered over by a green stage line (the bug shape that hid
-    the missing-bridge regression for a release cycle).
-    """
-
-    def test_skip_when_clearance_absent(self, capsys: pytest.CaptureFixture[str]) -> None:
-        """No clearance import → skip cleanly, return True."""
-        with patch.dict("sys.modules", {"terok_clearance": None}):
-            assert run_bridge_install_phase() is True
-        out = capsys.readouterr().out
-        assert "skip" in out
-        assert "clearance not installed" in out
-
-    def test_happy_path_calls_install_and_passes_smoke_check(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        """Files land on disk → ok."""
-        with (
-            patch("terok_sandbox.shield.install_shield_bridge") as install,
-            patch("terok_sandbox._setup._bridge_artefacts_present", return_value=True),
-        ):
-            assert run_bridge_install_phase() is True
-        install.assert_called_once()
-        out = capsys.readouterr().out
-        assert "Shield bridge" in out
-        assert "installed" in out
-        assert "FAIL" not in out
-
-    def test_install_returning_no_files_fails(self, capsys: pytest.CaptureFixture[str]) -> None:
-        """install_shield_bridge silently no-ops → smoke check fails the phase.
-
-        Regression-prevention test: this is the shape that would have
-        caught the v0.7-era regression where the bridge install call
-        site was deleted from terok's setup wrapper.  An install that
-        "succeeds" but leaves no files on disk is a broken integration,
-        not a healthy one.
-        """
-        with (
-            patch("terok_sandbox.shield.install_shield_bridge"),
-            patch("terok_sandbox._setup._bridge_artefacts_present", return_value=False),
-        ):
-            assert run_bridge_install_phase() is False
-        out = capsys.readouterr().out
-        assert "FAIL" in out
-        assert "missing on disk" in out
-
-    def test_install_raising_fails(self, capsys: pytest.CaptureFixture[str]) -> None:
-        """install_shield_bridge raises → phase fails with the exception text."""
-        with (
-            patch(
-                "terok_sandbox.shield.install_shield_bridge",
-                side_effect=RuntimeError("permission denied"),
-            ),
-        ):
-            assert run_bridge_install_phase() is False
-        out = capsys.readouterr().out
-        assert "FAIL" in out
-        assert "permission denied" in out
-
-
-class TestBridgeUninstallPhase:
-    """Bridge phase teardown — symmetric to install."""
-
-    def test_skip_when_shield_absent(self, capsys: pytest.CaptureFixture[str]) -> None:
-        """No shield import → skip cleanly, return True."""
-        with patch.dict("sys.modules", {"terok_sandbox.shield": None}):
-            assert run_bridge_uninstall_phase() is True
-        out = capsys.readouterr().out
-        assert "skip" in out
-
-    def test_happy_path_calls_uninstall(self, capsys: pytest.CaptureFixture[str]) -> None:
-        with patch("terok_sandbox.shield.uninstall_shield_bridge") as uninstall:
-            assert run_bridge_uninstall_phase() is True
-        uninstall.assert_called_once()
-        out = capsys.readouterr().out
-        assert "Shield bridge" in out and "removed" in out
-
-    def test_uninstall_failure_reports_fail(self, capsys: pytest.CaptureFixture[str]) -> None:
-        with patch(
-            "terok_sandbox.shield.uninstall_shield_bridge",
-            side_effect=RuntimeError("file in use"),
-        ):
-            assert run_bridge_uninstall_phase() is False
-        out = capsys.readouterr().out
-        assert "FAIL" in out and "file in use" in out
