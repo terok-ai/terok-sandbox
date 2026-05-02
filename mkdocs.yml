@@ -42,7 +42,9 @@ plugins:
           inventories:
             - https://docs.python.org/3/objects.inv
             - https://terok-ai.github.io/terok/objects.inv
+            - https://terok-ai.github.io/terok-executor/objects.inv
             - https://terok-ai.github.io/terok-shield/objects.inv
+            - https://terok-ai.github.io/terok-clearance/objects.inv
           options:
             docstring_style: google
             show_source: true
