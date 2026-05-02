@@ -40,8 +40,10 @@ _HOOK_FILES = (
     HOOK_ENTRYPOINT_NAME,
     "terok-shield-createRuntime.json",
     "terok-shield-poststop.json",
+    "terok-shield-bridge-hook",
     "terok-shield-bridge-createRuntime.json",
     "terok-shield-bridge-poststop.json",
+    "_oci_state.py",
 )
 
 # DANGEROUS TRANSITIONAL OVERRIDE — will be removed once terok-shield
