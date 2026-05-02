@@ -214,8 +214,8 @@ class SandboxConfigView(BaseModel):
     Higher layers compose by inheriting from this class and adding
     their own typed fields:
 
-    - [`terok_executor.config_schema.ExecutorConfigView`][terok_executor.config_schema.ExecutorConfigView]
-      inherits and adds the ``image:`` section.
+    - ``terok_executor.config_schema.ExecutorConfigView`` inherits and
+      adds the ``image:`` section.
     - terok's ``RawGlobalConfig`` inherits and adds the remaining
       five terok-owned sections, then flips to ``extra="forbid"`` —
       the topmost layer knows every section, so a typo at the top
