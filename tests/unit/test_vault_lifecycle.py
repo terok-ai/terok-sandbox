@@ -883,6 +883,23 @@ class TestInstallSystemdUnits:
         assert any("enable" in c and "--now" in c for c in calls)
         assert any("restart" in c for c in calls)
 
+    def test_tcp_service_passes_scope_sockets_dir(self, tmp_path: Path) -> None:
+        """TCP service ExecStart includes --scope-sockets-dir so per-scope SSH-agent sockets get bound.
+
+        Without this flag the ScopeSocketReconciler never starts and host-side
+        gate sync raises GateAuthNotConfigured even when the scope owns a key.
+        """
+        cfg = _make_cfg(tmp_path)
+        mgr = VaultManager(cfg)
+        unit_dir = tmp_path / "systemd-units"
+        with (
+            patch.object(VaultManager, "_systemd_unit_dir", return_value=unit_dir),
+            patch("subprocess.run"),
+        ):
+            mgr.install_systemd_units()
+        svc = (unit_dir / "terok-vault.service").read_text()
+        assert f"--scope-sockets-dir={cfg.runtime_dir}" in svc
+
     def test_socket_unit_has_both_listen_streams(self, tmp_path: Path) -> None:
         """Socket unit declares both Unix socket and TCP port ListenStream entries."""
         cfg = _make_cfg(tmp_path)
