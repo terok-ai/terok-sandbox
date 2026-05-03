@@ -4,7 +4,7 @@ build-backend = "poetry_dynamic_versioning.backend"
 
 [tool.poetry]
 name = "terok-sandbox"
-version = "0.0.105"
+version = "0.0.106"
 description = "Hardened Podman container runner with gate server and shield integration"
 readme = "README.md"
 license = "Apache-2.0"
@@ -32,11 +32,11 @@ python = ">=3.12,<4.0"
 # install into one ``setup_global_hooks`` call (nft + bridge + reader), and
 # bumps BUNDLE_VERSION 10 → 11.  Release script flips to the wheel URL when
 # the next shield release ships.
-terok-shield = {url = "https://github.com/terok-ai/terok-shield/releases/download/v0.6.35/terok_shield-0.6.35-py3-none-any.whl"}
+terok-shield = {url = "https://github.com/terok-ai/terok-shield/releases/download/v0.6.36/terok_shield-0.6.36-py3-none-any.whl"}
 # DEV-TIME BRANCH PIN — tracks terok-clearance's feat/dossier-in-events, the
 # wire-format companion that consumes the dossier on the subscriber side and
 # drops ContainerInspector entirely.
-terok-clearance = {url = "https://github.com/terok-ai/terok-clearance/releases/download/v0.6.7/terok_clearance-0.6.7-py3-none-any.whl"}
+terok-clearance = {url = "https://github.com/terok-ai/terok-clearance/releases/download/v0.6.8/terok_clearance-0.6.8-py3-none-any.whl"}
 platformdirs = ">=4.9.6"
 aiohttp = ">=3.9"
 cryptography = ">=46.0.7"
