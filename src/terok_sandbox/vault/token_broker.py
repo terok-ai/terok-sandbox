@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""Vault token broker — HTTP-over-Unix-socket reverse proxy with secret injection.
+"""Vault token broker — HTTP/WebSocket reverse proxy with secret injection.
 
 This module has **zero terok imports**.  It is a self-contained security
 component: the vault's token broker daemon that listens on a Unix socket,
@@ -41,7 +41,14 @@ import sqlite3
 import time
 from pathlib import Path
 
-from aiohttp import ClientSession, ClientTimeout, ServerDisconnectedError, TCPConnector, web
+from aiohttp import (
+    ClientSession,
+    ClientTimeout,
+    ServerDisconnectedError,
+    TCPConnector,
+    WSMsgType,
+    web,
+)
 
 _logger = logging.getLogger("terok-vault")
 
@@ -54,6 +61,8 @@ _KEY_REFRESH_TASK = web.AppKey("refresh_task", object)  # asyncio.Task
 _REFRESH_INTERVAL = 300  # seconds between background refresh checks
 _IDEMPOTENT_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 _REFRESH_BUFFER = 600  # refresh this many seconds before expiry
+_WEBSOCKET_MAX_MSG_SIZE = 16 * 1024 * 1024
+_WEBSOCKET_INTERNAL_ERROR = 1011
 
 # ---------------------------------------------------------------------------
 # Route + credential loading (inlined, no terok imports)
@@ -69,6 +78,28 @@ class _RouteTable:
         for name, cfg in self._routes.items():
             if "upstream" not in cfg:
                 raise ValueError(f"Route '{name}' missing required 'upstream' field")
+            path_upstreams = cfg.get("path_upstreams", {})
+            if not isinstance(path_upstreams, dict):
+                raise ValueError(f"Route '{name}' has invalid 'path_upstreams' field")
+            for prefix, upstream in path_upstreams.items():
+                if not isinstance(prefix, str) or not prefix.startswith("/"):
+                    raise ValueError(
+                        f"Route '{name}' path_upstreams key must start with '/': {prefix!r}"
+                    )
+                if not isinstance(upstream, str) or not upstream:
+                    raise ValueError(
+                        f"Route '{name}' path_upstreams entry for {prefix!r} is invalid"
+                    )
+            oauth_extra_headers = cfg.get("oauth_extra_headers", {})
+            if not isinstance(oauth_extra_headers, dict):
+                raise ValueError(f"Route '{name}' has invalid 'oauth_extra_headers' field")
+            for header, value in oauth_extra_headers.items():
+                if not isinstance(header, str) or not header:
+                    raise ValueError(f"Route '{name}' oauth_extra_headers key is invalid")
+                if not isinstance(value, str):
+                    raise ValueError(
+                        f"Route '{name}' oauth_extra_headers value for {header!r} is invalid"
+                    )
 
     def get(self, provider: str) -> dict | None:
         """Return the route config for *provider*, or ``None``."""
@@ -205,6 +236,150 @@ def _extract_phantom_token(request: web.Request) -> str | None:
     return None
 
 
+def _static_oauth_token_info(token: str) -> dict | None:
+    """Return synthetic token metadata for shared OAuth marker tokens."""
+    from .constants import CODEX_SHARED_OAUTH_MARKER, PHANTOM_CREDENTIALS_MARKER
+
+    static_markers = {
+        PHANTOM_CREDENTIALS_MARKER: "claude",
+        CODEX_SHARED_OAUTH_MARKER: "codex",
+    }
+    provider = static_markers.get(token)
+    if provider is None:
+        return None
+    _logger.debug("Accepting static phantom marker for %s OAuth", provider)
+    return {
+        "scope": "__static__",
+        "task": "__static__",
+        "credential_set": "default",
+        "provider": provider,
+    }
+
+
+def _path_matches_prefix(path: str, prefix: str) -> bool:
+    """Return whether *path* matches the configured path-prefix override."""
+    normalized = prefix if prefix.startswith("/") else f"/{prefix}"
+    if path == normalized:
+        return True
+    if normalized.endswith("/"):
+        return path.startswith(normalized)
+    return path.startswith(f"{normalized}/")
+
+
+def _select_upstream(route: dict, path: str) -> str:
+    """Pick the upstream base URL for *path* using longest-prefix matching."""
+    selected = route["upstream"]
+    best_len = -1
+    for prefix, upstream in (route.get("path_upstreams") or {}).items():
+        if _path_matches_prefix(path, prefix) and len(prefix) > best_len:
+            selected = upstream
+            best_len = len(prefix)
+    return selected
+
+
+def _build_upstream_url(upstream_base: str, path: str, query_string: str) -> str:
+    """Join an upstream base URL with the inbound request path and query."""
+    from urllib.parse import urlparse
+
+    parsed = urlparse(upstream_base)
+    base_path = parsed.path.rstrip("/")
+    upstream_path = f"{base_path}{path}" if base_path else path
+    if not upstream_path.startswith("/"):
+        upstream_path = f"/{upstream_path}"
+    upstream_url = f"{parsed.scheme}://{parsed.netloc}{upstream_path}"
+    if query_string:
+        upstream_url += f"?{query_string}"
+    return upstream_url
+
+
+def _requested_websocket_protocols(request: web.Request) -> list[str]:
+    """Return websocket subprotocols requested by the client, in order."""
+    protocols: list[str] = []
+    for value in request.headers.getall("Sec-WebSocket-Protocol", []):
+        protocols.extend(part.strip() for part in value.split(",") if part.strip())
+    return protocols
+
+
+async def _proxy_websocket(
+    request: web.Request,
+    *,
+    session: ClientSession,
+    upstream_url: str,
+    headers: dict[str, str],
+    provider: str,
+) -> web.StreamResponse:
+    """Bridge a client websocket to the upstream websocket with auth injection."""
+    protocols = _requested_websocket_protocols(request)
+    client_ws: web.WebSocketResponse | None = None
+    try:
+        async with session.ws_connect(
+            upstream_url,
+            headers=headers,
+            protocols=protocols,
+            autoping=False,
+            autoclose=False,
+            heartbeat=30,
+            max_msg_size=_WEBSOCKET_MAX_MSG_SIZE,
+        ) as upstream_ws:
+            response_protocols = [upstream_ws.protocol] if upstream_ws.protocol else []
+            client_ws = web.WebSocketResponse(
+                protocols=response_protocols,
+                autoping=False,
+                autoclose=False,
+                max_msg_size=_WEBSOCKET_MAX_MSG_SIZE,
+            )
+            await client_ws.prepare(request)
+
+            async def _client_to_upstream() -> None:
+                async for msg in client_ws:
+                    if msg.type is WSMsgType.TEXT:
+                        await upstream_ws.send_str(msg.data)
+                    elif msg.type is WSMsgType.BINARY:
+                        await upstream_ws.send_bytes(msg.data)
+                    elif msg.type is WSMsgType.PING:
+                        await upstream_ws.ping(msg.data)
+                    elif msg.type is WSMsgType.PONG:
+                        await upstream_ws.pong(msg.data)
+                    else:
+                        await upstream_ws.close()
+                        return
+
+            async def _upstream_to_client() -> None:
+                async for msg in upstream_ws:
+                    if msg.type is WSMsgType.TEXT:
+                        await client_ws.send_str(msg.data)
+                    elif msg.type is WSMsgType.BINARY:
+                        await client_ws.send_bytes(msg.data)
+                    elif msg.type is WSMsgType.PING:
+                        await client_ws.ping(msg.data)
+                    elif msg.type is WSMsgType.PONG:
+                        await client_ws.pong(msg.data)
+                    else:
+                        await client_ws.close(code=upstream_ws.close_code or 1000)
+                        return
+
+            tasks = {
+                asyncio.create_task(_client_to_upstream()),
+                asyncio.create_task(_upstream_to_client()),
+            }
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            for task in done:
+                task.result()
+            if not client_ws.closed:
+                await client_ws.close(code=upstream_ws.close_code or 1000)
+            return client_ws
+    except Exception as exc:
+        _logger.error("Upstream websocket to %s failed: %s", provider, exc)
+        if client_ws is not None and client_ws.prepared:
+            if not client_ws.closed:
+                await client_ws.close(code=_WEBSOCKET_INTERNAL_ERROR)
+            return client_ws
+        return web.Response(status=502, text="Upstream websocket failed")
+
+
 # ---------------------------------------------------------------------------
 # Request handler
 # ---------------------------------------------------------------------------
@@ -223,24 +398,8 @@ async def _handle_request(request: web.Request) -> web.StreamResponse:
 
     token_info = token_db.lookup_token(phantom)
     if token_info is None:
-        # Workaround: Claude Code shows "Claude API" instead of the subscription
-        # plan when CLAUDE_CODE_OAUTH_TOKEN env var is the token source.  For
-        # Claude OAuth setups the static marker in .credentials.json is used as
-        # the access token instead of a per-task phantom.  Accept it here and
-        # route to the Claude credential in the default set.
-        from .constants import PHANTOM_CREDENTIALS_MARKER
-
-        if phantom == PHANTOM_CREDENTIALS_MARKER:
-            # Hardcoded to credential_set="default" — Claude OAuth is a
-            # shared credential, per-scope credential sets are not
-            # supported for this path.
-            _logger.debug("Accepting static phantom marker for Claude OAuth")
-            token_info = {
-                "scope": "__static__",
-                "task": "__static__",
-                "credential_set": "default",
-                "provider": "claude",
-            }
+        if static_info := _static_oauth_token_info(phantom):
+            token_info = static_info
         else:
             _logger.warning("%s %s -> 401 Invalid token", request.method, request.path)
             return web.Response(status=401, text="Invalid token")
@@ -276,7 +435,6 @@ async def _handle_request(request: web.Request) -> web.StreamResponse:
             return web.Response(status=502, text="Credential misconfigured")
         auth_header = "Authorization"
         auth_prefix = "Bearer "
-        oauth_beta_header = cred.get("beta_header", "oauth-2025-04-20")
     else:
         real_token = cred.get("token") or cred.get("key")
         if not real_token:
@@ -290,12 +448,8 @@ async def _handle_request(request: web.Request) -> web.StreamResponse:
             auth_prefix = ""
 
     # 4. Build upstream request — strip phantom auth, inject real auth
-    from urllib.parse import urlparse
-
-    parsed = urlparse(route["upstream"])
-    upstream_url = f"{parsed.scheme}://{parsed.netloc}{rest}"
-    if request.query_string:
-        upstream_url += f"?{request.query_string}"
+    upstream_base = _select_upstream(route, rest)
+    upstream_url = _build_upstream_url(upstream_base, rest, request.query_string)
 
     # Strip auth, host, and RFC 7230 hop-by-hop headers (plus any names the
     # client listed in its Connection header) before forwarding upstream.
@@ -306,13 +460,25 @@ async def _handle_request(request: web.Request) -> web.StreamResponse:
     dropped.discard("")
     headers = {k: v for k, v in request.headers.items() if k.lower() not in dropped}
     headers[auth_header] = f"{auth_prefix}{real_token}"
-    if is_oauth and oauth_beta_header:
-        existing = headers.get("anthropic-beta", "")
-        if oauth_beta_header not in existing:
-            headers["anthropic-beta"] = f"{existing},{oauth_beta_header}".lstrip(",")
+    if is_oauth:
+        for header, value in (route.get("oauth_extra_headers") or {}).items():
+            existing_values = [
+                part.strip() for part in headers.get(header, "").split(",") if part.strip()
+            ]
+            if value not in existing_values:
+                headers[header] = ",".join([*existing_values, value])
+
+    session: ClientSession = request.app[_KEY_CLIENT]
+    if request.headers.get("Upgrade", "").lower() == "websocket":
+        return await _proxy_websocket(
+            request,
+            session=session,
+            upstream_url=upstream_url,
+            headers=headers,
+            provider=provider,
+        )
 
     # 5. Forward and stream response
-    session: ClientSession = request.app[_KEY_CLIENT]
     # Read the body once (streaming body can only be consumed once).
     body = await request.read() if request.can_read_body else None
     # Only retry idempotent methods (or those with an Idempotency-Key header) to
@@ -381,9 +547,9 @@ async def _do_oauth_refresh(
         payload["client_secret"] = oauth_cfg["client_secret"]
 
     # NOTE: RFC 6749 specifies application/x-www-form-urlencoded for token
-    # requests, but Anthropic's endpoint expects JSON (confirmed from Claude
-    # Code v2.1.86 source).  Future providers (e.g. Codex/OpenAI) may need
-    # form-encoded — add a per-provider `token_content_type` YAML field then.
+    # requests, but both Anthropic's and Codex/OpenAI's current refresh
+    # endpoints accept JSON payloads.  If a future provider needs form
+    # encoding, add a per-provider `token_content_type` YAML field then.
     async with session.post(
         oauth_cfg["token_url"],
         json=payload,

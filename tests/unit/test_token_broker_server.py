@@ -5,22 +5,31 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from aiohttp import web
+from aiohttp import WSMsgType, web
+from multidict import CIMultiDict
 
 from terok_sandbox.credentials.db import CredentialDB
 from terok_sandbox.vault.token_broker import (
     _KEY_CLIENT,
     _KEY_ROUTES,
     _KEY_TOKEN_DB,
+    _WEBSOCKET_INTERNAL_ERROR,
+    _WEBSOCKET_MAX_MSG_SIZE,
     _build_app,
+    _build_upstream_url,
     _do_oauth_refresh,
     _extract_phantom_token,
+    _path_matches_prefix,
+    _proxy_websocket,
     _refresh_all,
+    _requested_websocket_protocols,
     _RouteTable,
     _run_multi,
     _TokenDB,
@@ -93,6 +102,87 @@ class TestRouteTable:
     def test_get_unknown_provider(self, routes: _RouteTable) -> None:
         """Unknown provider returns None."""
         assert routes.get("nonexistent") is None
+
+    def test_rejects_invalid_path_upstreams(self, tmp_path: Path) -> None:
+        """Path-prefix upstream overrides must be a ``/``-prefixed mapping."""
+        routes_file = tmp_path / "bad-routes.json"
+        routes_file.write_text(
+            json.dumps(
+                {"codex": {"upstream": "https://api.openai.com", "path_upstreams": {"x": ""}}}
+            )
+        )
+
+        with pytest.raises(ValueError, match="path_upstreams"):
+            _RouteTable(str(routes_file))
+
+    def test_rejects_invalid_oauth_extra_headers(self, tmp_path: Path) -> None:
+        """OAuth extra headers must be a string-to-string mapping."""
+        routes_file = tmp_path / "bad-routes.json"
+        routes_file.write_text(
+            json.dumps(
+                {
+                    "claude": {
+                        "upstream": "https://api.anthropic.com",
+                        "oauth_extra_headers": {"anthropic-beta": 123},
+                    }
+                }
+            )
+        )
+
+        with pytest.raises(ValueError, match="oauth_extra_headers"):
+            _RouteTable(str(routes_file))
+
+    @pytest.mark.parametrize(
+        "route",
+        [
+            {"upstream": "https://api.openai.com", "path_upstreams": []},
+            {"upstream": "https://api.openai.com", "path_upstreams": {"/api": ""}},
+            {"upstream": "https://api.anthropic.com", "oauth_extra_headers": []},
+            {"upstream": "https://api.anthropic.com", "oauth_extra_headers": {"": "x"}},
+        ],
+    )
+    def test_rejects_malformed_optional_route_maps(
+        self, tmp_path: Path, route: dict[str, object]
+    ) -> None:
+        """Route extension maps must be real, non-empty string mappings."""
+        routes_file = tmp_path / "bad-routes.json"
+        routes_file.write_text(json.dumps({"provider": route}))
+
+        with pytest.raises(ValueError):
+            _RouteTable(str(routes_file))
+
+
+# ── Routing helpers ─────────────────────────────────────────────────────
+
+
+class TestRoutingHelpers:
+    """Pin low-level route matching and URL-building helpers."""
+
+    def test_path_prefix_matching_respects_segment_boundaries(self) -> None:
+        """A prefix matches itself or child paths, not same-prefix siblings."""
+        assert _path_matches_prefix("/backend-api", "/backend-api") is True
+        assert _path_matches_prefix("/backend-api/me", "backend-api") is True
+        assert _path_matches_prefix("/backend-apix", "/backend-api") is False
+
+    def test_build_upstream_url_normalizes_relative_path_and_keeps_query(self) -> None:
+        """Relative request paths are normalized before the query is appended."""
+        assert (
+            _build_upstream_url("https://chatgpt.com", "conversation", "q=1")
+            == "https://chatgpt.com/conversation?q=1"
+        )
+
+    def test_requested_websocket_protocols_preserve_order(self) -> None:
+        """Multiple websocket protocol headers are split and flattened in order."""
+        request = SimpleNamespace(
+            headers=CIMultiDict(
+                [
+                    ("Sec-WebSocket-Protocol", "json, realtime"),
+                    ("Sec-WebSocket-Protocol", "terok"),
+                ]
+            )
+        )
+
+        assert _requested_websocket_protocols(request) == ["json", "realtime", "terok"]
 
 
 # ── Token extraction ─────────────────────────────────────────────────────
@@ -316,16 +406,24 @@ class TestHandlerEdgeCases:
 
 @pytest.fixture()
 def _static_marker_env(tmp_path: Path):
-    """Set up DB with Claude OAuth credential and routes for static marker tests."""
+    """Set up DB with shared OAuth credentials and routes for static marker tests."""
     db = CredentialDB(tmp_path / "test.db")
     db.store_credential(
         "default", "claude", {"type": "oauth", "access_token": "sk-real-oauth-static"}
+    )
+    db.store_credential(
+        "default", "codex", {"type": "oauth", "access_token": "sk-real-codex-static"}
     )
     db.close()
 
     routes = tmp_path / "routes.json"
     routes.write_text(
-        json.dumps({"claude": {"upstream": "http://127.0.0.1:1", "auth_header": "dynamic"}})
+        json.dumps(
+            {
+                "claude": {"upstream": "http://127.0.0.1:1", "auth_header": "dynamic"},
+                "codex": {"upstream": "http://127.0.0.1:1", "auth_header": "Authorization"},
+            }
+        )
     )
     return _build_app(str(tmp_path / "test.db"), str(routes))
 
@@ -347,6 +445,20 @@ class TestStaticPhantomMarker:
                 headers={"Authorization": f"Bearer {PHANTOM_CREDENTIALS_MARKER}"},
             )
             # 502 = upstream unreachable, which means auth succeeded and routing worked
+            assert resp.status == 502
+
+    async def test_codex_static_marker_routes_to_codex(self, _static_marker_env) -> None:
+        """Codex shared auth.json marker resolves to the Codex credential."""
+        from aiohttp.test_utils import TestClient, TestServer
+
+        from terok_sandbox.vault.constants import CODEX_SHARED_OAUTH_MARKER
+
+        app = _static_marker_env
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get(
+                "/v1/responses",
+                headers={"Authorization": f"Bearer {CODEX_SHARED_OAUTH_MARKER}"},
+            )
             assert resp.status == 502
 
     async def test_static_marker_rejected_without_claude_credential(self, tmp_path: Path) -> None:
@@ -435,6 +547,7 @@ class TestForwardingPath:
                     "claude": {
                         "upstream": f"http://127.0.0.1:{upstream_server.port}",
                         "auth_header": "dynamic",
+                        "oauth_extra_headers": {"anthropic-beta": "oauth-2025-04-20"},
                     },
                 }
             )
@@ -456,6 +569,74 @@ class TestForwardingPath:
             assert "oauth-2025-04-20" in body["beta"]
             assert "some-feature" in body["beta"]
             assert body["path"] == "/v1/messages"
+
+        await upstream_server.close()
+
+    async def test_oauth_extra_header_dedupes_by_exact_token(self, _forwarding_env) -> None:
+        """Route OAuth headers append exact missing values, not substrings."""
+        from aiohttp.test_utils import TestClient, TestServer
+
+        upstream_app, tmp_path, tokens = _forwarding_env
+        upstream_server = TestServer(upstream_app)
+        await upstream_server.start_server()
+
+        routes = tmp_path / "routes.json"
+        routes.write_text(
+            json.dumps(
+                {
+                    "claude": {
+                        "upstream": f"http://127.0.0.1:{upstream_server.port}",
+                        "oauth_extra_headers": {"anthropic-beta": "oauth-2025-04-20"},
+                    },
+                }
+            )
+        )
+
+        broker_app = _build_app(str(tmp_path / "test.db"), str(routes))
+        async with TestClient(TestServer(broker_app)) as client:
+            resp = await client.post(
+                "/v1/messages",
+                headers={
+                    "Authorization": f"Bearer {tokens['claude']}",
+                    "anthropic-beta": "oauth-2025-04-20-preview",
+                },
+                json={"model": "test"},
+            )
+            assert resp.status == 200
+            body = await resp.json()
+            assert body["beta"] == "oauth-2025-04-20-preview,oauth-2025-04-20"
+
+        await upstream_server.close()
+
+    async def test_codex_oauth_does_not_inherit_anthropic_beta(self, _forwarding_env) -> None:
+        """OAuth extra headers are route-scoped; Codex does not get Claude's beta header."""
+        from aiohttp.test_utils import TestClient, TestServer
+
+        upstream_app, tmp_path, _tokens = _forwarding_env
+        upstream_server = TestServer(upstream_app)
+        await upstream_server.start_server()
+
+        db = CredentialDB(tmp_path / "test.db")
+        db.store_credential("default", "codex", {"type": "oauth", "access_token": "sk-codex"})
+        codex_token = db.create_token("proj", "t1", "default", "codex")
+        db.close()
+
+        routes = tmp_path / "routes.json"
+        routes.write_text(
+            json.dumps({"codex": {"upstream": f"http://127.0.0.1:{upstream_server.port}"}})
+        )
+
+        broker_app = _build_app(str(tmp_path / "test.db"), str(routes))
+        async with TestClient(TestServer(broker_app)) as client:
+            resp = await client.post(
+                "/v1/responses",
+                headers={"Authorization": f"Bearer {codex_token}"},
+                json={"model": "test"},
+            )
+            assert resp.status == 200
+            body = await resp.json()
+            assert body["auth"] == "Bearer sk-codex"
+            assert body["beta"] == ""
 
         await upstream_server.close()
 
@@ -527,6 +708,116 @@ class TestForwardingPath:
 
         await upstream_server.close()
 
+    async def test_path_upstreams_route_backend_api_to_chatgpt(self, tmp_path: Path) -> None:
+        """Codex ``/backend-api`` traffic can target a distinct upstream host."""
+        from aiohttp import web as _web
+        from aiohttp.test_utils import TestClient, TestServer
+
+        async def _api_echo(request: _web.Request) -> _web.Response:
+            return _web.json_response({"service": "api", "path": request.path})
+
+        async def _chatgpt_echo(request: _web.Request) -> _web.Response:
+            return _web.json_response({"service": "chatgpt", "path": request.path})
+
+        api_app = _web.Application()
+        api_app.router.add_route("*", "/{tail:.*}", _api_echo)
+        chatgpt_app = _web.Application()
+        chatgpt_app.router.add_route("*", "/{tail:.*}", _chatgpt_echo)
+
+        api_server = TestServer(api_app)
+        chatgpt_server = TestServer(chatgpt_app)
+        await api_server.start_server()
+        await chatgpt_server.start_server()
+
+        db = CredentialDB(tmp_path / "test.db")
+        db.store_credential("default", "codex", {"type": "oauth", "access_token": "sk-real-codex"})
+        codex_token = db.create_token("proj", "t1", "default", "codex")
+        db.close()
+
+        routes = tmp_path / "routes.json"
+        routes.write_text(
+            json.dumps(
+                {
+                    "codex": {
+                        "upstream": f"http://127.0.0.1:{api_server.port}",
+                        "path_upstreams": {
+                            "/backend-api/": f"http://127.0.0.1:{chatgpt_server.port}"
+                        },
+                    }
+                }
+            )
+        )
+
+        broker_app = _build_app(str(tmp_path / "test.db"), str(routes))
+        async with TestClient(TestServer(broker_app)) as client:
+            api_resp = await client.get(
+                "/v1/responses",
+                headers={"Authorization": f"Bearer {codex_token}"},
+            )
+            backend_resp = await client.get(
+                "/backend-api/me",
+                headers={"Authorization": f"Bearer {codex_token}"},
+            )
+            assert api_resp.status == 200
+            assert backend_resp.status == 200
+            assert (await api_resp.json())["service"] == "api"
+            assert (await backend_resp.json())["service"] == "chatgpt"
+
+        await api_server.close()
+        await chatgpt_server.close()
+
+    async def test_websocket_proxy_injects_real_bearer(self, tmp_path: Path) -> None:
+        """Realtime websocket traffic proxies through the broker with real auth."""
+        from aiohttp import web as _web
+        from aiohttp.test_utils import TestClient, TestServer
+
+        async def _ws_echo(request: _web.Request) -> _web.WebSocketResponse:
+            ws = _web.WebSocketResponse()
+            await ws.prepare(request)
+            await ws.send_json(
+                {
+                    "auth": request.headers.get("Authorization", ""),
+                    "path": request.path,
+                }
+            )
+            msg = await ws.receive()
+            await ws.send_str(f"echo:{msg.data}")
+            await ws.close()
+            return ws
+
+        upstream_app = _web.Application()
+        upstream_app.router.add_route("*", "/{tail:.*}", _ws_echo)
+        upstream_server = TestServer(upstream_app)
+        await upstream_server.start_server()
+
+        db = CredentialDB(tmp_path / "test.db")
+        db.store_credential(
+            "default",
+            "codex",
+            {"type": "oauth", "access_token": "sk-real-codex-ws"},
+        )
+        codex_token = db.create_token("proj", "t1", "default", "codex")
+        db.close()
+
+        routes = tmp_path / "routes.json"
+        routes.write_text(
+            json.dumps({"codex": {"upstream": f"http://127.0.0.1:{upstream_server.port}"}})
+        )
+
+        broker_app = _build_app(str(tmp_path / "test.db"), str(routes))
+        async with TestClient(TestServer(broker_app)) as client:
+            async with client.ws_connect(
+                "/v1/realtime",
+                headers={"Authorization": f"Bearer {codex_token}"},
+            ) as ws:
+                first = await ws.receive_json()
+                assert first["auth"] == "Bearer sk-real-codex-ws"
+                assert first["path"] == "/v1/realtime"
+                await ws.send_str("hello")
+                assert await ws.receive_str() == "echo:hello"
+
+        await upstream_server.close()
+
     async def test_query_string_preserved(self, _forwarding_env) -> None:
         """Query string is preserved in the upstream request."""
         from aiohttp.test_utils import TestClient, TestServer
@@ -574,6 +865,221 @@ class TestForwardingPath:
             assert resp.status == 502
             text = await resp.text()
             assert "127.0.0.1" not in text
+
+
+# ── WebSocket proxy branch coverage ─────────────────────────────────────
+
+
+@pytest.mark.asyncio
+class TestWebsocketProxy:
+    """Exercise direct WebSocket frame forwarding without a real network hop."""
+
+    class _FakeWebSocket:
+        """Tiny async-iterator websocket double for frame forwarding tests."""
+
+        def __init__(
+            self,
+            messages: list[SimpleNamespace],
+            *,
+            close_code: int | None = 1001,
+            fail_send_str: bool = False,
+            protocol: str | None = None,
+            wait_forever: bool = False,
+        ) -> None:
+            self._messages = messages
+            self._wait_forever = wait_forever
+            self.protocol = protocol
+            self.close_code = close_code
+            self.closed = False
+            self.fail_send_str = fail_send_str
+            self.prepared = False
+            self.sent: list[tuple[str, object]] = []
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self._messages:
+                return self._messages.pop(0)
+            if self._wait_forever:
+                await asyncio.Event().wait()
+            raise StopAsyncIteration
+
+        async def prepare(self, _request: object) -> None:
+            self.prepared = True
+
+        async def send_str(self, data: str) -> None:
+            if self.fail_send_str:
+                raise RuntimeError("send failed")
+            self.sent.append(("text", data))
+
+        async def send_bytes(self, data: bytes) -> None:
+            self.sent.append(("bytes", data))
+
+        async def ping(self, data: bytes) -> None:
+            self.sent.append(("ping", data))
+
+        async def pong(self, data: bytes) -> None:
+            self.sent.append(("pong", data))
+
+        async def close(self, *, code: int = 1000) -> None:
+            self.closed = True
+            self.sent.append(("close", code))
+
+    class _WebSocketContext:
+        """Async context manager returned by the fake client session."""
+
+        def __init__(self, websocket: TestWebsocketProxy._FakeWebSocket) -> None:
+            self._websocket = websocket
+
+        async def __aenter__(self) -> TestWebsocketProxy._FakeWebSocket:
+            return self._websocket
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    @staticmethod
+    def _msg(frame_type: WSMsgType, data: object = b"") -> SimpleNamespace:
+        """Build the small message shape consumed by ``_proxy_websocket``."""
+        return SimpleNamespace(type=frame_type, data=data)
+
+    async def test_client_frames_are_forwarded_to_upstream(self, monkeypatch) -> None:
+        """Text, binary, ping, pong, and close frames from the client are relayed."""
+        client_ws = self._FakeWebSocket(
+            [
+                self._msg(WSMsgType.TEXT, "hello"),
+                self._msg(WSMsgType.BINARY, b"\x01"),
+                self._msg(WSMsgType.PING, b"ping"),
+                self._msg(WSMsgType.PONG, b"pong"),
+                self._msg(WSMsgType.CLOSE),
+            ]
+        )
+        upstream_ws = self._FakeWebSocket([], protocol="realtime", wait_forever=True)
+        ws_connect_kwargs: dict[str, object] = {}
+        response_kwargs: dict[str, object] = {}
+
+        class _Session:
+            def ws_connect(self, *_args: object, **kwargs: object):
+                ws_connect_kwargs.update(kwargs)
+                return TestWebsocketProxy._WebSocketContext(upstream_ws)
+
+        monkeypatch.setattr(
+            "terok_sandbox.vault.token_broker.web.WebSocketResponse",
+            lambda **kwargs: response_kwargs.update(kwargs) or client_ws,
+        )
+
+        response = await _proxy_websocket(
+            SimpleNamespace(headers=CIMultiDict()),
+            session=_Session(),
+            upstream_url="ws://upstream.example/realtime",
+            headers={},
+            provider="codex",
+        )
+
+        assert response is client_ws
+        assert ws_connect_kwargs["max_msg_size"] == _WEBSOCKET_MAX_MSG_SIZE
+        assert response_kwargs["max_msg_size"] == _WEBSOCKET_MAX_MSG_SIZE
+        assert upstream_ws.sent == [
+            ("text", "hello"),
+            ("bytes", b"\x01"),
+            ("ping", b"ping"),
+            ("pong", b"pong"),
+            ("close", 1000),
+        ]
+
+    async def test_upstream_frames_are_forwarded_to_client(self, monkeypatch) -> None:
+        """Text, binary, ping, pong, and close frames from upstream are relayed."""
+        client_ws = self._FakeWebSocket([], wait_forever=True)
+        upstream_ws = self._FakeWebSocket(
+            [
+                self._msg(WSMsgType.TEXT, "hello"),
+                self._msg(WSMsgType.BINARY, b"\x02"),
+                self._msg(WSMsgType.PING, b"ping"),
+                self._msg(WSMsgType.PONG, b"pong"),
+                self._msg(WSMsgType.CLOSE),
+            ],
+            protocol="realtime",
+        )
+
+        class _Session:
+            def ws_connect(self, *_args: object, **_kwargs: object):
+                return TestWebsocketProxy._WebSocketContext(upstream_ws)
+
+        monkeypatch.setattr(
+            "terok_sandbox.vault.token_broker.web.WebSocketResponse",
+            lambda **_kwargs: client_ws,
+        )
+
+        response = await _proxy_websocket(
+            SimpleNamespace(headers=CIMultiDict()),
+            session=_Session(),
+            upstream_url="ws://upstream.example/realtime",
+            headers={},
+            provider="codex",
+        )
+
+        assert response is client_ws
+        assert client_ws.sent == [
+            ("text", "hello"),
+            ("bytes", b"\x02"),
+            ("ping", b"ping"),
+            ("pong", b"pong"),
+            ("close", 1001),
+        ]
+
+    async def test_upstream_connection_failure_returns_502(self) -> None:
+        """WebSocket connect failures become a generic broker 502."""
+
+        class _BoomContext:
+            async def __aenter__(self) -> object:
+                raise RuntimeError("boom")
+
+            async def __aexit__(self, *_args: object) -> None:
+                return None
+
+        class _Session:
+            def ws_connect(self, *_args: object, **_kwargs: object) -> _BoomContext:
+                return _BoomContext()
+
+        response = await _proxy_websocket(
+            SimpleNamespace(headers=CIMultiDict()),
+            session=_Session(),
+            upstream_url="ws://upstream.example/realtime",
+            headers={},
+            provider="codex",
+        )
+
+        assert response.status == 502
+        assert response.text == "Upstream websocket failed"
+
+    async def test_post_upgrade_failure_closes_websocket(self, monkeypatch) -> None:
+        """Once upgraded, errors close the websocket instead of returning HTTP."""
+        client_ws = self._FakeWebSocket([], fail_send_str=True, wait_forever=True)
+        upstream_ws = self._FakeWebSocket(
+            [self._msg(WSMsgType.TEXT, "boom")],
+            close_code=None,
+            protocol="realtime",
+        )
+
+        class _Session:
+            def ws_connect(self, *_args: object, **_kwargs: object):
+                return TestWebsocketProxy._WebSocketContext(upstream_ws)
+
+        monkeypatch.setattr(
+            "terok_sandbox.vault.token_broker.web.WebSocketResponse",
+            lambda **_kwargs: client_ws,
+        )
+
+        response = await _proxy_websocket(
+            SimpleNamespace(headers=CIMultiDict()),
+            session=_Session(),
+            upstream_url="ws://upstream.example/realtime",
+            headers={},
+            provider="codex",
+        )
+
+        assert response is client_ws
+        assert client_ws.sent == [("close", _WEBSOCKET_INTERNAL_ERROR)]
 
 
 # ── TokenDB refresh methods ──────────────────────────────────────────────

@@ -160,7 +160,7 @@ from .shield import (
     uninstall_hooks_direct,
     up,
 )
-from .vault.constants import PHANTOM_CREDENTIALS_MARKER
+from .vault.constants import CODEX_SHARED_OAUTH_MARKER, PHANTOM_CREDENTIALS_MARKER
 from .vault.lifecycle import (
     VaultManager,
     VaultStatus,
@@ -294,6 +294,16 @@ def is_vault_systemd_available() -> bool:
     return VaultManager().is_systemd_available()
 
 
+def install_vault_systemd(cfg: SandboxConfig | None = None) -> None:
+    """Install and start the vault's systemd user units."""
+    VaultManager(cfg).install_systemd_units()
+
+
+def uninstall_vault_systemd(cfg: SandboxConfig | None = None) -> None:
+    """Remove the vault's systemd user units."""
+    VaultManager(cfg).uninstall_systemd_units()
+
+
 def start_vault(cfg: SandboxConfig | None = None) -> None:
     """Start the vault as a background daemon."""
     VaultManager(cfg).start_daemon()
@@ -408,10 +418,13 @@ __all__ = [
     "is_vault_socket_active",
     "is_vault_socket_installed",
     "is_vault_systemd_available",
+    "install_vault_systemd",
     "start_vault",
     "stop_vault",
+    "uninstall_vault_systemd",
     # Command registry
     "CommandDef",
+    "CODEX_SHARED_OAUTH_MARKER",
     "KeyRow",
     "DOCTOR_COMMANDS",
     "GATE_COMMANDS",
