@@ -1,7 +1,6 @@
+# terok-gate-version: {{UNIT_VERSION}}
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
-#
-# terok-gate-version: {{UNIT_VERSION}}
 
 [Unit]
 Description=terok git gate connection handler
@@ -36,9 +35,12 @@ PrivateDevices=yes
 PrivateTmp=yes
 ProtectSystem=full
 
+# PrivateNetwork=yes / IPAddressDeny=any are intentionally absent: the
+# handler inherits a connected TCP socket via stdin (Accept=yes), and
+# the cgroup BPF IP-filter would block packet flow on that connection.
+# AF_UNIX-only variant gets the stricter pair — see
+# terok-gate-socket.service.
 RestrictAddressFamilies=AF_UNIX AF_INET
 SystemCallFilter=@system-service
 SystemCallFilter=~@resources @privileged
 MemoryDenyWriteExecute=yes
-PrivateNetwork=yes
-IPAddressDeny=any
