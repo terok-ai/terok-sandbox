@@ -114,13 +114,22 @@ class VolumeSpec:
     sharing: str = Sharing.SHARED
     """Sharing semantics: [`Sharing.PRIVATE`][terok_sandbox.sandbox.Sharing.PRIVATE] or [`Sharing.SHARED`][terok_sandbox.sandbox.Sharing.SHARED]."""
 
+    read_only: bool = False
+    """When True, mount the volume read-only inside the container.
+
+    Used to layer immutable views on top of writable directory mounts —
+    e.g. exposing a credential file to the agent while preventing it from
+    overwriting the host-side phantom token.
+    """
+
     def to_mount_arg(self) -> str:
         """Format as a ``-v`` flag value for ``podman run``."""
         try:
             relabel = _SHARING_TO_RELABEL[self.sharing]
         except KeyError:
             raise ValueError(f"Unknown sharing mode: {self.sharing!r}") from None
-        return f"{self.host_path}:{self.container_path}:{relabel}"
+        opts = relabel + (",ro" if self.read_only else "")
+        return f"{self.host_path}:{self.container_path}:{opts}"
 
 
 @dataclass(frozen=True)

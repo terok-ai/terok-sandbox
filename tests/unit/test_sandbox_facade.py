@@ -355,6 +355,16 @@ class TestVolumeSpec:
         vol = VolumeSpec(Path("/host/ws"), "/workspace", sharing=Sharing.PRIVATE)
         assert vol.to_mount_arg() == "/host/ws:/workspace:Z"
 
+    def test_to_mount_arg_read_only(self) -> None:
+        vol = VolumeSpec(Path("/host/cred"), "/home/dev/.claude/.credentials.json", read_only=True)
+        assert vol.to_mount_arg() == "/host/cred:/home/dev/.claude/.credentials.json:z,ro"
+
+    def test_to_mount_arg_read_only_private(self) -> None:
+        from terok_sandbox.sandbox import Sharing
+
+        vol = VolumeSpec(Path("/h"), "/c", sharing=Sharing.PRIVATE, read_only=True)
+        assert vol.to_mount_arg() == "/h:/c:Z,ro"
+
     def test_frozen(self) -> None:
         vol = VolumeSpec(Path("/a"), "/b")
         with pytest.raises(AttributeError):
