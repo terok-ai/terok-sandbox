@@ -94,7 +94,7 @@ class VaultUnreachableError(RuntimeError):
 
 # ---------- Constants ----------
 
-_UNIT_VERSION = 6
+_UNIT_VERSION = 7
 """Bump when the systemd unit templates change."""
 
 _SOCKET_UNIT = "terok-vault.socket"

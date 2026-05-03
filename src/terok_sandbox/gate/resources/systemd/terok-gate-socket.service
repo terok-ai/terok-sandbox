@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Jiri Vyskocil
+# SPDX-License-Identifier: Apache-2.0
+#
 # terok-gate-version: {{UNIT_VERSION}}
 
 [Unit]
@@ -6,6 +9,36 @@ Description=terok git gate server (Unix socket mode)
 [Service]
 Type=simple
 ExecStart={{TEROK_GATE_BIN}} --socket-path={{SOCKET_PATH}} --base-path={{GATE_BASE_PATH}} --token-file={{TOKEN_FILE}}
+
+NoNewPrivileges=yes
+AmbientCapabilities=
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+KeyringMode=private
+UMask=0077
+
+ProtectClock=yes
+ProtectKernelTunables=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectSystem=full
+
+RestrictAddressFamilies=AF_UNIX
+SystemCallFilter=@system-service
+SystemCallFilter=~@resources @privileged
+MemoryDenyWriteExecute=yes
+PrivateNetwork=yes
+IPAddressDeny=any
 
 [Install]
 WantedBy=default.target
