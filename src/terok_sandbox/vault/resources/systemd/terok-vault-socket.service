@@ -1,4 +1,6 @@
 # terok-vault-version: {{UNIT_VERSION}}
+# SPDX-FileCopyrightText: 2026 Jiri Vyskocil
+# SPDX-License-Identifier: Apache-2.0
 
 [Unit]
 Description=terok vault (Unix socket mode)
@@ -6,6 +8,36 @@ Description=terok vault (Unix socket mode)
 [Service]
 Type=simple
 ExecStart={{BIN}} "--socket-path={{SOCKET_PATH}}" "--db-path={{DB_PATH}}" "--routes-file={{ROUTES_PATH}}" "--ssh-signer-socket-path={{SSH_SIGNER_SOCKET_PATH}}"
+
+NoNewPrivileges=yes
+AmbientCapabilities=
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+KeyringMode=private
+UMask=0077
+
+ProtectClock=yes
+ProtectKernelTunables=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectSystem=full
+
+RestrictAddressFamilies=AF_UNIX
+SystemCallFilter=@system-service
+SystemCallFilter=~@resources @privileged
+MemoryDenyWriteExecute=yes
+PrivateNetwork=yes
+IPAddressDeny=any
 
 [Install]
 WantedBy=default.target

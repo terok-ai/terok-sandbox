@@ -1,4 +1,6 @@
 # terok-vault-version: {{UNIT_VERSION}}
+# SPDX-FileCopyrightText: 2026 Jiri Vyskocil
+# SPDX-License-Identifier: Apache-2.0
 
 [Unit]
 Description=terok vault daemon (token broker + SSH signer)
@@ -8,3 +10,37 @@ After=terok-vault.socket
 [Service]
 Type=simple
 ExecStart={{BIN}} "--socket-path={{SOCKET_PATH}}" "--db-path={{DB_PATH}}" "--routes-file={{ROUTES_PATH}}" "--port={{PORT}}" "--ssh-signer-port={{SSH_SIGNER_PORT}}" "--scope-sockets-dir={{SCOPE_SOCKETS_DIR}}"
+
+NoNewPrivileges=yes
+AmbientCapabilities=
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+KeyringMode=private
+UMask=0077
+
+ProtectClock=yes
+ProtectKernelTunables=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectSystem=full
+
+# PrivateNetwork=yes / IPAddressDeny=any are intentionally absent: the
+# daemon binds the SSH signer's TCP listener itself (not via socket
+# activation), so a private netns would hide it from the host, and the
+# cgroup BPF IP-filter would block the token broker's loopback traffic
+# even on its socket-activated fd.  AF_UNIX-only variants get the
+# stricter pair — see terok-vault-socket.service.
+RestrictAddressFamilies=AF_UNIX AF_INET
+SystemCallFilter=@system-service
+SystemCallFilter=~@resources @privileged
+MemoryDenyWriteExecute=yes

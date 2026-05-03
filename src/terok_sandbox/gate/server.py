@@ -406,6 +406,19 @@ class _ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     allow_reuse_address = True
 
 
+class _UnixThreadingHTTPServer(_ThreadingHTTPServer):
+    """ThreadingHTTPServer pre-configured for AF_UNIX listeners.
+
+    ``socketserver.TCPServer.__init__`` always creates ``socket.socket(
+    self.address_family, ...)`` regardless of ``bind_and_activate``; the flag
+    only skips ``bind`` / ``listen``.  Overriding ``address_family`` ensures
+    that throwaway socket is AF_UNIX too, so the daemon survives a
+    ``RestrictAddressFamilies=AF_UNIX`` sandbox.
+    """
+
+    address_family = socket.AF_UNIX
+
+
 # ---------------------------------------------------------------------------
 # Inetd mode: handle one request on an inherited socket
 # ---------------------------------------------------------------------------
@@ -505,7 +518,7 @@ def _create_unix_server(
         os.chmod(socket_path, 0o600)
         sock.listen(5)
 
-    server = _ThreadingHTTPServer(("localhost", 0), handler_class, bind_and_activate=False)
+    server = _UnixThreadingHTTPServer(str(socket_path), handler_class, bind_and_activate=False)
     server.socket.close()
     server.socket = sock
     return server
