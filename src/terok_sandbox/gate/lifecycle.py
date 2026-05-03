@@ -317,6 +317,13 @@ class GateServerManager:
         # CalledProcessError's default message omits captured output.
         _systemctl.run("daemon-reload")
         _systemctl.run("enable", "--now", enable_unit)
+        # Restart so a rewritten unit file or pipx-upgraded ``terok-gate``
+        # binary actually replaces the running process: ``enable --now`` is
+        # a no-op on an already-active unit, leaving the new code shadowed
+        # by the old one until the next manual restart.  Mirrors the vault
+        # primitive — both services share the contract that this method
+        # leaves the unit running with the latest code on disk.
+        _systemctl.run("restart", enable_unit)
 
     def _stop_all_units(self) -> None:
         """Stop and disable all gate units across both transport modes."""
