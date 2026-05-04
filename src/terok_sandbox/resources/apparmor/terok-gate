@@ -1,0 +1,70 @@
+# SPDX-FileCopyrightText: 2026 Jiri Vyskocil
+# SPDX-License-Identifier: Apache-2.0
+#
+# AppArmor profile for the terok-gate inetd handler.
+#
+# Best-effort hardening companion to the SELinux ``terok_gate.te``
+# module.  Named profile (no path-attachment) — activation is via the
+# systemd ``AppArmorProfile=terok-gate`` directive that
+# ``terok hardening install`` drops into the gate unit.  This sidesteps
+# the venv-installed Python script ambiguity (the kernel sees
+# ``/usr/bin/python3`` as the exec'd binary, not the gate console
+# script) by letting systemd attach the named profile after fork.
+#
+# Initial posture: ``complain`` mode set by install script via
+# ``aa-complain``.  Denials log without blocking, soak window collects
+# them, profile tightens across PR revisions, ``aa-enforce`` flipped in
+# a follow-up commit.
+
+abi <abi/3.0>,
+include <tunables/global>
+
+profile terok-gate flags=(complain) {
+    include <abstractions/base>
+    include <abstractions/python>
+    include <abstractions/openssl>
+
+    # Python interpreter + stdlib + venv site-packages.  abstractions/python
+    # covers most of the system interpreter; any venv path is reached via
+    # a wide HOME glob — narrow this once soak shows the actual prefix.
+    @{HOME}/.local/{**,**.so,**.so.*} mr,
+    /usr/lib/python3*/** mr,
+    /usr/lib64/python3*/** mr,
+
+    # git and its helper binaries — gate's whole job is invoking
+    # ``git upload-pack`` / ``git receive-pack`` over the inetd-wrapped
+    # socket.  Allow exec without profile-transition (no inner profile);
+    # the spawned git process inherits the gate confinement.
+    /usr/bin/git mrix,
+    /usr/bin/git-* mrix,
+    /usr/libexec/git-core/** mrix,
+
+    # Bare git repos served by gate.  Default location is under the
+    # sandbox state root; admins may relocate via TEROK_SANDBOX_STATE_DIR.
+    @{HOME}/.local/share/terok/** rk,
+    @{HOME}/.local/state/terok/** rwk,
+    /var/lib/terok/** rk,
+
+    # Gate token file — read-only.
+    @{HOME}/.config/terok/** r,
+
+    # Inetd handoff: stdin is the accepted client socket.
+    network unix stream,
+    network inet stream,
+    network inet6 stream,
+
+    # Standard process self-perms.
+    capability,
+    /proc/sys/kernel/random/uuid r,
+    /proc/@{pid}/** r,
+    /sys/devices/system/cpu/** r,
+
+    # Deny obvious privilege-escalation paths up front.  These often
+    # surface as accidental allows from over-broad ``capability,`` and
+    # are worth pinning negative.
+    deny capability sys_admin,
+    deny capability sys_module,
+    deny @{HOME}/.ssh/** rwk,
+    deny /etc/shadow r,
+    deny /etc/sudoers* r,
+}

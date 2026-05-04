@@ -58,6 +58,11 @@ def run_prereq_report(cfg: SandboxConfig) -> SelinuxCheckResult:
     re-surface the install hint at the end of output — sandbox#854's
     fix for the install command getting buried mid-output.  Purely
     informational for the binary checks; never blocks on those.
+
+    Optional MAC hardening (confined domains for gate/vault/clearance)
+    is intentionally NOT reported here — it's an out-of-band tool
+    (``python -m terok_sandbox.tools.hardening``), not part of the
+    daily setup flow.
     """
     print("Prerequisites:")
     _report_host_binaries()
