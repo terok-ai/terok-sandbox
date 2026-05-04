@@ -61,7 +61,7 @@ jobs:
           path: site
 
   deploy:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    if: github.repository == 'terok-ai/terok-sandbox' && github.ref == 'refs/heads/master'
     needs: build
     runs-on: ubuntu-latest
     permissions:
