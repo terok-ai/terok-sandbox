@@ -19,7 +19,7 @@ dynamic = ["version", "classifiers"]
 dependencies = [
     "terok-util @ https://github.com/terok-ai/terok-util/releases/download/v0.0.2a1/terok_util-0.0.2a1-py3-none-any.whl",
     "terok-shield @ https://github.com/terok-ai/terok-shield/releases/download/v0.6.42a6/terok_shield-0.6.42a6-py3-none-any.whl",
-    "terok-clearance @ https://github.com/terok-ai/terok-clearance/releases/download/v0.6.14a5/terok_clearance-0.6.14a5-py3-none-any.whl",
+    "terok-clearance @ git+https://github.com/sliwowitz/terok-clearance.git@feat/mac-hardening-v2",
     "platformdirs>=4.9.6",
     "aiohttp>=3.9",
     "cryptography>=46.0.7",

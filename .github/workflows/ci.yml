@@ -146,7 +146,18 @@ jobs:
     if: github.repository == 'terok-ai/terok-sandbox'
     runs-on: ubuntu-latest
     steps:
+      # ``persist-credentials: false`` skips installing the
+      # workflow GITHUB_TOKEN as a git http.extraheader for
+      # github.com.  Without it, ``pip install -e .`` below
+      # fails to clone the ``terok-clearance`` git+ dep from the
+      # sliwowitz/ fork: the workflow's token is scoped to
+      # ``terok-ai/terok-sandbox`` and gets 401 on sliwowitz/*,
+      # at which point git prompts for credentials and the
+      # non-interactive runner aborts.  Anonymous HTTPS clone
+      # works fine for the public fork.
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v6

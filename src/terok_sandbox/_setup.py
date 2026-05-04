@@ -60,6 +60,11 @@ def run_prereq_report(cfg: SandboxConfig) -> SelinuxCheckResult:
     fix for the install command getting buried mid-output.  Purely
     informational for the binary checks; never blocks on those.
     ``cfg.experimental`` gates the krun-only probes (currently ``ip``).
+
+    Optional MAC hardening (confined domains for gate/vault/clearance)
+    is intentionally NOT reported here — it's an out-of-band tool
+    (``python -m terok_sandbox.tools.hardening``), not part of the
+    daily setup flow.
     """
     print("Prerequisites:")
     _report_host_binaries()

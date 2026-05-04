@@ -840,15 +840,20 @@ async def _run_multi(
             import socket as _socket
 
             from terok_sandbox._util._net import harden_socket
-            from terok_sandbox._util._selinux import socket_selinux_context
+            from terok_sandbox._util._selinux import (
+                SELINUX_SOCKET_TYPE,
+                socket_selinux_context,
+            )
 
             # Bind+listen synchronously inside the SELinux context — the
             # socket-creation-context is process-scoped, so awaiting inside
-            # the context manager could leak the ``terok_socket_t`` label
-            # onto sockets created by unrelated coroutines running during
-            # the await.  Hand the pre-bound socket to ``SockSite`` outside
-            # the context.
-            with socket_selinux_context():
+            # the context manager could leak the per-service label onto
+            # sockets created by unrelated coroutines running during the
+            # await.  Hand the pre-bound socket to ``SockSite`` outside
+            # the context.  Per-service ``terok_vault_sock_t`` if the
+            # optional hardening modules are loaded; legacy
+            # ``terok_socket_t`` fallback otherwise.
+            with socket_selinux_context("terok_vault_sock_t", SELINUX_SOCKET_TYPE):
                 sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
                 sock.bind(str(path))
                 sock.listen(128)
