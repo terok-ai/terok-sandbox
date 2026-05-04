@@ -289,12 +289,20 @@ class GateServerManager:
             templates = [_SOCKET_UNIT, "terok-gate@.service"]
             enable_unit = _SOCKET_UNIT
 
+        from .._util._systemd_caps import write_dropin as _write_strict_dropin
+
         for template_name in templates:
             template_path = resource_dir / template_name
             if not template_path.is_file():
                 raise SystemExit(f"Missing systemd template: {template_path}")
             content = render_template(template_path, variables)
             (unit_dir / template_name).write_text(content, encoding="utf-8")
+            # Strict capability-modifying directives are dropped in only on
+            # hosts whose user manager has CAP_SETPCAP (Fedora ≥43 today).
+            # No-op on Ubuntu 24.04 where they'd fail unit start.  Symmetric
+            # with the MAC-side ``hardening-mac.conf`` drop-in, distinct
+            # filename so the two layers stack.
+            _write_strict_dropin(unit_dir, template_name)
 
         # Capture the "Created symlink ..." notice — otherwise it interleaves
         # with `terok setup`'s progressive stage output.  ``_systemctl.run``
@@ -319,6 +327,8 @@ class GateServerManager:
 
     def _remove_unit_files(self) -> None:
         """Stop active units, sweep orphans from prior versions, remove current ones."""
+        from .._util._systemd_caps import remove_dropin as _remove_strict_dropin
+
         self._stop_all_units()
         self._sweep_orphan_units()
         unit_dir = self._systemd_unit_dir()
@@ -326,6 +336,11 @@ class GateServerManager:
             unit_file = unit_dir / name
             if unit_file.is_file():
                 unit_file.unlink()
+            # Strict-hardening drop-in, if any.  Best-effort — the MAC drop-in
+            # may also live under <unit>.d/; remove_dropin only deletes its
+            # own filename and leaves any siblings (and the .d/ directory)
+            # intact when something else lives there.
+            _remove_strict_dropin(unit_dir, name)
 
     def _sweep_orphan_units(self) -> None:
         """Disable + remove gate unit files from prior versions.
