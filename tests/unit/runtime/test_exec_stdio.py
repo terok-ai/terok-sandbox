@@ -12,12 +12,19 @@ documented in the ACP host-proxy plan.
 from __future__ import annotations
 
 import io
+import subprocess
 import threading
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from terok_sandbox import NullRuntime
-from terok_sandbox.runtime.podman import _pump_stream, _start_stdio_pumps
+from terok_sandbox.runtime.podman import (
+    PodmanContainer,
+    PodmanRuntime,
+    _pump_stream,
+    _start_stdio_pumps,
+)
 
 
 class TestNullRuntimeExecStdio:
@@ -238,3 +245,96 @@ class TestStartStdioPumpsHelper:
         assert len(threads) == 3
         assert out.getvalue() == b"out"
         assert err.getvalue() == b"err"
+
+
+class TestPodmanRuntimeExecStdio:
+    """``PodmanRuntime.exec_stdio`` orchestrates Popen + pumps + cleanup.
+
+    Mocks :class:`subprocess.Popen` so the test never touches ``podman`` —
+    the goal is to cover the orchestration paths (argv build, timeout
+    fallback, empty-cmd guard) without spinning up a real container.
+    """
+
+    @pytest.fixture
+    def runtime(self) -> PodmanRuntime:
+        return PodmanRuntime()
+
+    @pytest.fixture
+    def container(self, runtime: PodmanRuntime) -> PodmanContainer:
+        return PodmanContainer("c-test", runtime=runtime)
+
+    @pytest.fixture
+    def proc(self) -> MagicMock:
+        """Popen mock with stdio attrs the pump-spawn code reads.
+
+        Tests that need a specific ``wait`` shape override
+        ``proc.wait.return_value`` or ``.side_effect`` after the fact.
+        """
+        proc = MagicMock()
+        proc.stdin = MagicMock()
+        proc.stdout = MagicMock()
+        proc.stderr = None
+        return proc
+
+    def test_empty_cmd_raises_value_error(
+        self, runtime: PodmanRuntime, container: PodmanContainer
+    ) -> None:
+        """An empty argv is a programming error, surfaced before Popen."""
+        with pytest.raises(ValueError, match="argv must not be empty"):
+            runtime.exec_stdio(container, [], stdin=io.BytesIO(), stdout=io.BytesIO())
+
+    def test_argv_includes_env_flags_and_container_name(
+        self, runtime: PodmanRuntime, container: PodmanContainer, proc: MagicMock
+    ) -> None:
+        """``env`` becomes ``-e KEY=VAL`` pairs preceding the container name.
+
+        Captures the argv handed to ``subprocess.Popen`` so future
+        regressions on argv shape (e.g. flag ordering) get caught at
+        unit level instead of in the manual integration walk-through.
+        """
+        proc.wait.return_value = 0
+        with patch(
+            "terok_sandbox.runtime.podman.subprocess.Popen", return_value=proc
+        ) as popen_mock:
+            rc = runtime.exec_stdio(
+                container,
+                ["agent", "--flag"],
+                stdin=io.BytesIO(),
+                stdout=io.BytesIO(),
+                env={"X": "1"},
+            )
+        assert rc == 0
+        argv = popen_mock.call_args.args[0]
+        assert argv == ["podman", "exec", "-i", "-e", "X=1", "c-test", "agent", "--flag"]
+
+    def test_timeout_terminates_then_kills_child(
+        self, runtime: PodmanRuntime, container: PodmanContainer, proc: MagicMock
+    ) -> None:
+        """Timeout escalation fires terminate → wait → kill in order."""
+        # Two ``TimeoutExpired``s in a row simulate a child that ignores
+        # SIGTERM, forcing the kill fallback.
+        proc.wait.side_effect = [
+            subprocess.TimeoutExpired("podman", 1.0),
+            subprocess.TimeoutExpired("podman", 2.0),
+            0,
+        ]
+        with patch("terok_sandbox.runtime.podman.subprocess.Popen", return_value=proc):
+            with pytest.raises(subprocess.TimeoutExpired):
+                runtime.exec_stdio(
+                    container,
+                    ["agent"],
+                    stdin=io.BytesIO(),
+                    stdout=io.BytesIO(),
+                    timeout=1.0,
+                )
+        proc.terminate.assert_called_once()
+        proc.kill.assert_called_once()
+
+    def test_returns_child_exit_code(
+        self, runtime: PodmanRuntime, container: PodmanContainer, proc: MagicMock
+    ) -> None:
+        """The child's exit code propagates back as the return value."""
+        proc.wait.return_value = 42
+        with patch("terok_sandbox.runtime.podman.subprocess.Popen", return_value=proc):
+            rc = runtime.exec_stdio(container, ["agent"], stdin=io.BytesIO(), stdout=io.BytesIO())
+        assert rc == 42
