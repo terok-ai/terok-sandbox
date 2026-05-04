@@ -864,9 +864,13 @@ class PodmanRuntime:
                 proc.wait()
             raise
         finally:
-            _close_proc_streams(proc)
+            # Join pumps before closing parent-side pipes — the stdout
+            # and stderr pumps drain whatever the child wrote before
+            # exiting, and closing the read end first would chop off
+            # tail bytes that are still in the kernel buffer.
             for t in pumps:
                 t.join(timeout=1)
+            _close_proc_streams(proc)
 
     def force_remove(self, containers: list[Container]) -> list[ContainerRemoveResult]:
         """Best-effort ``podman rm -f`` of each container.
