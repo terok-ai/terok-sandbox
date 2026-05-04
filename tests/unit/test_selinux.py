@@ -19,7 +19,6 @@ from terok_sandbox._util._selinux import (
     _try_setsockcreatecon,
     check_status,
     install_command,
-    install_script_path,
     is_libselinux_available,
     is_policy_installed,
     is_selinux_enabled,
@@ -44,10 +43,19 @@ def _mock_libselinux(
     set_rc: int = 0,
     get_rc: int = 0,
     get_value: bytes | None = None,
+    check_context_rc: int = 0,
 ) -> unittest.mock.MagicMock:
-    """Build a MagicMock that mimics the libselinux CDLL handle."""
+    """Build a MagicMock that mimics the libselinux CDLL handle.
+
+    *check_context_rc* controls ``security_check_context`` — the
+    userspace probe used by `is_policy_installed` and the new
+    `is_socket_type_loaded` / `is_domain_loaded` helpers.  Default
+    ``0`` (success) means probed types are treated as loaded; pass
+    a non-zero rc to model a host where the policy module is absent.
+    """
     lib = unittest.mock.MagicMock()
     lib.setsockcreatecon.return_value = set_rc
+    lib.security_check_context.return_value = check_context_rc
 
     def _fake_get(ptr: ctypes.c_char_p) -> int:
         # Deliberate test scaffolding: ``ctypes.byref(x)`` returns a
@@ -175,28 +183,23 @@ class TestMissingPolicyTools:
             assert missing_policy_tools() == ["checkmodule", "semodule_package"]
 
 
-# ---------- Vendored installer script ----------
-
-
-class TestInstallScriptPath:
-    """Verify the bundled installer shell script is discoverable."""
-
-    def test_script_exists(self) -> None:
-        """install_policy.sh must ship in the resource directory."""
-        path = install_script_path()
-        assert path.is_file()
-        assert path.name == "install_policy.sh"
+# ---------- Hardening install command ----------
 
 
 class TestInstallCommand:
-    """Verify the ``sudo bash <script>`` command string helper."""
+    """Verify the user-facing install command string helper."""
 
-    def test_shape(self) -> None:
-        """Returns ``sudo bash`` plus the resolved installer path."""
-        cmd = install_command()
-        assert cmd.startswith("sudo bash ")
-        assert cmd.endswith("install_policy.sh")
-        assert str(install_script_path()) in cmd
+    def test_returns_terok_hardening_install(self) -> None:
+        """Returns the orchestrator's CLI invocation, not a sudo-bash path.
+
+        The bash install script was retired in favour of
+        ``terok hardening install`` (a Python orchestrator that runs
+        as the user and shells out to sudo only for privileged
+        operations).  This helper is the single source of the
+        invocation string; sickbay hints and setup tips render the
+        same value.
+        """
+        assert install_command() == "terok hardening install"
 
 
 # ---------- Socket context manager ----------
@@ -236,6 +239,83 @@ class TestSocketSelinuxContext:
         ):
             with socket_selinux_context():
                 pass  # must not raise
+
+    def test_picks_first_loadable_candidate(self, tmp_path: Path) -> None:
+        """Variadic call uses the first candidate whose type is loaded.
+
+        Per-service hardening rolls out incrementally: services pass the
+        per-service type *and* the legacy fallback, so a mixed-version
+        host (per-service module loaded → use new type; legacy-only
+        host → fall back to terok_socket_t) lands the right context
+        without service-side branching.
+        """
+        enforce = tmp_path / "enforce"
+        enforce.write_text("1\n")
+
+        # check_context returns 0 for any probed type — both candidates
+        # are "loaded".  First in candidate order wins.
+        lib = _mock_libselinux(get_value=None, check_context_rc=0)
+
+        with (
+            unittest.mock.patch("terok_sandbox._util._selinux._ENFORCE_PATH", enforce),
+            unittest.mock.patch("ctypes.CDLL", return_value=lib),
+        ):
+            with socket_selinux_context("terok_gate_sock_t", SELINUX_SOCKET_TYPE):
+                pass
+
+        first_ctx = lib.setsockcreatecon.call_args_list[0].args[0]
+        assert b"terok_gate_sock_t" in first_ctx
+        assert SELINUX_SOCKET_TYPE.encode() not in first_ctx
+
+    def test_falls_back_when_first_candidate_not_loaded(self, tmp_path: Path) -> None:
+        """If the first candidate type isn't in policy, try the next.
+
+        The legacy-only-policy case: per-service modules not installed,
+        legacy ``terok_socket`` allow rule still works.
+        """
+        enforce = tmp_path / "enforce"
+        enforce.write_text("1\n")
+
+        lib = _mock_libselinux(get_value=None)
+        # Reject the per-service type, accept the legacy type.
+        lib.security_check_context.side_effect = lambda ctx: (
+            0 if SELINUX_SOCKET_TYPE.encode() in ctx else 1
+        )
+
+        with (
+            unittest.mock.patch("terok_sandbox._util._selinux._ENFORCE_PATH", enforce),
+            unittest.mock.patch("ctypes.CDLL", return_value=lib),
+        ):
+            with socket_selinux_context("terok_gate_sock_t", SELINUX_SOCKET_TYPE):
+                pass
+
+        first_ctx = lib.setsockcreatecon.call_args_list[0].args[0]
+        assert SELINUX_SOCKET_TYPE.encode() in first_ctx
+
+    def test_no_labelling_when_no_candidate_loaded(self, tmp_path: Path) -> None:
+        """If no candidate type is in policy, yield without labelling.
+
+        Container connectto will be denied — but we let the bind go
+        through so the operator surface (sickbay row, setup WARN) tells
+        them what's missing instead of crashing the service.
+        """
+        enforce = tmp_path / "enforce"
+        enforce.write_text("1\n")
+
+        # Reject every probed type.
+        lib = _mock_libselinux(get_value=None)
+        lib.security_check_context.return_value = 1
+
+        with (
+            unittest.mock.patch("terok_sandbox._util._selinux._ENFORCE_PATH", enforce),
+            unittest.mock.patch("ctypes.CDLL", return_value=lib),
+        ):
+            with socket_selinux_context("terok_gate_sock_t", SELINUX_SOCKET_TYPE):
+                pass
+
+        # No setsockcreatecon call at all — the bind happens with the
+        # process default context, container connectto will be denied.
+        assert lib.setsockcreatecon.call_args_list == []
 
     def test_restores_on_exception(self, tmp_path: Path) -> None:
         """Context restores even when the body raises."""

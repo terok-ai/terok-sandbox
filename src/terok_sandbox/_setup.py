@@ -31,10 +31,17 @@ from collections.abc import Callable, Iterable
 
 from ._stage import stage_line as _stage_line
 from ._util import _systemctl
+from ._util._apparmor import (
+    ApparmorStatus,
+    check_status as check_apparmor_status,
+)
 from ._util._selinux import (
+    CONFINED_DOMAINS as SELINUX_CONFINED_DOMAINS,
     SelinuxStatus,
     check_status as check_selinux_status,
-    install_command as selinux_install_command,
+    install_command as hardening_install_command,
+    is_selinux_enforcing,
+    loaded_confined_domains as selinux_loaded_confined_domains,
 )
 from .config import SandboxConfig
 
@@ -50,6 +57,8 @@ def run_prereq_report(cfg: SandboxConfig) -> None:
     _report_host_binaries()
     _report_firewall_binaries()
     _report_selinux(cfg)
+    _report_hardening()
+    _report_clearance_hardening()
 
 
 def _report_host_binaries() -> None:
@@ -87,9 +96,125 @@ def _report_selinux(cfg: SandboxConfig) -> None:
             case SelinuxStatus.OK:
                 s.ok("installed")
             case SelinuxStatus.POLICY_MISSING:
-                s.missing(f"install: {selinux_install_command()}")
+                s.missing(f"install: {hardening_install_command()}")
             case SelinuxStatus.LIBSELINUX_MISSING:
                 s.missing("libselinux.so.1 not loadable")
+
+
+def _report_hardening() -> None:
+    """Print optional MAC hardening status; stay silent when not applicable.
+
+    Surfaces the optional confined-domain modules (SELinux) and named
+    profiles (AppArmor) that ``terok hardening install`` loads.  Silence
+    is the default on hosts where the active backend is permissive /
+    disabled — the hardening layer is opt-in and noise-free for users
+    who don't ask for it.
+
+    Independent of ``services.mode``: confined domains attach to the
+    daemon process via systemd ``SELinuxContext=`` / ``AppArmorProfile=``
+    and apply regardless of how the daemon exposes its sockets.  Only
+    the legacy ``terok_socket`` connectto allow rule (covered by
+    `_report_selinux`) is socket-mode-specific.
+    """
+    # SELinux side — only relevant when SELinux is enforcing.
+    if is_selinux_enforcing():
+        loaded = selinux_loaded_confined_domains()
+        if not loaded:
+            with _stage_line("Hardening (SELinux)") as s:
+                s.missing(
+                    f"optional confined domains NOT loaded; install: {hardening_install_command()}"
+                )
+        elif len(loaded) < len(SELINUX_CONFINED_DOMAINS):
+            with _stage_line("Hardening (SELinux)") as s:
+                missing = sorted(set(SELINUX_CONFINED_DOMAINS) - set(loaded))
+                s.missing(
+                    f"partial install (loaded: {', '.join(loaded)}; missing: "
+                    f"{', '.join(missing)}); fix: {hardening_install_command()}"
+                )
+        else:
+            with _stage_line("Hardening (SELinux)") as s:
+                s.ok(f"loaded ({', '.join(loaded)})")
+
+    # AppArmor side — independent of SELinux; both can be absent on the
+    # same host (Arch sans apparmor, Alpine, …) which is fine.
+    aa = check_apparmor_status()
+    if aa.status is ApparmorStatus.NOT_APPLICABLE:
+        return
+    with _stage_line("Hardening (AppArmor)") as s:
+        match aa.status:
+            case ApparmorStatus.PROFILES_MISSING:
+                s.missing(f"optional profiles NOT loaded; install: {hardening_install_command()}")
+            case ApparmorStatus.PROFILES_PARTIAL:
+                s.missing(
+                    f"partial install (loaded: {', '.join(aa.loaded)}); "
+                    f"fix: {hardening_install_command()}"
+                )
+            case ApparmorStatus.OK_COMPLAIN:
+                s.ok(f"loaded in complain mode ({', '.join(aa.loaded)})")
+            case ApparmorStatus.OK_ENFORCE:
+                s.ok(f"loaded in enforce mode ({', '.join(aa.loaded)})")
+
+
+def _report_clearance_hardening() -> None:
+    """Print optional MAC hardening status for clearance hub + notifier.
+
+    Combined SELinux + AppArmor row scoped to the terok-clearance
+    package.  Clearance ships its own ``terok_clearance.hardening``
+    install function (mirror of sandbox's — each package owns its
+    assets); both are wired together by ``terok hardening install``.
+    Surfacing the clearance row here means a one-shot ``terok setup``
+    flags either side as missing, not just sandbox's.
+
+    Stays silent on hosts where neither LSM is active — clearance unit
+    templates already carry strong systemd-native hardening, so the
+    MAC layer is purely additive opt-in.
+    """
+    from terok_clearance import (
+        HARDENING_CONFINED_DOMAINS as CLEARANCE_CONFINED_DOMAINS,
+        HARDENING_CONFINED_PROFILES as CLEARANCE_CONFINED_PROFILES,
+        hardening_install_command as clearance_install_command,
+        hardening_loaded_confined_domains as clearance_loaded_domains,
+        hardening_loaded_confined_profiles as clearance_loaded_profiles,
+        is_apparmor_enabled as clearance_apparmor_enabled,
+        is_selinux_enabled as clearance_selinux_enabled,
+    )
+
+    selinux_active = clearance_selinux_enabled()
+    apparmor_active = clearance_apparmor_enabled()
+    if not (selinux_active or apparmor_active):
+        return
+
+    parts: list[str] = []
+    missing_anything = False
+    if selinux_active:
+        loaded = clearance_loaded_domains()
+        total = len(CLEARANCE_CONFINED_DOMAINS)
+        if not loaded:
+            missing_anything = True
+            parts.append(f"SELinux: {total} domain(s) NOT loaded")
+        elif len(loaded) < total:
+            missing_anything = True
+            parts.append(f"SELinux: partial ({len(loaded)}/{total} loaded)")
+        else:
+            parts.append(f"SELinux: {total} domain(s) loaded")
+    if apparmor_active:
+        loaded_p = clearance_loaded_profiles()
+        total_p = len(CLEARANCE_CONFINED_PROFILES)
+        if not loaded_p:
+            missing_anything = True
+            parts.append(f"AppArmor: {total_p} profile(s) NOT loaded")
+        elif len(loaded_p) < total_p:
+            missing_anything = True
+            parts.append(f"AppArmor: partial ({len(loaded_p)}/{total_p} loaded)")
+        else:
+            parts.append(f"AppArmor: {total_p} profile(s) loaded")
+
+    detail = "; ".join(parts)
+    with _stage_line("Hardening (Clearance)") as s:
+        if missing_anything:
+            s.missing(f"{detail}; install: {clearance_install_command()}")
+        else:
+            s.ok(detail)
 
 
 # ── Service install phases ────────────────────────────────────────────

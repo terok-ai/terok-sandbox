@@ -1,0 +1,341 @@
+module terok_gate 1.5;
+
+# Optional confined domain for the terok-gate inetd handler.
+#
+# Pairs with the legacy ``terok_socket`` module (which holds the
+# ``unconfined_t`` perms on socket creation for the service-side
+# fallback path).  This module is *additive hardening* — once the
+# systemd ``SELinuxContext=`` drop-in attaches the daemon to
+# ``terok_gate_t``, a compromise of gate is bounded by SELinux policy
+# rather than the user's UID.
+#
+# Two types declared:
+#
+# * ``terok_gate_t``   — the process domain gate runs in once
+#   confinement is active.  Initially **permissive** (set by the install
+#   script via ``semanage permissive -a terok_gate_t``) so denials log
+#   without blocking; the soak window collects AVCs that drive policy
+#   refinement in subsequent revisions.  Flipped to enforcing in a
+#   follow-up commit once denials are quiet.
+#
+# * ``terok_gate_sock_t`` — the per-service socket type that gate's
+#   listening Unix socket carries (set by the service via
+#   ``setsockcreatecon()`` before ``bind()``).  Splits the legacy
+#   shared ``terok_socket_t`` into a per-daemon type so a future policy
+#   tightening can grant container_t connectto only on the socket the
+#   relevant container actually needs.
+#
+# Domain entry is via systemd's ``SELinuxContext=`` directive in a unit
+# drop-in installed by ``terok hardening install``.  Four pieces of policy
+# below are needed to make that transition actually fire on a Fedora
+# user-systemd-service with ``NoNewPrivileges=yes`` set:
+#
+# 1. ``role unconfined_r types terok_gate_t;`` — the user's natural
+#    role can wear this type, so the directive can use the cheap
+#    ``unconfined_u:unconfined_r:terok_gate_t:s0`` context (no role
+#    or user transition needed; only the type changes).
+# 2. ``allow unconfined_t terok_gate_t : process transition;`` —
+#    the source domain (the user's systemd manager) may transition
+#    into the target.
+# 3. ``allow unconfined_t terok_gate_t : process2 nnp_transition;``
+#    — the kernel forbids LSM transitions to a more-privileged
+#    domain when ``no_new_privs`` is set unless this permission is
+#    explicit.  ``NoNewPrivileges=yes`` (set by the systemd-native
+#    hardening that landed in #236) sets the bit.
+# 4. ``allow terok_gate_t <binary_type> : file entrypoint;`` — the
+#    file the kernel actually exec'es must be a valid entrypoint to
+#    the target domain.  For gate that's either ``/usr/bin/git``
+#    (bin_t) when invoked via the inetd shim or the venv-installed
+#    python interpreter (user_home_t).
+#
+# No file-context (``.fc``) entries are shipped — the venv-installed
+# binaries move on every ``pipx upgrade`` and labelling them via
+# ``semanage fcontext`` would need a per-host pattern.
+#
+# Written in checkmodule-native module syntax (no refpolicy ``m4``
+# macros) — same build path as ``terok_socket.te``.
+
+require {
+    type container_t;
+    type unconfined_t;
+    type syslogd_t;
+    type kernel_t;
+    type init_t;
+    type bin_t;
+    type user_home_t;
+    # Path-walk types from the home-dir tree — see matching block in
+    # terok_vault.te for the rationale.  Gate's bare-repo store lives
+    # at ``~/.local/share/terok/sandbox/gate/``.
+    type var_t;
+    type home_root_t;
+    type user_home_dir_t;
+    type gconf_home_t;
+    type config_home_t;
+    type data_home_t;
+    type user_tmp_t;
+    # Python-runtime read targets — interpreter, libs, locale, ld.so
+    # cache, /proc, sysctl knobs, TLS certs.  See matching block in
+    # terok_clearance_hub.te for the soak rationale.
+    type lib_t;
+    type ld_so_t;
+    type ld_so_cache_t;
+    type etc_t;
+    type usr_t;
+    type root_t;
+    type proc_t;
+    type sysctl_t;
+    type sysctl_vm_t;
+    type sysctl_vm_overcommit_t;
+    type sysctl_crypto_t;
+    type sysfs_t;
+    type cgroup_t;
+    type cpu_online_t;
+    type device_t;
+    type locale_t;
+    type cert_t;
+    type null_device_t;
+    type var_run_t;
+    # SELinux runtime types — gate calls setsockcreatecon() to label
+    # its listening socket with terok_gate_sock_t before bind().
+    type security_t;
+    type selinux_config_t;
+    type setrans_var_run_t;
+    # /run/user/UID/terok/sandbox/ is relabelled container_file_t (by
+    # podman or an explicit chcon during ``terok setup``).  Gate's
+    # listening socket node lives there, so socket-file ops happen
+    # against this type even though the per-service SELinux *socket
+    # type* (terok_gate_sock_t, set via setsockcreatecon) is unchanged.
+    type container_file_t;
+    role system_r;
+    role unconfined_r;
+    class unix_stream_socket {
+        create bind listen accept connect
+        read write getattr getopt setopt shutdown ioctl
+        connectto
+    };
+    class process {
+        transition sigchld signull signal siginh rlimitinh noatsecure
+        sigkill sigstop getattr getsched fork setsockcreate
+    };
+    class process2 { nnp_transition };
+    class file {
+        read write open getattr setattr execute execute_no_trans entrypoint map
+        create unlink rename lock ioctl
+    };
+    class dir { read search getattr open add_name remove_name write };
+    class lnk_file { read getattr };
+    class chr_file { read write open getattr ioctl };
+    class fifo_file { read write getattr ioctl open };
+    class sock_file { create write unlink getattr setattr };
+    class filesystem getattr;
+    class security check_context;
+    class fd use;
+    class capability { dac_read_search };
+}
+
+# Socket type — legacy ``unconfined_t`` keeps full perms for the
+# transition window where users have the new module loaded but have not
+# yet installed the systemd drop-in that switches gate to terok_gate_t.
+type terok_gate_sock_t;
+
+allow unconfined_t terok_gate_sock_t:unix_stream_socket {
+    create bind listen accept
+    read write getattr getopt setopt shutdown
+    connectto
+};
+
+# The point of this module: rootless containers may connect to gate's
+# socket but cannot create or listen on a socket wearing this label.
+allow container_t terok_gate_sock_t:unix_stream_socket connectto;
+
+# Process domain.  Permissive at install time; enforcing once soaked.
+type terok_gate_t;
+
+# Role associations — both ``unconfined_r`` (the user's natural role,
+# used by the systemd directive for the cheap-transition path) and
+# ``system_r`` (kept for back-compat with anything probing the
+# system-context form).
+role unconfined_r types terok_gate_t;
+role system_r types terok_gate_t;
+
+# Transition allows — see header comment for the four-piece anatomy
+# of why each one is needed.  The directive in the unit drop-in uses
+# ``unconfined_u:unconfined_r:terok_gate_t:s0``, so the source domain
+# is ``unconfined_t`` and the relevant role/type associations are
+# already declared above.
+allow unconfined_t terok_gate_t:process { transition siginh rlimitinh noatsecure };
+allow unconfined_t terok_gate_t:process2 nnp_transition;
+
+# See matching block in terok_vault.te.  Without these, orphan
+# ``terok_gate_t`` processes accumulate across restarts because
+# systemd in unconfined_t can't deliver signals into the confined
+# domain.
+allow unconfined_t terok_gate_t:process { signal sigkill signull sigstop getattr };
+
+# Read ``/proc/<pid>/attr/*`` of confined processes from unconfined_t
+# — see matching comment in terok_vault.te.
+allow unconfined_t terok_gate_t:file { read open getattr };
+allow unconfined_t terok_gate_t:dir { read open search getattr };
+
+# Entrypoint allows — the actually-execed binary must be a valid
+# entrypoint into the target domain.  Generous list because pipx
+# venvs may live under user_home_t while the inetd shim execs git
+# (bin_t).  Tighter targeting (a custom ``terok_gate_exec_t`` type
+# applied via chcon at install time) is a candidate follow-up but
+# would need re-labelling on every ``pipx upgrade``.
+allow terok_gate_t bin_t:file { entrypoint execute read open getattr };
+allow terok_gate_t user_home_t:file { entrypoint execute read open getattr };
+
+# Once confined, gate must own its socket lifecycle the same way
+# unconfined_t does today.
+allow terok_gate_t terok_gate_sock_t:unix_stream_socket {
+    create bind listen accept
+    read write getattr getopt setopt shutdown
+    connectto
+};
+
+# Inetd handoff: systemd (init_t for system units, leaks down for user
+# units depending on policy) passes the accepted client socket on
+# stdin.  Allow inheriting + reading it.
+allow terok_gate_t init_t:fd use;
+allow terok_gate_t init_t:unix_stream_socket {
+    read write getattr getopt setopt shutdown
+};
+
+# Self-perms.
+allow terok_gate_t self:process { sigchld signull signal };
+allow terok_gate_t self:fd use;
+
+# Path-walk + state-dir access — same shape as the matching block
+# in terok_vault.te.  Gate's bare git repos live under
+# ``~/.local/share/terok/sandbox/gate/``; ``git upload-pack`` /
+# ``git receive-pack`` need r/w on object files + refs.
+allow terok_gate_t var_t:dir { search getattr };
+allow terok_gate_t home_root_t:dir { search getattr };
+allow terok_gate_t user_home_dir_t:dir { search getattr };
+allow terok_gate_t gconf_home_t:dir { search getattr };
+allow terok_gate_t data_home_t:dir {
+    search getattr open read add_name remove_name write
+};
+allow terok_gate_t data_home_t:file {
+    read write open getattr setattr create unlink rename lock
+};
+
+# ---- First-soak runtime allows (CPython startup + std reads) ----
+#
+# Same shape as the matching block in
+# terok-clearance/terok_clearance_hub.te — see that file's comment for
+# the broader rationale.  Gate is a CPython process so the import-time
+# surfaces are identical; the *gate-specific* additions follow below.
+
+# Interpreter + dynamic loader.
+allow terok_gate_t bin_t:dir { getattr search };
+allow terok_gate_t bin_t:lnk_file read;
+allow terok_gate_t lib_t:dir { getattr open read search };
+allow terok_gate_t lib_t:file { execute getattr map open read };
+allow terok_gate_t lib_t:lnk_file read;
+allow terok_gate_t ld_so_t:file { execute map open read };
+allow terok_gate_t ld_so_cache_t:file { getattr map open read };
+allow terok_gate_t usr_t:dir { getattr search };
+allow terok_gate_t usr_t:file { getattr open read };
+allow terok_gate_t usr_t:lnk_file read;
+allow terok_gate_t etc_t:dir search;
+allow terok_gate_t etc_t:lnk_file read;
+allow terok_gate_t root_t:dir search;
+
+# Pipx venv shim (exec'd as ``terok-gate`` from data_home_t — needs
+# ``entrypoint`` here too because the inetd shim re-execs the venv
+# binary, which kernel-checks against the target domain's allowed
+# entrypoints).
+allow terok_gate_t data_home_t:file { entrypoint execute ioctl map };
+allow terok_gate_t data_home_t:lnk_file { getattr read };
+allow terok_gate_t gconf_home_t:lnk_file read;
+allow terok_gate_t config_home_t:dir search;
+allow terok_gate_t config_home_t:file { getattr open read };
+
+# /proc + sysctl + cgroup + sysfs + cpu topology (multiprocessing
+# reads online CPU count).
+allow terok_gate_t proc_t:dir search;
+allow terok_gate_t proc_t:lnk_file read;
+allow terok_gate_t self:dir search;
+allow terok_gate_t self:file { getattr open read write };
+allow terok_gate_t self:process getsched;
+allow terok_gate_t sysctl_t:dir search;
+allow terok_gate_t sysctl_vm_t:dir search;
+allow terok_gate_t sysctl_vm_overcommit_t:file { open read };
+allow terok_gate_t sysctl_crypto_t:dir search;
+allow terok_gate_t sysctl_crypto_t:file { open read };
+allow terok_gate_t sysfs_t:dir search;
+allow terok_gate_t cgroup_t:dir search;
+allow terok_gate_t cgroup_t:file { getattr open read };
+allow terok_gate_t cpu_online_t:file { open read };
+
+# Locale archive (mmap'd by glibc).
+allow terok_gate_t locale_t:dir { getattr search };
+allow terok_gate_t locale_t:file { getattr map open read };
+allow terok_gate_t locale_t:lnk_file read;
+
+# /dev/null is r+w for gate (git subprocesses redirect to it).
+allow terok_gate_t device_t:dir search;
+allow terok_gate_t null_device_t:chr_file { getattr ioctl open read write };
+
+# Inherited fds.
+allow terok_gate_t kernel_t:fd use;
+allow terok_gate_t unconfined_t:fd use;
+allow terok_gate_t unconfined_t:unix_stream_socket {
+    getattr ioctl read write
+};
+
+# /run runtime dir search.
+allow terok_gate_t var_run_t:dir search;
+allow terok_gate_t var_run_t:lnk_file read;
+
+# TLS cert bundle (git over HTTPS).
+allow terok_gate_t cert_t:dir { getattr open read search };
+allow terok_gate_t cert_t:file { getattr open read };
+
+# ---- Gate-specific: exec git, fork, pipe, setsockcreatecon ----
+#
+# Gate forks a git subprocess for each request (git-upload-pack,
+# git-http-backend) and pipes stdin/stdout to it.  Without these,
+# the inetd handler exec's git but it dies before responding.
+allow terok_gate_t bin_t:file { execute_no_trans map };
+allow terok_gate_t self:process { fork getsched setsockcreate };
+allow terok_gate_t self:fifo_file { getattr ioctl read write open };
+allow terok_gate_t self:unix_stream_socket create;
+
+# setsockcreatecon() flow — gate sets the create-time SELinux
+# context to terok_gate_sock_t before bind().  Needs read on the
+# selinux securityfs context-validity probe, plus walk through
+# /etc/selinux/ and /run/setrans/.
+allow terok_gate_t security_t:dir search;
+allow terok_gate_t security_t:file { getattr open read write };
+allow terok_gate_t security_t:filesystem getattr;
+allow terok_gate_t security_t:security check_context;
+allow terok_gate_t selinux_config_t:dir search;
+allow terok_gate_t setrans_var_run_t:dir search;
+
+# ``$XDG_RUNTIME_DIR`` walk — /run/user/UID itself stays user_tmp_t,
+# but the /terok/sandbox/ subdir lives in container_file_t (see
+# require-block comment).  Need search on the user_tmp_t leg of the
+# walk plus full socket-file ops on the container_file_t leaf.
+allow terok_gate_t user_tmp_t:dir search;
+allow terok_gate_t container_file_t:dir { add_name getattr remove_name search };
+allow terok_gate_t container_file_t:sock_file { create getattr setattr unlink };
+
+# ---- v1.5: extra syslogd reach for /proc-PID enrichment ----
+#
+# journald ioctl's /proc/PID/{comm,cgroup,status} (FIONREAD-style
+# for log-field stamping) and getattrs the process itself for the
+# comm line.  v1.4 covered file:{read open getattr} but not these.
+allow syslogd_t terok_gate_t:file ioctl;
+allow syslogd_t terok_gate_t:process getattr;
+
+# ---- Cross-domain allows (non-permissive sources) ----
+#
+# Same rationale as the matching block in terok_clearance_hub.te.
+allow unconfined_t terok_gate_t:lnk_file read;
+allow unconfined_t terok_gate_t:file ioctl;
+allow syslogd_t terok_gate_t:dir search;
+allow syslogd_t terok_gate_t:file { read open getattr };
+allow syslogd_t terok_gate_t:lnk_file read;

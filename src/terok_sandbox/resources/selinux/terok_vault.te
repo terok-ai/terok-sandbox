@@ -1,0 +1,336 @@
+module terok_vault 1.5;
+
+# Optional confined domain for the terok-vault daemon.
+#
+# Companion to ``terok_gate.te``; same shape, different surface.  Vault
+# is the persistent socket-activated daemon that brokers credentials
+# and signs SSH agent requests; SSH-signing runs *inside* the same
+# process on a separate listening port, so one domain covers both.
+#
+# Three types declared:
+#
+# * ``terok_vault_t``         — process domain (permissive at install,
+#   enforcing post-soak).
+# * ``terok_vault_sock_t``    — vault's HTTP/control Unix socket
+#   (rootless containers reach it via ``connectto``).
+# * ``terok_vault_ssh_sock_t``— vault's SSH-agent socket; separate
+#   type so a future tightening can grant a container connectto on
+#   only the socket it actually needs.
+#
+# Domain entry is via systemd ``SELinuxContext=`` in a unit drop-in
+# installed by ``terok hardening install`` — see the matching header
+# comment in ``terok_gate.te`` for the four pieces of transition
+# policy needed to make the directive actually fire on a Fedora
+# user-systemd-service with ``NoNewPrivileges=yes`` set.  No ``.fc``
+# entries shipped (per-host venv paths).
+
+require {
+    type container_t;
+    type unconfined_t;
+    type syslogd_t;
+    type kernel_t;
+    type init_t;
+    type bin_t;
+    type user_home_t;
+    # Path-walk types from the home-dir tree (Fedora layout).  The
+    # daemon's state lives at
+    # ``/var/home/<user>/.local/share/terok/vault/`` (or wherever
+    # ``$XDG_DATA_HOME`` is configured), and the kernel checks search
+    # perms on every directory along the path.
+    type var_t;
+    type home_root_t;
+    type user_home_dir_t;
+    type gconf_home_t;
+    type config_home_t;
+    type data_home_t;
+    type user_tmp_t;
+    # Python-runtime read targets — see matching block in
+    # terok-clearance/terok_clearance_hub.te for the soak rationale.
+    type lib_t;
+    type ld_so_t;
+    type ld_so_cache_t;
+    type etc_t;
+    type usr_t;
+    type root_t;
+    type proc_t;
+    type sysctl_t;
+    type sysctl_vm_t;
+    type sysctl_vm_overcommit_t;
+    type sysctl_crypto_t;
+    type sysfs_t;
+    type cgroup_t;
+    type device_t;
+    type locale_t;
+    type cert_t;
+    type null_device_t;
+    type urandom_device_t;
+    type httpd_config_t;
+    type var_run_t;
+    # SELinux runtime types — vault calls setsockcreatecon() to label
+    # its sockets with the per-service types below before bind().
+    type security_t;
+    type selinux_config_t;
+    type setrans_var_run_t;
+    # /run/user/UID/terok/sandbox/ is relabelled container_file_t (by
+    # podman or an explicit chcon during ``terok setup``).  Vault's
+    # control + ssh-signer socket nodes live there.  See matching
+    # comment in terok_gate.te.
+    type container_file_t;
+    role system_r;
+    role unconfined_r;
+    class unix_stream_socket {
+        create bind listen accept connect
+        read write getattr getopt setopt shutdown ioctl
+        connectto
+    };
+    class tcp_socket {
+        create bind listen accept
+        read write getattr getopt setopt shutdown
+        name_bind
+    };
+    class process {
+        transition sigchld signull signal siginh rlimitinh noatsecure
+        sigkill sigstop getattr getsched setsockcreate
+    };
+    class process2 { nnp_transition };
+    class file {
+        read write open getattr setattr execute execute_no_trans entrypoint map
+        create unlink rename lock ioctl
+    };
+    class dir { read search getattr open add_name remove_name write };
+    class lnk_file { read getattr };
+    class chr_file { read write open getattr ioctl };
+    class sock_file { create write unlink getattr setattr };
+    class filesystem getattr;
+    class security check_context;
+    class fd use;
+}
+
+# ---- Socket types ----
+
+type terok_vault_sock_t;
+type terok_vault_ssh_sock_t;
+
+# Transitional ``unconfined_t`` allow — same rationale as in
+# terok_gate.te: covers users who load the new module but haven't yet
+# installed the systemd drop-in switching vault to terok_vault_t.
+allow unconfined_t terok_vault_sock_t:unix_stream_socket {
+    create bind listen accept
+    read write getattr getopt setopt shutdown
+    connectto
+};
+allow unconfined_t terok_vault_ssh_sock_t:unix_stream_socket {
+    create bind listen accept
+    read write getattr getopt setopt shutdown
+    connectto
+};
+
+# Container connectto exceptions — the point of this module.
+allow container_t terok_vault_sock_t:unix_stream_socket connectto;
+allow container_t terok_vault_ssh_sock_t:unix_stream_socket connectto;
+
+# ---- Process domain ----
+
+type terok_vault_t;
+
+# Role associations — same rationale as in terok_gate.te.  The cheap
+# context for the systemd directive is
+# ``unconfined_u:unconfined_r:terok_vault_t:s0``, so unconfined_r
+# must be allowed to wear the type.
+role unconfined_r types terok_vault_t;
+role system_r types terok_vault_t;
+
+# Transition allows — see the matching block in terok_gate.te for
+# the full reasoning.  Without these the kernel returns EPERM at
+# execve when systemd's setexeccon-then-execve sequence tries to
+# move the daemon into the confined domain (especially under
+# NoNewPrivileges=yes, where ``process2:nnp_transition`` is required
+# in addition to ``process:transition``).
+allow unconfined_t terok_vault_t:process { transition siginh rlimitinh noatsecure };
+allow unconfined_t terok_vault_t:process2 nnp_transition;
+
+# Let the user's systemd manager (in unconfined_t) signal, stop, and
+# inspect the confined daemon.  Without these, ``systemctl --user
+# stop`` / ``restart`` can't deliver SIGTERM/SIGKILL across the
+# domain boundary, which leaves orphan processes holding sockets and
+# breaks subsequent restarts (vault refuses to start when its socket
+# file is still bound by a previous, un-killable instance).
+# ``getattr`` lets systemd read ``/proc/PID/comm`` etc. so its log
+# lines stop reading "process X (n/a) remains running".
+allow unconfined_t terok_vault_t:process { signal sigkill signull sigstop getattr };
+
+# Reading ``/proc/<pid>/attr/current`` (and other /proc/<pid>/attr/*
+# files) of a confined process from unconfined_t needs file-class
+# allows on the target type — those pseudo-files are labeled with
+# the *process's* domain, not ``proc_t``.  Without these, ``sudo cat
+# /proc/<pid>/attr/current`` returns empty / Permission denied even
+# from root, which broke the verify_process_domain helper in
+# terok hardening install and any other tooling that wants to confirm
+# what domain the daemon ended up in.
+allow unconfined_t terok_vault_t:file { read open getattr };
+allow unconfined_t terok_vault_t:dir { read open search getattr };
+
+# Entrypoint allows — vault is exec'd as the venv-installed python
+# interpreter (under user_home_t) when launched from a pipx install,
+# and may exec ssh-keygen / ssh-add (bin_t) for signer key prep.
+allow terok_vault_t bin_t:file { entrypoint execute read open getattr };
+allow terok_vault_t user_home_t:file { entrypoint execute read open getattr };
+
+# Sockets owned by vault once confined.
+allow terok_vault_t terok_vault_sock_t:unix_stream_socket {
+    create bind listen accept
+    read write getattr getopt setopt shutdown
+    connectto
+};
+allow terok_vault_t terok_vault_ssh_sock_t:unix_stream_socket {
+    create bind listen accept
+    read write getattr getopt setopt shutdown
+    connectto
+};
+
+# Vault also exposes a TCP loopback port (legacy services_mode=tcp +
+# the SSH-signer port even in socket mode).  Allow basic TCP socket
+# operations; specific port_t name_bind rules come from the soak.
+allow terok_vault_t self:tcp_socket {
+    create bind listen accept
+    read write getattr getopt setopt shutdown
+};
+
+# Socket activation handoff from systemd.
+allow terok_vault_t init_t:fd use;
+allow terok_vault_t init_t:unix_stream_socket {
+    read write getattr getopt setopt shutdown
+};
+allow terok_vault_t init_t:tcp_socket {
+    read write getattr getopt setopt shutdown
+};
+
+# Self-perms — broad initial set.
+allow terok_vault_t self:process { sigchld signull signal };
+allow terok_vault_t self:fd use;
+
+# Path-walk + state-dir access driven by the first soak iteration's
+# AVC trail.  Vault opens its credential SQLite database
+# at ``~/.local/share/terok/vault/credentials.db`` (plus the SQLite
+# WAL + SHM sidecars), so it needs to walk every directory from
+# ``/var`` down through the user's XDG data home, then full
+# r/w/lock/create/unlink/rename on the data files themselves.
+allow terok_vault_t var_t:dir { search getattr };
+allow terok_vault_t home_root_t:dir { search getattr };
+allow terok_vault_t user_home_dir_t:dir { search getattr };
+allow terok_vault_t gconf_home_t:dir { search getattr };
+allow terok_vault_t data_home_t:dir {
+    search getattr open read add_name remove_name write
+};
+allow terok_vault_t data_home_t:file {
+    read write open getattr setattr create unlink rename lock
+};
+
+# ---- First-soak runtime allows (CPython startup + std reads) ----
+#
+# Same shape as the matching block in
+# terok-clearance/terok_clearance_hub.te — see that file's comment
+# for the soak rationale.
+
+# Interpreter + dynamic loader.
+allow terok_vault_t bin_t:dir { getattr search };
+allow terok_vault_t bin_t:file map;
+allow terok_vault_t lib_t:dir { getattr open read search };
+allow terok_vault_t lib_t:file { execute getattr map open read };
+allow terok_vault_t lib_t:lnk_file read;
+allow terok_vault_t ld_so_t:file { execute map read };
+allow terok_vault_t ld_so_cache_t:file { getattr map open read };
+allow terok_vault_t usr_t:dir { getattr search };
+allow terok_vault_t usr_t:file { getattr open read };
+allow terok_vault_t usr_t:lnk_file read;
+allow terok_vault_t etc_t:dir search;
+allow terok_vault_t etc_t:file { getattr open read };
+allow terok_vault_t etc_t:lnk_file read;
+allow terok_vault_t root_t:dir search;
+
+allow terok_vault_t data_home_t:file { execute map };
+allow terok_vault_t data_home_t:lnk_file { getattr read };
+allow terok_vault_t config_home_t:dir search;
+allow terok_vault_t config_home_t:file { getattr open read };
+
+allow terok_vault_t proc_t:dir search;
+allow terok_vault_t proc_t:lnk_file read;
+allow terok_vault_t self:dir search;
+allow terok_vault_t self:file { getattr open read write };
+allow terok_vault_t self:process getsched;
+allow terok_vault_t self:unix_stream_socket { connect create getattr };
+
+allow terok_vault_t sysctl_t:dir search;
+allow terok_vault_t sysctl_vm_t:dir search;
+allow terok_vault_t sysctl_vm_overcommit_t:file { open read };
+allow terok_vault_t sysctl_crypto_t:dir search;
+allow terok_vault_t sysctl_crypto_t:file { open read };
+allow terok_vault_t sysfs_t:dir search;
+allow terok_vault_t cgroup_t:dir search;
+allow terok_vault_t cgroup_t:file { getattr open read };
+
+allow terok_vault_t locale_t:dir search;
+allow terok_vault_t locale_t:file { getattr map open read };
+allow terok_vault_t locale_t:lnk_file read;
+
+allow terok_vault_t device_t:dir search;
+allow terok_vault_t null_device_t:chr_file { getattr ioctl read };
+allow terok_vault_t urandom_device_t:chr_file { open read };
+
+allow terok_vault_t kernel_t:fd use;
+allow terok_vault_t unconfined_t:fd use;
+allow terok_vault_t unconfined_t:unix_stream_socket {
+    getattr ioctl read write
+};
+
+allow terok_vault_t var_run_t:dir search;
+allow terok_vault_t var_run_t:lnk_file read;
+
+allow terok_vault_t cert_t:dir { getattr open read search };
+allow terok_vault_t cert_t:file { getattr open read };
+
+# Walking into the user's home dir to enumerate XDG_DATA_HOME (the
+# vault state-dir scan on first launch).
+allow terok_vault_t user_home_dir_t:dir { open read };
+
+# Some httpd-style config-dir search picked up during TLS init for
+# the SSH-signer port.  Cosmetic on Fedora (nothing under
+# /etc/httpd actually read), but the search itself is denied.
+allow terok_vault_t httpd_config_t:dir search;
+
+# ---- Vault-specific: setsockcreatecon, $XDG_RUNTIME_DIR sockets ----
+#
+# Vault calls setsockcreatecon() before each bind() to label its
+# sockets with the per-service socket types declared above.  Same
+# SELinux securityfs probe path as gate; see the matching block in
+# terok_gate.te for what each line is for.
+allow terok_vault_t self:process setsockcreate;
+allow terok_vault_t security_t:dir search;
+allow terok_vault_t security_t:file { getattr open read write };
+allow terok_vault_t security_t:filesystem getattr;
+allow terok_vault_t security_t:security check_context;
+allow terok_vault_t selinux_config_t:dir search;
+allow terok_vault_t setrans_var_run_t:dir search;
+
+# ``$XDG_RUNTIME_DIR`` walk + container_file_t leaf — see matching
+# block in terok_gate.te for the layout.  Vault writes to its own
+# ssh-signer socket (sock_file:write — distinct from gate which
+# only listens) so the perm set is a superset of gate's here.
+allow terok_vault_t user_tmp_t:dir search;
+allow terok_vault_t container_file_t:dir { add_name getattr remove_name search };
+allow terok_vault_t container_file_t:sock_file { create getattr setattr unlink write };
+
+# ---- v1.5: extra syslogd reach for /proc-PID enrichment ----
+#
+# Same rationale as the matching block in terok_gate.te.
+allow syslogd_t terok_vault_t:file ioctl;
+allow syslogd_t terok_vault_t:process getattr;
+
+# ---- Cross-domain allows (non-permissive sources) ----
+#
+# Same rationale as the matching block in terok_clearance_hub.te.
+allow unconfined_t terok_vault_t:lnk_file read;
+allow unconfined_t terok_vault_t:file ioctl;
+allow syslogd_t terok_vault_t:dir search;
+allow syslogd_t terok_vault_t:file { read open getattr };
+allow syslogd_t terok_vault_t:lnk_file read;

@@ -38,7 +38,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from socketserver import ThreadingMixIn
 
-from .._util._selinux import socket_selinux_context
+from .._util._selinux import SELINUX_SOCKET_TYPE, socket_selinux_context
 
 _logger = logging.getLogger("terok-gate")
 
@@ -500,9 +500,11 @@ def _create_unix_server(
     """Create an HTTPServer bound to a Unix domain socket.
 
     Stale socket files are removed if they are actual sockets (not regular
-    files that happen to share the path).  The socket is labeled
-    ``terok_socket_t`` via `socket_selinux_context` so that
-    rootless Podman containers (``container_t``) can ``connectto`` it.
+    files that happen to share the path).  The socket is labeled with
+    the per-service ``terok_gate_sock_t`` when the optional
+    confined-domain hardening is loaded, falling back to the legacy
+    ``terok_socket_t`` otherwise — both carry a ``container_t →
+    connectto`` allow rule in the appropriate policy module.
     """
     try:
         if not stat.S_ISSOCK(socket_path.lstat().st_mode):
@@ -512,7 +514,7 @@ def _create_unix_server(
         pass
     socket_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with socket_selinux_context():
+    with socket_selinux_context("terok_gate_sock_t", SELINUX_SOCKET_TYPE):
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.bind(str(socket_path))
         os.chmod(socket_path, 0o600)

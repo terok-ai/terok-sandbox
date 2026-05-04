@@ -1,0 +1,66 @@
+# SPDX-FileCopyrightText: 2026 Jiri Vyskocil
+# SPDX-License-Identifier: Apache-2.0
+#
+# AppArmor profile for the terok-vault daemon (token broker + SSH
+# signer in one process).
+#
+# Companion to the SELinux ``terok_vault.te`` module.  Named profile;
+# activation is via the systemd ``AppArmorProfile=terok-vault`` directive
+# in the unit drop-in installed by ``terok hardening install``.
+#
+# Initial posture: ``complain`` mode (set via ``aa-complain`` post-load).
+# Soak window in the open PR; flipped via ``aa-enforce`` later.
+
+abi <abi/3.0>,
+include <tunables/global>
+
+profile terok-vault flags=(complain) {
+    include <abstractions/base>
+    include <abstractions/python>
+    include <abstractions/openssl>
+    include <abstractions/ssl_certs>
+
+    # Python interpreter + venv reach (broad until soak narrows).
+    @{HOME}/.local/{**,**.so,**.so.*} mr,
+    /usr/lib/python3*/** mr,
+    /usr/lib64/python3*/** mr,
+
+    # Vault data root (credential SQLite DB, signer keys, route tables).
+    # Default is under the XDG data dir; TEROK_VAULT_DIR can move it.
+    @{HOME}/.local/share/terok/vault/** rwk,
+    /var/lib/terok/vault/** rwk,
+
+    # Runtime sockets (Unix domain) live under XDG_RUNTIME_DIR or the
+    # state dir fallback.
+    /run/user/@{uid}/terok/** rwk,
+    @{HOME}/.local/state/terok/** rwk,
+
+    # Vault config (routes file, etc.) — read-only.
+    @{HOME}/.config/terok/** r,
+
+    # SSH agent protocol: vault may invoke ssh-keygen / ssh-add for
+    # signer key prep.  Exec without profile transition.
+    /usr/bin/ssh-keygen mrix,
+    /usr/bin/ssh-add mrix,
+
+    # Network: Unix sockets (HTTP control + SSH-signer), TCP loopback
+    # (legacy services_mode=tcp, plus the SSH-signer port).
+    network unix stream,
+    network inet stream,
+    network inet6 stream,
+
+    # Self-perms.
+    capability,
+    /proc/sys/kernel/random/uuid r,
+    /proc/@{pid}/** r,
+    /sys/devices/system/cpu/** r,
+
+    # Negative pins — worth setting explicitly given vault holds
+    # credentials.  Vault has no business reading the user's SSH keys
+    # (its own signer keys live under vault_root) or system shadow.
+    deny capability sys_admin,
+    deny capability sys_module,
+    deny @{HOME}/.ssh/** rwk,
+    deny /etc/shadow r,
+    deny /etc/sudoers* r,
+}

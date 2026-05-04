@@ -44,10 +44,18 @@ if TYPE_CHECKING:
 # ---------- Constants ----------
 
 SELINUX_SOCKET_TYPE = "terok_socket_t"
-"""Custom SELinux type applied to terok service sockets."""
+"""Legacy SELinux type applied to terok service sockets via
+``setsockcreatecon()``.  Kept for back-compat; the per-service socket
+types declared in ``terok_gate.te`` / ``terok_vault.te`` are the
+forward path."""
 
 _SELINUX_CONTEXT = f"system_u:object_r:{SELINUX_SOCKET_TYPE}:s0"
 """Full SELinux context string for socket creation."""
+
+CONFINED_DOMAINS: tuple[str, ...] = ("terok_gate_t", "terok_vault_t")
+"""Optional confined process domains shipped by the hardening modules.
+Each is loaded by its own ``.te`` (``terok_gate.te``, ``terok_vault.te``)
+and is independent of the legacy ``terok_socket`` allow-rule."""
 
 _ENFORCE_PATH = Path("/sys/fs/selinux/enforce")
 """Kernel sysfs node indicating SELinux enforcement state."""
@@ -107,12 +115,12 @@ def is_libselinux_available() -> bool:
 def missing_policy_tools() -> list[str]:
     """Return names of policy-compilation tools not found on ``PATH``.
 
-    The ``terok_socket`` policy is compiled from its ``.te`` source at
-    install time by `install_policy`, which requires all three of
+    Each ``.te`` policy source is compiled at install time by
+    `install_command`'s shell script, which requires all three of
     ``checkmodule``, ``semodule_package``, and ``semodule``.  An empty
-    list means ``install_policy()`` will not fail with ``SystemExit`` for
-    missing tools.  Names are returned in invocation order so callers
-    can surface the first one a user would hit.
+    list means the install script will not abort for missing tools.
+    Names are returned in invocation order so callers can surface the
+    first one a user would hit.
     """
     return [t for t in ("checkmodule", "semodule_package", "semodule") if not shutil.which(t)]
 
@@ -125,56 +133,128 @@ def policy_source_path() -> Path:
     return Path(str(_resource_files("terok_sandbox.resources.selinux") / "terok_socket.te"))
 
 
-@lru_cache(maxsize=1)
-def install_script_path() -> Path:
-    """Return the path to the bundled ``install_policy.sh`` installer.
-
-    Installation is delegated to this short, inspectable shell script —
-    which users run with ``sudo bash <path>`` — rather than a Python
-    wrapper.  Running Python as root imports a large dependency graph;
-    a dedicated shell script can be ``cat``-ed and audited in seconds
-    before the privilege escalation.
-    """
-    return Path(str(_resource_files("terok_sandbox.resources.selinux") / "install_policy.sh"))
-
-
 def install_command() -> str:
-    """Return the full ``sudo bash <path>`` shell command for the installer.
+    """Return the user-facing hardening install command.
 
-    Single source for the command string so the setup hint, the sickbay
-    check, and any future caller all render the same invocation.
+    Replaces the older ``sudo bash <install_hardening.sh>`` flow.
+    The new orchestrator (``terok hardening install``) is a Python
+    entrypoint that runs as the user and shells out to ``sudo`` only
+    for the privileged kernel-policy operations (``semodule -i``,
+    ``semanage permissive``).  See `terok_sandbox.hardening` for the
+    config it consumes.
+
+    Single source for the command string so sickbay hints and setup
+    tips render the same invocation.
     """
-    return f"sudo bash {install_script_path()}"
+    return "terok hardening install"
+
+
+def is_domain_loaded(domain: str) -> bool:
+    """Return ``True`` if *domain* is a valid process type in the loaded policy.
+
+    Same userspace probe as `is_policy_installed` but for an arbitrary
+    process domain — the constructed context
+    ``system_u:system_r:<domain>:s0`` validates iff the type exists AND
+    the role association from the module's ``role system_r types ...;``
+    rule is in effect.
+
+    Used by sickbay to render a per-domain status row separate from the
+    legacy allow-rule check (``terok_socket_t`` is an *object* type;
+    confined domains are *process* types and load independently).
+    """
+    lib = _load_libselinux()
+    if lib is None:
+        return False
+    ctx = f"system_u:system_r:{domain}:s0".encode()
+    return lib.security_check_context(ctx) == 0
+
+
+def is_socket_type_loaded(socket_type: str) -> bool:
+    """Return ``True`` if *socket_type* is a valid object type in loaded policy.
+
+    Object-type counterpart of `is_domain_loaded` — validates a context
+    of the form ``system_u:object_r:<socket_type>:s0`` against the
+    currently loaded policy.  Used by `socket_selinux_context` to pick
+    the first loadable type from a candidate list, so per-service
+    socket types added by the optional hardening modules degrade
+    gracefully to ``terok_socket_t`` on hosts where only the legacy
+    allow-rule is installed.
+    """
+    lib = _load_libselinux()
+    if lib is None:
+        return False
+    ctx = f"system_u:object_r:{socket_type}:s0".encode()
+    return lib.security_check_context(ctx) == 0
+
+
+def loaded_confined_domains() -> tuple[str, ...]:
+    """Return the subset of `CONFINED_DOMAINS` whose modules are loaded.
+
+    Convenience for sickbay: empty tuple means the optional hardening
+    layer is not installed; full tuple means every domain is loaded;
+    partial means a botched / partial install worth surfacing.
+    """
+    return tuple(d for d in CONFINED_DOMAINS if is_domain_loaded(d))
 
 
 # ---------- Socket context labeling ----------
 
 
 @contextmanager
-def socket_selinux_context(
-    selinux_type: str = SELINUX_SOCKET_TYPE,
-) -> Iterator[None]:
-    """Apply *selinux_type* as the creation context for sockets bound in this block.
+def socket_selinux_context(*candidates: str) -> Iterator[None]:
+    """Apply the first loadable type from *candidates* as the socket creation context.
 
     Any ``socket()`` call within the ``with`` body produces a socket
-    whose kernel SID is *selinux_type*, enabling ``container_t`` clients
-    to ``connectto`` it once the matching policy is installed.  The
-    previous context is restored on exit.
+    whose kernel SID is the chosen type, enabling ``container_t``
+    clients to ``connectto`` it once the matching policy is installed.
+    The previous context is restored on exit.
 
-    No-op on non-SELinux systems or when ``libselinux.so.1`` is absent.
+    Variadic so service code can express "preferred type, with
+    fallback" in one call — the per-service socket types from the
+    optional confined-domain modules
+    (``terok_gate_sock_t`` / ``terok_vault_sock_t`` /
+    ``terok_vault_ssh_sock_t``) are loaded by ``terok hardening install``
+    on top of the legacy allow rule, but services need to keep working
+    on hosts where only the legacy ``terok_socket`` module is loaded
+    (or none, on non-SELinux distros).  Usage::
 
-    Usage::
-
-        with socket_selinux_context():
+        with socket_selinux_context("terok_gate_sock_t", SELINUX_SOCKET_TYPE):
             sock = socket.socket(AF_UNIX, SOCK_STREAM)
             sock.bind(str(path))
-        # socket object now carries terok_socket_t
+
+    Behavioural ladder, top-down:
+
+    1. Non-SELinux host — yield without labelling (no-op).
+    2. SELinux host, first candidate is a valid type — use it; the
+       restrictive per-service connectto rule fires.
+    3. SELinux host, first candidate not loaded but a fallback is —
+       use the fallback (typically ``SELINUX_SOCKET_TYPE``); the
+       broad legacy allow rule fires.
+    4. SELinux host, none of the candidates loaded — yield without
+       labelling; ``container_t connectto`` will be denied.  The
+       sickbay row + setup WARN tell the user to install the policy.
+
+    Calling with no arguments is equivalent to passing the legacy
+    type (``SELINUX_SOCKET_TYPE``) — preserved for backward compat
+    with pre-hardening callers.
     """
+    if not candidates:
+        candidates = (SELINUX_SOCKET_TYPE,)
+
     if not is_selinux_enabled():
         yield
         return
 
-    context = f"system_u:object_r:{selinux_type}:s0"
+    chosen = next((t for t in candidates if is_socket_type_loaded(t)), None)
+    if chosen is None:
+        # No candidate is in the loaded policy — bind without
+        # labelling.  Container connectto will be denied; the operator
+        # surface (sickbay / terok setup) tells them to install the
+        # policy module that declares the type.
+        yield
+        return
+
+    context = f"system_u:object_r:{chosen}:s0"
     old = _try_getsockcreatecon()
     _try_setsockcreatecon(context)
     try:

@@ -226,6 +226,18 @@ depends_on = [
     "terok_sandbox.commands",
 ]
 
+# Optional MAC hardening orchestration — install/remove for the
+# confined SELinux domains + AppArmor profiles.  Surface layer
+# because it shells out (subprocess + sudo) and writes systemd
+# drop-ins under the user's $XDG_CONFIG_HOME — both side effects
+# only the top-level entrypoint should touch.  Standalone (no
+# internal sandbox deps); consumed by the ``terok hardening
+# install`` orchestrator in the terok package.
+[[modules]]
+path = "terok_sandbox.hardening"
+layer = "surface"
+depends_on = []
+
 # Package root — same-layer deps on surface peers
 [[modules]]
 path = "terok_sandbox"
