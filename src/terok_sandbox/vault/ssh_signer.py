@@ -413,15 +413,19 @@ async def _bind_hardened_unix(
     import socket as _socket
 
     from terok_sandbox._util._net import harden_socket, prepare_socket_path
-    from terok_sandbox._util._selinux import socket_selinux_context
+    from terok_sandbox._util._selinux import SELINUX_SOCKET_TYPE, socket_selinux_context
 
     path = Path(path_str)
     prepare_socket_path(path)
     # Bind+listen synchronously inside the SELinux context — the
     # socket-creation-context is process-scoped, so awaiting inside the
-    # context manager could leak ``terok_socket_t`` onto sockets created
-    # by unrelated coroutines running during the await.
-    with socket_selinux_context():
+    # context manager could leak the per-service label onto sockets
+    # created by unrelated coroutines running during the await.
+    # Per-service ``terok_vault_ssh_sock_t`` when the optional confined
+    # domains are loaded; legacy ``terok_socket_t`` fallback otherwise
+    # (separate from the vault HTTP socket so a future tightening can
+    # scope ``container_t connectto`` to one socket per service).
+    with socket_selinux_context("terok_vault_ssh_sock_t", SELINUX_SOCKET_TYPE):
         sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
         sock.bind(str(path))
         sock.listen(128)

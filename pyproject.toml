@@ -25,7 +25,7 @@ packages = [
 [tool.poetry.dependencies]
 python = ">=3.12,<4.0"
 terok-shield = {url = "https://github.com/terok-ai/terok-shield/releases/download/v0.6.37/terok_shield-0.6.37-py3-none-any.whl"}
-terok-clearance = {url = "https://github.com/terok-ai/terok-clearance/releases/download/v0.6.9/terok_clearance-0.6.9-py3-none-any.whl"}
+terok-clearance = {git = "https://github.com/sliwowitz/terok-clearance.git", branch = "feat/mac-hardening"}
 platformdirs = ">=4.9.6"
 aiohttp = ">=3.9"
 cryptography = ">=46.0.7"
