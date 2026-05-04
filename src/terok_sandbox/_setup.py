@@ -45,7 +45,18 @@ _HOST_BINARIES: tuple[str, ...] = ("podman", "git", "ssh-keygen")
 
 
 def run_prereq_report(cfg: SandboxConfig) -> None:
-    """Print host prerequisites.  Never blocks — purely informational."""
+    """Print host prerequisites.  Never blocks — purely informational.
+
+    Optional MAC hardening (confined domains for gate/vault/clearance)
+    is intentionally NOT reported here — it's an out-of-band tool
+    (``python -m terok_sandbox.tools.hardening``), not part of the
+    daily setup flow.  In distro-packaged deployments hardening lands
+    via the package's postinst hook and there's nothing for setup to
+    surface; in dev/pipx deployments the operator runs the tool by
+    hand.  Sickbay's ``SELinux policy`` row still surfaces the
+    legacy ``terok_socket_t`` connectto allow rule, which IS daily-
+    setup-relevant (without it, hook-mode container connectto fails).
+    """
     print("Prerequisites:")
     _report_host_binaries()
     _report_firewall_binaries()

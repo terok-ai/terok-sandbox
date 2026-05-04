@@ -37,17 +37,26 @@ from ._stage import (
     supports_color,
     yellow,
 )
+from ._util._apparmor import (
+    CONFINED_PROFILES as APPARMOR_CONFINED_PROFILES,
+    ApparmorCheckResult,
+    ApparmorStatus,
+    check_status as check_apparmor_status,
+    is_apparmor_enabled,
+    loaded_confined_profiles as apparmor_loaded_confined_profiles,
+)
 from ._util._selinux import (
+    CONFINED_DOMAINS as SELINUX_CONFINED_DOMAINS,
     SELINUX_SOCKET_TYPE,
     SelinuxCheckResult,
     SelinuxStatus,
     check_status as check_selinux_status,
     install_command as selinux_install_command,
-    install_script_path as selinux_install_script,
     is_libselinux_available,
     is_policy_installed as is_selinux_policy_installed,
     is_selinux_enabled,
     is_selinux_enforcing,
+    loaded_confined_domains as selinux_loaded_confined_domains,
     missing_policy_tools as missing_selinux_policy_tools,
     policy_source_path as selinux_policy_source,
 )
@@ -490,6 +499,7 @@ __all__ = [
     "reset_port_cache",
     "resolve_service_ports",
     # SELinux
+    "SELINUX_CONFINED_DOMAINS",
     "SELINUX_SOCKET_TYPE",
     "SelinuxCheckResult",
     "SelinuxStatus",
@@ -500,8 +510,15 @@ __all__ = [
     "is_selinux_policy_installed",
     "missing_selinux_policy_tools",
     "selinux_install_command",
-    "selinux_install_script",
+    "selinux_loaded_confined_domains",
     "selinux_policy_source",
+    # AppArmor
+    "APPARMOR_CONFINED_PROFILES",
+    "ApparmorCheckResult",
+    "ApparmorStatus",
+    "apparmor_loaded_confined_profiles",
+    "check_apparmor_status",
+    "is_apparmor_enabled",
     # Meta
     "__version__",
 ]

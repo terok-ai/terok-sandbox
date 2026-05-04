@@ -226,6 +226,20 @@ depends_on = [
     "terok_sandbox.commands",
 ]
 
+# Optional MAC hardening installer — out-of-band tool, not a
+# feature.  Lives under ``tools/`` because it's something a packager
+# (deb/rpm postinst, ansible, …) runs at install time, not part of
+# the daily user CLI.  Surface layer because it shells out
+# (subprocess + sudo) and writes systemd drop-ins under
+# ``$XDG_CONFIG_HOME`` — side effects that only a top-level
+# entrypoint should touch.  Standalone (no internal sandbox deps);
+# the terok package's own ``tools/hardening.py`` orchestrator chains
+# this with the matching clearance tool.
+[[modules]]
+path = "terok_sandbox.tools"
+layer = "surface"
+utility = true
+
 # Package root — same-layer deps on surface peers
 [[modules]]
 path = "terok_sandbox"

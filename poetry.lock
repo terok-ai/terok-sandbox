@@ -2743,18 +2743,19 @@ description = "Shield clearance and desktop notifications for terok"
 optional = false
 python-versions = ">=3.12,<4.0"
 groups = ["main"]
-files = [
-    {file = "terok_clearance-0.6.9-py3-none-any.whl", hash = "sha256:6e0a7c877d4e71543e02d172078004418acb9f5a8df117375f41725ea9995564"},
-]
+files = []
+develop = false
 
 [package.dependencies]
-asyncvarlink = ">=0.3.1,<0.4.0"
+asyncvarlink = "^0.3.1"
 dbus-fast = ">=2.0,<5.0"
-pyyaml = ">=6.0,<7.0"
+pyyaml = "^6.0"
 
 [package.source]
-type = "url"
-url = "https://github.com/terok-ai/terok-clearance/releases/download/v0.6.9/terok_clearance-0.6.9-py3-none-any.whl"
+type = "git"
+url = "https://github.com/sliwowitz/terok-clearance.git"
+reference = "feat/mac-hardening"
+resolved_reference = "8baceac49d5fee6b941cf7a32227d28ad4df11f1"
 
 [[package]]
 name = "terok-shield"
@@ -3173,4 +3174,4 @@ propcache = ">=0.2.1"
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<4.0"
-content-hash = "b7439122c460ecd645281a25f29a72f0d113c61487e23792a8d13566162ca331"
+content-hash = "6f89d1adde570d20eff2e3e464fdd447e37a890053739d13fc1675443c4474a0"
