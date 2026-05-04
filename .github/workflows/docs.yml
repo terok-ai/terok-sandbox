@@ -53,9 +53,7 @@ jobs:
           sudo tar xzf scc_Linux_x86_64.tar.gz -C /usr/local/bin scc
 
       - name: Build documentation
-        run: poetry run mkdocs build --strict
-        env:
-          NO_MKDOCS_2_WARNING: "1"
+        run: poetry run properdocs build --strict
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v5

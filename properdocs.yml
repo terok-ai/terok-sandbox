@@ -57,12 +57,9 @@ plugins:
             merge_init_into_class: true
   - terok:
       ci_map: true
-      ci_map_path: ci_map.md
       quality_report: true
-      quality_report_path: quality_report.md
       quality_report_codecov_repo: terok-ai/terok-sandbox
       ref_pages: true
-      ref_pages_path: reference
   - literate-nav:
       nav_file: SUMMARY.md
   - section-index
@@ -90,8 +87,8 @@ markdown_extensions:
 nav:
   - Home: index.md
   - Developer Guide:
-    - Code Metrics: quality_report.md
-    - CI Workflow Map: ci_map.md
+    - Code Metrics: quality-report.md
+    - CI Workflow Map: ci-map.md
   - API Reference: reference/
 
 extra:
