@@ -1011,6 +1011,14 @@ def _pump_stream(src: BinaryIO, dst: BinaryIO, *, label: str) -> None:
     silently end the pump — the partner pump (or the child's exit) is
     expected to terminate the overall call.
 
+    The read uses ``read1`` when available so a small chunk arrives
+    promptly: ``BufferedReader.read(n)`` blocks until ``n`` bytes
+    *or* EOF and would stall this pump on JSON-RPC traffic where
+    each frame is well under the 64 KB chunk size.  Raw / unbuffered
+    streams (``os.fdopen(fd, "rb", buffering=0)``) lack ``read1``
+    but their plain ``read`` already has "return whatever's
+    available" semantics, so the fallback is correct.
+
     For the *stdin→child* pump specifically, ``dst`` is the host-side
     write-end of the child's stdin pipe.  When the source reaches EOF
     we close ``dst`` so the child sees EOF on its stdin promptly,
@@ -1018,9 +1026,10 @@ def _pump_stream(src: BinaryIO, dst: BinaryIO, *, label: str) -> None:
     ``proc.wait()`` (which would deadlock any child that exits on
     stdin EOF — most ACP wrappers do).
     """
+    read = getattr(src, "read1", src.read)
     try:
         while True:
-            chunk = src.read(_STDIO_PUMP_CHUNK)
+            chunk = read(_STDIO_PUMP_CHUNK)
             if not chunk:
                 break
             dst.write(chunk)

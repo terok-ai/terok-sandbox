@@ -12,8 +12,10 @@ documented in the ACP host-proxy plan.
 from __future__ import annotations
 
 import io
+import os
 import subprocess
 import threading
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -159,6 +161,49 @@ class TestPumpStreamHelper:
         dst = io.BytesIO()
         _pump_stream(src, dst, label="child→stdout")
         assert not dst.closed
+
+    def test_buffered_reader_short_payload_does_not_stall(self) -> None:
+        """A short payload on a ``BufferedReader`` arrives without waiting for
+        the full chunk size.
+
+        Regression for the ACP probe stalling at 8 s on every wrapper:
+        ``proc.stdout`` from :class:`subprocess.Popen` is a
+        :class:`io.BufferedReader`, and its ``read(n)`` blocks until
+        ``n`` bytes *or* EOF — not "whatever's available".  A 200-byte
+        JSON-RPC reply on a 64 KB chunk would never get pumped until the
+        pipe closed.  The fix is to use ``read1`` on streams that have
+        it; this test pins that behaviour with a real OS pipe wrapped
+        as a ``BufferedReader``.
+        """
+        r_fd, w_fd = os.pipe()
+        try:
+            # Produce a small payload and *leave the writer open* — that's
+            # the production shape (the agent is still alive after sending
+            # its first frame).  A non-buffered ``os.fdopen`` here would
+            # hide the bug; we want the buffered wrapper that Popen uses.
+            os.write(w_fd, b"hello-world")
+            src = open(r_fd, "rb", closefd=True)  # noqa: SIM115 — owned by the pump thread until EOF
+            r_fd = -1  # ownership transferred
+            dst = io.BytesIO()
+            t = threading.Thread(target=_pump_stream, args=(src, dst), kwargs={"label": "buf"})
+            t.start()
+            # Without read1, the pump would block forever waiting for
+            # 64 KB or EOF; with read1 the 11 bytes propagate immediately.
+            for _ in range(50):
+                if dst.getvalue() == b"hello-world":
+                    break
+                time.sleep(0.01)
+            else:  # pragma: no cover — only fires when the pump regresses
+                raise AssertionError(f"pump didn't deliver short payload; dst={dst.getvalue()!r}")
+            os.close(w_fd)  # signal EOF so the pump can exit
+            w_fd = -1
+            t.join(timeout=2)
+            assert not t.is_alive(), "pump didn't exit on EOF"
+        finally:
+            if r_fd != -1:
+                os.close(r_fd)
+            if w_fd != -1:
+                os.close(w_fd)
 
     def test_concurrent_pumps_finish(self) -> None:
         """Two pumps in threads each finish independently.
