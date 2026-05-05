@@ -23,6 +23,10 @@ reads it.  sqlite3 in WAL mode gives lock-free concurrent reads across multiple
 terok processes (CLI commands, vault daemon, task runners).  Zero external
 dependencies.
 
+Schema declarations and forward migrations live in
+[`terok_sandbox.credentials.migrations`][terok_sandbox.credentials.migrations]
+— this module is the data-access layer only.
+
 Encryption upgrade path: wrap the ``data`` / ``private_der`` columns with
 ``cryptography.fernet`` before INSERT, or swap ``sqlite3`` for ``sqlcipher3``
 (drop-in API replacement).  A single wrap applies uniformly to both API
@@ -38,131 +42,16 @@ import secrets
 import sqlite3
 from pathlib import Path
 
-_SCHEMA_VERSION = 2
-"""Credential-DB schema version — bumped when the on-disk shape changes so
-[`migrate_credential_db_schema`][terok_sandbox.credentials.db.migrate_credential_db_schema]
-can route legacy rows forward on first open.  v0 → v1 reshaped the
-``ssh_keys`` table; v1 → v2 renamed ``proxy_tokens.task`` to ``subject`` to
-reflect the field's opaque-label semantics."""
+from .migrations import ensure_credentials_schema, migrate_credential_db_schema
 
-
-def ensure_credentials_schema(conn: sqlite3.Connection) -> None:
-    """Create the credential / SSH-key / phantom-token tables if missing.
-
-    Idempotent (every statement is ``IF NOT EXISTS``).  Exposed at module
-    level alongside
-    [`migrate_credential_db_schema`][terok_sandbox.credentials.db.migrate_credential_db_schema]
-    so every opener of the DB file —
-    [`CredentialDB`][terok_sandbox.credentials.db.CredentialDB] for writers
-    and the vault daemon's read-only ``_TokenDB`` — runs it before issuing
-    queries.  Without it, a daemon that opens an empty DB on a fresh install
-    (before any CLI command has touched the file) hits ``no such table:
-    credentials`` on the first query and crashes the unit.
-    """
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS credentials (
-            credential_set TEXT NOT NULL,
-            provider       TEXT NOT NULL,
-            data           TEXT NOT NULL,
-            PRIMARY KEY (credential_set, provider)
-        );
-        CREATE TABLE IF NOT EXISTS ssh_keys (
-            id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            key_type     TEXT    NOT NULL CHECK (key_type IN ('ed25519','rsa')),
-            private_der  BLOB    NOT NULL,
-            public_blob  BLOB    NOT NULL,
-            comment      TEXT    NOT NULL DEFAULT '',
-            fingerprint  TEXT    NOT NULL UNIQUE,
-            created_at   TEXT    NOT NULL DEFAULT (datetime('now'))
-        );
-        CREATE TABLE IF NOT EXISTS ssh_key_assignments (
-            scope        TEXT    NOT NULL,
-            key_id       INTEGER NOT NULL REFERENCES ssh_keys(id) ON DELETE CASCADE,
-            assigned_at  TEXT    NOT NULL DEFAULT (datetime('now')),
-            PRIMARY KEY (scope, key_id)
-        );
-        CREATE TABLE IF NOT EXISTS ssh_keys_version (
-            id      INTEGER PRIMARY KEY CHECK (id = 0),
-            version INTEGER NOT NULL
-        );
-        INSERT OR IGNORE INTO ssh_keys_version (id, version) VALUES (0, 0);
-        CREATE TABLE IF NOT EXISTS proxy_tokens (
-            token          TEXT PRIMARY KEY,
-            scope          TEXT NOT NULL,
-            subject        TEXT NOT NULL,
-            credential_set TEXT NOT NULL,
-            provider       TEXT NOT NULL
-        );
-    """)
-    conn.commit()
-
-
-def migrate_credential_db_schema(conn: sqlite3.Connection) -> None:
-    """Migrate legacy credential-DB rows forward to the current schema.
-
-    Tracked via ``PRAGMA user_version`` so the whole function is a no-op on
-    already-upgraded DBs.  Two upgrade steps so far:
-
-    * **v0 → v1** — reshape ``ssh_keys`` rows.  OpenSSH PEM in a
-      ``private_pem`` column with hex fingerprints becomes PKCS#8 DER in
-      ``private_der`` with ``SHA256:<base64>`` fingerprints.
-    * **v1 → v2** — rename ``proxy_tokens.task`` to ``proxy_tokens.subject``.
-      The column always held an opaque caller-supplied correlation label;
-      the new name makes that contract explicit at the schema boundary
-      (terok happens to put a task id there, but the sandbox treats the
-      value as opaque).
-
-    Exposed at module level so every opener of the DB file (``CredentialDB``
-    for writers, ``_TokenDB`` in the vault daemon for readers) runs it
-    before issuing queries — otherwise a daemon that restarts before any
-    CLI command has touched the DB would hit "no such column: …" on a
-    freshly-upgraded host.
-
-    The ``cryptography`` import is scoped to the v0→v1 branch so
-    already-migrated DBs (the common case) don't pay an import cost, and
-    the storage module keeps tach-clean at import time.
-    """
-    (current,) = conn.execute("PRAGMA user_version").fetchone()
-    if current >= _SCHEMA_VERSION:
-        return
-
-    if current < 1:
-        cols = {r[1] for r in conn.execute("PRAGMA table_info(ssh_keys)").fetchall()}
-        if "private_pem" in cols and "private_der" not in cols:
-            import base64 as _b64
-            import hashlib as _sha
-
-            from cryptography.hazmat.primitives.serialization import (
-                Encoding,
-                NoEncryption,
-                PrivateFormat,
-                load_ssh_private_key,
-            )
-
-            def _fp(pub: bytes) -> str:
-                """Re-format a public blob's fingerprint as ``SHA256:<base64>``."""
-                digest = _sha.sha256(pub).digest()
-                return f"SHA256:{_b64.b64encode(digest).decode('ascii').rstrip('=')}"
-
-            rows = conn.execute("SELECT id, private_pem, public_blob FROM ssh_keys").fetchall()
-            for row_id, priv_pem, pub_blob in rows:
-                key = load_ssh_private_key(bytes(priv_pem), password=None)
-                der = key.private_bytes(Encoding.DER, PrivateFormat.PKCS8, NoEncryption())
-                conn.execute(
-                    "UPDATE ssh_keys SET private_pem = ?, fingerprint = ? WHERE id = ?",
-                    (der, _fp(bytes(pub_blob)), row_id),
-                )
-            conn.execute("ALTER TABLE ssh_keys RENAME COLUMN private_pem TO private_der")
-
-    if current < 2:
-        proxy_cols = {r[1] for r in conn.execute("PRAGMA table_info(proxy_tokens)").fetchall()}
-        if "task" in proxy_cols and "subject" not in proxy_cols:
-            # SQLite ≥3.25 supports RENAME COLUMN; rolling-upgrade migration
-            # for any DB still carrying the v1 ``task`` column.
-            conn.execute("ALTER TABLE proxy_tokens RENAME COLUMN task TO subject")
-
-    conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
-    conn.commit()
+__all__ = [
+    "CredentialDB",
+    "InvalidScopeName",
+    "SSHKeyRecord",
+    "SSHKeyRow",
+    "ensure_credentials_schema",
+    "migrate_credential_db_schema",
+]
 
 
 # ── Scope-name guard ────────────────────────────────────────────────────────

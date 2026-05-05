@@ -99,9 +99,18 @@ depends_on = [
     "terok_sandbox.vault",
 ]
 
-# Credential DB — standalone SQLite store
+# Credential DB — standalone SQLite store; re-exports schema helpers
+# from the migrations module so out-of-tree consumers keep one import.
 [[modules]]
 path = "terok_sandbox.credentials.db"
+layer = "foundation"
+depends_on = ["terok_sandbox.credentials.migrations"]
+
+# Schema bootstrap + forward migrations for the credential DB.  Standalone
+# so future schema bumps have a focused review target without disturbing
+# the data-access layer.
+[[modules]]
+path = "terok_sandbox.credentials.migrations"
 layer = "foundation"
 depends_on = []
 
