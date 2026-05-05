@@ -211,7 +211,7 @@ class TestSchemaMigration:
         from cryptography.hazmat.primitives.asymmetric import ed25519
         from cryptography.hazmat.primitives.serialization import load_der_private_key
 
-        from terok_sandbox.credentials.db import _SCHEMA_VERSION
+        from terok_sandbox.credentials.migrations import SCHEMA_VERSION
 
         db_path = tmp_path / "legacy.db"
         _seed_legacy_v0_db(db_path)
@@ -228,7 +228,7 @@ class TestSchemaMigration:
             reloaded = load_der_private_key(bytes(der_blob), password=None)
             assert isinstance(reloaded, ed25519.Ed25519PrivateKey)
             (version,) = db._conn.execute("PRAGMA user_version").fetchone()
-            assert version == _SCHEMA_VERSION
+            assert version == SCHEMA_VERSION
         finally:
             db.close()
 
@@ -236,7 +236,7 @@ class TestSchemaMigration:
         db2 = CredentialDB(db_path)
         try:
             (version,) = db2._conn.execute("PRAGMA user_version").fetchone()
-            assert version == _SCHEMA_VERSION
+            assert version == SCHEMA_VERSION
         finally:
             db2.close()
 
@@ -249,7 +249,7 @@ class TestSchemaMigration:
         ``CredentialDB``.  Without this path the daemon would crash on
         its first key lookup with "no such column: private_der".
         """
-        from terok_sandbox.credentials.db import _SCHEMA_VERSION
+        from terok_sandbox.credentials.migrations import SCHEMA_VERSION
         from terok_sandbox.vault.token_broker import _TokenDB
 
         db_path = tmp_path / "legacy.db"
@@ -258,7 +258,7 @@ class TestSchemaMigration:
         token_db = _TokenDB(str(db_path))
         try:
             (version,) = token_db._conn.execute("PRAGMA user_version").fetchone()
-            assert version == _SCHEMA_VERSION
+            assert version == SCHEMA_VERSION
             [record] = token_db.load_ssh_keys_for_scope("proj")
             assert record.public_blob == pub_blob
             assert record.fingerprint.startswith("SHA256:")
@@ -275,7 +275,7 @@ class TestSchemaMigration:
         """
         import sqlite3
 
-        from terok_sandbox.credentials.db import _SCHEMA_VERSION
+        from terok_sandbox.credentials.migrations import SCHEMA_VERSION
 
         db_path = tmp_path / "v1.db"
         # Hand-built v1 schema: proxy_tokens still uses the old ``task``
@@ -316,7 +316,7 @@ class TestSchemaMigration:
             assert "subject" in cols
             assert "task" not in cols
             (version,) = db._conn.execute("PRAGMA user_version").fetchone()
-            assert version == _SCHEMA_VERSION
+            assert version == SCHEMA_VERSION
             # Pre-existing row survived the column rename.
             info = db.lookup_token("terok-p-aaa")
             assert info == {
