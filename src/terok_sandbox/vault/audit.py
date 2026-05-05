@@ -73,6 +73,12 @@ class AuditWriter:
         writes ``json + "\\n"`` under the per-writer lock.  Line-buffered
         text mode flushes after every newline, so a crash mid-broker
         loses at most the most recent partial line.
+
+        The actual file write goes through ``asyncio.to_thread`` so a
+        slow disk / stuck mount can't stall the broker's event loop —
+        the write happens on the default executor, the lock keeps
+        ordering across concurrent callers, and the soft-fail
+        ``OSError`` path stays the same shape as the sync version.
         """
         line = json.dumps(entry, separators=(",", ":")) + "\n"
         async with self._lock:
@@ -81,7 +87,7 @@ class AuditWriter:
             if self._fh is None:
                 return
             try:
-                self._fh.write(line)
+                await asyncio.to_thread(self._fh.write, line)
             except OSError as exc:
                 _logger.warning("Credential audit write failed (%s): %s", self._path, exc)
 

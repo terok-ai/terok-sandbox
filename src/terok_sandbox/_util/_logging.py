@@ -18,6 +18,7 @@ Two surfaces share one implementation:
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 from collections.abc import Callable
@@ -44,12 +45,24 @@ class BestEffortLogger:
         self._log_path_fn = log_path_fn
 
     def log(self, message: str, *, level: str = "DEBUG") -> None:
-        """Append one ``[timestamp] LEVEL: message`` line.  Never raises."""
+        """Append one ``[timestamp] LEVEL: message`` line.  Never raises.
+
+        File creation goes through ``os.open`` with mode ``0o600`` so the
+        log lands owner-only by construction — atomically, without
+        relying on the process umask.  The mode bits are honoured by
+        the kernel only on creation; existing files keep whatever perms
+        they were created with.
+        """
         try:
             log_path = self._log_path_fn()
             log_path.parent.mkdir(parents=True, exist_ok=True)
             timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-            with log_path.open("a", encoding="utf-8") as f:
+            fd = os.open(
+                log_path,
+                os.O_APPEND | os.O_CREAT | os.O_WRONLY,
+                0o600,
+            )
+            with os.fdopen(fd, "a", encoding="utf-8") as f:
                 f.write(f"[{timestamp}] {level}: {message}\n")
         except Exception:  # nosec B110 — intentionally silent
             pass
