@@ -94,7 +94,7 @@ class VaultUnreachableError(RuntimeError):
 
 # ---------- Constants ----------
 
-_UNIT_VERSION = 8
+_UNIT_VERSION = 9
 """Bump when the systemd unit templates change."""
 
 _SOCKET_UNIT = "terok-vault.socket"
@@ -379,6 +379,7 @@ class VaultManager:
             "SCOPE_SOCKETS_DIR": str(self._cfg.runtime_dir),
             "DB_PATH": str(self._cfg.db_path),
             "ROUTES_PATH": str(self._cfg.routes_path),
+            "AUDIT_LOG_PATH": str(self._cfg.credential_audit_log_path),
             "PORT": str(self._cfg.token_broker_port),
             "SSH_SIGNER_PORT": str(self._cfg.ssh_signer_port),
             "BIN": shlex.join(self._vault_exec_prefix()),

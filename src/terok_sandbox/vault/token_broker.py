@@ -39,6 +39,7 @@ import signal
 import socket
 import sqlite3
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 from aiohttp import (
@@ -50,6 +51,8 @@ from aiohttp import (
     web,
 )
 
+from .audit import AuditWriter
+
 _logger = logging.getLogger("terok-vault")
 
 # Typed app keys (avoids NotAppKeyWarning on aiohttp >= 3.9)
@@ -57,6 +60,7 @@ _KEY_ROUTES = web.AppKey("routes", "_RouteTable")
 _KEY_TOKEN_DB = web.AppKey("token_db", "_TokenDB")
 _KEY_CLIENT = web.AppKey("client_session", ClientSession)
 _KEY_REFRESH_TASK = web.AppKey("refresh_task", object)  # asyncio.Task
+_KEY_AUDIT = web.AppKey("audit", AuditWriter)
 
 _REFRESH_INTERVAL = 300  # seconds between background refresh checks
 _IDEMPOTENT_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
@@ -123,20 +127,25 @@ class _TokenDB:
         # an empty DB on a fresh install (no CLI write has touched the file
         # yet) and a post-upgrade DB (v0 columns) without crashing on the
         # first query.  Both helpers are idempotent.
-        from ..credentials.db import ensure_credentials_schema, migrate_ssh_keys_schema
+        from ..credentials.db import ensure_credentials_schema, migrate_credential_db_schema
 
         ensure_credentials_schema(self._conn)
-        migrate_ssh_keys_schema(self._conn)
+        migrate_credential_db_schema(self._conn)
 
     def lookup_token(self, token: str) -> dict | None:
-        """Return ``{scope, task, credential_set, provider}`` or ``None``."""
+        """Return ``{scope, subject, credential_set, provider}`` or ``None``."""
         row = self._conn.execute(
-            "SELECT scope, task, credential_set, provider FROM proxy_tokens WHERE token = ?",
+            "SELECT scope, subject, credential_set, provider FROM proxy_tokens WHERE token = ?",
             (token,),
         ).fetchone()
         if row is None:
             return None
-        return {"scope": row[0], "task": row[1], "credential_set": row[2], "provider": row[3]}
+        return {
+            "scope": row[0],
+            "subject": row[1],
+            "credential_set": row[2],
+            "provider": row[3],
+        }
 
     def load_credential(self, credential_set: str, provider: str) -> dict | None:
         """Return parsed credential data dict, or ``None``."""
@@ -250,7 +259,7 @@ def _static_oauth_token_info(token: str) -> dict | None:
     _logger.debug("Accepting static phantom marker for %s OAuth", provider)
     return {
         "scope": "__static__",
-        "task": "__static__",
+        "subject": "__static__",
         "credential_set": "default",
         "provider": provider,
     }
@@ -385,8 +394,44 @@ async def _proxy_websocket(
 # ---------------------------------------------------------------------------
 
 
+async def _audit_request(
+    request: web.Request,
+    token_info: dict | None,
+    status: int,
+    outcome: str,
+    started_at: float,
+) -> None:
+    """Append one credential-audit line for *request*.  Soft-fails on every error.
+
+    ``token_info`` may be ``None`` for early-return paths (missing or
+    invalid phantom) — the caller-supplied label fields are then empty.
+    The audit writer's own ``write`` is the soft-fail boundary; this
+    helper just shapes the entry.  WebSocket sessions are deliberately
+    not audited in v1: the proxy hands off to a separate streaming loop
+    whose lifetime doesn't fit a single request line.
+    """
+    audit = request.app.get(_KEY_AUDIT)
+    if audit is None:
+        return
+    info = token_info or {}
+    entry = {
+        "ts": datetime.now(UTC).isoformat(timespec="seconds"),
+        "scope": info.get("scope", ""),
+        "subject": info.get("subject", ""),
+        "credential_set": info.get("credential_set", ""),
+        "provider": info.get("provider", ""),
+        "method": request.method,
+        "path": request.path,
+        "status": status,
+        "outcome": outcome,
+        "duration_ms": int((time.monotonic() - started_at) * 1000),
+    }
+    await audit.write(entry)
+
+
 async def _handle_request(request: web.Request) -> web.StreamResponse:
     """Authenticate, route by token, inject credentials, and forward to upstream."""
+    started_at = time.monotonic()
     routes: _RouteTable = request.app[_KEY_ROUTES]
     token_db: _TokenDB = request.app[_KEY_TOKEN_DB]
 
@@ -394,6 +439,7 @@ async def _handle_request(request: web.Request) -> web.StreamResponse:
     phantom = _extract_phantom_token(request)
     if not phantom:
         _logger.warning("%s %s -> 401 Missing authentication", request.method, request.path)
+        await _audit_request(request, None, 401, "missing_token", started_at)
         return web.Response(status=401, text="Missing authentication")
 
     token_info = token_db.lookup_token(phantom)
@@ -402,6 +448,7 @@ async def _handle_request(request: web.Request) -> web.StreamResponse:
             token_info = static_info
         else:
             _logger.warning("%s %s -> 401 Invalid token", request.method, request.path)
+            await _audit_request(request, None, 401, "invalid_token", started_at)
             return web.Response(status=401, text="Invalid token")
 
     # 2. Route by token's provider
@@ -411,6 +458,7 @@ async def _handle_request(request: web.Request) -> web.StreamResponse:
         _logger.warning(
             "%s %s -> 404 No route for provider: %s", request.method, request.path, provider
         )
+        await _audit_request(request, token_info, 404, "no_route", started_at)
         return web.Response(status=404, text=f"No route for provider: {provider}")
     rest = request.path
 
@@ -420,6 +468,7 @@ async def _handle_request(request: web.Request) -> web.StreamResponse:
         _logger.warning(
             "No credential for provider %r in set %r", provider, token_info["credential_set"]
         )
+        await _audit_request(request, token_info, 502, "credential_missing", started_at)
         return web.Response(status=502, text="Credential not configured for this provider")
 
     # Determine the real auth value and header based on credential type.
@@ -432,6 +481,7 @@ async def _handle_request(request: web.Request) -> web.StreamResponse:
         real_token = cred.get("access_token")
         if not real_token:
             _logger.error("Credential for %r is OAuth but missing access_token", provider)
+            await _audit_request(request, token_info, 502, "credential_misconfigured", started_at)
             return web.Response(status=502, text="Credential misconfigured")
         auth_header = "Authorization"
         auth_prefix = "Bearer "
@@ -439,6 +489,7 @@ async def _handle_request(request: web.Request) -> web.StreamResponse:
         real_token = cred.get("token") or cred.get("key")
         if not real_token:
             _logger.error("Credential for %r has no usable token field", provider)
+            await _audit_request(request, token_info, 502, "credential_misconfigured", started_at)
             return web.Response(status=502, text="Credential misconfigured")
         auth_header = route.get("auth_header", "Authorization")
         auth_prefix = route.get("auth_prefix", "Bearer ")
@@ -470,6 +521,10 @@ async def _handle_request(request: web.Request) -> web.StreamResponse:
 
     session: ClientSession = request.app[_KEY_CLIENT]
     if request.headers.get("Upgrade", "").lower() == "websocket":
+        # WebSocket sessions deliberately bypass the audit log in v1 — the
+        # streaming loop has no single status / duration we can record
+        # inside one JSONL line.  Per-frame audit is unbounded; an open /
+        # close pair is the natural follow-up.
         return await _proxy_websocket(
             request,
             session=session,
@@ -511,16 +566,20 @@ async def _handle_request(request: web.Request) -> web.StreamResponse:
                 async for chunk in upstream.content.iter_any():
                     await resp.write(chunk)
                 await resp.write_eof()
+                await _audit_request(request, token_info, upstream.status, "ok", started_at)
                 return resp
         except ServerDisconnectedError:
             if not connection_established and attempt == 0 and can_retry:
                 _logger.debug("Upstream %s disconnected on pooled conn, retrying", provider)
                 continue
             _logger.error("Upstream %s disconnected on fresh connection", provider)
+            await _audit_request(request, token_info, 502, "upstream_disconnected", started_at)
             return web.Response(status=502, text="Upstream disconnected")
         except Exception as exc:
             _logger.error("Upstream request to %s failed: %s", provider, exc)
+            await _audit_request(request, token_info, 502, "upstream_error", started_at)
             return web.Response(status=502, text="Upstream request failed")
+    await _audit_request(request, token_info, 502, "upstream_disconnected", started_at)
     return web.Response(status=502, text="Upstream disconnected")  # unreachable
 
 
@@ -635,6 +694,9 @@ async def _on_cleanup(app: web.Application) -> None:
             pass
     await app[_KEY_CLIENT].close()
     app[_KEY_TOKEN_DB].close()
+    audit = app.get(_KEY_AUDIT)
+    if audit is not None:
+        await audit.close()
 
 
 async def _handle_health(_request: web.Request) -> web.Response:
@@ -642,11 +704,19 @@ async def _handle_health(_request: web.Request) -> web.Response:
     return web.json_response({"status": "ok"})
 
 
-def _build_app(db_path: str, routes_path: str) -> web.Application:
-    """Construct the aiohttp application."""
+def _build_app(db_path: str, routes_path: str, audit_path: Path | None = None) -> web.Application:
+    """Construct the aiohttp application.
+
+    *audit_path* — when supplied, every credential-bearing request lands
+    one JSONL line at this path.  ``None`` disables auditing (used by
+    smoke tests that don't care about the side-channel); production
+    callers point at :func:`audit.credential_audit_log_path`.
+    """
     app = web.Application()
     app[_KEY_ROUTES] = _RouteTable(routes_path)
     app[_KEY_TOKEN_DB] = _TokenDB(db_path)
+    if audit_path is not None:
+        app[_KEY_AUDIT] = AuditWriter(audit_path)
     app.on_startup.append(_on_startup)
     app.on_cleanup.append(_on_cleanup)
     from .constants import HEALTH_PATH
@@ -834,6 +904,16 @@ def main() -> None:
     )
     parser.add_argument("--log-level", default="INFO", help="Logging level (default: INFO)")
     parser.add_argument("--log-file", default=None, help="Append log output to this file")
+    parser.add_argument(
+        "--audit-log",
+        default=None,
+        help=(
+            "Append-only JSONL credential-use audit log.  When set, every "
+            "phantom-token-validated request lands one line at this path; "
+            "unset disables auditing.  systemd unit defaults to "
+            "<vault_root>/credential_audit.jsonl."
+        ),
+    )
     args = parser.parse_args()
 
     if args.ssh_signer_port is not None and args.ssh_signer_socket_path is not None:
@@ -864,7 +944,8 @@ def main() -> None:
         finally:
             os.close(fd)
 
-    app = _build_app(args.db_path, args.routes_file)
+    audit_path = Path(args.audit_log) if args.audit_log else None
+    app = _build_app(args.db_path, args.routes_file, audit_path=audit_path)
 
     # Graceful shutdown on SIGTERM
     def _handle_sigterm(*_: object) -> None:

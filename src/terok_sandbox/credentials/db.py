@@ -11,8 +11,12 @@ mediates:
 - **SSH keys** stored as unencrypted PKCS#8 DER + SSH wire-format public blob,
   deduplicated by standard-format fingerprint, linked to project scopes through
   an assignments join table.
-- **Phantom tokens** minted per-task so containers can authenticate to the
-  vault without ever seeing real credentials.
+- **Phantom tokens** minted per-``(scope, subject)`` so containers can
+  authenticate to the vault without ever seeing real credentials.  ``subject``
+  is an opaque caller-supplied correlation label — the sandbox stores it
+  verbatim and never interprets its contents.  Callers (the orchestrator)
+  decide what it identifies; today terok puts the task id there, but the
+  sandbox treats it as a string label.
 
 The database is **never** mounted into task containers — only the vault daemon
 reads it.  sqlite3 in WAL mode gives lock-free concurrent reads across multiple
@@ -34,19 +38,24 @@ import secrets
 import sqlite3
 from pathlib import Path
 
-_SCHEMA_VERSION = 1
-"""SSH-key table schema version — bumped when the on-disk encoding changes
-so [`migrate_ssh_keys_schema`][terok_sandbox.credentials.db.migrate_ssh_keys_schema] can route legacy rows forward on first open."""
+_SCHEMA_VERSION = 2
+"""Credential-DB schema version — bumped when the on-disk shape changes so
+[`migrate_credential_db_schema`][terok_sandbox.credentials.db.migrate_credential_db_schema]
+can route legacy rows forward on first open.  v0 → v1 reshaped the
+``ssh_keys`` table; v1 → v2 renamed ``proxy_tokens.task`` to ``subject`` to
+reflect the field's opaque-label semantics."""
 
 
 def ensure_credentials_schema(conn: sqlite3.Connection) -> None:
     """Create the credential / SSH-key / phantom-token tables if missing.
 
     Idempotent (every statement is ``IF NOT EXISTS``).  Exposed at module
-    level alongside [`migrate_ssh_keys_schema`][terok_sandbox.credentials.db.migrate_ssh_keys_schema] so every opener of
-    the DB file — [`CredentialDB`][terok_sandbox.credentials.db.CredentialDB] for writers and the vault
-    daemon's read-only ``_TokenDB`` — runs it before issuing queries.
-    Without it, a daemon that opens an empty DB on a fresh install
+    level alongside
+    [`migrate_credential_db_schema`][terok_sandbox.credentials.db.migrate_credential_db_schema]
+    so every opener of the DB file —
+    [`CredentialDB`][terok_sandbox.credentials.db.CredentialDB] for writers
+    and the vault daemon's read-only ``_TokenDB`` — runs it before issuing
+    queries.  Without it, a daemon that opens an empty DB on a fresh install
     (before any CLI command has touched the file) hits ``no such table:
     credentials`` on the first query and crashes the unit.
     """
@@ -80,7 +89,7 @@ def ensure_credentials_schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS proxy_tokens (
             token          TEXT PRIMARY KEY,
             scope          TEXT NOT NULL,
-            task           TEXT NOT NULL,
+            subject        TEXT NOT NULL,
             credential_set TEXT NOT NULL,
             provider       TEXT NOT NULL
         );
@@ -88,21 +97,28 @@ def ensure_credentials_schema(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def migrate_ssh_keys_schema(conn: sqlite3.Connection) -> None:
-    """Migrate legacy ``ssh_keys`` rows forward to the current schema.
+def migrate_credential_db_schema(conn: sqlite3.Connection) -> None:
+    """Migrate legacy credential-DB rows forward to the current schema.
 
     Tracked via ``PRAGMA user_version`` so the whole function is a no-op on
-    already-upgraded DBs.  The only current upgrade converts v0 rows —
-    OpenSSH PEM in a ``private_pem`` column, hex fingerprints — to v1:
-    PKCS#8 DER in ``private_der`` with ``SHA256:<base64>`` fingerprints.
+    already-upgraded DBs.  Two upgrade steps so far:
+
+    * **v0 → v1** — reshape ``ssh_keys`` rows.  OpenSSH PEM in a
+      ``private_pem`` column with hex fingerprints becomes PKCS#8 DER in
+      ``private_der`` with ``SHA256:<base64>`` fingerprints.
+    * **v1 → v2** — rename ``proxy_tokens.task`` to ``proxy_tokens.subject``.
+      The column always held an opaque caller-supplied correlation label;
+      the new name makes that contract explicit at the schema boundary
+      (terok happens to put a task id there, but the sandbox treats the
+      value as opaque).
 
     Exposed at module level so every opener of the DB file (``CredentialDB``
     for writers, ``_TokenDB`` in the vault daemon for readers) runs it
     before issuing queries — otherwise a daemon that restarts before any
-    CLI command has touched the DB would hit "no such column: private_der"
-    on a freshly-upgraded host.
+    CLI command has touched the DB would hit "no such column: …" on a
+    freshly-upgraded host.
 
-    The ``cryptography`` import is scoped to the migration branch so
+    The ``cryptography`` import is scoped to the v0→v1 branch so
     already-migrated DBs (the common case) don't pay an import cost, and
     the storage module keeps tach-clean at import time.
     """
@@ -110,32 +126,41 @@ def migrate_ssh_keys_schema(conn: sqlite3.Connection) -> None:
     if current >= _SCHEMA_VERSION:
         return
 
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(ssh_keys)").fetchall()}
-    if "private_pem" in cols and "private_der" not in cols:
-        import base64 as _b64
-        import hashlib as _sha
+    if current < 1:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(ssh_keys)").fetchall()}
+        if "private_pem" in cols and "private_der" not in cols:
+            import base64 as _b64
+            import hashlib as _sha
 
-        from cryptography.hazmat.primitives.serialization import (
-            Encoding,
-            NoEncryption,
-            PrivateFormat,
-            load_ssh_private_key,
-        )
-
-        def _fp(pub: bytes) -> str:
-            """Re-format a public blob's fingerprint as ``SHA256:<base64>``."""
-            digest = _sha.sha256(pub).digest()
-            return f"SHA256:{_b64.b64encode(digest).decode('ascii').rstrip('=')}"
-
-        rows = conn.execute("SELECT id, private_pem, public_blob FROM ssh_keys").fetchall()
-        for row_id, priv_pem, pub_blob in rows:
-            key = load_ssh_private_key(bytes(priv_pem), password=None)
-            der = key.private_bytes(Encoding.DER, PrivateFormat.PKCS8, NoEncryption())
-            conn.execute(
-                "UPDATE ssh_keys SET private_pem = ?, fingerprint = ? WHERE id = ?",
-                (der, _fp(bytes(pub_blob)), row_id),
+            from cryptography.hazmat.primitives.serialization import (
+                Encoding,
+                NoEncryption,
+                PrivateFormat,
+                load_ssh_private_key,
             )
-        conn.execute("ALTER TABLE ssh_keys RENAME COLUMN private_pem TO private_der")
+
+            def _fp(pub: bytes) -> str:
+                """Re-format a public blob's fingerprint as ``SHA256:<base64>``."""
+                digest = _sha.sha256(pub).digest()
+                return f"SHA256:{_b64.b64encode(digest).decode('ascii').rstrip('=')}"
+
+            rows = conn.execute("SELECT id, private_pem, public_blob FROM ssh_keys").fetchall()
+            for row_id, priv_pem, pub_blob in rows:
+                key = load_ssh_private_key(bytes(priv_pem), password=None)
+                der = key.private_bytes(Encoding.DER, PrivateFormat.PKCS8, NoEncryption())
+                conn.execute(
+                    "UPDATE ssh_keys SET private_pem = ?, fingerprint = ? WHERE id = ?",
+                    (der, _fp(bytes(pub_blob)), row_id),
+                )
+            conn.execute("ALTER TABLE ssh_keys RENAME COLUMN private_pem TO private_der")
+
+    if current < 2:
+        proxy_cols = {r[1] for r in conn.execute("PRAGMA table_info(proxy_tokens)").fetchall()}
+        if "task" in proxy_cols and "subject" not in proxy_cols:
+            # SQLite ≥3.25 supports RENAME COLUMN; rolling-upgrade migration
+            # for any DB still carrying the v1 ``task`` column.
+            conn.execute("ALTER TABLE proxy_tokens RENAME COLUMN task TO subject")
+
     conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
     conn.commit()
 
@@ -225,7 +250,7 @@ class CredentialDB:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         ensure_credentials_schema(self._conn)
-        migrate_ssh_keys_schema(self._conn)
+        migrate_credential_db_schema(self._conn)
 
     # ── Provider credentials ────────────────────────────────────────────
 
@@ -439,35 +464,52 @@ class CredentialDB:
 
     # ── Phantom tokens ──────────────────────────────────────────────────
 
-    def create_token(self, scope: str, task: str, credential_set: str, provider: str) -> str:
-        """Create a per-task, per-provider phantom token.
+    def create_token(self, scope: str, subject: str, credential_set: str, provider: str) -> str:
+        """Mint a phantom token bound to ``(scope, subject, credential_set, provider)``.
+
+        ``subject`` is an opaque caller-supplied correlation label — the
+        sandbox stores it verbatim and never interprets its contents.
+        Today terok puts the orchestrator's task id there; the sandbox
+        treats the value as a string.
 
         Token format: ``terok-p-<32 hex chars>``.
         """
         token = f"terok-p-{secrets.token_hex(16)}"
         self._conn.execute(
-            "INSERT INTO proxy_tokens (token, scope, task, credential_set, provider)"
+            "INSERT INTO proxy_tokens (token, scope, subject, credential_set, provider)"
             " VALUES (?, ?, ?, ?, ?)",
-            (token, scope, task, credential_set, provider),
+            (token, scope, subject, credential_set, provider),
         )
         self._conn.commit()
         return token
 
     def lookup_token(self, token: str) -> dict | None:
-        """Return ``{scope, task, credential_set, provider}`` or ``None``."""
+        """Return ``{scope, subject, credential_set, provider}`` or ``None``."""
         row = self._conn.execute(
-            "SELECT scope, task, credential_set, provider FROM proxy_tokens WHERE token = ?",
+            "SELECT scope, subject, credential_set, provider FROM proxy_tokens WHERE token = ?",
             (token,),
         ).fetchone()
         if row is None:
             return None
-        return {"scope": row[0], "task": row[1], "credential_set": row[2], "provider": row[3]}
+        return {
+            "scope": row[0],
+            "subject": row[1],
+            "credential_set": row[2],
+            "provider": row[3],
+        }
 
-    def revoke_tokens(self, scope: str, task: str) -> int:
-        """Revoke all phantom tokens for a scope/task pair.  Returns count revoked."""
+    def revoke_tokens(self, scope: str, subject: str) -> int:
+        """Revoke every phantom token bound to ``(scope, subject)``.
+
+        Returns the number of rows removed.  The sandbox makes no claim
+        about what ``subject`` identifies; callers (the orchestrator) pass
+        whatever opaque label they used at
+        [`create_token`][terok_sandbox.credentials.db.CredentialDB.create_token]
+        time.
+        """
         cur = self._conn.execute(
-            "DELETE FROM proxy_tokens WHERE scope = ? AND task = ?",
-            (scope, task),
+            "DELETE FROM proxy_tokens WHERE scope = ? AND subject = ?",
+            (scope, subject),
         )
         self._conn.commit()
         return cur.rowcount
