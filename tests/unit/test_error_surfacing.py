@@ -435,3 +435,67 @@ class TestGateHandlerLogMessage:
         with unittest.mock.patch("terok_sandbox.gate.server._logger") as mock_logger:
             handler.log_message("%s %s", "GET /foo", "not-a-number")
             mock_logger.warning.assert_not_called()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 4. ``BestEffortLogger`` — path-on-construction surface for cross-package use
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestBestEffortLogger:
+    """The path-parameterised logger that backs the module-level shortcuts.
+
+    Lets out-of-tree consumers (notably terok itself) drop their own
+    near-identical copy of the helper and bind a logger to whatever
+    state path their package owns.  See terok-sandbox#111 for the
+    cross-package utility roadmap.
+    """
+
+    def test_log_writes_to_constructor_supplied_path(self, tmp_path: Path) -> None:
+        from terok_sandbox import BestEffortLogger
+
+        log_path = tmp_path / "out.log"
+        logger = BestEffortLogger(lambda: log_path)
+        logger.log("hello", level="DEBUG")
+        content = log_path.read_text()
+        assert "DEBUG: hello" in content
+        assert content.startswith("[")
+
+    def test_path_resolver_is_called_on_every_write(self, tmp_path: Path) -> None:
+        """A test that flips its target dir between writes still lands lines correctly."""
+        from terok_sandbox import BestEffortLogger
+
+        first = tmp_path / "first" / "out.log"
+        second = tmp_path / "second" / "out.log"
+        target = [first]
+        logger = BestEffortLogger(lambda: target[0])
+        logger.debug("one")
+        target[0] = second
+        logger.warning("two")
+        assert "DEBUG: one" in first.read_text()
+        assert "WARNING: two" in second.read_text()
+        assert "two" not in first.read_text()
+
+    def test_unwritable_path_silently_skipped(self) -> None:
+        """A resolver that points at an impossible path must not raise."""
+        from terok_sandbox import BestEffortLogger
+
+        # Resolving to a /proc subpath is reliably unwritable for non-root.
+        logger = BestEffortLogger(lambda: Path("/proc/1/this-cannot-be-created/log"))
+        logger.debug("never reaches disk")  # must not raise
+        logger.warning("either")
+        logger.warn_user("comp", "msg")
+
+    def test_warn_user_writes_to_log_and_stderr(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from terok_sandbox import BestEffortLogger
+
+        log_path = tmp_path / "out.log"
+        logger = BestEffortLogger(lambda: log_path)
+        logger.warn_user("vault", "configuration drift detected")
+        captured = capsys.readouterr()
+        assert "Warning [vault]: configuration drift detected" in captured.err
+        # File-side keeps the WARNING level even when stderr is the
+        # primary signal — composes with later forensic review.
+        assert "WARNING: [vault] configuration drift detected" in log_path.read_text()
