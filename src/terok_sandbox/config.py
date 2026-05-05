@@ -209,6 +209,17 @@ class SandboxConfig:
         return self.vault_dir / "routes.json"
 
     @property
+    def credential_audit_log_path(self) -> Path:
+        """Return the path to the credential-use audit JSONL.
+
+        One file under the vault state dir, shared across every subject
+        the broker has ever served — sandbox doesn't model
+        "subject" semantically, so per-subject layout is the consumer's
+        concern (terok's review CLI filters by ``scope`` / ``subject``).
+        """
+        return self.vault_dir / "credential_audit.jsonl"
+
+    @property
     def gate_socket_path(self) -> Path:
         """Return the Unix socket path for the gate server."""
         return self.runtime_dir / "gate-server.sock"
