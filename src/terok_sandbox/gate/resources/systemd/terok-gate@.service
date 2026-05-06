@@ -13,10 +13,13 @@ StandardError=journal
 ExecStart={{TEROK_GATE_BIN}} --inetd --base-path={{GATE_BASE_PATH}} --token-file={{TOKEN_FILE}}
 
 NoNewPrivileges=yes
-# AmbientCapabilities= (cleared) was fatal in --user mode on Ubuntu 24.04
-# (exit status=218/CAPABILITIES — user manager lacks CAP_SETPCAP).  User
-# services start with no ambient caps, so clearing was a no-op; dropped
-# until distro detection lets us branch.
+# Several directives below were absent (AmbientCapabilities=,
+# ProtectClock=, ProtectKernelTunables=, ProtectKernelLogs=,
+# ProtectKernelModules=, PrivateDevices=) — each implicitly modifies
+# CapabilityBoundingSet, which in --user mode on Ubuntu 24.04 hits
+# `Failed to drop capabilities: Operation not permitted` (status=218/
+# CAPABILITIES) because the user manager lacks CAP_SETPCAP.  Re-add
+# behind distro detection in a follow-up.
 LockPersonality=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
@@ -25,16 +28,11 @@ SystemCallArchitectures=native
 KeyringMode=private
 UMask=0077
 
-ProtectClock=yes
-ProtectKernelTunables=yes
-ProtectKernelLogs=yes
-ProtectKernelModules=yes
 ProtectControlGroups=yes
 ProtectHostname=yes
 ProtectProc=invisible
 ProcSubset=pid
 
-PrivateDevices=yes
 PrivateTmp=yes
 ProtectSystem=full
 
