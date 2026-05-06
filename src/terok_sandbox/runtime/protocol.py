@@ -18,10 +18,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, BinaryIO, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
 
 # ── Value types ───────────────────────────────────────────────────────────
@@ -279,6 +279,32 @@ class ContainerRuntime(Protocol):
 
         The operation that diverges most across backends: podman uses
         ``podman exec``; a krun backend would use SSH over vsock.
+        """
+        ...
+
+    def exec_stdio(
+        self,
+        container: Container,
+        cmd: list[str],
+        *,
+        stdin: BinaryIO,
+        stdout: BinaryIO,
+        stderr: BinaryIO | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> int:
+        """Run *cmd* inside *container* with stdio bridged to caller-supplied streams.
+
+        Forwards bytes bidirectionally between *stdin*/*stdout*/*stderr* and the
+        spawned process — distinct from :meth:`exec`, which captures output into
+        an :class:`ExecResult`.  Used by the host-side ACP proxy to bridge a Unix
+        socket to an in-container ACP-stdio agent without the runtime ever
+        materialising the conversation.
+
+        Blocks until the child exits; returns the exit code.  EOF on either
+        side terminates forwarding cleanly.  Implementations are expected to
+        be transport-agnostic — *stdin*/*stdout* are arbitrary byte streams
+        (a socket's file-object face, a pipe end, a test buffer).
         """
         ...
 
