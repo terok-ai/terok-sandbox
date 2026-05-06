@@ -68,9 +68,16 @@ def stage(label: str, marker: Marker, detail: str = "") -> None:
     Matches [`stage_begin`][terok_sandbox.stage_begin] + [`stage_end`][terok_sandbox.stage_end] when the caller
     doesn't need progressive output.  The marker is ANSI-coloured
     according to `_PALETTE` when colour is enabled.
+
+    Multi-line *detail* is split: only the first line lands inside the
+    parentheses; remaining lines are emitted as an indented
+    continuation block underneath.  See [`stage_end`][terok_sandbox.stage_end] for the
+    rationale (callers passing a multi-line exception ``str()``).
     """
-    suffix = f" ({detail})" if detail else ""
+    head, tail = _split_detail(detail)
+    suffix = f" ({head})" if head else ""
     print(f"  {label:<{STAGE_WIDTH}} {_render_marker(marker)}{suffix}")
+    _print_continuation(tail)
 
 
 def stage_begin(label: str) -> None:
@@ -89,9 +96,19 @@ def stage_end(marker: Marker, detail: str = "") -> None:
 
     The sibling of [`stage_begin`][terok_sandbox.stage_begin]; together they render the same
     line [`stage`][terok_sandbox.stage] would.
+
+    Multi-line *detail* is split: only the first line lands inside the
+    parentheses on the marker line; the remainder is emitted as an
+    indented continuation block underneath.  This guards against
+    callers passing exception ``str()`` whose help text spans several
+    lines (e.g. ``VaultUnreachableError`` carries paths and remediation
+    hints) — without the split, the dotted-column layout smears across
+    the log and the closing paren lands on the last line of help text.
     """
-    suffix = f" ({detail})" if detail else ""
+    head, tail = _split_detail(detail)
+    suffix = f" ({head})" if head else ""
     print(f" {_render_marker(marker)}{suffix}")
+    _print_continuation(tail)
 
 
 class StageLine:
@@ -212,6 +229,35 @@ def red(text: str) -> str:
 def yellow(text: str) -> str:
     """Return *text* wrapped in ANSI yellow for warning banners when colour is on."""
     return _color(text, "33")
+
+
+def _split_detail(detail: str) -> tuple[str, str]:
+    """Split *detail* into ``(headline, continuation)`` for inline + block render.
+
+    The headline is the first line — it lands inside the marker line's
+    parentheses.  The continuation is everything after the first newline
+    (may itself contain newlines and blank lines) and is rendered as an
+    indented block by [`_print_continuation`][terok_sandbox._stage._print_continuation].
+    """
+    head, _, tail = detail.partition("\n")
+    return head, tail
+
+
+def _print_continuation(tail: str) -> None:
+    """Render the multi-line continuation block under a stage line.
+
+    Each line is left-padded so the block visually attaches to its
+    parent stage's label column.  Blank lines stay blank (no trailing
+    indent whitespace) so paragraph breaks read cleanly.
+    """
+    if not tail:
+        return
+    # Stage prefix is "  <label:STAGE_WIDTH> " — match that left margin
+    # plus one extra space so continuation lines visually attach to
+    # their stage's detail column rather than its marker.
+    indent = " " * (STAGE_WIDTH + 4)
+    for line in tail.splitlines():
+        print(f"{indent}{line}" if line else "")
 
 
 def _render_marker(marker: Marker) -> str:
