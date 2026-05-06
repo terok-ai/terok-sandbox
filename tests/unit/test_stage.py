@@ -122,6 +122,88 @@ class TestStageBeginEnd:
         assert combined == joined
 
 
+class TestMultilineDetail:
+    """Multi-line detail keeps the marker line clean and indents the rest.
+
+    Callers pass exception ``str()`` whose help text spans several
+    lines (e.g. ``VaultUnreachableError``).  Without the split, the
+    closing paren lands on the last line of the help text and the
+    dotted-column layout smears across the log.
+    """
+
+    def test_stage_end_keeps_first_line_inline_and_indents_rest(
+        self, plain: None, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        stage_end(Marker.FAIL, "first line.\nsecond line\nthird line")
+        lines = capsys.readouterr().out.splitlines()
+        assert lines[0].endswith("(first line.)")
+        assert lines[1].endswith("second line")
+        assert lines[2].endswith("third line")
+
+    def test_stage_end_continuation_uses_consistent_indent(
+        self, plain: None, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Continuation lines share the same left margin so the block reads as one unit."""
+        stage_end(Marker.FAIL, "head\nsecond\nthird")
+        lines = capsys.readouterr().out.splitlines()
+        prefix_len = len(lines[1]) - len(lines[1].lstrip(" "))
+        assert prefix_len > 0
+        for line in lines[1:]:
+            if line:
+                assert line.startswith(" " * prefix_len)
+
+    def test_stage_end_blank_lines_are_emitted_blank(
+        self, plain: None, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A blank line in the help text stays a real empty line, no trailing indent."""
+        stage_end(Marker.FAIL, "headline\n\nparagraph")
+        lines = capsys.readouterr().out.splitlines()
+        assert lines[0].endswith("(headline)")
+        assert lines[1] == ""
+        assert lines[2].endswith("paragraph")
+
+    def test_stage_end_close_paren_lands_on_marker_line(
+        self, plain: None, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """No paren leak into the continuation block — the close paren stays on line 0."""
+        stage_end(Marker.FAIL, "headline.\ndetail line")
+        lines = capsys.readouterr().out.splitlines()
+        assert lines[0].count("(") == 1 and lines[0].count(")") == 1
+        assert "(" not in lines[1] and ")" not in lines[1]
+
+    def test_stage_one_shot_also_handles_multiline(
+        self, plain: None, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The one-shot ``stage()`` mirrors ``stage_end`` so call sites stay interchangeable."""
+        stage("Vault", Marker.FAIL, "headline\nrest")
+        lines = capsys.readouterr().out.splitlines()
+        assert "Vault" in lines[0]
+        assert lines[0].endswith("(headline)")
+        assert lines[1].endswith("rest")
+
+    def test_stage_line_handles_multiline_fail_detail(
+        self, plain: None, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The context manager forwards multi-line detail through ``stage_end`` cleanly."""
+        with stage_line("Vault") as s:
+            s.fail("Vault is not reachable.\n\nStart the vault before creating tasks.")
+        lines = capsys.readouterr().out.splitlines()
+        assert lines[0].endswith("(Vault is not reachable.)")
+        assert lines[1] == ""
+        assert lines[2].endswith("Start the vault before creating tasks.")
+
+    def test_stage_line_multiline_exception_message_renders_cleanly(
+        self, plain: None, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A raised exception with multi-line ``str()`` no longer smears the marker line."""
+        with pytest.raises(RuntimeError):
+            with stage_line("Vault"):
+                raise RuntimeError("Vault is not reachable.\n\nSocket: /tmp/vault.sock")
+        lines = capsys.readouterr().out.splitlines()
+        assert lines[0].endswith("(Vault is not reachable.)")
+        assert lines[2].endswith("Socket: /tmp/vault.sock")
+
+
 class TestBannerColour:
     """``bold`` / ``red`` / ``yellow`` wrap banner text with the same gate as stage markers."""
 
