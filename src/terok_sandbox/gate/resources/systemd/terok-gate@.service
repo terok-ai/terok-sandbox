@@ -39,8 +39,9 @@ ProtectSystem=full
 # PrivateNetwork=yes / IPAddressDeny=any are intentionally absent: the
 # handler inherits a connected TCP socket via stdin (Accept=yes), and
 # the cgroup BPF IP-filter would block packet flow on that connection.
-# AF_UNIX-only variant gets the stricter pair — see
-# terok-gate-socket.service.
+# Same applies to the socket-mode variant (terok-gate-socket.service):
+# gate fetches from upstream forges over HTTPS, so the same allow-list
+# stands.
 RestrictAddressFamilies=AF_UNIX AF_INET
 SystemCallFilter=@system-service
 SystemCallFilter=~@resources @privileged
