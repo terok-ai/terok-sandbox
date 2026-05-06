@@ -39,7 +39,7 @@ from ..config import SandboxConfig
 
 # ---------- Constants ----------
 
-_UNIT_VERSION = 9
+_UNIT_VERSION = 10
 """Bump when the systemd unit templates change.  ``ensure_reachable``
 checks the installed version and refuses to start tasks if it is stale."""
 

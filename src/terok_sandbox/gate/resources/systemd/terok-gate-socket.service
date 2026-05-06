@@ -10,7 +10,10 @@ Type=simple
 ExecStart={{TEROK_GATE_BIN}} --socket-path={{SOCKET_PATH}} --base-path={{GATE_BASE_PATH}} --token-file={{TOKEN_FILE}}
 
 NoNewPrivileges=yes
-AmbientCapabilities=
+# AmbientCapabilities= (cleared) was fatal in --user mode on Ubuntu 24.04
+# (exit status=218/CAPABILITIES — user manager lacks CAP_SETPCAP).  User
+# services start with no ambient caps, so clearing was a no-op; dropped
+# until distro detection lets us branch.
 LockPersonality=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
