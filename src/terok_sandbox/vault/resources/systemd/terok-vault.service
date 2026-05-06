@@ -9,7 +9,7 @@ After=terok-vault.socket
 
 [Service]
 Type=simple
-ExecStart={{BIN}} "--socket-path={{SOCKET_PATH}}" "--db-path={{DB_PATH}}" "--routes-file={{ROUTES_PATH}}" "--port={{PORT}}" "--ssh-signer-port={{SSH_SIGNER_PORT}}" "--scope-sockets-dir={{SCOPE_SOCKETS_DIR}}"
+ExecStart={{BIN}} "--socket-path={{SOCKET_PATH}}" "--db-path={{DB_PATH}}" "--routes-file={{ROUTES_PATH}}" "--port={{PORT}}" "--ssh-signer-port={{SSH_SIGNER_PORT}}" "--scope-sockets-dir={{SCOPE_SOCKETS_DIR}}" "--audit-log={{AUDIT_LOG_PATH}}"
 
 NoNewPrivileges=yes
 AmbientCapabilities=

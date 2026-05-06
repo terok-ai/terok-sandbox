@@ -37,6 +37,7 @@ from ._stage import (
     supports_color,
     yellow,
 )
+from ._util import BestEffortLogger
 from ._util._selinux import (
     SELINUX_SOCKET_TYPE,
     SelinuxCheckResult,
@@ -315,6 +316,8 @@ def stop_vault(cfg: SandboxConfig | None = None) -> None:
 
 
 __all__ = [
+    # Cross-package utilities
+    "BestEffortLogger",
     # Config
     "CONTAINER_RUNTIME_DIR",
     "ConfigScope",

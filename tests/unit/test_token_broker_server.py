@@ -867,6 +867,53 @@ class TestForwardingPath:
             assert "127.0.0.1" not in text
 
 
+# ── Audit-log integration ─────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+class TestAuditLogIntegration:
+    """Wire ``_build_app`` with ``audit_path`` and verify lines land per request."""
+
+    async def test_ok_request_writes_one_audit_line(self, _forwarding_env) -> None:
+        """Successful proxy call appends a single ``outcome=ok`` JSONL line."""
+        from aiohttp.test_utils import TestClient, TestServer
+
+        upstream_app, tmp_path, tokens = _forwarding_env
+        upstream_server = TestServer(upstream_app)
+        await upstream_server.start_server()
+
+        routes = tmp_path / "routes.json"
+        routes.write_text(
+            json.dumps({"claude": {"upstream": f"http://127.0.0.1:{upstream_server.port}"}})
+        )
+
+        audit_path = tmp_path / "credential_audit.jsonl"
+        broker_app = _build_app(str(tmp_path / "test.db"), str(routes), audit_path=audit_path)
+        try:
+            async with TestClient(TestServer(broker_app)) as client:
+                resp = await client.post(
+                    "/v1/messages",
+                    headers={"Authorization": f"Bearer {tokens['claude']}"},
+                    json={"model": "test"},
+                )
+                assert resp.status == 200
+        finally:
+            await upstream_server.close()
+
+        lines = audit_path.read_text().splitlines()
+        assert len(lines) == 1
+        entry = json.loads(lines[0])
+        assert entry["scope"] == "proj"
+        assert entry["subject"] == "t1"
+        assert entry["credential_set"] == "default"
+        assert entry["provider"] == "claude"
+        assert entry["method"] == "POST"
+        assert entry["path"] == "/v1/messages"
+        assert entry["status"] == 200
+        assert entry["outcome"] == "ok"
+        assert isinstance(entry["duration_ms"], int)
+
+
 # ── WebSocket proxy branch coverage ─────────────────────────────────────
 
 

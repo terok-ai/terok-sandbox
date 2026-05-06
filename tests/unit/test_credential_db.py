@@ -66,28 +66,28 @@ class TestTokens:
 
     def test_create_and_lookup(self, db: CredentialDB) -> None:
         """Create a token, look it up, verify fields."""
-        token = db.create_token("proj1", "task-42", "default", "claude")
+        token = db.create_token("proj1", "subj-42", "default", "claude")
         assert token.startswith("terok-p-")
         assert len(token) == 8 + 32  # prefix + hex(16 bytes)
         info = db.lookup_token(token)
         assert info == {
             "scope": "proj1",
-            "task": "task-42",
+            "subject": "subj-42",
             "credential_set": "default",
             "provider": "claude",
         }
 
     def test_create_with_provider(self, db: CredentialDB) -> None:
         """Per-provider tokens encode the provider name."""
-        token = db.create_token("proj1", "task-1", "default", "claude")
+        token = db.create_token("proj1", "subj-1", "default", "claude")
         info = db.lookup_token(token)
         assert info is not None
         assert info["provider"] == "claude"
 
     def test_per_provider_tokens_are_independent(self, db: CredentialDB) -> None:
-        """Different providers get different tokens for the same task."""
-        t_claude = db.create_token("p", "t", "default", "claude")
-        t_vibe = db.create_token("p", "t", "default", "vibe")
+        """Different providers get different tokens for the same subject."""
+        t_claude = db.create_token("p", "s", "default", "claude")
+        t_vibe = db.create_token("p", "s", "default", "vibe")
         assert t_claude != t_vibe
         assert db.lookup_token(t_claude)["provider"] == "claude"
         assert db.lookup_token(t_vibe)["provider"] == "vibe"
@@ -97,27 +97,27 @@ class TestTokens:
         assert db.lookup_token("nonexistent") is None
 
     def test_tokens_are_unique(self, db: CredentialDB) -> None:
-        """Multiple tokens for the same task are distinct."""
-        t1 = db.create_token("p", "t", "default", "claude")
-        t2 = db.create_token("p", "t", "default", "claude")
+        """Multiple tokens for the same subject are distinct."""
+        t1 = db.create_token("p", "s", "default", "claude")
+        t2 = db.create_token("p", "s", "default", "claude")
         assert t1 != t2
         assert db.lookup_token(t1) is not None
         assert db.lookup_token(t2) is not None
 
-    def test_revoke_removes_all_for_task(self, db: CredentialDB) -> None:
-        """revoke_tokens removes all tokens for a scope+task pair."""
-        t1 = db.create_token("proj", "task-1", "default", "claude")
-        t2 = db.create_token("proj", "task-1", "default", "claude")
-        t3 = db.create_token("proj", "task-2", "default", "claude")
-        count = db.revoke_tokens("proj", "task-1")
+    def test_revoke_removes_all_for_subject(self, db: CredentialDB) -> None:
+        """revoke_tokens removes all tokens for a scope+subject pair."""
+        t1 = db.create_token("proj", "subj-1", "default", "claude")
+        t2 = db.create_token("proj", "subj-1", "default", "claude")
+        t3 = db.create_token("proj", "subj-2", "default", "claude")
+        count = db.revoke_tokens("proj", "subj-1")
         assert count == 2
         assert db.lookup_token(t1) is None
         assert db.lookup_token(t2) is None
-        assert db.lookup_token(t3) is not None  # different task
+        assert db.lookup_token(t3) is not None  # different subject
 
     def test_revoke_idempotent(self, db: CredentialDB) -> None:
-        """Revoking tokens for a task with none is a no-op."""
-        assert db.revoke_tokens("nonexistent", "task") == 0
+        """Revoking tokens for a subject with none is a no-op."""
+        assert db.revoke_tokens("nonexistent", "subject") == 0
 
 
 class TestDBLifecycle:
@@ -199,15 +199,19 @@ def _seed_legacy_v0_db(db_path: Path) -> bytes:
 class TestSchemaMigration:
     """Verify legacy v0 rows (OpenSSH PEM + hex fingerprint) migrate cleanly."""
 
-    def test_credential_db_open_migrates_v0_to_v1(self, tmp_path: Path) -> None:
+    def test_credential_db_open_migrates_v0_to_current(self, tmp_path: Path) -> None:
         """Opening a v0 DB through [`CredentialDB`][terok_sandbox.CredentialDB] rewrites every row.
 
         The old shape stored OpenSSH PEM in a ``private_pem`` column with
         64-char hex fingerprints.  The new shape stores PKCS#8 DER in
-        ``private_der`` with ``SHA256:<base64>`` fingerprints.
+        ``private_der`` with ``SHA256:<base64>`` fingerprints.  The migrator
+        runs both the v0→v1 (ssh_keys reshape) and v1→v2
+        (``proxy_tokens.task`` → ``subject``) steps in a single pass.
         """
         from cryptography.hazmat.primitives.asymmetric import ed25519
         from cryptography.hazmat.primitives.serialization import load_der_private_key
+
+        from terok_sandbox.credentials.migrations import SCHEMA_VERSION
 
         db_path = tmp_path / "legacy.db"
         _seed_legacy_v0_db(db_path)
@@ -224,7 +228,7 @@ class TestSchemaMigration:
             reloaded = load_der_private_key(bytes(der_blob), password=None)
             assert isinstance(reloaded, ed25519.Ed25519PrivateKey)
             (version,) = db._conn.execute("PRAGMA user_version").fetchone()
-            assert version == 1
+            assert version == SCHEMA_VERSION
         finally:
             db.close()
 
@@ -232,7 +236,7 @@ class TestSchemaMigration:
         db2 = CredentialDB(db_path)
         try:
             (version,) = db2._conn.execute("PRAGMA user_version").fetchone()
-            assert version == 1
+            assert version == SCHEMA_VERSION
         finally:
             db2.close()
 
@@ -245,6 +249,7 @@ class TestSchemaMigration:
         ``CredentialDB``.  Without this path the daemon would crash on
         its first key lookup with "no such column: private_der".
         """
+        from terok_sandbox.credentials.migrations import SCHEMA_VERSION
         from terok_sandbox.vault.token_broker import _TokenDB
 
         db_path = tmp_path / "legacy.db"
@@ -253,13 +258,75 @@ class TestSchemaMigration:
         token_db = _TokenDB(str(db_path))
         try:
             (version,) = token_db._conn.execute("PRAGMA user_version").fetchone()
-            assert version == 1
+            assert version == SCHEMA_VERSION
             [record] = token_db.load_ssh_keys_for_scope("proj")
             assert record.public_blob == pub_blob
             assert record.fingerprint.startswith("SHA256:")
             assert len(record.private_der) > 0
         finally:
             token_db.close()
+
+    def test_v1_to_v2_renames_proxy_tokens_task_column(self, tmp_path: Path) -> None:
+        """A v1 DB with ``proxy_tokens.task`` is renamed to ``subject`` on first open.
+
+        Reflects the labelling change at the sandbox-orchestrator boundary:
+        the column was always opaque to the sandbox; the new name makes
+        that contract explicit at the schema level.
+        """
+        import sqlite3
+
+        from terok_sandbox.credentials.migrations import SCHEMA_VERSION
+
+        db_path = tmp_path / "v1.db"
+        # Hand-built v1 schema: proxy_tokens still uses the old ``task``
+        # column name.  Mark it v1 by setting user_version directly.
+        conn = sqlite3.connect(str(db_path))
+        try:
+            conn.executescript("""
+                CREATE TABLE credentials (
+                    credential_set TEXT NOT NULL,
+                    provider       TEXT NOT NULL,
+                    data           TEXT NOT NULL,
+                    PRIMARY KEY (credential_set, provider)
+                );
+                CREATE TABLE proxy_tokens (
+                    token          TEXT PRIMARY KEY,
+                    scope          TEXT NOT NULL,
+                    task           TEXT NOT NULL,
+                    credential_set TEXT NOT NULL,
+                    provider       TEXT NOT NULL
+                );
+                CREATE TABLE ssh_keys_version (
+                    id      INTEGER PRIMARY KEY CHECK (id = 0),
+                    version INTEGER NOT NULL
+                );
+                INSERT INTO ssh_keys_version (id, version) VALUES (0, 0);
+                INSERT INTO proxy_tokens VALUES
+                    ('terok-p-aaa', 'proj', 'subj-1', 'default', 'claude');
+            """)
+            conn.execute("PRAGMA user_version = 1")
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Open through CredentialDB → migration runs.
+        db = CredentialDB(db_path)
+        try:
+            cols = {r[1] for r in db._conn.execute("PRAGMA table_info(proxy_tokens)").fetchall()}
+            assert "subject" in cols
+            assert "task" not in cols
+            (version,) = db._conn.execute("PRAGMA user_version").fetchone()
+            assert version == SCHEMA_VERSION
+            # Pre-existing row survived the column rename.
+            info = db.lookup_token("terok-p-aaa")
+            assert info == {
+                "scope": "proj",
+                "subject": "subj-1",
+                "credential_set": "default",
+                "provider": "claude",
+            }
+        finally:
+            db.close()
 
     def test_token_db_bootstraps_schema_on_empty_db(self, tmp_path: Path) -> None:
         """Fresh-install path: ``_TokenDB`` opens an untouched DB without crashing.
