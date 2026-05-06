@@ -823,12 +823,11 @@ class PodmanRuntime:
     ) -> int:
         """Bridge byte streams to ``podman exec -i`` for *cmd* inside *container*.
 
-        Spawns a child process and runs three daemon pump threads — one per
-        direction — copying bytes until either side reaches EOF or the
-        child exits.  The threading model mirrors :func:`_stream_initial_logs`
-        (already in this module) rather than introducing asyncio at the
-        sandbox layer; callers using asyncio drive this via
-        :func:`asyncio.AbstractEventLoop.run_in_executor`.
+        Synchronous: spawns the child, runs three daemon pump threads
+        (one per direction) copying bytes until either side reaches
+        EOF or the child exits, joins the pumps, returns the exit code.
+        Async callers drive this via
+        :meth:`asyncio.AbstractEventLoop.run_in_executor`.
 
         Lets :class:`FileNotFoundError` (podman missing) propagate.  On
         timeout, terminates the child (terminate → 2 s wait → kill) and
