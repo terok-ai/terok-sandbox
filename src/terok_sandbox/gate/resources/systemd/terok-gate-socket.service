@@ -33,12 +33,22 @@ ProcSubset=pid
 PrivateTmp=yes
 ProtectSystem=full
 
-RestrictAddressFamilies=AF_UNIX
+# RestrictAddressFamilies=AF_UNIX, PrivateNetwork=yes, and
+# IPAddressDeny=any used to live here on the assumption that the
+# socket-mode gate speaks only AF_UNIX.  That's wrong: gate
+# fetches from upstream forges (github / gitlab / …) over HTTPS,
+# so it needs outbound IP.  RestrictAddressFamilies= (seccomp
+# BPF) and IPAddressDeny= (cgroup BPF) are enforced even in
+# --user mode where namespace-based directives like
+# PrivateNetwork= silently downgrade — so the AF_UNIX-only set
+# blocked DNS via 127.0.0.53 and the upstream HTTPS connection,
+# breaking ``git fetch`` with ``Temporary failure in name
+# resolution``.  Match the gate@ inetd variant's allow-list for
+# outbound IP (still no AF_INET6 / raw sockets).
+RestrictAddressFamilies=AF_UNIX AF_INET
 SystemCallFilter=@system-service
 SystemCallFilter=~@resources @privileged
 MemoryDenyWriteExecute=yes
-PrivateNetwork=yes
-IPAddressDeny=any
 
 [Install]
 WantedBy=default.target
