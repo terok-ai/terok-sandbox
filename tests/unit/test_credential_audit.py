@@ -9,6 +9,7 @@ import asyncio
 import json
 import os
 import stat
+import unittest.mock
 from pathlib import Path
 
 import pytest
@@ -118,3 +119,31 @@ class TestAuditWriter:
         await writer.write({"x": 1})
         await writer.close()
         await writer.close()  # second close: no-op, no exception
+
+    @pytest.mark.asyncio
+    async def test_write_oserror_logs_warning_and_returns(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """``OSError`` from the offloaded write logs a warning, doesn't propagate.
+
+        Pins the soft-fail branch around the ``await asyncio.to_thread(...)``
+        call: a quota / EIO / closed-handle failure mid-stream must not
+        kill the broker, and the operator should see the failure surface
+        once via ``logging.WARNING`` rather than a stack trace.
+        """
+        path = tmp_path / "audit.jsonl"
+        writer = AuditWriter(path)
+        # First write succeeds — opens the lazy file handle.
+        await writer.write({"x": 1})
+        try:
+            # Replace the underlying handle's ``write`` with one that raises.
+            writer._fh.write = unittest.mock.MagicMock(  # type: ignore[union-attr]
+                side_effect=OSError("disk quota exceeded")
+            )
+            with caplog.at_level("WARNING", logger="terok_sandbox.vault.audit"):
+                await writer.write({"x": 2})  # must not raise
+        finally:
+            await writer.close()
+
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert any("audit write failed" in r.message for r in warnings)

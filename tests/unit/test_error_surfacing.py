@@ -129,6 +129,35 @@ class TestWarnUser:
         content = (tmp_path / "terok-sandbox.log").read_text()
         assert "WARNING: [shield] rule mismatch" in content
 
+    def test_never_raises_on_stderr_failure(self, tmp_path: Path) -> None:
+        """``warn_user`` must absorb ``OSError`` from ``print`` to stderr.
+
+        Pins the soft-fail branch around the ``print(..., file=sys.stderr)``
+        call: a broken pipe / EPIPE / closed FD must not propagate out of
+        the helper.  The file-side ``WARNING`` line still lands so the
+        forensic trail isn't lost.
+        """
+        import io
+
+        from terok_sandbox._util._logging import warn_user
+
+        broken = io.StringIO()
+        broken.write = unittest.mock.MagicMock(side_effect=OSError("broken pipe"))
+        with (
+            unittest.mock.patch(
+                "platformdirs.user_state_path",
+                return_value=tmp_path,
+            ),
+            unittest.mock.patch("terok_sandbox._util._logging.sys") as mock_sys,
+        ):
+            mock_sys.stderr = broken
+            warn_user("vault", "stderr is dead")  # must not raise
+
+        # File-side WARNING line still landed — soft-fail in the stderr
+        # branch must not skip the file write.
+        content = (tmp_path / "terok-sandbox.log").read_text()
+        assert "WARNING: [vault] stderr is dead" in content
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 2. git_gate — narrowed exception handling returns None gracefully
