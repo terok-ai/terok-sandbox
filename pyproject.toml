@@ -8,19 +8,28 @@ version = "0.0.113"
 description = "Hardened Podman container runner with gate server and shield integration"
 readme = "README.md"
 license = "Apache-2.0"
-authors = ["terok maintainers"]
+authors = ["Jiri Vyskocil <jiri@vyskocil.com>"]
 keywords = ["podman", "containers", "sandbox", "security", "isolation"]
 classifiers = [
-  "Programming Language :: Python :: 3",
-  "License :: OSI Approved :: Apache Software License",
-  "Environment :: Console",
-  "Operating System :: POSIX :: Linux",
-  "Topic :: System :: Systems Administration",
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python",
+    "Topic :: Security",
+    "Topic :: System :: Systems Administration",
+    "Typing :: Typed",
 ]
 
 packages = [
   { include = "terok_sandbox", from = "src" },
 ]
+maintainers = ["Jiri Vyskocil <jiri@vyskocil.com>"]
+homepage = "https://terok.ai/"
+repository = "https://github.com/terok-ai/terok-sandbox"
+documentation = "https://terok-ai.github.io/terok-sandbox/"
 
 [tool.poetry.dependencies]
 python = ">=3.12,<4.0"
@@ -64,6 +73,11 @@ mkdocs-terok = {url = "https://github.com/terok-ai/mkdocs-terok/releases/downloa
 terok-sandbox = "terok_sandbox.cli:main"
 terok-gate = "terok_sandbox.gate.server:main"
 terok-vault = "terok_sandbox.vault.token_broker:main"
+
+[tool.poetry.urls]
+Issues = "https://github.com/terok-ai/terok-sandbox/issues"
+Changelog = "https://github.com/terok-ai/terok-sandbox/releases"
+Security = "https://github.com/terok-ai/terok-sandbox/security/policy"
 
 [tool.pytest.ini_options]
 testpaths = ["tests/unit", "tests/integration"]
