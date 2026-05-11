@@ -216,6 +216,17 @@ path = "terok_sandbox.commands"
 layer = "surface"
 depends_on = [
     "terok_sandbox._setup",
+    "terok_sandbox.launch",
+]
+
+# Per-container wiring composer — `prepare`/`run`/`cleanup`.  Surface
+# because it produces operator-facing podman args + drives token mints
+# and shield rules in one place.
+[[modules]]
+path = "terok_sandbox.launch"
+layer = "surface"
+depends_on = [
+    "terok_sandbox.sandbox",
 ]
 
 # Sandbox-wide setup orchestration — phase runner invoked by the

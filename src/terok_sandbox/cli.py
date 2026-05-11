@@ -16,6 +16,7 @@ from importlib.metadata import PackageNotFoundError, version as _meta_version
 from .commands import (
     DOCTOR_COMMANDS,
     GATE_COMMANDS,
+    LAUNCH_COMMANDS,
     SETUP_COMMANDS,
     SHIELD_COMMANDS,
     SSH_COMMANDS,
@@ -31,7 +32,14 @@ except PackageNotFoundError:
 
 def _wire_command(sub: argparse._SubParsersAction, cmd: CommandDef) -> None:
     """Add a [`CommandDef`][terok_sandbox.cli.CommandDef] to an argparse subparser group."""
-    p = sub.add_parser(cmd.name, help=cmd.help)
+    parser_kwargs: dict = {"help": cmd.help}
+    if cmd.epilog:
+        # ``RawDescriptionHelpFormatter`` preserves the newlines and
+        # leading whitespace in the epilog so multi-line guidance
+        # (e.g. delivery-pattern walkthroughs) renders verbatim.
+        parser_kwargs["epilog"] = cmd.epilog
+        parser_kwargs["formatter_class"] = argparse.RawDescriptionHelpFormatter
+    p = sub.add_parser(cmd.name, **parser_kwargs)
     for arg in cmd.args:
         kwargs: dict = {}
         if arg.help:
@@ -63,11 +71,33 @@ def _dispatch(args: argparse.Namespace) -> None:
         )
         for arg in cmd.args
     }
+    # Trailing args after ``--`` (currently only ``run`` consumes them).
+    # ``main`` attaches ``args.podman_args`` after parsing if the split
+    # was detected.  Passing it through unconditionally lets future
+    # commands grow the same affordance without re-wiring dispatch.
+    if hasattr(args, "podman_args"):
+        kwargs["podman_args"] = args.podman_args
     cmd.handler(**kwargs)
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     """Entry point for the ``terok-sandbox`` command."""
+    import sys
+
+    if argv is None:
+        argv = sys.argv[1:]
+
+    # The ``run`` subcommand uses ``--`` to separate sandbox args from
+    # the trailing podman invocation.  Split before argparse to avoid
+    # ``REMAINDER`` quirks with optional flags after the separator —
+    # same pattern terok-shield uses.
+    saw_separator = "--" in argv
+    run_trailing: list[str] = []
+    if saw_separator:
+        sep = argv.index("--")
+        run_trailing = argv[sep + 1 :]
+        argv = argv[:sep]
+
     parser = argparse.ArgumentParser(
         prog="terok-sandbox",
         description="Hardened Podman container runtime with shield firewall and git gate",
@@ -107,11 +137,22 @@ def main() -> None:
         _wire_command(ssh_sub, cmd)
     ssh_p.set_defaults(_group_help=ssh_p)
 
+    # -- prepare / run / cleanup (container wiring) --
+    for cmd in LAUNCH_COMMANDS:
+        _wire_command(sub, cmd)
+
     # -- doctor --
     for cmd in DOCTOR_COMMANDS:
         _wire_command(sub, cmd)
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+
+    cmd_name = getattr(getattr(args, "_cmd", None), "name", None)
+    if saw_separator and cmd_name != "run":
+        parser.error("'--' separator is only supported by the 'run' subcommand")
+    if cmd_name == "run":
+        args.podman_args = run_trailing
+
     if hasattr(args, "_cmd"):
         _dispatch(args)
     elif hasattr(args, "_group_help"):
