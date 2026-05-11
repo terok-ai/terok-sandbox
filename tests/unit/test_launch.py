@@ -16,14 +16,19 @@ from terok_sandbox.commands import (
     LAUNCH_COMMANDS,
     _handle_cleanup,
     _handle_prepare,
+    _handle_run,
 )
 from terok_sandbox.config import SandboxConfig
 from terok_sandbox.launch import (
     CONTAINER_BRIDGES_DIR,
     LOOPBACK_VAULT_PORT,
     WiringPlan,
+    _find_podman,
+    _read_meta,
+    bridges_resource_dir,
     cleanup,
     compose,
+    exec_podman,
     format_args,
     reject_managed_flags,
     reject_managed_volumes,
@@ -333,3 +338,161 @@ class TestHandlers:
         _handle_cleanup("never-prepared", cfg=cfg)
         out = capsys.readouterr().out
         assert "Nothing to clean up" in out or "No sandbox state found" in out
+
+    def test_cleanup_handler_reports_cleanup_when_state_present(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture
+    ) -> None:
+        cfg = _make_cfg(tmp_path)
+        with patch("terok_sandbox.shield.pre_start", return_value=[]):
+            compose("myc", cfg=cfg, shield=True, gate=False, broker=False, scope=None)
+        with patch("terok_sandbox.shield.down"):
+            _handle_cleanup("myc", cfg=cfg)
+        out = capsys.readouterr().out
+        assert "Cleaned up sandbox state for myc" in out
+
+    def test_run_handler_exec_into_podman(self, tmp_path: Path) -> None:
+        """`_handle_run` composes args and `os.execv`s into podman."""
+        cfg = _make_cfg(tmp_path)
+        with (
+            patch("terok_sandbox.shield.pre_start", return_value=["--annotation=x"]),
+            patch("terok_sandbox.launch.shutil.which", return_value="/usr/bin/podman"),
+            patch("terok_sandbox.launch.Path.resolve", return_value=Path("/usr/bin/podman")),
+            patch("terok_sandbox.launch.Path.is_file", return_value=True),
+            patch("terok_sandbox.launch.os.access", return_value=True),
+            patch("terok_sandbox.launch.os.execv") as execv,
+        ):
+            _handle_run("myc", cfg=cfg, podman_args=["ubuntu:24.04", "bash"])
+        execv.assert_called_once()
+        argv = execv.call_args[0][1]
+        assert argv[0] == "/usr/bin/podman"
+        assert argv[1] == "run"
+        assert "--name" in argv and "myc" in argv
+        assert argv[-2:] == ["ubuntu:24.04", "bash"]
+
+
+# ---------------------------------------------------------------------------
+# exec_podman + _find_podman edge cases
+# ---------------------------------------------------------------------------
+
+
+class TestExecPodman:
+    """Verify `exec_podman` and `_find_podman` error paths."""
+
+    def test_exec_podman_no_args_raises(self) -> None:
+        with pytest.raises(SystemExit, match="No image specified"):
+            exec_podman(["--name", "myc"], [])
+
+    def test_find_podman_missing_raises(self) -> None:
+        with patch("terok_sandbox.launch.shutil.which", return_value=None):
+            with pytest.raises(SystemExit, match="podman binary not found"):
+                _find_podman()
+
+    def test_exec_podman_rejects_collisions_before_execv(self) -> None:
+        """Collision check fires before os.execv — execv never reached."""
+        with (
+            patch("terok_sandbox.launch.shutil.which", return_value="/usr/bin/podman"),
+            patch("terok_sandbox.launch.os.execv") as execv,
+            pytest.raises(SystemExit, match="--name"),
+        ):
+            exec_podman(["--name", "myc"], ["--name", "evil", "ubuntu"])
+        execv.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Profile override + corrupted meta + bridges resource path
+# ---------------------------------------------------------------------------
+
+
+class TestEdgeCases:
+    """Cover branches the happy-path tests don't exercise."""
+
+    def test_profiles_override_shield_profiles(self, tmp_path: Path) -> None:
+        """`--profiles` reaches shield via a `dataclasses.replace`d cfg."""
+        cfg = _make_cfg(tmp_path)
+        captured: list[SandboxConfig] = []
+
+        def fake_pre_start(container: str, task_dir: Path, c: SandboxConfig) -> list[str]:
+            captured.append(c)
+            return []
+
+        with patch("terok_sandbox.shield.pre_start", side_effect=fake_pre_start):
+            compose(
+                "myc",
+                cfg=cfg,
+                shield=True,
+                gate=False,
+                broker=False,
+                scope=None,
+                profiles=("alt-strict",),
+            )
+        assert captured[0].shield_profiles == ("alt-strict",)
+
+    def test_read_meta_corrupted_returns_none(self, tmp_path: Path) -> None:
+        """`_read_meta` swallows JSONDecodeError and treats it as no-state."""
+        cfg = _make_cfg(tmp_path)
+        state = run_state_dir(cfg, "myc")
+        state.mkdir(parents=True)
+        (state / "meta.json").write_text("{ not json")
+        assert _read_meta(state) is None
+
+    def test_cleanup_swallows_shield_down_failure(self, tmp_path: Path) -> None:
+        """`cleanup` is best-effort against shield.down errors."""
+        cfg = _make_cfg(tmp_path)
+        with patch("terok_sandbox.shield.pre_start", return_value=[]):
+            compose("myc", cfg=cfg, shield=True, gate=False, broker=False, scope=None)
+        with patch("terok_sandbox.shield.down", side_effect=OSError("nft gone")):
+            assert cleanup("myc", cfg=cfg) is True
+        # State dir gone even though shield.down failed.
+        assert not run_state_dir(cfg, "myc").exists()
+
+    def test_bridges_resource_dir_returns_existing_path(self) -> None:
+        """The bundled bridge scripts are reachable via the resolver."""
+        d = bridges_resource_dir()
+        assert (d / "ensure-bridges.sh").is_file()
+        assert (d / "ssh-agent-bridge.sh").is_file()
+
+    def test_reject_managed_volumes_skips_no_target(self) -> None:
+        """`-v hostpath` (no colon) is skipped, not flagged."""
+        reject_managed_volumes(["-v", "/just/a/path"])
+
+    def test_reject_managed_volumes_skips_empty_after_v(self) -> None:
+        """Trailing `-v` with no value is skipped."""
+        reject_managed_volumes(["-v"])
+
+    def test_cleanup_db_missing_does_not_crash(self, tmp_path: Path) -> None:
+        """A missing credential DB at cleanup time is treated as already-revoked."""
+        cfg = _make_cfg(tmp_path)
+        with (
+            patch("terok_sandbox.shield.pre_start", return_value=[]),
+            patch("terok_sandbox.gate.tokens.TokenStore.create", return_value="t"),
+            patch("terok_sandbox.credentials.db.CredentialDB.create_token", return_value="p"),
+        ):
+            compose("myc", cfg=cfg, shield=True, gate=True, broker=True, scope="proj")
+        # Now make CredentialDB construction fail at cleanup.
+        with (
+            patch("terok_sandbox.shield.down"),
+            patch(
+                "terok_sandbox.launch.CredentialDB",
+                side_effect=OSError("db file vanished"),
+            ),
+            patch("terok_sandbox.gate.tokens.TokenStore.revoke_for_task"),
+        ):
+            assert cleanup("myc", cfg=cfg) is True
+
+    def test_handlers_construct_default_cfg(self, tmp_path: Path) -> None:
+        """Handlers fall back to `SandboxConfig()` when *cfg* is omitted."""
+        from terok_sandbox import commands as cmd_mod
+
+        fake_cfg = _make_cfg(tmp_path)
+        with (
+            patch.object(cmd_mod, "SandboxConfig", return_value=fake_cfg),
+            patch("terok_sandbox.shield.pre_start", return_value=[]),
+            patch("terok_sandbox.launch.shutil.which", return_value="/usr/bin/podman"),
+            patch("terok_sandbox.launch.Path.resolve", return_value=Path("/usr/bin/podman")),
+            patch("terok_sandbox.launch.Path.is_file", return_value=True),
+            patch("terok_sandbox.launch.os.access", return_value=True),
+            patch("terok_sandbox.launch.os.execv"),
+        ):
+            _handle_prepare("a")
+            _handle_run("b", podman_args=["ubuntu"])
+            _handle_cleanup("a")
