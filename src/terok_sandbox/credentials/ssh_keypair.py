@@ -169,6 +169,7 @@ def generate_keypair(key_type: str, *, comment: str) -> GeneratedKeypair:
             if it contains control characters or exceeds the length limit.
     """
     _require_safe_comment(comment)
+    private_key: ed25519.Ed25519PrivateKey | rsa.RSAPrivateKey
     if key_type == "ed25519":
         private_key = ed25519.Ed25519PrivateKey.generate()
     elif key_type == "rsa":
@@ -213,7 +214,7 @@ def import_ssh_keypair(
 
     existing_row = db.get_ssh_key_by_fingerprint(parsed.fingerprint)
     already = existing_row is not None
-    scope_was_assigned = already and any(
+    scope_was_assigned = existing_row is not None and any(
         r.id == existing_row.id for r in db.list_ssh_keys_for_scope(scope)
     )
 
@@ -255,6 +256,11 @@ def parse_openssh_keypair(
         if isinstance(exc, TypeError) or _PASSPHRASE_HINT.search(str(exc)):
             raise PasswordProtectedKeyError("private key is passphrase-protected") from exc
         raise
+
+    if not isinstance(private_key, (ed25519.Ed25519PrivateKey, rsa.RSAPrivateKey)):
+        raise ValueError(
+            f"Unsupported key algorithm: {type(private_key).__name__} (expected Ed25519 or RSA)"
+        )
 
     key_type = _classify_key(private_key)
     private_der = _serialize_private_der(private_key)
@@ -382,7 +388,7 @@ def public_line_of(record: SSHKeyRecord) -> str:
 # ── Private helpers ─────────────────────────────────────────────────────────
 
 
-def _serialize_private_der(private_key) -> bytes:
+def _serialize_private_der(private_key: ed25519.Ed25519PrivateKey | rsa.RSAPrivateKey) -> bytes:
     """Serialize *private_key* as unencrypted PKCS#8 DER — the on-disk form."""
     return private_key.private_bytes(
         encoding=Encoding.DER,
@@ -391,7 +397,9 @@ def _serialize_private_der(private_key) -> bytes:
     )
 
 
-def _serialize_public(public_key, *, comment: str) -> tuple[bytes, str]:
+def _serialize_public(
+    public_key: ed25519.Ed25519PublicKey | rsa.RSAPublicKey, *, comment: str
+) -> tuple[bytes, str]:
     """Render *public_key* as ``(wire_blob, one_line_text)`` with *comment* appended."""
     one_line = public_key.public_bytes(encoding=Encoding.OpenSSH, format=PublicFormat.OpenSSH)
     parts = one_line.decode("ascii").split(None, 2)
@@ -416,7 +424,7 @@ def _parse_public_line(pub_bytes: bytes) -> tuple[bytes, str]:
     return blob, comment
 
 
-def _classify_key(private_key) -> str:
+def _classify_key(private_key: ed25519.Ed25519PrivateKey | rsa.RSAPrivateKey) -> str:
     """Return ``"ed25519"`` or ``"rsa"`` for a decoded private key object."""
     if isinstance(private_key, ed25519.Ed25519PrivateKey):
         return "ed25519"

@@ -28,6 +28,7 @@ from __future__ import annotations
 import contextlib
 import shutil
 from collections.abc import Callable, Iterable
+from typing import Any
 
 from ._stage import stage_line as _stage_line
 from ._util import _systemctl
@@ -64,9 +65,14 @@ def _report_host_binaries() -> None:
 
 def _report_firewall_binaries() -> None:
     """Delegate the nft / dnsmasq / dig probes to terok-shield's own list."""
+    # Top-level ``terok_shield`` namespace import (not ``.prereqs``) so the
+    # test patch ``terok_shield.check_firewall_binaries`` still hits the
+    # name we look up.  The lazy ``__getattr__`` returns ``object`` to
+    # type-checkers — ``[operator]`` silences the resulting callable
+    # warning.
     from terok_shield import check_firewall_binaries
 
-    for check in check_firewall_binaries():
+    for check in check_firewall_binaries():  # type: ignore[operator]
         with _stage_line(check.name) as s:
             if check.ok:
                 s.ok(check.path)
@@ -275,7 +281,7 @@ def run_clearance_uninstall_phase() -> bool:
 def _reinstall_systemd_service(
     *,
     label: str,
-    mgr,  # noqa: ANN001 — duck-typed manager; no shared base class across vault/gate
+    mgr: Any,  # duck-typed manager; no shared base class across vault/gate
     reachable_exc: tuple[type[BaseException], ...] = (SystemExit,),
 ) -> bool:
     """Run the full stop → uninstall → install → verify cycle for one service.

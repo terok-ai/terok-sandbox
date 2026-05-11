@@ -16,20 +16,23 @@ from terok_shield import (
     HOOK_ENTRYPOINT_NAME,
     USER_HOOKS_DIR,
     EnvironmentCheck,  # noqa: F401 — re-exported
-    NftNotFoundError,  # noqa: F401 — re-exported
     Shield,
     ShieldConfig,
     ShieldMode,
-    ShieldNeedsSetup,  # noqa: F401 — re-exported
     ShieldState,  # noqa: F401 — re-exported
-    ensure_containers_conf_hooks_dir,
     reader_script_path,  # noqa: F401 — re-exported so terok's shield-boundary contract holds
-    setup_global_hooks,
-    system_hooks_dir,
 )
 from terok_shield.container import (
     resolve_state_dir as resolve_container_state_dir,  # noqa: F401 — re-exported
 )
+
+# Several symbols are exposed via the top-level ``terok_shield.__getattr__``
+# lazy importer which returns ``object`` to type-checkers — that breaks both
+# ``except`` narrowing on the error classes and ``setup_global_hooks(...)``
+# call sites.  Pull them straight from the owning submodules.
+from terok_shield.hooks.install import setup_global_hooks
+from terok_shield.podman_info import ensure_containers_conf_hooks_dir, system_hooks_dir
+from terok_shield.run import NftNotFoundError, ShieldNeedsSetup  # noqa: F401
 
 from .config import SandboxConfig
 

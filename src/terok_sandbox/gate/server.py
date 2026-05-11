@@ -37,6 +37,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from socketserver import ThreadingMixIn
+from typing import IO, Any
 
 from .._util._selinux import socket_selinux_context
 
@@ -207,7 +208,7 @@ def _build_cgi_env(
     return env
 
 
-def _stream_request_body(rfile: object, stdin: object, remaining: int) -> None:
+def _stream_request_body(rfile: Any, stdin: IO[bytes], remaining: int) -> None:
     """Stream *remaining* bytes from *rfile* to CGI *stdin*."""
     if remaining <= 0:
         return
@@ -222,7 +223,7 @@ def _stream_request_body(rfile: object, stdin: object, remaining: int) -> None:
         pass  # CGI process closed stdin early
 
 
-def _parse_cgi_headers(stdout: object) -> tuple[int, list[tuple[str, str]]]:
+def _parse_cgi_headers(stdout: IO[bytes]) -> tuple[int, list[tuple[str, str]]]:
     """Read CGI response headers from *stdout*.
 
     Returns ``(status_code, [(header_name, header_value), ...])``.
@@ -245,7 +246,7 @@ def _parse_cgi_headers(stdout: object) -> tuple[int, list[tuple[str, str]]]:
     return status_code, headers
 
 
-def _stream_response_body(stdout: object, wfile: object) -> None:
+def _stream_response_body(stdout: IO[bytes], wfile: Any) -> None:
     """Stream CGI response body from *stdout* to *wfile*."""
     while True:
         chunk = stdout.read(8192)
@@ -305,7 +306,8 @@ def _make_handler_class(base_path: Path, token_store: TokenStore) -> type[BaseHT
         def _split_path(self) -> tuple[str, str]:
             """Split request path into path and query string."""
             if "?" in self.path:
-                return self.path.split("?", 1)
+                path, query = self.path.split("?", 1)
+                return path, query
             return self.path, ""
 
         def _send_auth_required(self) -> None:
@@ -357,6 +359,11 @@ def _make_handler_class(base_path: Path, token_store: TokenStore) -> type[BaseHT
             except OSError:
                 self.send_error(500, "git http-backend unavailable")
                 return
+
+            # All three streams are guaranteed by ``subprocess.PIPE`` above.
+            assert proc.stdin is not None
+            assert proc.stdout is not None
+            assert proc.stderr is not None
 
             _stream_request_body(self.rfile, proc.stdin, content_length)
             proc.stdin.close()
@@ -438,10 +445,17 @@ def _serve_inetd(base_path: Path, token_store: TokenStore) -> None:
         handler.request = conn
         handler.client_address = conn.getpeername()
         handler.server = type("FakeServer", (), {"server_name": "localhost", "server_port": 0})()
-        handler.rfile = rfile
-        handler.wfile = wfile
-        handler.raw_requestline = rfile.readline(65537)
-        if handler.raw_requestline and handler.parse_request():
+        # ``SocketIO`` vs ``BufferedIOBase`` is a stdlib stubs detail —
+        # ``makefile`` is documented to return the raw ``SocketIO`` when
+        # ``buffering=0`` and the handler reads it through the same byte API.
+        handler.rfile = rfile  # type: ignore[assignment]
+        handler.wfile = wfile  # type: ignore[assignment]
+        # ``BaseHTTPRequestHandler.raw_requestline`` is set on every request
+        # by ``handle_one_request`` at runtime; typeshed leaves it off the
+        # class surface so the explicit attribute write on this manual path
+        # needs a suppression.
+        handler.raw_requestline = rfile.readline(65537)  # type: ignore[attr-defined]
+        if handler.raw_requestline and handler.parse_request():  # type: ignore[attr-defined]
             method = getattr(handler, f"do_{handler.command}", None)
             if method:
                 method()
@@ -518,7 +532,15 @@ def _create_unix_server(
         os.chmod(socket_path, 0o600)
         sock.listen(5)
 
-    server = _UnixThreadingHTTPServer(str(socket_path), handler_class, bind_and_activate=False)
+    # bind_and_activate=False — we replace ``server.socket`` below, so the
+    # constructor's address tuple is unused.  ``HTTPServer`` types the
+    # first arg as a tuple, but the unix-socket path string is what makes
+    # debugging easier (HTTPServer never looks at it after this point).
+    server = _UnixThreadingHTTPServer(
+        str(socket_path),  # type: ignore[arg-type]
+        handler_class,
+        bind_and_activate=False,
+    )
     server.socket.close()
     server.socket = sock
     return server

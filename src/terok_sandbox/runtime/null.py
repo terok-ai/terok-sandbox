@@ -14,7 +14,7 @@ and [`NullRuntime.add_image`][terok_sandbox.runtime.null.NullRuntime.add_image] 
 from __future__ import annotations
 
 import socket
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path  # noqa: TC003 — used in a Protocol argument type
 from typing import BinaryIO
 
@@ -37,7 +37,7 @@ ExecStdioStep = tuple[str, bytes]
 class NullLogStream:
     """Empty log stream — yields no lines and closes cleanly."""
 
-    def __iter__(self) -> Iterator[str]:
+    def __iter__(self) -> NullLogStream:
         """Return self — iteration yields nothing."""
         return self
 
@@ -51,7 +51,6 @@ class NullLogStream:
 
     def __exit__(self, *exc: object) -> None:
         """Exit no-op context."""
-        return None
 
     def close(self) -> None:
         """Nothing to close."""

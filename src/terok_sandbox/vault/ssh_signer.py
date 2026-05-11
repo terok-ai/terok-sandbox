@@ -26,7 +26,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import struct
+from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import Any
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.asymmetric.padding import PKCS1v15
@@ -118,7 +120,7 @@ class _DBKeyCache:
     transparently without a proxy restart.
     """
 
-    def __init__(self, token_db) -> None:
+    def __init__(self, token_db: Any) -> None:
         self._token_db = token_db
         self._cache: dict[str, tuple[int, list[_ResolvedKey]]] = {}
 
@@ -172,6 +174,8 @@ def _sign(key: Ed25519PrivateKey | RSAPrivateKey, data: bytes, flags: int) -> by
     # OpenSSH 8.7+ rejects SHA-1 signatures, and SHA-1 is no longer collision
     # resistant.  Clients still asking for ssh-rsa are served with SHA-256
     # signatures labelled ``rsa-sha2-256`` (the widest compatible choice).
+    algo: bytes
+    hash_cls: SHA512 | SHA256
     if flags & SSH_AGENT_RSA_SHA2_512:
         algo, hash_cls = b"rsa-sha2-512", SHA512()
     else:
@@ -207,7 +211,7 @@ async def _read_handshake(reader: asyncio.StreamReader) -> str | None:
 
 
 async def _resolve_scope_from_token(
-    reader: asyncio.StreamReader, writer: asyncio.StreamWriter, token_db
+    reader: asyncio.StreamReader, writer: asyncio.StreamWriter, token_db: Any
 ) -> str | None:
     """Container-facing: read and validate the phantom token, return the scope."""
     peer = writer.get_extra_info("peername")
@@ -298,7 +302,7 @@ async def _serve_agent_session(
 async def _handle_container_connection(
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
-    token_db,
+    token_db: Any,
     key_cache: _DBKeyCache,
 ) -> None:
     """Container-facing connection: handshake → scope → agent session."""
@@ -405,7 +409,7 @@ async def start_ssh_signer_local(*, scope: str, socket_path: Path, db_path: str)
 
 async def _bind_hardened_unix(
     path_str: str,
-    on_connect,
+    on_connect: Callable[[asyncio.StreamReader, asyncio.StreamWriter], Awaitable[None]],
     *,
     mode: int | None = None,
 ) -> asyncio.Server:

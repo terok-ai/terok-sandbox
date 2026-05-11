@@ -41,6 +41,10 @@ import sqlite3
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..credentials.db import SSHKeyRecord
 
 from aiohttp import (
     ClientSession,
@@ -55,11 +59,12 @@ from .audit import AuditWriter
 
 _logger = logging.getLogger("terok-vault")
 
-# Typed app keys (avoids NotAppKeyWarning on aiohttp >= 3.9)
-_KEY_ROUTES = web.AppKey("routes", "_RouteTable")
-_KEY_TOKEN_DB = web.AppKey("token_db", "_TokenDB")
+# Typed app keys (avoids NotAppKeyWarning on aiohttp >= 3.9).
+# ``_RouteTable`` / ``_TokenDB`` AppKeys are declared after their class
+# bodies further down the file because ``AppKey`` evaluates its second
+# argument at runtime and can't accept a forward-reference string.
 _KEY_CLIENT = web.AppKey("client_session", ClientSession)
-_KEY_REFRESH_TASK = web.AppKey("refresh_task", object)  # asyncio.Task
+_KEY_REFRESH_TASK: web.AppKey[asyncio.Task[None]] = web.AppKey("refresh_task", asyncio.Task)
 _KEY_AUDIT = web.AppKey("audit", AuditWriter)
 
 _REFRESH_INTERVAL = 300  # seconds between background refresh checks
@@ -162,7 +167,7 @@ class _TokenDB:
         ).fetchone()
         return row[0] if row else 0
 
-    def load_ssh_keys_for_scope(self, scope: str):
+    def load_ssh_keys_for_scope(self, scope: str) -> list[SSHKeyRecord]:
         """Return full SSH key records (including raw bytes) assigned to *scope*."""
         from ..credentials.db import SSHKeyRecord
 
@@ -207,6 +212,14 @@ class _TokenDB:
             self._conn.close()
         except Exception:  # noqa: BLE001
             pass
+
+
+# Typed AppKeys for ``_RouteTable`` / ``_TokenDB`` are declared down here
+# (not next to ``_KEY_CLIENT`` further up) because ``web.AppKey`` evaluates
+# its second argument at runtime and would forward-reference fail if these
+# stood above the class bodies.
+_KEY_ROUTES = web.AppKey("routes", _RouteTable)
+_KEY_TOKEN_DB = web.AppKey("token_db", _TokenDB)
 
 
 # ---------------------------------------------------------------------------
@@ -971,7 +984,7 @@ def main() -> None:
         pass
 
 
-def _resolve_scope_sockets_dir(args) -> Path | None:
+def _resolve_scope_sockets_dir(args: argparse.Namespace) -> Path | None:
     """Pick the directory for per-scope local sockets.
 
     Explicit ``--scope-sockets-dir`` wins; otherwise inherit from the parent

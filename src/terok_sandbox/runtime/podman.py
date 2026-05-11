@@ -24,7 +24,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import BinaryIO
 
@@ -151,7 +151,7 @@ def _detect_rootless_network_mode() -> str:
         return "slirp4netns"
 
 
-def bypass_network_args(gate_port: int) -> list[str]:
+def bypass_network_args(gate_port: int | None) -> list[str]:
     """Return podman network args for running without shield.
 
     Replicates shield's normal networking (reachable ``host.containers.internal``)
@@ -618,7 +618,7 @@ class PodmanLogStream:
         """Underlying ``Popen`` handle — exposed for callers needing low-level access."""
         return self._proc
 
-    def __iter__(self) -> Iterator[str]:
+    def __iter__(self) -> PodmanLogStream:
         """Return ``self`` — iteration reads from the child's stdout."""
         return self
 
@@ -1175,6 +1175,8 @@ def _stream_initial_logs(
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
             )
+            if proc.stdout is None:  # stdout=PIPE above guarantees a pipe
+                return
             proc_holder[0] = proc
             start_time = time.time()
             buf = b""
