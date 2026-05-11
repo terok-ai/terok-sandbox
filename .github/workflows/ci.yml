@@ -100,3 +100,25 @@ jobs:
 
       - name: Run SAST scan
         run: bandit -r src/terok_sandbox/ -ll
+
+  # Static type checking via mypy.  Installs the package + main deps so
+  # mypy can read real signatures for third-party types instead of
+  # falling back to ``Any`` (via ``ignore_missing_imports = true``).
+  typecheck:
+    if: github.repository == 'terok-ai/terok-sandbox'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install project + tools
+        run: |
+          pip install -e .
+          pip install -r .github/requirements-ci.txt
+
+      - name: Run mypy
+        run: mypy src/terok_sandbox/

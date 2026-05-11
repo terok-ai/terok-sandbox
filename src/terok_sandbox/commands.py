@@ -34,6 +34,8 @@ from .config import SandboxConfig
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from .credentials.db import CredentialDB
+
 
 class KeyRow(NamedTuple):
     """One registered SSH key, fully resolved for display and matching."""
@@ -566,7 +568,7 @@ VAULT_COMMANDS: tuple[CommandDef, ...] = (
 # ---------------------------------------------------------------------------
 
 
-def _open_db(cfg: SandboxConfig):
+def _open_db(cfg: SandboxConfig) -> CredentialDB:
     """Open the vault credential DB for SSH operations."""
     from .credentials.db import CredentialDB
 

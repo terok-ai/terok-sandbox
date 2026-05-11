@@ -260,13 +260,13 @@ def get_vault_status(cfg: SandboxConfig | None = None) -> VaultStatus:
     return VaultManager(cfg).get_status()
 
 
-def get_token_broker_port(cfg: SandboxConfig | None = None) -> int:
-    """Return the configured token broker TCP port."""
+def get_token_broker_port(cfg: SandboxConfig | None = None) -> int | None:
+    """Return the configured token broker TCP port (``None`` in socket mode)."""
     return VaultManager(cfg).token_broker_port
 
 
-def get_ssh_signer_port(cfg: SandboxConfig | None = None) -> int:
-    """Return the configured SSH signer TCP port."""
+def get_ssh_signer_port(cfg: SandboxConfig | None = None) -> int | None:
+    """Return the configured SSH signer TCP port (``None`` in socket mode)."""
     return VaultManager(cfg).ssh_signer_port
 
 

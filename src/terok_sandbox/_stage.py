@@ -163,7 +163,7 @@ class StageLine:
         _exc_type: type[BaseException] | None,
         exc: BaseException | None,
         _tb: TracebackType | None,
-    ) -> bool:
+    ) -> None:
         """Emit the line: exception (if any) wins over stored marker; never suppresses."""
         if exc is not None:
             stage_end(Marker.FAIL, str(exc))
@@ -171,7 +171,6 @@ class StageLine:
             stage_end(self._marker, self._detail)
         else:
             stage_end(Marker.FAIL, "no marker set")
-        return False  # never suppress exceptions
 
     def ok(self, detail: str = "") -> None:
         """Mark the line as ``ok`` with optional detail."""

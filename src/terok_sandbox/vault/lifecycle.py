@@ -277,13 +277,13 @@ class VaultManager:
         )
 
     @property
-    def token_broker_port(self) -> int:
-        """Return the configured vault token broker TCP port."""
+    def token_broker_port(self) -> int | None:
+        """Return the configured vault token broker TCP port (``None`` in socket mode)."""
         return self._cfg.token_broker_port
 
     @property
-    def ssh_signer_port(self) -> int:
-        """Return the configured vault SSH signer TCP port."""
+    def ssh_signer_port(self) -> int | None:
+        """Return the configured vault SSH signer TCP port (``None`` in socket mode)."""
         return self._cfg.ssh_signer_port
 
     # -- Systemd lifecycle ---------------------------------------------------
@@ -536,6 +536,8 @@ class VaultManager:
             start_new_session=True,
             env=env,
         )
+        if proc.stderr is None:  # subprocess.PIPE above guarantees a pipe
+            raise SystemExit("Vault subprocess did not provide a stderr pipe")
 
         broker_ok, signer_ok, broker_detail, signer_detail = self._wait_for_daemon_ready()
         if broker_ok and signer_ok:
@@ -660,13 +662,16 @@ class VaultManager:
         return [_sys.executable, "-m", "terok_sandbox.vault"]
 
     @staticmethod
-    def _probe(port: int, *, timeout: float = 2.0) -> bool:
+    def _probe(port: int | None, *, timeout: float = 2.0) -> bool:
         """Return ``True`` if the vault's health endpoint responds 200.
 
         Uses [`http.client`][http.client] (stdlib only) to hit the TCP port.
+        Returns ``False`` when *port* is ``None`` (no TCP port configured).
         """
         import http.client
 
+        if port is None:
+            return False
         conn: http.client.HTTPConnection | None = None
         try:
             conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
@@ -681,8 +686,10 @@ class VaultManager:
                 conn.close()
 
     @staticmethod
-    def _wait_for_ready(port: int, *, timeout: float = 5.0, interval: float = 0.2) -> bool:
+    def _wait_for_ready(port: int | None, *, timeout: float = 5.0, interval: float = 0.2) -> bool:
         """Poll the health endpoint until it responds 200 or *timeout* expires."""
+        if port is None:
+            return False
         probe_timeout = min(1.0, interval)
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -692,10 +699,12 @@ class VaultManager:
         return False
 
     @staticmethod
-    def _wait_for_tcp_port(port: int, timeout: float = 5.0) -> bool:
+    def _wait_for_tcp_port(port: int | None, timeout: float = 5.0) -> bool:
         """Wait up to *timeout* seconds for a TCP port on localhost to accept connections."""
         import socket
 
+        if port is None:
+            return False
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

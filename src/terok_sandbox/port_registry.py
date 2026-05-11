@@ -206,12 +206,15 @@ class PortRegistry:
                 for k in (SERVICE_GATE, SERVICE_PROXY, SERVICE_SSH_AGENT):
                     self.release(k)
                 source = "installed service" if key in installed else "previous session"
+                claims_path = (
+                    state_dir / _CLAIMS_FILENAME if state_dir else f"<state_dir>/{_CLAIMS_FILENAME}"
+                )
                 raise SystemExit(
                     f"Port {expected} ({key}) was assigned by {source} but is now taken.\n"
                     f"Existing containers expect this port.\n\n"
                     f"Options:\n"
                     f"  - Resolve the conflict and retry\n"
-                    f"  - Delete {state_dir / _CLAIMS_FILENAME} to force re-allocation\n"
+                    f"  - Delete {claims_path} to force re-allocation\n"
                     f"    (existing containers will need re-creation)"
                 )
 
@@ -288,7 +291,11 @@ class PortRegistry:
             return preferred
 
         # Auto-allocation: clamp preferred to port_range, scan with wrap-around.
-        start = preferred if preferred in self.port_range else self.port_range.start
+        start = (
+            preferred
+            if preferred is not None and preferred in self.port_range
+            else self.port_range.start
+        )
         for candidate in range(start, self.port_range.stop):
             if candidate not in others and candidate not in own_ports and _is_port_free(candidate):
                 self._held[service_key] = candidate
@@ -364,9 +371,9 @@ class PortRegistry:
         existing: dict[str, int] = {}
         try:
             if not target.is_symlink():
-                existing = json.loads(target.read_text())
-                if not isinstance(existing, dict):
-                    existing = {}
+                loaded = json.loads(target.read_text())
+                if isinstance(loaded, dict):
+                    existing = loaded
         except (OSError, ValueError, TypeError):
             pass
         merged = {**existing, **self._held}
