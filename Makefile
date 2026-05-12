@@ -2,6 +2,7 @@
 
 REPORTS_DIR ?= reports
 COVERAGE_XML ?= $(REPORTS_DIR)/coverage.xml
+COVERAGE_JSON ?= $(REPORTS_DIR)/coverage.json
 UNIT_JUNIT_XML ?= $(REPORTS_DIR)/unit.junit.xml
 RUFF_REPORT ?= $(REPORTS_DIR)/ruff-report.json
 BANDIT_REPORT ?= $(REPORTS_DIR)/bandit-report.json
@@ -25,7 +26,7 @@ format:
 # Run tests with coverage
 test-unit:
 	mkdir -p $(REPORTS_DIR)
-	poetry run pytest tests/unit/ --cov=terok_sandbox --cov-report=term-missing --cov-report=xml:$(COVERAGE_XML) --junitxml=$(UNIT_JUNIT_XML) -o junit_family=legacy
+	poetry run pytest tests/unit/ --cov=terok_sandbox --cov-report=term-missing --cov-report=xml:$(COVERAGE_XML) --cov-report=json:$(COVERAGE_JSON) --junitxml=$(UNIT_JUNIT_XML) -o junit_family=legacy
 
 # Run integration tests (real servers, databases, system interactions)
 test-integration:
