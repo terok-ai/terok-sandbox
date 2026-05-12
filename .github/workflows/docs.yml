@@ -43,7 +43,7 @@ jobs:
           key: venv-${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-docs-${{ hashFiles('**/pyproject.toml', '**/poetry.lock') }}
 
       - name: Install dependencies
-        run: poetry install --with dev,docs --no-interaction
+        run: poetry install --with dev,docs,test --no-interaction
 
       - name: Install scc (lines of code counter)
         run: |
@@ -51,6 +51,11 @@ jobs:
           curl -sLO https://github.com/boyter/scc/releases/download/v3.5.0/scc_Linux_x86_64.tar.gz
           echo "6c31f4d0cf3b7a8c5ca910fa4e451949434798f6541ec5dea4b83f4973e13772  scc_Linux_x86_64.tar.gz" | sha256sum -c
           sudo tar xzf scc_Linux_x86_64.tar.gz -C /usr/local/bin scc
+
+      - name: Generate coverage data for treemap
+        # Produces reports/coverage.json, consumed by mkdocs-terok's
+        # code_metrics generator to render a local SVG treemap.
+        run: make test-unit
 
       - name: Build documentation
         run: poetry run properdocs build --strict
