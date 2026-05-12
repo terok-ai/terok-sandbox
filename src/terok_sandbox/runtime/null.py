@@ -27,7 +27,7 @@ from .protocol import (
     PortReservation,
 )
 
-# A scripted stdio interaction for :meth:`NullRuntime.exec_stdio` — pairs of
+# A scripted stdio interaction for [`exec_stdio`][terok_sandbox.runtime.null.NullRuntime.exec_stdio] — pairs of
 # ``("read", expected_bytes)`` and ``("write", bytes_to_emit)`` operations.
 # The reader half asserts what the caller pushes into ``stdin``; the writer
 # half emits what the caller will see on ``stdout`` / ``stderr``.
@@ -311,7 +311,7 @@ class NullRuntime:
         *,
         exit_code: int = 0,
     ) -> None:
-        """Pre-register a stdio interaction for :meth:`exec_stdio`.
+        """Pre-register a stdio interaction for [`exec_stdio`][terok_sandbox.runtime.null.NullRuntime.exec_stdio].
 
         *script* is a sequence of ``("read", bytes)`` / ``("write", bytes)``
         steps replayed in order: ``read`` consumes the matching prefix from
@@ -376,7 +376,7 @@ class NullRuntime:
         registered for ``(container, cmd)``, replays it in order: ``read``
         consumes from *stdin* and asserts a match; ``write`` pushes bytes to
         *stdout*.  Without a script, returns immediately with exit code 0
-        — matches the empty-success default of :meth:`exec`.
+        — matches the empty-success default of [`exec`][terok_sandbox.runtime.null.NullRuntime.exec].
         """
         key = (container.name, tuple(cmd))
         self._exec_stdio_calls.append((container.name, tuple(cmd), dict(env or {})))

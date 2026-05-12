@@ -723,7 +723,7 @@ def _build_app(db_path: str, routes_path: str, audit_path: Path | None = None) -
     *audit_path* — when supplied, every credential-bearing request lands
     one JSONL line at this path.  ``None`` disables auditing (used by
     smoke tests that don't care about the side-channel); production
-    callers point at :func:`audit.credential_audit_log_path`.
+    callers point at [`credential_audit_log_path`][terok_sandbox.vault.audit.credential_audit_log_path].
     """
     app = web.Application()
     app[_KEY_ROUTES] = _RouteTable(routes_path)

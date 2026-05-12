@@ -827,11 +827,11 @@ class PodmanRuntime:
         (one per direction) copying bytes until either side reaches
         EOF or the child exits, joins the pumps, returns the exit code.
         Async callers drive this via
-        :meth:`asyncio.AbstractEventLoop.run_in_executor`.
+        [`run_in_executor`][asyncio.loop.run_in_executor].
 
-        Lets :class:`FileNotFoundError` (podman missing) propagate.  On
+        Lets [`FileNotFoundError`][] (podman missing) propagate.  On
         timeout, terminates the child (terminate → 2 s wait → kill) and
-        re-raises :class:`subprocess.TimeoutExpired`.
+        re-raises [`TimeoutExpired`][subprocess.TimeoutExpired].
         """
         if not cmd:
             raise ValueError("exec_stdio argv must not be empty")

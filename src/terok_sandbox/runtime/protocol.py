@@ -296,8 +296,8 @@ class ContainerRuntime(Protocol):
         """Run *cmd* inside *container* with stdio bridged to caller-supplied streams.
 
         Forwards bytes bidirectionally between *stdin*/*stdout*/*stderr* and the
-        spawned process — distinct from :meth:`exec`, which captures output into
-        an :class:`ExecResult`.  Used by the host-side ACP proxy to bridge a Unix
+        spawned process — distinct from [`exec`][terok_sandbox.runtime.null.NullRuntime.exec], which captures output into
+        an [`ExecResult`][terok_sandbox.runtime.protocol.ExecResult].  Used by the host-side ACP proxy to bridge a Unix
         socket to an in-container ACP-stdio agent without the runtime ever
         materialising the conversation.
 
