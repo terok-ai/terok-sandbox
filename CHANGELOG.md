@@ -5,6 +5,12 @@ also the "Changelog" link in PyPI metadata.
 
 [rel]: https://github.com/terok-ai/terok-sandbox/releases
 
+## v0.0.117 — Vault Passphrase
+
+Credentials Vault DB encryption
+
+**Full Changelog**: https://github.com/terok-ai/terok-sandbox/compare/v0.0.116...v0.0.117
+
 ## v0.0.116 — Checkpoint Charlie
 
 ## What's Changed

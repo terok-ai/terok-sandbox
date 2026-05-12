@@ -232,9 +232,7 @@ class VaultManager:
         creds: tuple[str, ...] = ()
         if self._cfg.db_path.is_file():
             try:
-                from ..credentials.db import CredentialDB
-
-                db = CredentialDB(self._cfg.db_path)
+                db = self._cfg.open_credential_db()
                 try:
                     creds = tuple(db.list_credentials("default"))
                 finally:

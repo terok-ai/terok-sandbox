@@ -88,6 +88,7 @@ depends_on = [
     "terok_sandbox.paths",
     "terok_sandbox.port_registry",
     "terok_sandbox.credentials.db",
+    "terok_sandbox.credentials.encryption",
     "terok_sandbox.config_schema",
 ]
 
@@ -97,6 +98,8 @@ path = "terok_sandbox.doctor"
 layer = "foundation"
 depends_on = [
     "terok_sandbox.vault",
+    "terok_sandbox.config",
+    "terok_sandbox.credentials.encryption",
 ]
 
 # Credential DB — standalone SQLite store; re-exports schema helpers
@@ -104,7 +107,10 @@ depends_on = [
 [[modules]]
 path = "terok_sandbox.credentials.db"
 layer = "foundation"
-depends_on = ["terok_sandbox.credentials.migrations"]
+depends_on = [
+    "terok_sandbox.credentials.migrations",
+    "terok_sandbox.credentials.encryption",
+]
 
 # Schema bootstrap + forward migrations for the credential DB.  Standalone
 # so future schema bumps have a focused review target without disturbing
@@ -114,14 +120,20 @@ path = "terok_sandbox.credentials.migrations"
 layer = "foundation"
 depends_on = []
 
-# Vault — token broker + SSH signer, standalone; reads SSH key records
-# straight from the credential DB (same layer) so the signer can serve
-# them without re-encoding via a higher-level facade.
+# Passphrase resolution chain + SQLCipher open/migrate helpers.
+[[modules]]
+path = "terok_sandbox.credentials.encryption"
+layer = "foundation"
+depends_on = []
+
+# Vault — token broker + SSH signer.  Depends on config to fetch the
+# resolution-chain knobs at daemon-init time via cfg.open_sqlcipher_connection.
 [[modules]]
 path = "terok_sandbox.vault"
 layer = "foundation"
 depends_on = [
     "terok_sandbox.credentials.db",
+    "terok_sandbox.config",
 ]
 
 # Credentials package root — standalone (DB + SSH key management)
@@ -218,6 +230,12 @@ depends_on = [
     "terok_sandbox._setup",
     "terok_sandbox.launch",
 ]
+
+# Round-trip YAML writer for setup-time config.yml edits.
+[[modules]]
+path = "terok_sandbox._yaml"
+layer = "foundation"
+depends_on = []
 
 # Per-container wiring composer — `prepare`/`run`/`cleanup`.  Surface
 # because it produces operator-facing podman args + drives token mints

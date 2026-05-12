@@ -33,3 +33,23 @@ def _isolate_port_registry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(_reg._default, "registry_dir", registry)
     monkeypatch.setattr(_reg, "_save_ports", lambda _sd, _p: None)
     _reg.reset_cache()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_credential_keyring(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub the resolution chain so tests get a deterministic ``"test"`` passphrase.
+
+    Tests pick up the platform-default ``runtime_dir`` which can hold
+    a stale ``vault.passphrase`` from a prior run, so we blank the
+    file tier as well as the keyring tier; the 4 tests that exercise
+    the file tier explicitly restore ``load_passphrase_from_file``
+    via a local monkeypatch.
+    """
+    import terok_sandbox.config as _config
+    import terok_sandbox.credentials.encryption as _enc
+
+    monkeypatch.setattr(_enc, "load_passphrase_from_file", lambda _path: None)
+    monkeypatch.setattr(_enc, "load_passphrase_from_keyring", lambda: "test")
+    monkeypatch.setattr(_enc, "store_passphrase_in_keyring", lambda _pw: True)
+    monkeypatch.setattr(_enc, "forget_passphrase_in_keyring", lambda: True)
+    monkeypatch.setattr(_config, "credentials_use_keyring", lambda: True)

@@ -52,7 +52,7 @@ def _seed_key(db: CredentialDB, scope: str, comment: str = "test-comment") -> by
 def signer_env(tmp_path: Path):
     """Seed one scope+key and return (db_path, token, pub_blob)."""
     db_path = tmp_path / "vault.db"
-    db = CredentialDB(db_path)
+    db = CredentialDB(db_path, passphrase="test")
     pub_blob = _seed_key(db, "proj")
     token = db.create_token("proj", "task-1", "proj", "ssh")
     db.close()
@@ -221,7 +221,7 @@ class TestServeAgentSessionErrors:
         )
 
         db_path = tmp_path / "vault.db"
-        db = CredentialDB(db_path)
+        db = CredentialDB(db_path, passphrase="test")
         _seed_key(db, "proj")
         cache = _DBKeyCache(db)
 
@@ -323,7 +323,7 @@ class TestServeAgentSessionMissingFlags:
         )
 
         db_path = tmp_path / "vault.db"
-        db = CredentialDB(db_path)
+        db = CredentialDB(db_path, passphrase="test")
         _seed_key(db, "proj")
         cache = _DBKeyCache(db)
 
@@ -433,7 +433,7 @@ class TestKeyCacheErrorRecovery:
         from terok_sandbox.vault.ssh_signer import _DBKeyCache
 
         db_path = tmp_path / "vault.db"
-        db = CredentialDB(db_path)
+        db = CredentialDB(db_path, passphrase="test")
         # First key: valid.
         good_blob = _seed_key(db, "proj", comment="good")
         # Second key: corrupt bytes but valid blob/fingerprint metadata.
@@ -465,7 +465,7 @@ class TestDBKeyCache:
         from terok_sandbox.vault.ssh_signer import _DBKeyCache
 
         db_path = tmp_path / "vault.db"
-        db = CredentialDB(db_path)
+        db = CredentialDB(db_path, passphrase="test")
         _seed_key(db, "proj")
 
         cache = _DBKeyCache(db)
@@ -479,7 +479,7 @@ class TestDBKeyCache:
         from terok_sandbox.vault.ssh_signer import _DBKeyCache
 
         db_path = tmp_path / "vault.db"
-        db = CredentialDB(db_path)
+        db = CredentialDB(db_path, passphrase="test")
         _seed_key(db, "proj", comment="first")
 
         cache = _DBKeyCache(db)
@@ -577,7 +577,7 @@ class TestSSHSignerRoundTrip:
     async def test_multi_key_listing(self, tmp_path: Path) -> None:
         """A scope with two assigned keys exposes both on REQUEST_IDENTITIES."""
         db_path = tmp_path / "vault.db"
-        db = CredentialDB(db_path)
+        db = CredentialDB(db_path, passphrase="test")
         blob1 = _seed_key(db, "proj", comment="first")
         blob2 = _seed_key(db, "proj", comment="second")
         token = db.create_token("proj", "task-1", "proj", "ssh")
@@ -634,7 +634,7 @@ class TestSSHSignerRoundTrip:
     async def test_non_ssh_provider_token_rejected(self, tmp_path: Path) -> None:
         """A token whose provider != 'ssh' is rejected."""
         db_path = tmp_path / "vault.db"
-        db = CredentialDB(db_path)
+        db = CredentialDB(db_path, passphrase="test")
         _seed_key(db, "proj")
         api_token = db.create_token("proj", "task-1", "default", "claude")
         db.close()
@@ -702,7 +702,7 @@ class TestSSHSignerRoundTrip:
     async def test_missing_scope_closes_connection(self, tmp_path: Path) -> None:
         """Token for a scope with no assigned keys closes the connection."""
         db_path = tmp_path / "vault.db"
-        db = CredentialDB(db_path)
+        db = CredentialDB(db_path, passphrase="test")
         token = db.create_token("ghost", "task-1", "ghost", "ssh")
         db.close()
 

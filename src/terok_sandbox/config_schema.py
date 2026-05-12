@@ -56,6 +56,21 @@ class RawCredentialsSection(BaseModel):
         default=None,
         description="Shared credentials directory (proxy DB, agent config mounts)",
     )
+    passphrase: str | None = Field(
+        default=None,
+        description=(
+            "Unsafe headless fallback for the SQLCipher passphrase; only set"
+            " when no OS keyring or systemd-creds is available."
+        ),
+    )
+    use_keyring: bool = Field(
+        default=False,
+        description=(
+            "Opt-in switch for the OS keyring tier of the passphrase"
+            " resolution chain.  Off by default because Linux Secret"
+            " Service has per-collection (not per-item) ACLs."
+        ),
+    )
 
 
 class RawPathsSection(BaseModel):

@@ -37,7 +37,6 @@ import json
 import logging
 import signal
 import socket
-import sqlite3
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -126,7 +125,11 @@ class _TokenDB:
     def __init__(self, db_path: str) -> None:
         # check_same_thread=False is safe: this is a read-only accessor and
         # aiohttp runs handlers in a single event loop thread.
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
+        from ..config import SandboxConfig
+
+        self._conn = SandboxConfig().open_sqlcipher_connection(
+            Path(db_path), check_same_thread=False
+        )
         self._conn.execute("PRAGMA journal_mode=WAL")
         # Bootstrap + migrate schema here too so the vault daemon can open
         # an empty DB on a fresh install (no CLI write has touched the file

@@ -14,8 +14,12 @@ Shield commands are delegated to terok-shield's own registry —
 
 from __future__ import annotations
 
+import contextlib
+import dataclasses
+import sys
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, NamedTuple
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 from ._setup import (
     run_clearance_install_phase,
@@ -29,7 +33,9 @@ from ._setup import (
     run_vault_uninstall_phase,
 )
 from ._util import sanitize_tty
-from .config import SandboxConfig
+from ._yaml import update_section as _yaml_update_section
+from .config import SandboxConfig, credentials_passphrase, credentials_use_keyring
+from .credentials.encryption import PassphraseSource
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -150,7 +156,21 @@ def _handle_sandbox_setup(
     # unconditionally costs nothing on shield-only deployments.
     if not no_shield:
         failed |= not run_shield_install_phase(root=root)
+    # Credentials DB migration runs *before* vault — the daemon needs a
+    # decryptable DB to start, so doing it here keeps a single failed
+    # phase from masking the actual cause.  Skipped along with the vault
+    # phase when ``--no-vault`` is set; otherwise we refresh the
+    # credential fields on ``cfg`` so the vault phase sees the tier
+    # choice the operator just made.  ``dataclasses.replace`` preserves
+    # any non-default paths the caller (e.g. terok-executor) constructed
+    # the config with.
     if not no_vault:
+        failed |= not _run_credentials_setup_phase(cfg)
+        cfg = dataclasses.replace(
+            cfg,
+            credentials_passphrase=credentials_passphrase(),
+            credentials_use_keyring=credentials_use_keyring(),
+        )
         failed |= not run_vault_install_phase(cfg)
     if not no_gate:
         failed |= not run_gate_install_phase(cfg)
@@ -530,6 +550,87 @@ def _handle_vault_uninstall() -> None:
     print("Vault systemd units removed.")
 
 
+def _handle_vault_unlock(*, cfg: SandboxConfig | None = None) -> None:
+    """Write the credentials-DB passphrase to the session-unlock tmpfs file; restart the daemon."""
+    from ._yaml import write_secret_text
+    from .credentials.encryption import prompt_passphrase
+    from .vault.lifecycle import VaultManager
+
+    if cfg is None:
+        cfg = SandboxConfig()
+
+    write_secret_text(cfg.vault_passphrase_file, prompt_passphrase() + "\n")
+    print(f"→ wrote passphrase to {cfg.vault_passphrase_file} (RAM-backed, cleared on reboot)")
+
+    mgr = VaultManager(cfg)
+    if mgr.is_daemon_running():
+        mgr.stop_daemon()
+        mgr.start_daemon()
+        print("→ vault daemon restarted")
+    else:
+        print("→ vault daemon is not running; start it with `terok-sandbox vault start`")
+
+
+def _handle_vault_lock(*, cfg: SandboxConfig | None = None, forget: bool = False) -> None:
+    """Delete the session-unlock tmpfs file and stop the vault daemon.
+
+    By default this only clears the *session* tier; if keyring or
+    ``credentials.passphrase`` are also configured, socket activation
+    can re-spawn the daemon and auto-unlock immediately — and the
+    operator may not realise that's not "locked".  Pass
+    ``forget=True`` (``--forget`` on the CLI) to also remove the
+    keyring entry and clear ``credentials.passphrase`` from
+    ``config.yml`` so the next daemon start *must* have an explicit
+    ``vault unlock``.
+    """
+    from .credentials.encryption import forget_passphrase_in_keyring
+    from .vault.lifecycle import VaultManager
+
+    if cfg is None:
+        cfg = SandboxConfig()
+
+    path = cfg.vault_passphrase_file
+    if path.exists():
+        path.unlink()
+        print(f"→ removed {path}")
+    else:
+        print(f"→ {path} was not present")
+
+    if forget:
+        if cfg.credentials_use_keyring and forget_passphrase_in_keyring():
+            print("→ cleared keyring entry")
+        if cfg.credentials_passphrase:
+            from . import config as _config
+            from .paths import _config_file_paths
+
+            user_config = next((p for label, p in _config_file_paths() if label == "user"), None)
+            if user_config is not None and user_config.exists():
+                _yaml_update_section(
+                    user_config,
+                    "credentials",
+                    {"passphrase": None},  # nosec: B105 — clearing a config key
+                )
+                _config._credentials_section.cache_clear()
+                print("→ cleared credentials.passphrase from config.yml")
+    elif cfg.credentials_use_keyring or cfg.credentials_passphrase:
+        active = []
+        if cfg.credentials_use_keyring:
+            active.append("keyring")
+        if cfg.credentials_passphrase:
+            active.append("config.yml")
+        print(
+            f"warning: non-session passphrase tiers still active ({', '.join(active)});"
+            " the daemon may auto-unlock on next socket activation.\n"
+            "         Use `terok-sandbox vault lock --forget` to clear them too.",
+            file=sys.stderr,
+        )
+
+    mgr = VaultManager(cfg)
+    if mgr.is_daemon_running():
+        mgr.stop_daemon()
+        print("→ vault daemon stopped")
+
+
 VAULT_COMMANDS: tuple[CommandDef, ...] = (
     CommandDef(
         name="start",
@@ -561,6 +662,28 @@ VAULT_COMMANDS: tuple[CommandDef, ...] = (
         handler=_handle_vault_uninstall,
         group="vault",
     ),
+    CommandDef(
+        name="unlock",
+        help="Provision the credentials-DB passphrase for this session (tmpfs file)",
+        handler=_handle_vault_unlock,
+        group="vault",
+    ),
+    CommandDef(
+        name="lock",
+        help="Remove the session-unlock tmpfs file and stop the vault daemon",
+        handler=_handle_vault_lock,
+        group="vault",
+        args=(
+            ArgDef(
+                name="--forget",
+                action="store_true",
+                help=(
+                    "Also clear keyring + credentials.passphrase so the daemon"
+                    " cannot auto-unlock from non-session tiers"
+                ),
+            ),
+        ),
+    ),
 )
 
 # ---------------------------------------------------------------------------
@@ -569,10 +692,8 @@ VAULT_COMMANDS: tuple[CommandDef, ...] = (
 
 
 def _open_db(cfg: SandboxConfig) -> CredentialDB:
-    """Open the vault credential DB for SSH operations."""
-    from .credentials.db import CredentialDB
-
-    return CredentialDB(cfg.db_path)
+    """Open the vault credential DB for SSH operations (CLI flavour, TTY-prompt enabled)."""
+    return cfg.open_credential_db(prompt_on_tty=True)
 
 
 def _build_key_rows(cfg: SandboxConfig) -> list[KeyRow]:
@@ -1247,6 +1368,293 @@ DOCTOR_COMMANDS: tuple[CommandDef, ...] = (
         help="Run sandbox health checks",
         handler=_handle_doctor,
         group="doctor",
+    ),
+)
+
+
+# ---------------------------------------------------------------------------
+# Credentials DB at-rest encryption — chooser, provisioning, migration
+#
+# Three passphrase storage modes (chosen interactively, or session-unlock
+# by default for automated installs):
+#   - session-unlock: passphrase lives in $XDG_RUNTIME_DIR/.../vault.passphrase
+#     (tmpfs, cleared on reboot; daemon reads at startup)
+#   - OS keyring: passphrase lives in libsecret/Keychain/Credential Manager
+#   - config file: passphrase inlined into config.yml (UNSAFE, on-disk)
+#
+# Once chosen, the mode is persisted so the resolution chain picks it
+# up next time — session mode self-describes via the tmpfs file's
+# presence; keyring sets credentials.use_keyring=true in config.yml;
+# config writes the passphrase itself into config.yml.
+#
+# The plaintext→encrypted migration code path is deprecated in 0.9.0
+# and slated for removal in 0.10.0: after that release fresh installs
+# stay the only supported entry point, and the ``credentials
+# encrypt-db`` CLI verb plus ``_handle_credentials_encrypt_db``'s
+# ``is_plaintext_sqlite`` branch + ``encrypt_in_place`` call all go
+# away.  Operators with a stale plaintext DB after 0.10.0 must restore
+# from the ``.plaintext-backup-<stamp>.tar.gz`` snapshot the setup
+# phase writes before re-keying.
+# ---------------------------------------------------------------------------
+
+
+_PassphraseMode = Literal["session", "keyring", "config"]
+
+_CHOOSER_PROMPT = """\
+
+Where should terok store the passphrase to encrypt the vault?
+  [s] session-unlock — terok-sandbox vault unlock after each boot (default)
+  [k] keyring — store passphrase in your login keyring
+  [c] config file — UNSAFE, same disk as the encrypted DB
+
+Choice [s]:"""
+
+_CHOICE_TO_MODE: dict[str, _PassphraseMode] = {"s": "session", "k": "keyring", "c": "config"}
+
+
+def _handle_credentials_encrypt_db(*, cfg: SandboxConfig | None = None) -> None:
+    """Provision the credentials-DB passphrase; migrate any legacy plaintext file.
+
+    An already-encrypted DB is short-circuited *before* we provision a
+    new passphrase — minting a fresh one here would overwrite whatever
+    tier currently holds the working key and lock the operator out.
+    """
+    from .credentials.encryption import encrypt_in_place, is_plaintext_sqlite
+
+    if cfg is None:
+        cfg = SandboxConfig()
+
+    db_path = cfg.db_path
+    if db_path.exists() and not is_plaintext_sqlite(db_path):
+        print(f"  {db_path} is already SQLCipher-encrypted.")
+        return
+
+    mode = _ask_passphrase_mode()
+    passphrase, source = _provision_passphrase(cfg, mode=mode)
+    _persist_mode_choice(mode, passphrase)
+    print(f"  passphrase source: {source}")
+
+    if not db_path.exists():
+        print(f"  no DB at {db_path}; will be created encrypted on first use.")
+        return
+
+    # Snapshot the plaintext DB (and any sidecars) before we touch
+    # anything.  A failed migration would otherwise leave the operator
+    # with a possibly-clobbered DB and no fallback — having a tarred
+    # copy is cheap insurance.  The tarball is intentionally NOT
+    # auto-deleted: the operator must explicitly remove it once they
+    # have verified migration succeeded.
+    backup_path = _back_up_plaintext_db(db_path)
+    encrypt_in_place(db_path, passphrase)
+    print(f"  encrypted {db_path} in place.")
+    _warn_about_plaintext_backup(backup_path)
+
+
+def _back_up_plaintext_db(db_path: Path) -> Path:
+    """Tar the plaintext DB + WAL/SHM sidecars next to it, return the tarball path.
+
+    The tarball contains cleartext secrets, so it must never go
+    through a window of umask-default permissions: pre-create the
+    file via ``O_CREAT | O_EXCL`` at 0o600 and stream the tar into
+    that fd.  ``chmod`` after ``tarfile.open(path)`` would leave the
+    secrets world-readable on hosts with a permissive umask for the
+    duration of the write.
+    """
+    import datetime
+    import os
+    import tarfile
+
+    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup_path = db_path.with_name(f"{db_path.name}.plaintext-backup-{stamp}.tar.gz")
+    fd = os.open(backup_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as raw, tarfile.open(fileobj=raw, mode="w:gz") as tar:
+            tar.add(db_path, arcname=db_path.name)
+            for suffix in ("-wal", "-shm", "-journal"):
+                sidecar = db_path.with_name(db_path.name + suffix)
+                if sidecar.exists():
+                    tar.add(sidecar, arcname=sidecar.name)
+    except BaseException:
+        backup_path.unlink(missing_ok=True)
+        raise
+    return backup_path
+
+
+def _warn_about_plaintext_backup(backup_path: Path) -> None:
+    """Surface the backup path in red so the operator can't miss it."""
+    use_color = sys.stderr.isatty()
+    red = "\033[1;31m" if use_color else ""
+    reset = "\033[0m" if use_color else ""
+    print(
+        f"\n{red}WARNING: plaintext backup written to {backup_path}{reset}\n"
+        f"{red}         It contains your secrets in cleartext."
+        f" Once you have confirmed the migration is good, delete it:{reset}\n"
+        f"{red}           rm {backup_path}{reset}",
+        file=sys.stderr,
+    )
+
+
+def _run_credentials_setup_phase(cfg: SandboxConfig) -> bool:
+    """Migrate the credentials DB to SQLCipher; no-op on already-encrypted or absent.
+
+    The vault daemon, if installed from a previous setup, holds a write
+    lock on the plaintext DB (WAL mode).  Quiesce it before the
+    migration so ``sqlcipher_export`` can ATTACH the source without
+    colliding.  ``run_vault_install_phase`` re-installs+starts the
+    daemon a moment later, so this stop is transient by design.
+
+    On "database is locked" the phase self-heals: the socket-activation
+    unit can re-spawn the service between our stop and the migration's
+    open.  Uninstalling the units removes the trigger entirely, then we
+    retry once before bailing — saves the operator from a manual
+    ``systemctl --user stop`` + re-run.
+    """
+    from .vault.lifecycle import VaultManager
+
+    print("→ credentials", end="", flush=True)
+    mgr = VaultManager(cfg)
+    _quiesce_vault_for_migration(mgr)
+    try:
+        _handle_credentials_encrypt_db(cfg=cfg)
+    except Exception as exc:  # noqa: BLE001
+        if not _looks_like_db_lock(exc):
+            print(f" — FAILED: {exc}")
+            return False
+        # Socket activation may have respawned the daemon between our
+        # quiesce and the migration's open; uninstalling the units kills
+        # the trigger.
+        print(" — locked, auto-recovering by uninstalling vault units …", flush=True)
+        _quiesce_vault_for_migration(mgr, force_uninstall=True)
+        try:
+            _handle_credentials_encrypt_db(cfg=cfg)
+        except Exception as retry_exc:  # noqa: BLE001
+            print(f"  recovery FAILED: {retry_exc}")
+            if _looks_like_db_lock(retry_exc):
+                print(
+                    "  Hint: another process still holds the DB.  Find it with:\n"
+                    "    fuser -v " + str(cfg.db_path) + "\n"
+                    "  stop it, then re-run `terok setup`."
+                )
+            return False
+        print("  recovered.")
+    return True
+
+
+def _quiesce_vault_for_migration(
+    mgr: Any,
+    *,
+    force_uninstall: bool = False,
+) -> None:
+    """Best-effort quiesce of the vault daemon so it doesn't hold the DB.
+
+    ``stop_daemon`` itself is idempotent (handles both systemd-managed
+    and PID-file daemons), but socket activation can race-respawn the
+    service between stop and migration.  ``force_uninstall`` removes
+    the unit files entirely — same pattern ``run_vault_install_phase``
+    uses, just earlier in the timeline.
+    """
+    with contextlib.suppress(Exception):
+        mgr.stop_daemon()
+    if force_uninstall:
+        with contextlib.suppress(Exception):
+            mgr.uninstall_systemd_units()
+
+
+def _looks_like_db_lock(exc: BaseException) -> bool:
+    """Return ``True`` if *exc* is sqlite's "database is locked" complaint."""
+    return "database is locked" in str(exc).lower()
+
+
+def _ask_passphrase_mode() -> _PassphraseMode:
+    """Return the operator's chosen mode; default to session on non-TTY runs."""
+    if not sys.stdin.isatty():
+        return "session"
+    print(_CHOOSER_PROMPT)
+    choice = sys.stdin.readline().strip().lower()[:1] or "s"
+    return _CHOICE_TO_MODE.get(choice, "session")
+
+
+def _provision_passphrase(
+    cfg: SandboxConfig, *, mode: _PassphraseMode
+) -> tuple[str, PassphraseSource]:
+    """Resolve or mint a passphrase for *mode*; return ``(passphrase, source)``."""
+    from ._yaml import write_secret_text
+    from .credentials.encryption import (
+        generate_passphrase,
+        load_passphrase_from_file,
+        load_passphrase_from_keyring,
+        prompt_passphrase,
+        store_passphrase_in_keyring,
+    )
+
+    if mode == "session":
+        existing = load_passphrase_from_file(cfg.vault_passphrase_file)
+        if existing is not None:
+            return existing, "session-file"
+        # Auto-generating silently would lock the operator out at next
+        # boot — the tmpfs file vanishes, and ``vault unlock`` has no
+        # way to re-type a passphrase they never saw.  Route through
+        # ``prompt_passphrase(confirm=True)``: empty entry still mints
+        # a fresh passphrase but echoes it once for the operator to
+        # copy out before it lands on the tmpfs file.
+        new = prompt_passphrase(confirm=True)
+        write_secret_text(cfg.vault_passphrase_file, new + "\n")
+        return new, "session-file"
+
+    if mode == "keyring":
+        existing = load_passphrase_from_keyring()
+        if existing is not None:
+            return existing, "keyring"
+        new = generate_passphrase()
+        if store_passphrase_in_keyring(new):
+            return new, "keyring"
+        raise RuntimeError("OS keyring is unreachable or denied; choose a different storage mode")
+
+    if mode == "config":
+        if cfg.credentials_passphrase:
+            return cfg.credentials_passphrase, "config"
+        print("Enter a passphrase to write to credentials.passphrase in config.yml:")
+        return prompt_passphrase(confirm=True), "prompt"
+
+    raise ValueError(f"unknown mode: {mode!r}")
+
+
+def _persist_mode_choice(mode: _PassphraseMode, passphrase: str) -> None:
+    """Write the chosen mode into config.yml so the chain re-resolves next time.
+
+    Session mode needs no change — the tmpfs file is self-describing.
+    Both fields (``use_keyring`` and ``passphrase``) are always written
+    so that switching modes leaves a clean, single-source state — the
+    previous mode's marker doesn't linger and the resolution chain
+    can't see two tiers claiming ownership.
+    """
+    from . import config as _config
+    from .paths import _config_file_paths
+
+    user_config = next((p for label, p in _config_file_paths() if label == "user"), None)
+    if user_config is None or mode == "session":
+        return
+    updates: dict[str, object | None] = (
+        {"use_keyring": True, "passphrase": None}  # nosec: B105 — clearing a config key
+        if mode == "keyring"
+        else {"use_keyring": False, "passphrase": passphrase}
+    )
+    _yaml_update_section(user_config, "credentials", updates)
+    # The resolution chain reads through ``_credentials_section`` which
+    # is lru-cached; without invalidation the same process keeps seeing
+    # the pre-setup state.
+    _config._credentials_section.cache_clear()
+
+
+CREDENTIALS_COMMANDS: tuple[CommandDef, ...] = (
+    CommandDef(
+        name="encrypt-db",
+        help=(
+            "Migrate a legacy plaintext credentials DB to SQLCipher-encrypted "
+            "(deprecated in 0.9.0, removed in 0.10.0)"
+        ),
+        handler=_handle_credentials_encrypt_db,
+        group="credentials",
     ),
 )
 

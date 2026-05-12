@@ -15,7 +15,7 @@ from terok_sandbox.credentials.db import CredentialDB
 @pytest.fixture()
 def db(tmp_path: Path) -> CredentialDB:
     """Return a fresh CredentialDB backed by a temp file."""
-    return CredentialDB(tmp_path / "proxy" / "credentials.db")
+    return CredentialDB(tmp_path / "proxy" / "credentials.db", passphrase="test")
 
 
 class TestCredentialCRUD:
@@ -126,24 +126,28 @@ class TestDBLifecycle:
     def test_creates_parent_dirs(self, tmp_path: Path) -> None:
         """CredentialDB creates parent directories if missing."""
         deep_path = tmp_path / "a" / "b" / "c" / "db.sqlite3"
-        db = CredentialDB(deep_path)
+        db = CredentialDB(deep_path, passphrase="test")
         db.store_credential("s", "p", {"k": "v"})
         assert deep_path.exists()
         db.close()
 
     def test_wal_mode_enabled(self, tmp_path: Path) -> None:
         """Database uses WAL journal mode for concurrent access."""
-        db = CredentialDB(tmp_path / "test.db")
+        db = CredentialDB(tmp_path / "test.db", passphrase="test")
         mode = db._conn.execute("PRAGMA journal_mode").fetchone()[0]
         assert mode == "wal"
         db.close()
 
 
 def _seed_legacy_v0_db(db_path: Path) -> bytes:
-    """Hand-build a v0 ``ssh_keys`` table with one row; return the public blob."""
+    """Hand-build a v0 ``ssh_keys`` table inside an encrypted DB; return the public blob.
+
+    The on-disk format is SQLCipher (every CredentialDB is encrypted),
+    but the *schema content* is at v0 (``private_pem`` column, hex
+    fingerprints) so the migration path can prove it forward.
+    """
     import base64
     import hashlib
-    import sqlite3
 
     from cryptography.hazmat.primitives.asymmetric import ed25519
     from cryptography.hazmat.primitives.serialization import (
@@ -153,13 +157,15 @@ def _seed_legacy_v0_db(db_path: Path) -> bytes:
         PublicFormat,
     )
 
+    from terok_sandbox.credentials.encryption import open_sqlcipher
+
     priv = ed25519.Ed25519PrivateKey.generate()
     pem = priv.private_bytes(Encoding.PEM, PrivateFormat.OpenSSH, NoEncryption())
     pub_wire = priv.public_key().public_bytes(Encoding.OpenSSH, PublicFormat.OpenSSH)
     pub_blob = base64.b64decode(pub_wire.decode("ascii").split()[1])
     hex_fp = hashlib.sha256(pub_blob).hexdigest()
 
-    conn = sqlite3.connect(str(db_path))
+    conn = open_sqlcipher(db_path, "test")
     conn.executescript("""
         CREATE TABLE ssh_keys (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -216,7 +222,7 @@ class TestSchemaMigration:
         db_path = tmp_path / "legacy.db"
         _seed_legacy_v0_db(db_path)
 
-        db = CredentialDB(db_path)
+        db = CredentialDB(db_path, passphrase="test")
         try:
             cols = {r[1] for r in db._conn.execute("PRAGMA table_info(ssh_keys)").fetchall()}
             assert "private_der" in cols
@@ -233,7 +239,7 @@ class TestSchemaMigration:
             db.close()
 
         # Re-opening the same DB is a pure no-op.
-        db2 = CredentialDB(db_path)
+        db2 = CredentialDB(db_path, passphrase="test")
         try:
             (version,) = db2._conn.execute("PRAGMA user_version").fetchone()
             assert version == SCHEMA_VERSION
@@ -273,14 +279,13 @@ class TestSchemaMigration:
         the column was always opaque to the sandbox; the new name makes
         that contract explicit at the schema level.
         """
-        import sqlite3
-
+        from terok_sandbox.credentials.encryption import open_sqlcipher
         from terok_sandbox.credentials.migrations import SCHEMA_VERSION
 
         db_path = tmp_path / "v1.db"
-        # Hand-built v1 schema: proxy_tokens still uses the old ``task``
-        # column name.  Mark it v1 by setting user_version directly.
-        conn = sqlite3.connect(str(db_path))
+        # Hand-built v1 schema inside an encrypted DB: proxy_tokens still uses
+        # the old ``task`` column name.  Mark it v1 by setting user_version.
+        conn = open_sqlcipher(db_path, "test")
         try:
             conn.executescript("""
                 CREATE TABLE credentials (
@@ -310,7 +315,7 @@ class TestSchemaMigration:
             conn.close()
 
         # Open through CredentialDB → migration runs.
-        db = CredentialDB(db_path)
+        db = CredentialDB(db_path, passphrase="test")
         try:
             cols = {r[1] for r in db._conn.execute("PRAGMA table_info(proxy_tokens)").fetchall()}
             assert "subject" in cols

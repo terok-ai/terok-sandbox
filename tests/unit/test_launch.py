@@ -203,6 +203,61 @@ class TestMetaAndCleanup:
         revoke_db.assert_called_with("proj", "myc")
         revoke_gate.assert_called_with("proj", "myc")
 
+    def test_cleanup_warns_when_locked_vault_skips_revocation(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A locked vault during cleanup MUST warn so operator knows tokens linger."""
+        from terok_sandbox.credentials.db import NoPassphraseError
+
+        cfg = _make_cfg(tmp_path)
+        with (
+            patch("terok_sandbox.shield.pre_start", return_value=[]),
+            patch("terok_sandbox.shield.down"),
+            patch("terok_sandbox.gate.tokens.TokenStore.create", return_value="terok-g-abc"),
+            patch(
+                "terok_sandbox.credentials.db.CredentialDB.create_token",
+                return_value="terok-p-xyz",
+            ),
+            patch("terok_sandbox.gate.tokens.TokenStore.revoke_for_task", return_value=None),
+        ):
+            compose("myc", cfg=cfg, shield=True, gate=True, broker=True, scope="proj")
+            with patch(
+                "terok_sandbox.config.SandboxConfig.open_credential_db",
+                side_effect=NoPassphraseError("locked"),
+            ):
+                cleanup("myc", cfg=cfg)
+        err = capsys.readouterr().err
+        assert "couldn't revoke broker/SSH tokens for proj/myc" in err
+        assert "NoPassphraseError" in err
+        assert "vault unlock" in err
+
+    def test_ssh_mint_failure_rolls_back_gate_token(self, tmp_path: Path) -> None:
+        """A locked vault during SSH-token minting must not leak the gate token.
+
+        Pre-fix: ``compose`` raised before ``_write_meta``; cleanup() had
+        no meta to read and the gate token stayed in ``TokenStore``.
+        """
+        from terok_sandbox.credentials.db import NoPassphraseError
+
+        cfg = _make_cfg(tmp_path)
+        with (
+            patch("terok_sandbox.shield.pre_start", return_value=[]),
+            patch(
+                "terok_sandbox.gate.tokens.TokenStore.create", return_value="terok-g-abc"
+            ) as gate_create,
+            patch(
+                "terok_sandbox.config.SandboxConfig.open_credential_db",
+                side_effect=NoPassphraseError("locked"),
+            ),
+            patch(
+                "terok_sandbox.gate.tokens.TokenStore.revoke_for_task", return_value=None
+            ) as revoke_gate,
+        ):
+            with pytest.raises(NoPassphraseError):
+                compose("myc", cfg=cfg, shield=False, gate=True, broker=False, scope="proj")
+            gate_create.assert_called_once_with("proj", "myc")
+            revoke_gate.assert_called_once_with("proj", "myc")
+
 
 # ---------------------------------------------------------------------------
 # Collision rejection
@@ -472,7 +527,7 @@ class TestEdgeCases:
         with (
             patch("terok_sandbox.shield.down"),
             patch(
-                "terok_sandbox.launch.CredentialDB",
+                "terok_sandbox.config.SandboxConfig.open_credential_db",
                 side_effect=OSError("db file vanished"),
             ),
             patch("terok_sandbox.gate.tokens.TokenStore.revoke_for_task"),

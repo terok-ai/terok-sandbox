@@ -15,7 +15,8 @@ runs.
 - **Hardened container lifecycle** — rootless Podman containers
   launched through a single `Sandbox` facade.  No daemon, no setuid,
   no escalation surface from the host.
-- **Credential vault** — long-lived secrets stay on the host.  The
+- **Credential vault** — long-lived secrets stay on the host,
+  [SQLCipher-encrypted at rest](credentials-encryption.md).  The
   container receives short-lived phantom tokens that are exchanged
   for the real value at the moment of use, scoped per route, audited
   per request.

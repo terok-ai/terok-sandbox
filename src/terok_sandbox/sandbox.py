@@ -474,4 +474,4 @@ class Sandbox:
         """
         from .credentials.ssh import SSHManager
 
-        return SSHManager.open(scope=scope, db_path=self._cfg.db_path)
+        return SSHManager.open_for_config(scope=scope, cfg=self._cfg, prompt_on_tty=True)

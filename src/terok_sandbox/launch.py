@@ -24,7 +24,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .config import CONTAINER_RUNTIME_DIR, SandboxConfig
-from .credentials.db import CredentialDB
 from .gate.tokens import TokenStore
 from .runtime.podman import podman_userns_args
 from .sandbox import Sharing, VolumeSpec
@@ -276,12 +275,22 @@ def compose(
     # mode) or set the port env (TCP mode).  The in-container bridge
     # injects the token in the agent-protocol pre-handshake and exposes
     # a plain ``SSH_AUTH_SOCK=/tmp/ssh-agent.sock`` to user-side tools.
+    #
+    # If anything in this block raises, ``_write_meta`` further down is
+    # skipped — which means cleanup() has no plan to read and can't
+    # revoke the gate token we minted moments ago.  Roll it back here so
+    # a locked-vault failure doesn't leak an authorised gate token.
     if effective_ssh:
-        db = CredentialDB(cfg.db_path)
         try:
-            ssh_token = db.create_token(scope, container, scope, "ssh")  # type: ignore[arg-type]
-        finally:
-            db.close()
+            db = cfg.open_credential_db(prompt_on_tty=True)
+            try:
+                ssh_token = db.create_token(scope, container, scope, "ssh")
+            finally:
+                db.close()
+        except BaseException:
+            if effective_gate and scope is not None:
+                TokenStore(cfg).revoke_for_task(scope, container)
+            raise
         args += ["-e", f"TEROK_SSH_SIGNER_TOKEN={ssh_token}"]
         if cfg.services_mode == "socket":
             args += _volume_args(
@@ -411,11 +420,37 @@ def cleanup(container: str, *, cfg: SandboxConfig) -> bool:
     if plan.gate and plan.scope is not None:
         TokenStore(cfg).revoke_for_task(plan.scope, container)
     if (plan.broker or plan.ssh) and plan.scope is not None:
+        from .credentials.db import (  # noqa: PLC0415
+            NoPassphraseError,
+            PlaintextDBFoundError,
+            WrongPassphraseError,
+        )
+
         try:
-            db = CredentialDB(cfg.db_path)
-        except OSError:
-            # Database file gone (e.g. vault uninstalled between prepare
-            # and cleanup) — already revoked from the caller's point of view.
+            db = cfg.open_credential_db(prompt_on_tty=True)
+        except (
+            OSError,
+            NoPassphraseError,
+            PlaintextDBFoundError,
+            WrongPassphraseError,
+            SystemExit,
+        ) as exc:
+            # Cleanup is best-effort: a missing DB (OSError), a locked
+            # / unencrypted / undecryptable vault (the three credential
+            # exceptions) or a cancelled prompt (SystemExit) all collapse
+            # to "already revoked from the caller's point of view" so
+            # shield/state teardown can still proceed.  Any other
+            # RuntimeError is a real bug — let it propagate.  Warn so
+            # the operator knows the broker/SSH phantom tokens for this
+            # container are still in the DB and should be cleaned up
+            # after the next ``vault unlock``.
+            print(
+                f"warning: cleanup couldn't revoke broker/SSH tokens for"
+                f" {plan.scope}/{container}: {type(exc).__name__}: {exc}\n"
+                f"         tokens remain in the credentials DB until the next"
+                f" `terok-sandbox credentials revoke` after a `vault unlock`.",
+                file=sys.stderr,
+            )
             db = None
         if db is not None:
             try:

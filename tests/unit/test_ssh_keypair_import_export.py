@@ -27,7 +27,7 @@ from terok_sandbox.credentials.ssh_keypair import (
 @pytest.fixture()
 def db(tmp_path: Path) -> CredentialDB:
     """Return a fresh DB rooted under a per-test tmp dir."""
-    return CredentialDB(tmp_path / "vault" / "credentials.db")
+    return CredentialDB(tmp_path / "vault" / "credentials.db", passphrase="test")
 
 
 @pytest.fixture()

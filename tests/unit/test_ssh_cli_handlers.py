@@ -51,7 +51,7 @@ def patched_open_db(db_path: Path):
     """
 
     def _factory(_cfg):
-        return CredentialDB(db_path)
+        return CredentialDB(db_path, passphrase="test")
 
     with patch("terok_sandbox.commands._open_db", side_effect=_factory):
         yield
@@ -83,7 +83,7 @@ def _seed_in_db(db: CredentialDB, scope: str) -> int:
 
 def _seed(db_path: Path, scope: str) -> int:
     """Seed one key for *scope* through a fresh DB connection; return its id."""
-    db = CredentialDB(db_path)
+    db = CredentialDB(db_path, passphrase="test")
     try:
         return _seed_in_db(db, scope)
     finally:
@@ -145,7 +145,7 @@ class TestLink:
         _handle_ssh_link(key_id=key_id, scope="proj-b", cfg=mock_cfg)
         assert f"Linked key id={key_id}" in capsys.readouterr().out
 
-        verify = CredentialDB(db_path)
+        verify = CredentialDB(db_path, passphrase="test")
         try:
             assert [r.id for r in verify.list_ssh_keys_for_scope("proj-a")] == [key_id]
             assert [r.id for r in verify.list_ssh_keys_for_scope("proj-b")] == [key_id]
@@ -157,7 +157,7 @@ class TestLink:
     ) -> None:
         """A non-existent key_id fails with a clear message (no FK error leak)."""
         # Create an empty DB file so ``_open_db`` has something to open.
-        CredentialDB(db_path).close()
+        CredentialDB(db_path, passphrase="test").close()
         with pytest.raises(SystemExit, match="No ssh_keys row with id=999"):
             _handle_ssh_link(key_id=999, scope="proj-b", cfg=mock_cfg)
 
@@ -170,7 +170,7 @@ class TestLink:
     ) -> None:
         """Re-linking the same pair is a reported no-op, not a duplicate row."""
         key_id = _seed(db_path, "proj-a")
-        db = CredentialDB(db_path)
+        db = CredentialDB(db_path, passphrase="test")
         try:
             db.assign_ssh_key("proj-b", key_id)
         finally:
@@ -298,7 +298,7 @@ class TestAdd:
         assert "SSH key ready for scope 'proj'" in out
         assert "type:        ed25519" in out
         assert "ssh-ed25519 " in out
-        db = CredentialDB(db_path)
+        db = CredentialDB(db_path, passphrase="test")
         try:
             assert len(db.list_ssh_keys_for_scope("proj")) == 1
         finally:
@@ -339,7 +339,7 @@ class TestExport:
         self, tmp_path: Path, db_path: Path, mock_cfg: MagicMock, patched_open_db
     ) -> None:
         """Exporting a scope with no keys bubbles the library ValueError as SystemExit."""
-        CredentialDB(db_path).close()  # ensure DB exists
+        CredentialDB(db_path, passphrase="test").close()  # ensure DB exists
         with pytest.raises(SystemExit, match="has no SSH keys"):
             _handle_ssh_export(scope="proj", out_dir=str(tmp_path / "out"), cfg=mock_cfg)
 
@@ -405,7 +405,7 @@ class TestRemove:
 
     def test_empty_vault_errors(self, db_path: Path, mock_cfg: MagicMock, patched_open_db) -> None:
         """With no registered keys, remove refuses up front."""
-        CredentialDB(db_path).close()
+        CredentialDB(db_path, passphrase="test").close()
         with pytest.raises(SystemExit, match="No SSH keys registered"):
             _handle_ssh_remove(cfg=mock_cfg)
 
@@ -422,7 +422,7 @@ class TestRemove:
         _handle_ssh_remove(scope="proj-a", yes=True, cfg=mock_cfg)
         out = capsys.readouterr().out
         assert "Unassigned 1 key from their scope(s)" in out
-        db = CredentialDB(db_path)
+        db = CredentialDB(db_path, passphrase="test")
         try:
             assert db.list_ssh_keys_for_scope("proj-a") == []
             assert len(db.list_ssh_keys_for_scope("proj-b")) == 1

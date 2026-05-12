@@ -19,8 +19,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import sqlite3
 from pathlib import Path
+from typing import Any
 
 from .ssh_signer import start_ssh_signer_local
 
@@ -47,6 +47,7 @@ class ScopeSocketReconciler:
         self._servers: dict[str, asyncio.Server] = {}
         self._last_version: int = -1
         self._task: asyncio.Task | None = None
+        self._conn: Any = None
 
     async def start(self) -> None:
         """Bind sockets for the current assignment state, then begin polling."""
@@ -71,6 +72,9 @@ class ScopeSocketReconciler:
                 pass
             self._socket_path(scope).unlink(missing_ok=True)
         self._servers.clear()
+        if self._conn is not None:
+            self._conn.close()
+            self._conn = None
 
     def socket_path(self, scope: str) -> Path:
         """Return the per-scope socket path; public for callers that render it."""
@@ -159,19 +163,25 @@ class ScopeSocketReconciler:
         return self._runtime_dir / f"ssh-agent-local-{scope}.sock"
 
     def _snapshot(self) -> tuple[int, set[str]]:
-        """Return ``(version, scopes)`` from a short-lived sqlite3 read."""
-        conn = sqlite3.connect(self._db_path)
-        try:
-            version_row = conn.execute(
-                "SELECT version FROM ssh_keys_version WHERE id = 0",
-            ).fetchone()
-            version = version_row[0] if version_row else 0
-            scopes = {
-                r[0]
-                for r in conn.execute(
-                    "SELECT DISTINCT scope FROM ssh_key_assignments",
-                ).fetchall()
-            }
-        finally:
-            conn.close()
+        """Return ``(version, scopes)`` from the persistent reader connection.
+
+        Opens the connection on first call and holds it for the
+        reconciler's lifetime — WAL mode lets the reader stay alive
+        alongside any writer.  Re-opening per poll would re-pay
+        SQLCipher's PBKDF2 derivation every 2 s.
+        """
+        if self._conn is None:
+            from ..config import SandboxConfig
+
+            self._conn = SandboxConfig().open_sqlcipher_connection(Path(self._db_path))
+        version_row = self._conn.execute(
+            "SELECT version FROM ssh_keys_version WHERE id = 0",
+        ).fetchone()
+        version = version_row[0] if version_row else 0
+        scopes = {
+            r[0]
+            for r in self._conn.execute(
+                "SELECT DISTINCT scope FROM ssh_key_assignments",
+            ).fetchall()
+        }
         return version, scopes

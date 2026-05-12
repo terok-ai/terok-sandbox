@@ -105,13 +105,54 @@ def sandbox_doctor_checks(
     Returns:
         List of [`DoctorCheck`][terok_sandbox.doctor.DoctorCheck] instances ready for orchestration.
     """
-    checks: list[DoctorCheck] = []
+    checks: list[DoctorCheck] = [_make_vault_unlocked_check()]
     if token_broker_port is not None:
         checks.append(_make_token_broker_check(token_broker_port))
     if ssh_signer_port is not None:
         checks.append(_make_ssh_signer_check(ssh_signer_port))
     checks.append(_make_shield_check(desired_shield_state))
     return checks
+
+
+def _make_vault_unlocked_check() -> DoctorCheck:
+    """Verify the credentials-DB passphrase resolves through some tier.
+
+    Host-side check: walks the resolution chain (session-unlock file →
+    OS keyring → config-file fallback) and reports an actionable error
+    when nothing yields.  The vault daemon won't start without a
+    passphrase, so this is the first check operators should see fail.
+    """
+
+    def _eval(_rc: int, _stdout: str, _stderr: str) -> CheckVerdict:
+        """Walk the resolution chain locally; report the verdict."""
+        from .config import SandboxConfig, credentials_passphrase, credentials_use_keyring
+        from .credentials.encryption import resolve_passphrase
+
+        cfg = SandboxConfig()
+        passphrase = resolve_passphrase(
+            passphrase_file=cfg.vault_passphrase_file,
+            use_keyring=credentials_use_keyring(),
+            config_fallback=credentials_passphrase(),
+        )
+        if passphrase is not None:
+            return CheckVerdict("ok", "credentials-DB passphrase available")
+        return CheckVerdict(
+            "error",
+            "vault is locked — no passphrase available."
+            " Run `terok-sandbox vault unlock` (session-unlock)"
+            " or `terok-sandbox setup` to provision.",
+        )
+
+    return DoctorCheck(
+        category="vault",
+        label="Credentials DB passphrase",
+        probe_cmd=[],
+        evaluate=_eval,
+        host_side=True,
+        fix_description=(
+            "Run `terok-sandbox vault unlock` to provision the passphrase for this session."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -410,7 +410,7 @@ class TestGetVaultStatus:
         from terok_sandbox.credentials.db import CredentialDB
 
         cfg = _make_cfg(tmp_path)
-        db = CredentialDB(cfg.db_path)
+        db = CredentialDB(cfg.db_path, passphrase="test")
         db.store_credential("default", "github", {"token": "abc"})
         db.store_credential("default", "anthropic", {"key": "xyz"})
         db.close()

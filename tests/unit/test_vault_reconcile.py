@@ -35,7 +35,7 @@ class TestReconciler:
     async def test_initial_bind_creates_sockets(self, tmp_path: Path) -> None:
         """Scopes with assigned keys get a socket each on ``start``."""
         db_path = tmp_path / "vault.db"
-        db = CredentialDB(db_path)
+        db = CredentialDB(db_path, passphrase="test")
         _seed(db, "proj-a")
         _seed(db, "proj-b")
         db.close()
@@ -54,7 +54,7 @@ class TestReconciler:
         import asyncio
 
         db_path = tmp_path / "vault.db"
-        db = CredentialDB(db_path)
+        db = CredentialDB(db_path, passphrase="test")
         key_id = _seed(db, "proj")
 
         runtime_dir = tmp_path / "runtime"
@@ -77,7 +77,7 @@ class TestReconciler:
     async def test_stop_unlinks_all_sockets(self, tmp_path: Path) -> None:
         """stop() closes every server and unlinks its socket file."""
         db_path = tmp_path / "vault.db"
-        db = CredentialDB(db_path)
+        db = CredentialDB(db_path, passphrase="test")
         _seed(db, "proj")
         db.close()
 
@@ -100,7 +100,7 @@ class TestReconciler:
     async def test_unchanged_version_is_a_noop(self, tmp_path: Path) -> None:
         """A second reconcile with the same version doesn't rebind anything."""
         db_path = tmp_path / "vault.db"
-        db = CredentialDB(db_path)
+        db = CredentialDB(db_path, passphrase="test")
         _seed(db, "proj")
         db.close()
 
@@ -118,7 +118,7 @@ class TestReconciler:
     async def test_bind_failure_keeps_version_pinned(self, tmp_path: Path) -> None:
         """A bind failure leaves ``_last_version`` behind so the next tick retries."""
         db_path = tmp_path / "vault.db"
-        db = CredentialDB(db_path)
+        db = CredentialDB(db_path, passphrase="test")
         _seed(db, "proj")
         db.close()
 
@@ -191,7 +191,7 @@ class TestReconciler:
         import unittest.mock as mock
 
         db_path = tmp_path / "vault.db"
-        db = CredentialDB(db_path)
+        db = CredentialDB(db_path, passphrase="test")
         key_id = _seed(db, "proj")
         runtime_dir = tmp_path / "runtime"
         reconciler = ScopeSocketReconciler(db_path=str(db_path), runtime_dir=runtime_dir)
