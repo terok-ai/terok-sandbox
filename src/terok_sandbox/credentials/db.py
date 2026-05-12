@@ -20,17 +20,16 @@ mediates:
 
 The database is **never** mounted into task containers — only the vault daemon
 reads it.  sqlite3 in WAL mode gives lock-free concurrent reads across multiple
-terok processes (CLI commands, vault daemon, task runners).  Zero external
-dependencies.
+terok processes (CLI commands, vault daemon, task runners).
 
 Schema declarations and forward migrations live in
 [`terok_sandbox.credentials.migrations`][terok_sandbox.credentials.migrations]
 — this module is the data-access layer only.
 
-Encryption upgrade path: wrap the ``data`` / ``private_der`` columns with
-``cryptography.fernet`` before INSERT, or swap ``sqlite3`` for ``sqlcipher3``
-(drop-in API replacement).  A single wrap applies uniformly to both API
-credentials and SSH keys.
+The on-disk file is always SQLCipher-encrypted; the passphrase
+resolution chain (keyring → ``credentials.passphrase`` config field)
+and the SQLCipher open helpers live in
+[`terok_sandbox.credentials.encryption`][terok_sandbox.credentials.encryption].
 """
 
 from __future__ import annotations
@@ -41,16 +40,28 @@ import re
 import secrets
 import sqlite3
 from pathlib import Path
+from typing import Any
 
+import sqlcipher3.dbapi2 as _sqlcipher_dbapi
+
+from .encryption import NoPassphraseError, WrongPassphraseError
 from .migrations import ensure_credentials_schema, migrate_credential_db_schema
+
+# sqlcipher3 has its own DatabaseError class disjoint from stdlib sqlite3's;
+# bad-passphrase failures raise the sqlcipher3 flavour.
+_DB_ERRORS: tuple[type[Exception], ...] = (sqlite3.DatabaseError, _sqlcipher_dbapi.DatabaseError)
 
 __all__ = [
     "CredentialDB",
     "InvalidScopeName",
+    "NoPassphraseError",
+    "PlaintextDBFoundError",
     "SSHKeyRecord",
     "SSHKeyRow",
+    "WrongPassphraseError",
     "ensure_credentials_schema",
     "migrate_credential_db_schema",
+    "open_credential_db",
 ]
 
 
@@ -121,25 +132,45 @@ class SSHKeyRecord:
     fingerprint: str
 
 
+class PlaintextDBFoundError(RuntimeError):
+    """A legacy plaintext sqlite DB was found where an encrypted one was expected."""
+
+
 class CredentialDB:
     """SQLite-backed store for provider credentials, SSH keys, and phantom tokens.
 
-    Stores captured provider credentials, SSH keypairs (private DER + public
-    blob, assigned to scopes), and issues per-task phantom tokens consumed
-    by the vault's token broker and SSH signer.
-
-    Args:
-        db_path: Path to the sqlite3 database file.  Parent directories
-            are created automatically.
+    The on-disk file is always SQLCipher-encrypted.  Callers either
+    supply *passphrase* explicitly or leave it ``None`` to walk the
+    runtime resolution chain (keyring → ``credentials.passphrase``).
+    A missing passphrase raises [`NoPassphraseError`][terok_sandbox.credentials.db.NoPassphraseError];
+    a stale plaintext file raises [`PlaintextDBFoundError`][terok_sandbox.credentials.db.PlaintextDBFoundError]
+    — both point the operator at ``terok setup``.
     """
 
-    def __init__(self, db_path: Path) -> None:
+    def __init__(self, db_path: Path, *, passphrase: str) -> None:
+        if not passphrase:
+            raise NoPassphraseError(
+                f"no SQLCipher passphrase available for {db_path}"
+                " — run `terok-sandbox setup` to provision one"
+            )
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(db_path), isolation_level="DEFERRED")
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA foreign_keys=ON")
-        ensure_credentials_schema(self._conn)
-        migrate_credential_db_schema(self._conn)
+        self._conn = _open_connection(db_path, passphrase)
+        try:
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA foreign_keys=ON")
+            ensure_credentials_schema(self._conn)
+            migrate_credential_db_schema(self._conn)
+        except _DB_ERRORS as exc:
+            self._conn.close()
+            if _looks_like_plaintext_db(db_path):
+                raise PlaintextDBFoundError(
+                    f"{db_path} is a legacy plaintext sqlite DB — run "
+                    "`terok-sandbox credentials encrypt-db` to migrate it"
+                ) from exc
+            raise WrongPassphraseError(
+                f"could not decrypt {db_path} — wrong passphrase, or the DB was"
+                " created with a different key"
+            ) from exc
 
     # ── Provider credentials ────────────────────────────────────────────
 
@@ -415,3 +446,57 @@ class CredentialDB:
             self._conn.close()
         except Exception:  # noqa: BLE001
             pass
+
+
+# ── Configured-open entry point ─────────────────────────────────────────────
+
+
+def _open_connection(db_path: Path, passphrase: str) -> Any:
+    """Return a sqlcipher3 connection — the only flavour the encrypted DB takes."""
+    from .encryption import open_sqlcipher  # noqa: PLC0415
+
+    return open_sqlcipher(db_path, passphrase, isolation_level="DEFERRED")
+
+
+def _looks_like_plaintext_db(db_path: Path) -> bool:
+    """Best-effort post-failure check used to translate sqlcipher errors.
+
+    Only called from the [`CredentialDB`][terok_sandbox.credentials.db.CredentialDB]
+    error path when a SQLCipher open fails — never on the success
+    path.  Delegates to the setup-time probe.
+    """
+    from .encryption import is_plaintext_sqlite  # noqa: PLC0415
+
+    return is_plaintext_sqlite(db_path)
+
+
+def open_credential_db(
+    db_path: Path,
+    *,
+    passphrase_file: Path | None = None,
+    use_keyring: bool = False,
+    config_fallback: str | None = None,
+    prompt_on_tty: bool = False,
+) -> CredentialDB:
+    """Open the credential DB, resolving the passphrase via the runtime chain.
+
+    Walks: *passphrase_file* (tmpfs session-unlock) → OS keyring (when
+    *use_keyring*) → *config_fallback* → (when *prompt_on_tty* and a
+    TTY is attached) interactive prompt.  CLI consumers pass
+    ``prompt_on_tty=True``; daemons leave it ``False`` so they fail
+    fast instead of blocking on stdin.
+    """
+    from .encryption import resolve_passphrase  # noqa: PLC0415
+
+    passphrase = resolve_passphrase(
+        passphrase_file=passphrase_file,
+        use_keyring=use_keyring,
+        config_fallback=config_fallback,
+        prompt_on_tty=prompt_on_tty,
+    )
+    if passphrase is None:
+        raise NoPassphraseError(
+            f"no SQLCipher passphrase available for {db_path}"
+            " — run `terok-sandbox vault unlock` or `terok setup` to provision one"
+        )
+    return CredentialDB(db_path, passphrase=passphrase)

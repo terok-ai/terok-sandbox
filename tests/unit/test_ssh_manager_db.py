@@ -16,7 +16,7 @@ from terok_sandbox.credentials.ssh import SSHManager
 @pytest.fixture()
 def db(tmp_path: Path) -> CredentialDB:
     """Return a fresh DB."""
-    return CredentialDB(tmp_path / "vault" / "credentials.db")
+    return CredentialDB(tmp_path / "vault" / "credentials.db", passphrase="test")
 
 
 class TestInit:
@@ -104,12 +104,12 @@ class TestOwnership:
 
     def test_context_manager_closes_owned_db(self, tmp_path) -> None:
         """``SSHManager.open`` + ``with`` closes the DB at block exit."""
-        import sqlite3
+        import sqlcipher3.dbapi2 as _sqlcipher_dbapi
 
-        with SSHManager.open(scope="proj", db_path=tmp_path / "owned.db") as m:
+        with SSHManager.open(scope="proj", db_path=tmp_path / "owned.db", use_keyring=True) as m:
             m.init()  # proves the DB is usable inside the block
         # Any read on the closed connection must raise — proves __exit__ really closed it.
-        with pytest.raises(sqlite3.ProgrammingError):
+        with pytest.raises(_sqlcipher_dbapi.ProgrammingError):
             m._db.list_ssh_keys_for_scope("proj")
         # A second close() must be a no-op (idempotent).
         m.close()

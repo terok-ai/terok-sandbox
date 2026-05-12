@@ -312,7 +312,7 @@ class TestSSHSignerUnixSocket:
         from terok_sandbox.credentials.ssh_keypair import generate_keypair
 
         kp = generate_keypair("ed25519", comment="test-socket")
-        db = CredentialDB(tmp_path / "test.db")
+        db = CredentialDB(tmp_path / "test.db", passphrase="test")
         key_id = db.store_ssh_key(
             key_type=kp.key_type,
             private_der=kp.private_der,
@@ -355,7 +355,7 @@ class TestSSHSignerUnixSocket:
         sock_path = tmp_path / "ssh-agent.sock"
         sock_path.write_text("not a socket")
 
-        db = CredentialDB(tmp_path / "test.db")
+        db = CredentialDB(tmp_path / "test.db", passphrase="test")
         db.close()
 
         with pytest.raises(RuntimeError, match="Refusing to remove non-socket"):
@@ -369,7 +369,7 @@ class TestSSHSignerUnixSocket:
         stale.close()
         assert sock_path.exists()
 
-        db = CredentialDB(tmp_path / "test.db")
+        db = CredentialDB(tmp_path / "test.db", passphrase="test")
         db.close()
 
         server = await start_ssh_signer(str(tmp_path / "test.db"), socket_path=str(sock_path))
@@ -381,7 +381,7 @@ class TestSSHSignerUnixSocket:
 
     async def test_raises_without_transport(self, tmp_path: Path) -> None:
         """ValueError when neither socket_path nor host+port is given."""
-        db = CredentialDB(tmp_path / "test.db")
+        db = CredentialDB(tmp_path / "test.db", passphrase="test")
         db.close()
 
         with pytest.raises(ValueError, match="Either socket_path or host\\+port"):

@@ -11,12 +11,13 @@ orchestration layer constructs it from [`core.config`][terok.lib.core.config] va
 
 from __future__ import annotations
 
+import functools
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from .paths import (
     config_root as _config_root,
@@ -27,41 +28,38 @@ from .paths import (
 )
 
 if TYPE_CHECKING:
-    from .config_schema import ServicesMode
+    from .config_schema import RawCredentialsSection, ServicesMode
 
 CONTAINER_RUNTIME_DIR = "/run/terok"
 """Container-side mount point for the host runtime directory (socket mode)."""
 
 
-def services_mode() -> ServicesMode:
-    """Resolve the ``services.mode`` setting through sandbox's own pydantic schema.
+def _validate_section[T: BaseModel](schema_cls: type[T], section: str) -> T:
+    """Validate *section* against *schema_cls*; warn + return schema defaults on error.
 
-    Sandbox owns the ``services:`` section (see
-    [`RawServicesSection`][terok_sandbox.config_schema.RawServicesSection]), so this
-    reader and the composed ``RawGlobalConfig`` validator up in terok
-    share one schema class: one default, one validator, one failure
-    mode.  A missing section, a missing key, or a malformed value all
-    collapse to the schema's own default — no hand-rolled fallback
-    drifting from the schema's intent.
-
-    An outright invalid value (a typo like ``soket``) still surfaces a
-    stderr warning before the default kicks in, since the caller asked
-    for a specific mode and silently ignoring the request would be
-    worse than a default mismatch.
+    Sandbox owns several top-level sections of ``config.yml``.  Each
+    reader runs the same dance: read → validate → on failure print a
+    one-liner to stderr and fall through to the schema's defaults.
+    This helper centralises that pattern so a missing/typo'd key
+    collapses to the schema's default without hand-rolled fallbacks.
     """
-    from .config_schema import RawServicesSection
-
-    raw = read_config_section("services")
+    raw = read_config_section(section)
     try:
-        return RawServicesSection.model_validate(raw).mode
+        return schema_cls.model_validate(raw)
     except ValidationError as exc:
-        default = RawServicesSection().mode
         print(
-            f"warning: invalid services section ({exc.errors()[0]['msg']}) "
-            f"— falling back to {default!r}",
+            f"warning: invalid {section} section ({exc.errors()[0]['msg']}) "
+            "— falling back to schema defaults",
             file=sys.stderr,
         )
-        return default
+        return schema_cls()
+
+
+def services_mode() -> ServicesMode:
+    """Resolve the ``services.mode`` setting through sandbox's own pydantic schema."""
+    from .config_schema import RawServicesSection
+
+    return _validate_section(RawServicesSection, "services").mode
 
 
 def _default_services_mode() -> ServicesMode:
@@ -73,6 +71,40 @@ def _default_services_mode() -> ServicesMode:
     reference at class-definition time and ignore later patches.
     """
     return services_mode()
+
+
+@functools.lru_cache(maxsize=1)
+def _credentials_section() -> RawCredentialsSection:
+    """Return a validated ``RawCredentialsSection`` from the layered config.
+
+    Cached so the two field readers below share one pydantic pass per
+    process — the daemon's per-scope-bind path re-resolves the chain
+    on every reconcile event, and each resolution previously cost two
+    validations.
+    """
+    from .config_schema import RawCredentialsSection
+
+    return _validate_section(RawCredentialsSection, "credentials")
+
+
+def credentials_passphrase() -> str | None:
+    """Resolve the ``credentials.passphrase`` headless fallback through the schema."""
+    return _credentials_section().passphrase
+
+
+def credentials_use_keyring() -> bool:
+    """Resolve the ``credentials.use_keyring`` opt-in flag through the schema."""
+    return _credentials_section().use_keyring
+
+
+def _default_credentials_passphrase() -> str | None:
+    """Default-factory indirection so tests can patch ``credentials_passphrase``."""
+    return credentials_passphrase()
+
+
+def _default_credentials_use_keyring() -> bool:
+    """Default-factory indirection so tests can patch ``credentials_use_keyring``."""
+    return credentials_use_keyring()
 
 
 @dataclass(frozen=True)
@@ -118,6 +150,23 @@ class SandboxConfig:
 
     shield_bypass: bool = False
     """DANGEROUS: when True, the egress firewall is completely disabled."""
+
+    credentials_passphrase: str | None = field(default_factory=_default_credentials_passphrase)
+    """Headless-no-keyring fallback for the SQLCipher passphrase.
+
+    Read from ``credentials.passphrase`` in ``config.yml`` at construct
+    time.  ``None`` (the default) means "no config-file fallback set"
+    — callers fall through to the next tier in the resolution chain.
+    """
+
+    credentials_use_keyring: bool = field(default_factory=_default_credentials_use_keyring)
+    """Opt-in switch for the OS keyring tier in the passphrase resolution chain.
+
+    Off by default.  Linux Secret Service has per-collection (not
+    per-item) ACLs, so authorising terok against the default collection
+    grants read access to every other secret stored there.  Operators
+    opt in via ``terok setup`` after weighing that trade-off.
+    """
 
     services_mode: ServicesMode = field(default_factory=_default_services_mode)
     """Transport for host↔container IPC, resolved once at construction.
@@ -202,6 +251,47 @@ class SandboxConfig:
     def vault_pid_path(self) -> Path:
         """Return the PID file path for the managed vault daemon."""
         return self.runtime_dir / "vault.pid"
+
+    @property
+    def vault_passphrase_file(self) -> Path:
+        """Return the session-unlock tmpfs path for the SQLCipher passphrase.
+
+        Lives under ``runtime_dir`` (``$XDG_RUNTIME_DIR/...``), so it is
+        RAM-backed and cleared on reboot.  Written by
+        ``terok-sandbox vault unlock``; read at daemon startup as the
+        highest-priority tier of the passphrase resolution chain.
+        """
+        return self.runtime_dir / "vault.passphrase"
+
+    def open_credential_db(self, *, prompt_on_tty: bool = False) -> Any:
+        """Open the credentials DB with this config's resolution-chain knobs.
+
+        Single seam over [`open_credential_db`][terok_sandbox.credentials.db.open_credential_db]
+        so call sites don't have to thread the four tier-selection
+        kwargs by hand.  CLI consumers pass ``prompt_on_tty=True`` to
+        unlock the interactive fallback; daemons leave it off.
+        """
+        from .credentials.db import open_credential_db  # noqa: PLC0415
+
+        return open_credential_db(
+            self.db_path,
+            passphrase_file=self.vault_passphrase_file,
+            use_keyring=self.credentials_use_keyring,
+            config_fallback=self.credentials_passphrase,
+            prompt_on_tty=prompt_on_tty,
+        )
+
+    def open_sqlcipher_connection(self, db_path: Path | None = None, **connect_kwargs: Any) -> Any:
+        """Open a raw sqlcipher3 connection via the chain (vault daemon path)."""
+        from .credentials.encryption import open_sqlcipher_via_chain  # noqa: PLC0415
+
+        return open_sqlcipher_via_chain(
+            db_path or self.db_path,
+            passphrase_file=self.vault_passphrase_file,
+            use_keyring=self.credentials_use_keyring,
+            config_fallback=self.credentials_passphrase,
+            **connect_kwargs,
+        )
 
     @property
     def routes_path(self) -> Path:

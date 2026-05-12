@@ -48,7 +48,7 @@ class TestHealthEndpoint:
         routes_file = tmp_path / "routes.json"
         routes_file.write_text("{}")
         db_path = tmp_path / "creds.db"
-        CredentialDB(db_path).close()
+        CredentialDB(db_path, passphrase="test").close()
         return _build_app(str(db_path), str(routes_file))
 
     async def test_health_returns_200(self, _app) -> None:
@@ -232,7 +232,7 @@ class TestTokenDB:
     @pytest.fixture()
     def token_db(self, tmp_path: Path):
         """Create a DB with test data and return a _TokenDB accessor."""
-        db = CredentialDB(tmp_path / "test.db")
+        db = CredentialDB(tmp_path / "test.db", passphrase="test")
         db.store_credential("default", "claude", {"access_token": "sk-real-123"})
         token = db.create_token("proj", "task-1", "default", "claude")
         db.close()
@@ -270,7 +270,7 @@ class TestBuildApp:
 
     def test_app_has_required_keys(self, tmp_path: Path) -> None:
         """_build_app sets up routes, token_db, and lifecycle hooks."""
-        db = CredentialDB(tmp_path / "test.db")
+        db = CredentialDB(tmp_path / "test.db", passphrase="test")
         db.close()
         routes_file = tmp_path / "routes.json"
         routes_file.write_text(json.dumps({"claude": {"upstream": "https://example.com"}}))
@@ -297,7 +297,7 @@ class TestBuildApp:
 @pytest.fixture()
 def _broker_env(tmp_path: Path):
     """Set up a DB with per-provider tokens and routes, return (app, tokens)."""
-    db = CredentialDB(tmp_path / "test.db")
+    db = CredentialDB(tmp_path / "test.db", passphrase="test")
     db.store_credential("default", "claude", {"access_token": "sk-real"})
     db.store_credential("default", "empty", {"type": "oauth"})  # no token fields
     db.store_credential("default", "orphan", {"access_token": "sk-orphan"})
@@ -407,7 +407,7 @@ class TestHandlerEdgeCases:
 @pytest.fixture()
 def _static_marker_env(tmp_path: Path):
     """Set up DB with shared OAuth credentials and routes for static marker tests."""
-    db = CredentialDB(tmp_path / "test.db")
+    db = CredentialDB(tmp_path / "test.db", passphrase="test")
     db.store_credential(
         "default", "claude", {"type": "oauth", "access_token": "sk-real-oauth-static"}
     )
@@ -467,7 +467,7 @@ class TestStaticPhantomMarker:
 
         from terok_sandbox.vault.constants import PHANTOM_CREDENTIALS_MARKER
 
-        db = CredentialDB(tmp_path / "test.db")
+        db = CredentialDB(tmp_path / "test.db", passphrase="test")
         db.close()  # empty DB
 
         routes = tmp_path / "routes.json"
@@ -516,7 +516,7 @@ def _forwarding_env(tmp_path: Path):
     upstream_app = _web.Application()
     upstream_app.router.add_route("*", "/{tail:.*}", _echo)
 
-    db = CredentialDB(tmp_path / "test.db")
+    db = CredentialDB(tmp_path / "test.db", passphrase="test")
     db.store_credential("default", "claude", {"type": "oauth", "access_token": "sk-real-oauth"})
     db.store_credential("default", "vibe", {"type": "api_key", "key": "mistral-real-key"})
     db.store_credential("default", "glab", {"type": "pat", "token": "glpat-real"})
@@ -616,7 +616,7 @@ class TestForwardingPath:
         upstream_server = TestServer(upstream_app)
         await upstream_server.start_server()
 
-        db = CredentialDB(tmp_path / "test.db")
+        db = CredentialDB(tmp_path / "test.db", passphrase="test")
         db.store_credential("default", "codex", {"type": "oauth", "access_token": "sk-codex"})
         codex_token = db.create_token("proj", "t1", "default", "codex")
         db.close()
@@ -729,7 +729,7 @@ class TestForwardingPath:
         await api_server.start_server()
         await chatgpt_server.start_server()
 
-        db = CredentialDB(tmp_path / "test.db")
+        db = CredentialDB(tmp_path / "test.db", passphrase="test")
         db.store_credential("default", "codex", {"type": "oauth", "access_token": "sk-real-codex"})
         codex_token = db.create_token("proj", "t1", "default", "codex")
         db.close()
@@ -790,7 +790,7 @@ class TestForwardingPath:
         upstream_server = TestServer(upstream_app)
         await upstream_server.start_server()
 
-        db = CredentialDB(tmp_path / "test.db")
+        db = CredentialDB(tmp_path / "test.db", passphrase="test")
         db.store_credential(
             "default",
             "codex",
@@ -1138,7 +1138,7 @@ class TestTokenDBRefresh:
     @pytest.fixture()
     def db_with_creds(self, tmp_path: Path):
         """Create a DB with mixed credential types."""
-        db = CredentialDB(tmp_path / "test.db")
+        db = CredentialDB(tmp_path / "test.db", passphrase="test")
         db.store_credential(
             "default",
             "claude",
@@ -1330,7 +1330,7 @@ class TestRefreshAll:
         token_url = f"http://127.0.0.1:{server.port}/v1/oauth/token"
 
         # DB: claude expired, codex still valid
-        db = CredentialDB(tmp_path / "test.db")
+        db = CredentialDB(tmp_path / "test.db", passphrase="test")
         db.store_credential(
             "default",
             "claude",
@@ -1391,7 +1391,7 @@ class TestRefreshAll:
 
     async def test_skips_provider_without_oauth_refresh(self, tmp_path: Path) -> None:
         """Providers without oauth_refresh in routes are skipped."""
-        db = CredentialDB(tmp_path / "test.db")
+        db = CredentialDB(tmp_path / "test.db", passphrase="test")
         db.store_credential(
             "default",
             "gh",
@@ -1438,7 +1438,7 @@ class TestServerDisconnectRetry:
     @pytest.fixture()
     def _app_and_token(self, tmp_path: Path):
         """Minimal broker app with a single claude credential; upstream URL is irrelevant (session mocked)."""
-        db = CredentialDB(tmp_path / "test.db")
+        db = CredentialDB(tmp_path / "test.db", passphrase="test")
         db.store_credential("default", "claude", {"type": "oauth", "access_token": "sk-real"})
         token = db.create_token("proj", "t1", "default", "claude")
         db.close()
@@ -1537,7 +1537,7 @@ class TestRunMultiSiteSelection:
         """Build a minimal app with required keys."""
         routes_file = tmp_path / "routes.json"
         routes_file.write_text("{}")
-        db = CredentialDB(tmp_path / "creds.db")
+        db = CredentialDB(tmp_path / "creds.db", passphrase="test")
         db.close()
         return _build_app(
             routes_path=str(routes_file),

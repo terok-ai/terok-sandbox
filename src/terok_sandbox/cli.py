@@ -14,6 +14,7 @@ import argparse
 from importlib.metadata import PackageNotFoundError, version as _meta_version
 
 from .commands import (
+    CREDENTIALS_COMMANDS,
     DOCTOR_COMMANDS,
     GATE_COMMANDS,
     LAUNCH_COMMANDS,
@@ -136,6 +137,13 @@ def main(argv: list[str] | None = None) -> None:
     for cmd in SSH_COMMANDS:
         _wire_command(ssh_sub, cmd)
     ssh_p.set_defaults(_group_help=ssh_p)
+
+    # -- credentials --
+    cred_p = sub.add_parser("credentials", help="Credentials DB management")
+    cred_sub = cred_p.add_subparsers()
+    for cmd in CREDENTIALS_COMMANDS:
+        _wire_command(cred_sub, cmd)
+    cred_p.set_defaults(_group_help=cred_p)
 
     # -- prepare / run / cleanup (container wiring) --
     for cmd in LAUNCH_COMMANDS:

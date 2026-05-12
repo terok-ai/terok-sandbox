@@ -46,7 +46,7 @@ class TestLocalSigner:
     async def test_returns_scope_identities_without_handshake(self, tmp_path: Path) -> None:
         """A direct connection lists the scope's keys — no token required."""
         db_path = tmp_path / "vault.db"
-        db = CredentialDB(db_path)
+        db = CredentialDB(db_path, passphrase="test")
         kp = generate_keypair("ed25519", comment="tk-main:proj")
         key_id = db.store_ssh_key(
             key_type=kp.key_type,
@@ -88,7 +88,7 @@ class TestLocalSigner:
     async def test_scope_without_keys_closes_connection(self, tmp_path: Path) -> None:
         """Binding to a scope with no keys is tolerated; connections return empty."""
         db_path = tmp_path / "vault.db"
-        CredentialDB(db_path).close()
+        CredentialDB(db_path, passphrase="test").close()
 
         sock_path = tmp_path / "ssh-agent-local-ghost.sock"
         server = await start_ssh_signer_local(

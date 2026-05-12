@@ -15,10 +15,13 @@ bytes-level keypair vocabulary (``GeneratedKeypair``, fingerprint helpers).
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TypedDict
+from typing import TYPE_CHECKING, TypedDict
 
 from .db import CredentialDB, _require_safe_scope
 from .ssh_keypair import DEFAULT_RSA_BITS, GeneratedKeypair, generate_keypair
+
+if TYPE_CHECKING:
+    from ..config import SandboxConfig
 
 
 class SSHInitResult(TypedDict):
@@ -58,13 +61,36 @@ class SSHManager:
         self._owned_db: CredentialDB | None = None
 
     @classmethod
-    def open(cls, *, scope: str, db_path: Path | str) -> SSHManager:
-        """Return a manager that owns its own DB connection.
+    def open(
+        cls,
+        *,
+        scope: str,
+        db_path: Path | str,
+        passphrase_file: Path | None = None,
+        use_keyring: bool = False,
+        config_fallback: str | None = None,
+        prompt_on_tty: bool = False,
+    ) -> SSHManager:
+        """Return a manager that owns a fresh DB connection from the resolution chain."""
+        from .db import open_credential_db  # noqa: PLC0415
 
-        The connection is opened against *db_path* and closed when the
-        manager exits its context or is garbage-collected.
-        """
-        db = CredentialDB(Path(db_path))
+        db = open_credential_db(
+            Path(db_path),
+            passphrase_file=passphrase_file,
+            use_keyring=use_keyring,
+            config_fallback=config_fallback,
+            prompt_on_tty=prompt_on_tty,
+        )
+        manager = cls(scope=scope, db=db)
+        manager._owned_db = db
+        return manager
+
+    @classmethod
+    def open_for_config(
+        cls, *, scope: str, cfg: SandboxConfig, prompt_on_tty: bool = False
+    ) -> SSHManager:
+        """Return a manager that owns a connection opened via ``cfg.open_credential_db``."""
+        db = cfg.open_credential_db(prompt_on_tty=prompt_on_tty)
         manager = cls(scope=scope, db=db)
         manager._owned_db = db
         return manager

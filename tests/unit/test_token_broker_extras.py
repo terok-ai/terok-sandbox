@@ -40,7 +40,7 @@ class TestTokenDBDel:
 
     def test_del_swallows_close_error(self, tmp_path: Path) -> None:
         db_path = tmp_path / "creds.db"
-        CredentialDB(db_path).close()
+        CredentialDB(db_path, passphrase="test").close()
         db = _TokenDB(str(db_path))
         # sqlite3.Connection.close is read-only — swap the whole _conn
         # for a stand-in whose close() raises.
@@ -228,7 +228,7 @@ class TestRunMultiSocketValidation:
 def _argv_basics(tmp_path: Path) -> list[str]:
     """Return a minimal valid argv for terok-vault main()."""
     db = tmp_path / "creds.db"
-    CredentialDB(db).close()
+    CredentialDB(db, passphrase="test").close()
     routes = tmp_path / "routes.json"
     routes.write_text("{}")
     return [
@@ -361,7 +361,7 @@ def _populate_db_and_routes(
 ) -> tuple[Path, Path, str]:
     """Write a credentials DB + routes file and return (db_path, routes_path, phantom)."""
     db_path = tmp_path / "creds.db"
-    db = CredentialDB(db_path)
+    db = CredentialDB(db_path, passphrase="test")
     db.store_credential("default", "myprovider", cred)
     phantom = db.create_token("myproj", "task-1", "default", "myprovider")
     db.close()

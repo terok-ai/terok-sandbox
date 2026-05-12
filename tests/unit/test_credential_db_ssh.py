@@ -15,7 +15,7 @@ from terok_sandbox.credentials.db import CredentialDB, InvalidScopeName, _requir
 @pytest.fixture()
 def db(tmp_path: Path) -> CredentialDB:
     """Return a fresh DB rooted under a per-test tmp dir."""
-    return CredentialDB(tmp_path / "vault" / "credentials.db")
+    return CredentialDB(tmp_path / "vault" / "credentials.db", passphrase="test")
 
 
 def _store_key(db: CredentialDB, fp: str, *, comment: str = "c") -> int:
