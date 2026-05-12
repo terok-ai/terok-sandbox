@@ -2,6 +2,6 @@
 * User Guide
     * [`prepare` / `run` / `cleanup`](prepare-run-cleanup.md)
 * Developer Guide
-    * [Code Metrics](quality-report.md)
+    * [Code Metrics](code-metrics.md)
     * [CI Workflow Map](ci-map.md)
 * [API Reference](reference/)
