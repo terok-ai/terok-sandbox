@@ -398,22 +398,22 @@ class TestStopTaskContainersLogging:
 
 
 class TestVaultStatusDbFailure:
-    """Verify log_warning when credential DB read fails in get_vault_status."""
+    """Verify get_vault_status' behaviour when the credential DB can't be read."""
 
-    def test_db_exception_logs_warning(self, tmp_path: Path) -> None:
-        """Corrupted DB triggers log_warning and returns empty credentials."""
+    def test_decrypt_failure_marks_vault_locked(self, tmp_path: Path) -> None:
+        """A file that fails to decrypt surfaces as ``locked`` — the actionable signal."""
         from terok_sandbox import SandboxConfig
         from terok_sandbox.vault.lifecycle import VaultManager
 
         cfg = SandboxConfig(state_dir=tmp_path)
-        # Create a corrupt DB file
+        # Bytes that aren't a SQLCipher-encrypted DB: HMAC check fails ⇒
+        # WrongPassphraseError ⇒ ``locked`` rather than a generic warning.
         cfg.db_path.parent.mkdir(parents=True, exist_ok=True)
         cfg.db_path.write_text("not a sqlite db")
 
-        with unittest.mock.patch("terok_sandbox.vault.lifecycle.log_warning") as mock_warn:
-            VaultManager(cfg).get_status()
-        mock_warn.assert_called_once()
-        assert "credential db" in mock_warn.call_args[0][0].lower()
+        status = VaultManager(cfg).get_status()
+        assert status.locked is True
+        assert status.credentials_stored == ()
 
 
 class TestGateHandlerLogMessage:

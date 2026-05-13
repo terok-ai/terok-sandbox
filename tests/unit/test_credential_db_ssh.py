@@ -62,6 +62,22 @@ class TestStoreAndDedup:
         assert db.ssh_keys_version() == v
 
 
+class TestCountSshKeys:
+    """Verify count_ssh_keys feeds VaultStatus.ssh_keys_stored."""
+
+    def test_zero_when_empty(self, db: CredentialDB) -> None:
+        """Fresh DB → no keypairs → 0."""
+        assert db.count_ssh_keys() == 0
+
+    def test_counts_distinct_fingerprints(self, db: CredentialDB) -> None:
+        """One row per fingerprint, regardless of how many scopes hold the key."""
+        k1 = _store_key(db, "fp-1")
+        _store_key(db, "fp-2")
+        db.assign_ssh_key("proj-a", k1)
+        db.assign_ssh_key("proj-b", k1)
+        assert db.count_ssh_keys() == 2
+
+
 class TestAssignments:
     """Verify scope → key_id assignment invariants."""
 

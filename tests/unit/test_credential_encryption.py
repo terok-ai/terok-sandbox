@@ -16,6 +16,7 @@ from terok_sandbox.credentials.db import (
     PlaintextDBFoundError,
     WrongPassphraseError,
     open_credential_db,
+    open_credential_db_with_source,
 )
 from terok_sandbox.credentials.encryption import (
     encrypt_in_place,
@@ -28,6 +29,7 @@ from terok_sandbox.credentials.encryption import (
     open_sqlcipher_via_chain,
     prompt_passphrase,
     resolve_passphrase,
+    resolve_passphrase_with_source,
     store_passphrase_in_keyring,
 )
 
@@ -208,6 +210,44 @@ class TestResolvePassphrase:
         assert resolve_passphrase() is None
 
 
+class TestResolvePassphraseWithSource:
+    """The source-tracking variant labels each tier as it hits."""
+
+    def test_session_file_source(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from terok_sandbox.credentials import encryption as enc
+
+        monkeypatch.setattr(enc, "load_passphrase_from_file", load_passphrase_from_file)
+        path = tmp_path / "p"
+        path.write_text("file-pw\n")
+        assert resolve_passphrase_with_source(passphrase_file=path) == ("file-pw", "session-file")
+
+    def test_keyring_source(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from terok_sandbox.credentials import encryption as enc
+
+        monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda: "ring-pw")
+        assert resolve_passphrase_with_source(use_keyring=True) == ("ring-pw", "keyring")
+
+    def test_config_source(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from terok_sandbox.credentials import encryption as enc
+
+        monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda: None)
+        assert resolve_passphrase_with_source(config_fallback="cfg-pw") == ("cfg-pw", "config")
+
+    def test_prompt_source(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from terok_sandbox.credentials import encryption as enc
+
+        monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda: None)
+        _scripted_tty_prompt(monkeypatch, "tty-pw")
+        assert resolve_passphrase_with_source(prompt_on_tty=True) == ("tty-pw", "prompt")
+
+    def test_none_when_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Every tier empty → (None, None) so VaultStatus.locked stays derivable."""
+        from terok_sandbox.credentials import encryption as enc
+
+        monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda: None)
+        assert resolve_passphrase_with_source() == (None, None)
+
+
 class TestEncryptInPlace:
     """One-shot setup migration from legacy plaintext to SQLCipher."""
 
@@ -356,6 +396,33 @@ class TestCredentialDBEncryption:
             assert db.load_credential("default", "missing") is None
         finally:
             db.close()
+
+    def test_open_credential_db_with_source_reports_tier(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The source-aware opener returns which tier of the chain hit."""
+        from terok_sandbox.credentials import encryption as enc
+
+        monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda: _PASSPHRASE)
+        db, source = open_credential_db_with_source(tmp_path / "src.db", use_keyring=True)
+        try:
+            assert source == "keyring"
+        finally:
+            db.close()
+
+    def test_open_credential_db_with_source_raises_on_empty_chain(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Empty chain → NoPassphraseError, same as the non-source variant."""
+        from terok_sandbox.credentials import encryption as enc
+
+        monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda: None)
+        with pytest.raises(NoPassphraseError):
+            open_credential_db_with_source(tmp_path / "src.db")
 
 
 class TestOpenSqlcipherViaChain:

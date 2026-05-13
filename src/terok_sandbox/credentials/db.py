@@ -44,7 +44,7 @@ from typing import Any
 
 import sqlcipher3.dbapi2 as _sqlcipher_dbapi
 
-from .encryption import NoPassphraseError, WrongPassphraseError
+from .encryption import NoPassphraseError, PassphraseSource, WrongPassphraseError
 from .migrations import ensure_credentials_schema, migrate_credential_db_schema
 
 # sqlcipher3 has its own DatabaseError class disjoint from stdlib sqlite3's;
@@ -62,6 +62,7 @@ __all__ = [
     "ensure_credentials_schema",
     "migrate_credential_db_schema",
     "open_credential_db",
+    "open_credential_db_with_source",
 ]
 
 
@@ -376,6 +377,19 @@ class CredentialDB:
         ).fetchone()
         return row[0] if row else 0
 
+    def count_ssh_keys(self) -> int:
+        """Return the number of distinct keypairs stored in the DB.
+
+        Counts ``ssh_keys`` rows (deduplicated by fingerprint) rather
+        than ``ssh_key_assignments`` rows — a single key shared across
+        scopes is one stored key, not N.  Surfaces through
+        [`VaultStatus.ssh_keys_stored`][terok_sandbox.VaultStatus] so
+        TUI/CLI consumers can show a count without opening the DB
+        themselves.
+        """
+        row = self._conn.execute("SELECT count(*) FROM ssh_keys").fetchone()
+        return row[0] if row else 0
+
     def _bump_ssh_keys_version(self) -> None:
         """Increment the SSH key version counter."""
         self._conn.execute(
@@ -470,6 +484,37 @@ def _looks_like_plaintext_db(db_path: Path) -> bool:
     return is_plaintext_sqlite(db_path)
 
 
+def open_credential_db_with_source(
+    db_path: Path,
+    *,
+    passphrase_file: Path | None = None,
+    use_keyring: bool = False,
+    config_fallback: str | None = None,
+    prompt_on_tty: bool = False,
+) -> tuple[CredentialDB, PassphraseSource]:
+    """Same as [`open_credential_db`][terok_sandbox.credentials.db.open_credential_db]
+    but also returns which tier the passphrase came from.
+
+    Used by [`VaultStatus`][terok_sandbox.VaultStatus] so the TUI status
+    pill can label the unlocked vault by its source without re-walking
+    the chain itself.
+    """
+    from .encryption import resolve_passphrase_with_source  # noqa: PLC0415
+
+    passphrase, source = resolve_passphrase_with_source(
+        passphrase_file=passphrase_file,
+        use_keyring=use_keyring,
+        config_fallback=config_fallback,
+        prompt_on_tty=prompt_on_tty,
+    )
+    if passphrase is None or source is None:
+        raise NoPassphraseError(
+            f"no SQLCipher passphrase available for {db_path}"
+            " — run `terok-sandbox vault unlock` or `terok setup` to provision one"
+        )
+    return CredentialDB(db_path, passphrase=passphrase), source
+
+
 def open_credential_db(
     db_path: Path,
     *,
@@ -486,17 +531,11 @@ def open_credential_db(
     ``prompt_on_tty=True``; daemons leave it ``False`` so they fail
     fast instead of blocking on stdin.
     """
-    from .encryption import resolve_passphrase  # noqa: PLC0415
-
-    passphrase = resolve_passphrase(
+    db, _source = open_credential_db_with_source(
+        db_path,
         passphrase_file=passphrase_file,
         use_keyring=use_keyring,
         config_fallback=config_fallback,
         prompt_on_tty=prompt_on_tty,
     )
-    if passphrase is None:
-        raise NoPassphraseError(
-            f"no SQLCipher passphrase available for {db_path}"
-            " — run `terok-sandbox vault unlock` or `terok setup` to provision one"
-        )
-    return CredentialDB(db_path, passphrase=passphrase)
+    return db
