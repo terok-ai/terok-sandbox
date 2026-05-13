@@ -1256,6 +1256,50 @@ def _handle_ssh_remove(
     print(f"Unassigned {n} key{'s' if n != 1 else ''} from their scope(s).")
 
 
+def _handle_ssh_rename(
+    *,
+    fingerprint: str,
+    comment: str,
+    cfg: SandboxConfig | None = None,
+) -> None:
+    """Change the comment of an existing SSH key, identified by fingerprint prefix.
+
+    The comment lives on the ``ssh_keys`` row, so renaming applies across
+    every scope that key is linked to.  Ambiguous prefixes that match
+    more than one distinct fingerprint print the candidates and exit
+    without writing anything.
+    """
+    from .config import SandboxConfig as _SandboxConfig
+    from .credentials.db import UnsafeCommentError
+
+    if cfg is None:
+        cfg = _SandboxConfig()
+
+    matches = _filter_key_rows(_build_key_rows(cfg), fingerprint=fingerprint)
+    distinct = {r.fingerprint for r in matches}
+    if not distinct:
+        raise SystemExit(f"No SSH key matches fingerprint prefix {fingerprint!r}.")
+    if len(distinct) > 1:
+        print(f"Ambiguous fingerprint prefix {fingerprint!r} matched {len(distinct)} keys:\n")
+        _print_key_table(matches)
+        raise SystemExit("Refine the prefix to a single key.")
+
+    full_fp = distinct.pop()
+    db = _open_db(cfg)
+    try:
+        try:
+            updated = db.set_ssh_key_comment(full_fp, comment)
+        except UnsafeCommentError as exc:
+            raise SystemExit(f"Invalid comment: {exc}") from exc
+    finally:
+        db.close()
+
+    if not updated:
+        raise SystemExit(f"Key {full_fp} disappeared before the rename committed.")
+
+    print(f"Renamed {full_fp} → {sanitize_tty(comment)!r}")
+
+
 SSH_COMMANDS: tuple[CommandDef, ...] = (
     CommandDef(
         name="list",
@@ -1384,6 +1428,22 @@ SSH_COMMANDS: tuple[CommandDef, ...] = (
                 dest="key_id",
                 type=int,
                 required=True,
+            ),
+        ),
+    ),
+    CommandDef(
+        name="rename",
+        help="Change the comment of a stored SSH key (selected by fingerprint prefix)",
+        handler=_handle_ssh_rename,
+        group="ssh",
+        args=(
+            ArgDef(
+                name="fingerprint",
+                help="Fingerprint prefix identifying the key (min 8 chars recommended)",
+            ),
+            ArgDef(
+                name="comment",
+                help="New comment text",
             ),
         ),
     ),
