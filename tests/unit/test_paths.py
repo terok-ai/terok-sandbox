@@ -526,3 +526,50 @@ class TestNamespaceRuntimeDir:
             assert (
                 namespace_runtime_dir("sandbox") == MOCK_BASE / "state-home" / "terok" / "sandbox"
             )
+
+
+class TestPlaintextPassphraseConfigPath:
+    """sandbox#282 helper that locates ``credentials.passphrase`` in the layered config."""
+
+    def test_returns_none_when_field_absent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No ``credentials.passphrase`` anywhere → ``None``."""
+        from terok_sandbox.paths import plaintext_passphrase_config_path
+
+        cfg = tmp_path / "config.yml"
+        cfg.write_text("credentials:\n  use_keyring: true\n", encoding="utf-8")
+        monkeypatch.setattr(
+            "terok_sandbox.paths._config_file_paths",
+            lambda: [("user", cfg)],
+        )
+        assert plaintext_passphrase_config_path() is None
+
+    def test_finds_field_in_user_config(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Field set in user config → that path."""
+        from terok_sandbox.paths import plaintext_passphrase_config_path
+
+        cfg = tmp_path / "user" / "config.yml"
+        cfg.parent.mkdir(parents=True)
+        cfg.write_text("credentials:\n  passphrase: hunter2\n", encoding="utf-8")
+        monkeypatch.setattr(
+            "terok_sandbox.paths._config_file_paths",
+            lambda: [("user", cfg)],
+        )
+        assert plaintext_passphrase_config_path() == cfg
+
+    def test_user_wins_over_system(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Both layers set the field → the higher-priority (last-walked) one wins."""
+        from terok_sandbox.paths import plaintext_passphrase_config_path
+
+        system = tmp_path / "system.yml"
+        user = tmp_path / "user.yml"
+        system.write_text("credentials:\n  passphrase: sys-value\n", encoding="utf-8")
+        user.write_text("credentials:\n  passphrase: user-value\n", encoding="utf-8")
+        monkeypatch.setattr(
+            "terok_sandbox.paths._config_file_paths",
+            lambda: [("system", system), ("user", user)],
+        )
+        assert plaintext_passphrase_config_path() == user

@@ -525,6 +525,28 @@ def _handle_vault_status() -> None:
         print(f"Credentials: {', '.join(sanitize_tty(c) for c in status.credentials_stored)}")
     else:
         print("Credentials: none stored")
+    if status.plaintext_passphrase_path is not None:
+        _print_plaintext_passphrase_warning(status.plaintext_passphrase_path)
+
+
+def _print_plaintext_passphrase_warning(path: Path) -> None:
+    """Stderr WARNING that the vault passphrase lives in plaintext on disk.
+
+    Fires whenever ``credentials.passphrase`` is configured, even if a
+    higher tier (session-file, systemd-creds, keyring) actually
+    unlocked this call — the file is still a passive re-unlock vector
+    and the operator deserves to know it's there.  Visual style
+    mirrors [`_warn_about_plaintext_backup`][terok_sandbox.commands._warn_about_plaintext_backup].
+    """
+    use_color = sys.stderr.isatty()
+    red = "\033[1;31m" if use_color else ""
+    reset = "\033[0m" if use_color else ""
+    print(
+        f"{red}WARNING: vault passphrase stored in plaintext at {sanitize_tty(str(path))}{reset}\n"
+        f"{red}         accept on-disk plaintext as your trust boundary,"
+        f" or migrate to keyring/systemd-creds.{reset}",
+        file=sys.stderr,
+    )
 
 
 def _handle_vault_install() -> None:
@@ -1583,7 +1605,7 @@ _CHOOSER_PROMPT = """\
 Where should terok store the passphrase to encrypt the vault?
   [s] session-unlock — terok-sandbox vault unlock after each boot (default)
   [k] keyring — store passphrase in your login keyring
-  [c] config file — UNSAFE, same disk as the encrypted DB
+  [c] config file — plaintext on disk; same as encrypted DB (requires confirmation)
 
 Choice [s]:"""
 
@@ -1743,13 +1765,41 @@ def _looks_like_db_lock(exc: BaseException) -> bool:
     return "database is locked" in str(exc).lower()
 
 
+_CONFIG_TIER_CONFIRMATION = """\
+
+You picked the config-file tier.  This stores the SQLCipher passphrase
+as plaintext on the same disk as the encrypted database itself, so
+your encryption is only as strong as the filesystem layer
+(LUKS / signed image / per-user permissions).
+
+  - Do NOT enable on shared or multi-tenant machines.
+  - The keyring tier ([k]) and systemd-creds tier (separate verb)
+    bind the passphrase to your login session or TPM; both are
+    safer defaults on a single-user host.
+  - `terok-sandbox vault status` and sickbay will permanently warn
+    that plaintext-on-disk is configured until you remove it.
+
+Type `yes` to confirm, anything else to choose a different tier:"""
+
+
 def _ask_passphrase_mode() -> _PassphraseMode:
-    """Return the operator's chosen mode; default to session on non-TTY runs."""
+    """Return the operator's chosen mode; default to session on non-TTY runs.
+
+    The config-file tier requires an explicit ``yes`` confirmation to
+    block accidental selection — see [`_CONFIG_TIER_CONFIRMATION`][terok_sandbox.commands._CONFIG_TIER_CONFIRMATION]
+    for the trust-boundary explanation.  Any other answer re-prompts.
+    """
     if not sys.stdin.isatty():
         return "session"
-    print(_CHOOSER_PROMPT)
-    choice = sys.stdin.readline().strip().lower()[:1] or "s"
-    return _CHOICE_TO_MODE.get(choice, "session")
+    while True:
+        print(_CHOOSER_PROMPT)
+        choice = sys.stdin.readline().strip().lower()[:1] or "s"
+        mode = _CHOICE_TO_MODE.get(choice, "session")
+        if mode != "config":
+            return mode
+        print(_CONFIG_TIER_CONFIRMATION)
+        if sys.stdin.readline().strip().lower() == "yes":
+            return mode
 
 
 def _provision_passphrase(

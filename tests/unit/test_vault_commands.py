@@ -117,3 +117,49 @@ class TestVaultStatus:
             _handle_vault_status()
 
         assert "stopped" in capsys.readouterr().out
+
+    def test_shows_plaintext_passphrase_warning(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """``plaintext_passphrase_path`` triggers a stderr WARNING naming the file."""
+        config_path = Path("/etc/terok/config.yml")
+        status = VaultStatus(
+            mode="systemd",
+            running=True,
+            healthy=True,
+            socket_path=Path("/s"),
+            db_path=Path("/d"),
+            routes_path=Path("/r"),
+            routes_configured=0,
+            credentials_stored=(),
+            plaintext_passphrase_path=config_path,
+        )
+        with patch.object(VaultManager, "get_status", return_value=status):
+            _handle_vault_status()
+
+        captured = capsys.readouterr()
+        # Warning lives on stderr so structured stdout fields stay greppable.
+        assert "WARNING" in captured.err
+        assert "plaintext" in captured.err
+        assert str(config_path) in captured.err
+        # Stdout still carries the structured fields without warning noise.
+        assert "WARNING" not in captured.out
+
+    def test_no_warning_when_plaintext_path_is_none(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Default-None case is silent — no plaintext-passphrase line at all."""
+        status = VaultStatus(
+            mode="systemd",
+            running=True,
+            healthy=True,
+            socket_path=Path("/s"),
+            db_path=Path("/d"),
+            routes_path=Path("/r"),
+            routes_configured=0,
+            credentials_stored=(),
+        )
+        with patch.object(VaultManager, "get_status", return_value=status):
+            _handle_vault_status()
+
+        captured = capsys.readouterr()
+        assert "WARNING" not in captured.err
+        assert "plaintext" not in captured.err
