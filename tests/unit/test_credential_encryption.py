@@ -1263,7 +1263,7 @@ class TestVaultSeal:
 
         monkeypatch.setattr(sc, "is_available", lambda: False)
 
-        with pytest.raises(SystemExit, match="systemd-creds binary"):
+        with pytest.raises(SystemExit, match="needs systemd"):
             _handle_vault_seal(cfg=_make_cfg(tmp_path))
 
     def test_seal_refuses_when_no_current_passphrase(
@@ -1281,10 +1281,41 @@ class TestVaultSeal:
             "terok_sandbox.credentials.encryption.load_passphrase_from_keyring",
             lambda: None,
         )
-        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
 
         with pytest.raises(SystemExit, match="no current passphrase"):
             _handle_vault_seal(cfg=cfg)
+
+    def test_seal_never_prompts_for_passphrase(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Even with a TTY, seal must not invite a fresh passphrase entry.
+
+        Sealing whatever the operator types would happily encrypt a value
+        that *doesn't* open the existing DB; the failure mode lands at
+        the next reboot.  The handler routes through
+        ``resolve_passphrase(..., prompt_on_tty=False)`` so the prompt
+        branch is unreachable from this code path.
+        """
+        from unittest.mock import MagicMock
+
+        from terok_sandbox.commands import _handle_vault_seal
+        from terok_sandbox.credentials import systemd_creds as sc
+
+        cfg = _make_cfg(tmp_path)
+        monkeypatch.setattr(sc, "is_available", lambda: True)
+        monkeypatch.setattr(sc, "has_tpm2", lambda: True)
+        monkeypatch.setattr(
+            "terok_sandbox.credentials.encryption.load_passphrase_from_keyring",
+            lambda: None,
+        )
+        # A live TTY would trip the prompt branch if the handler still asked for one
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        prompt = MagicMock()
+        monkeypatch.setattr("prompt_toolkit.prompt", prompt)
+
+        with pytest.raises(SystemExit, match="no current passphrase"):
+            _handle_vault_seal(cfg=cfg)
+        prompt.assert_not_called()
 
 
 class TestCredentialsSetupPhaseDaemonHandling:

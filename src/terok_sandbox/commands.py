@@ -656,7 +656,10 @@ def _handle_vault_seal(*, cfg: SandboxConfig | None = None, key: str = "auto") -
         cfg = SandboxConfig()
 
     if not systemd_creds.is_available():
-        raise SystemExit("systemd-creds binary not found on PATH (needs systemd ≥ 250)")
+        raise SystemExit(
+            "systemd-creds unavailable: needs systemd ≥ 257 with the Varlink"
+            " io.systemd.Credentials interface (Fedora ≥ 42, Debian ≥ 13)"
+        )
 
     if key == "auto":
         tpm = systemd_creds.has_tpm2()
@@ -671,15 +674,18 @@ def _handle_vault_seal(*, cfg: SandboxConfig | None = None, key: str = "auto") -
     else:
         raise SystemExit(f"unknown --key value: {key!r} (expected: auto, tpm, host)")
 
-    # Resolve the *current* passphrase — must come from a tier other
-    # than systemd-creds (sealing what we just unsealed would be a
-    # no-op).  Skip the systemd_creds_file kwarg so the resolver can't
+    # Seal must reuse an *already-resolved* passphrase — prompting
+    # here would happily accept whatever the operator just typed and
+    # seal it, only for the next reboot to find that the sealed value
+    # is not the one that opens the DB.  ``prompt_on_tty=False`` makes
+    # "no tier resolves" a loud precondition failure instead.  Skip
+    # the systemd_creds_file kwarg as well so the resolver can't
     # short-circuit on a stale credential we're about to replace.
     passphrase = resolve_passphrase(
         passphrase_file=cfg.vault_passphrase_file,
         use_keyring=cfg.credentials_use_keyring,
         config_fallback=cfg.credentials_passphrase,
-        prompt_on_tty=True,
+        prompt_on_tty=False,
     )
     if passphrase is None:
         raise SystemExit("no current passphrase to seal — run `terok-sandbox vault unlock` first")
