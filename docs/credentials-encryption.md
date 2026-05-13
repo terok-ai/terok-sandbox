@@ -12,10 +12,12 @@ stops at the first hit:
 1. **Session-unlock file** — `$XDG_RUNTIME_DIR/terok/sandbox/vault.passphrase`,
    RAM-backed, cleared on reboot.  Written by `vault unlock`.
 2. **systemd-creds** — sealed credential at
-   `$XDG_DATA_HOME/terok/vault/vault.passphrase.cred`, decrypted via
-   `systemd-creds(1)`.  Machine-bound (TPM2 or host key), survives
-   reboot, no keyring needed.  Written by `vault seal`.
-   Requires systemd ≥ 257.
+   `${XDG_DATA_HOME:-~/.local/share}/terok/vault/vault.passphrase.cred`
+   (`XDG_DATA_HOME` is rarely set — the `~/.local/share` fallback is
+   what most hosts hit; the path matches `vault status`'s `DB:` line
+   directory).  Decrypted via `systemd-creds(1)`.  Machine-bound
+   (TPM2 or host key), survives reboot, no keyring needed.  Written
+   by `vault seal`.  Requires systemd ≥ 257.
 3. **OS keyring** — `(service=terok-sandbox, username=credentials-db)`,
    used only when `credentials.use_keyring: true` is set in `config.yml`.
 4. **Config fallback** — `credentials.passphrase` in `config.yml`.
@@ -69,7 +71,7 @@ secret-tool lookup service terok-sandbox username credentials-db
 
 # systemd-creds (sealed at rest; needs the same host that sealed it):
 systemd-creds --user --name=terok-sandbox.vault-passphrase \
-  decrypt "$XDG_DATA_HOME/terok/vault/vault.passphrase.cred" -
+  decrypt "${XDG_DATA_HOME:-$HOME/.local/share}/terok/vault/vault.passphrase.cred" -
 
 # config.yml (plaintext-on-disk):
 yq '.credentials.passphrase' ~/.config/terok/config.yml
