@@ -1187,124 +1187,92 @@ class TestVaultUnlockLock:
 
 
 class TestVaultSeal:
-    """``terok-sandbox vault seal`` CLI handler."""
+    """``terok-sandbox vault seal`` CLI handler.
 
-    def test_seal_auto_picks_tpm_when_available(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """``--key=auto`` (default) seals against TPM2 when ``has-tpm2`` succeeds."""
-        from unittest.mock import MagicMock
+    The handler is intentionally thin: validate the ``--key`` vocabulary,
+    resolve a passphrase from another tier, hand off to
+    ``systemd_creds.seal`` with a ``KeyMode`` that maps 1:1 onto
+    systemd's own ``--with-key=`` values.  Tests stub ``sc.seal`` so the
+    actual subprocess is unit-test-irrelevant.
+    """
 
-        from terok_sandbox.commands import _handle_vault_seal
-        from terok_sandbox.credentials import systemd_creds as sc
-
+    @staticmethod
+    def _seed_cfg(tmp_path: Path) -> object:
+        """Return a cfg with a session-unlock file already populated."""
         cfg = _make_cfg(tmp_path)
         cfg.vault_passphrase_file.parent.mkdir(parents=True, exist_ok=True)
         cfg.vault_passphrase_file.write_text("current-pw\n")
+        return cfg
 
-        seal = MagicMock()
+    @staticmethod
+    def _stub_seal_ready(
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> tuple[object, object]:
+        """Stub ``sc.is_available`` true and capture ``sc.seal`` invocations."""
+        from unittest.mock import MagicMock
+
+        from terok_sandbox.credentials import systemd_creds as sc
+
         monkeypatch.setattr(sc, "is_available", lambda: True)
-        monkeypatch.setattr(sc, "has_tpm2", lambda: True)
-        monkeypatch.setattr(sc, "seal", seal)
         monkeypatch.setattr(
             "terok_sandbox.credentials.encryption.load_passphrase_from_file",
             load_passphrase_from_file,
         )
-
-        _handle_vault_seal(cfg=cfg)
-
-        seal.assert_called_once_with("current-pw", cfg.vault_systemd_creds_file, tpm=True)
-
-    def test_seal_auto_falls_through_to_host_without_tpm(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """No TPM → seal against the host key."""
-        from unittest.mock import MagicMock
-
-        from terok_sandbox.commands import _handle_vault_seal
-        from terok_sandbox.credentials import systemd_creds as sc
-
-        cfg = _make_cfg(tmp_path)
-        cfg.vault_passphrase_file.parent.mkdir(parents=True, exist_ok=True)
-        cfg.vault_passphrase_file.write_text("current-pw\n")
-
         seal = MagicMock()
-        monkeypatch.setattr(sc, "is_available", lambda: True)
-        monkeypatch.setattr(sc, "has_tpm2", lambda: False)
         monkeypatch.setattr(sc, "seal", seal)
-        monkeypatch.setattr(
-            "terok_sandbox.credentials.encryption.load_passphrase_from_file",
-            load_passphrase_from_file,
+        return sc, seal
+
+    @pytest.mark.parametrize(
+        ("cli_key", "expected_mode"),
+        [
+            ("auto", "auto"),
+            ("tpm", "tpm2"),
+            ("host", "host"),
+            ("tpm+host", "host+tpm2"),
+        ],
+    )
+    def test_key_argument_maps_to_systemd_key_mode(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        cli_key: str,
+        expected_mode: str,
+    ) -> None:
+        """Each ``--key=…`` value funnels through to the systemd ``--with-key=`` vocabulary.
+
+        Notably ``--key=auto`` maps to ``--with-key=auto`` — we hand the
+        host-vs-TPM choice to systemd, which picks ``host+tpm2`` on
+        TPM-equipped hosts (defense in depth) rather than the weaker
+        TPM-only default the wrapper used to imply.
+        """
+        from terok_sandbox.commands import _handle_vault_seal
+
+        cfg = self._seed_cfg(tmp_path)
+        _, seal = self._stub_seal_ready(monkeypatch)
+
+        _handle_vault_seal(cfg=cfg, key=cli_key)
+
+        seal.assert_called_once_with(
+            "current-pw", cfg.vault_systemd_creds_file, key_mode=expected_mode
         )
 
-        _handle_vault_seal(cfg=cfg)
-
-        assert seal.call_args.kwargs["tpm"] is False
-
-    def test_seal_tpm_explicit_fails_without_tpm(
+    def test_seal_propagates_systemd_creds_failure_as_systemexit(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """``--key=tpm`` refuses to silently downgrade to host-key sealing."""
+        """A ``--key=tpm`` request on a TPM-less host bubbles up as a SystemExit.
+
+        The wrapper itself can't know whether the host has a TPM — systemd-creds
+        is the authority — so the handler trusts ``seal()`` to fail loudly and
+        translates the resulting RuntimeError into a CLI-friendly SystemExit.
+        """
         from terok_sandbox.commands import _handle_vault_seal
-        from terok_sandbox.credentials import systemd_creds as sc
 
-        monkeypatch.setattr(sc, "is_available", lambda: True)
-        monkeypatch.setattr(sc, "has_tpm2", lambda: False)
+        cfg = self._seed_cfg(tmp_path)
+        _, seal = self._stub_seal_ready(monkeypatch)
+        seal.side_effect = RuntimeError("systemd-creds encrypt failed (exit 1): no TPM2 device")
 
-        with pytest.raises(SystemExit, match="no TPM2"):
-            _handle_vault_seal(cfg=_make_cfg(tmp_path), key="tpm")
-
-    def test_seal_key_tpm_explicit_with_tpm(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """``--key=tpm`` on a TPM-equipped host seals with TPM2 (operator pinning the choice)."""
-        from unittest.mock import MagicMock
-
-        from terok_sandbox.commands import _handle_vault_seal
-        from terok_sandbox.credentials import systemd_creds as sc
-
-        cfg = _make_cfg(tmp_path)
-        cfg.vault_passphrase_file.parent.mkdir(parents=True, exist_ok=True)
-        cfg.vault_passphrase_file.write_text("current-pw\n")
-
-        seal = MagicMock()
-        monkeypatch.setattr(sc, "is_available", lambda: True)
-        monkeypatch.setattr(sc, "has_tpm2", lambda: True)
-        monkeypatch.setattr(sc, "seal", seal)
-        monkeypatch.setattr(
-            "terok_sandbox.credentials.encryption.load_passphrase_from_file",
-            load_passphrase_from_file,
-        )
-
-        _handle_vault_seal(cfg=cfg, key="tpm")
-
-        assert seal.call_args.kwargs["tpm"] is True
-
-    def test_seal_key_host_explicit(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """``--key=host`` skips the TPM and seals against the host key directly."""
-        from unittest.mock import MagicMock
-
-        from terok_sandbox.commands import _handle_vault_seal
-        from terok_sandbox.credentials import systemd_creds as sc
-
-        cfg = _make_cfg(tmp_path)
-        cfg.vault_passphrase_file.parent.mkdir(parents=True, exist_ok=True)
-        cfg.vault_passphrase_file.write_text("current-pw\n")
-
-        seal = MagicMock()
-        has_tpm = MagicMock(return_value=True)
-        monkeypatch.setattr(sc, "is_available", lambda: True)
-        monkeypatch.setattr(sc, "has_tpm2", has_tpm)
-        monkeypatch.setattr(sc, "seal", seal)
-        monkeypatch.setattr(
-            "terok_sandbox.credentials.encryption.load_passphrase_from_file",
-            load_passphrase_from_file,
-        )
-
-        _handle_vault_seal(cfg=cfg, key="host")
-
-        assert seal.call_args.kwargs["tpm"] is False
-        has_tpm.assert_not_called()  # --key=host shouldn't probe for TPM at all
+        with pytest.raises(SystemExit, match="no TPM2 device"):
+            _handle_vault_seal(cfg=cfg, key="tpm")
 
     def test_seal_unknown_key_value_rejected(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1321,7 +1289,7 @@ class TestVaultSeal:
     def test_seal_refuses_when_binary_missing(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """``systemd-creds`` absent → exit with an actionable hint."""
+        """``systemd-creds`` absent or too old → exit with an actionable hint."""
         from terok_sandbox.commands import _handle_vault_seal
         from terok_sandbox.credentials import systemd_creds as sc
 
@@ -1339,8 +1307,6 @@ class TestVaultSeal:
 
         cfg = _make_cfg(tmp_path)
         monkeypatch.setattr(sc, "is_available", lambda: True)
-        monkeypatch.setattr(sc, "has_tpm2", lambda: True)
-        # Every chain tier returns nothing
         monkeypatch.setattr(
             "terok_sandbox.credentials.encryption.load_passphrase_from_keyring",
             lambda: None,
@@ -1367,12 +1333,10 @@ class TestVaultSeal:
 
         cfg = _make_cfg(tmp_path)
         monkeypatch.setattr(sc, "is_available", lambda: True)
-        monkeypatch.setattr(sc, "has_tpm2", lambda: True)
         monkeypatch.setattr(
             "terok_sandbox.credentials.encryption.load_passphrase_from_keyring",
             lambda: None,
         )
-        # A live TTY would trip the prompt branch if the handler still asked for one
         monkeypatch.setattr("sys.stdin.isatty", lambda: True)
         prompt = MagicMock()
         monkeypatch.setattr("prompt_toolkit.prompt", prompt)

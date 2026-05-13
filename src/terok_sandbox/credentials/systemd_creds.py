@@ -28,6 +28,27 @@ local credential key: Permission denied``.  [`is_available`][terok_sandbox.crede
 gates on the version so the tier reports as unavailable rather than
 failing at runtime.
 
+**Design choices that follow systemd-creds' intent.**
+
+- ``--name=terok-sandbox.vault-passphrase`` is always set.  systemd
+  embeds the name in the sealed blob to *prevent cross-purpose reuse*
+  ("a credential sealed for X must not decrypt as if it were Y"); an
+  explicit namespaced name is the documented production pattern.
+- The default key mode (``KeyMode.AUTO`` → ``--with-key=auto``)
+  delegates the host-vs-TPM choice to systemd, which yields
+  ``host+tpm2`` on TPM-equipped systems (defense in depth) and falls
+  back to host alone on TPM-less hosts.  We don't second-guess that
+  decision — duplicating systemd's auto-detection in Python would
+  drift over time and weaken the dual-factor default.
+- No PCR policy.  Application-level credentials that need to survive
+  kernel / UKI updates without operator intervention shouldn't bind
+  to PCR values — Lennart's writing on PCR sealing targets disk
+  encryption, not application secrets, where PCR brittleness costs
+  too much (every kernel update would require re-sealing).  The
+  attacker that can boot another kernel can also read the encrypted
+  DB plaintext when the legitimate operator unlocks the vault, so the
+  PCR policy doesn't move the needle for our threat model.
+
 The module is a thin subprocess shim — no Python binding exists for
 systemd-creds and the CLI is the supported entry point.  Tests stub
 ``subprocess.run`` directly; production code stays trivial.
@@ -40,10 +61,18 @@ import re
 import shutil
 import subprocess  # nosec: B404 — sealed credential lifecycle requires the systemd-creds CLI
 from pathlib import Path
+from typing import Literal
 
 # ── Vocabulary ──────────────────────────────────────────────────────
 
 _BINARY = "systemd-creds"
+
+#: Namespaced credential name embedded in the encrypted blob.  systemd
+#: refuses to decrypt a credential whose stored name doesn't match the
+#: one supplied at decrypt time — the sandbox-prefixed value here
+#: prevents the sealed file from being re-read by any other consumer
+#: of systemd-creds on the same machine.
+_CREDENTIAL_NAME = "terok-sandbox.vault-passphrase"
 
 #: Minimum systemd version with the non-root Varlink delegation path —
 #: PR systemd/systemd#35536, released in v257 (2024-12-20).  Below this
@@ -51,6 +80,16 @@ _BINARY = "systemd-creds"
 #: that as "tier unavailable" rather than letting subprocess errors
 #: leak through.
 _MIN_SYSTEMD_VERSION = 257
+
+#: Subset of systemd-creds' ``--with-key=`` values we expose.  These map
+#: 1:1 to the systemd flag so the wrapper doesn't reinvent the choice
+#: (or invite the choice to drift): ``auto`` is "let systemd pick" —
+#: host+tpm2 if a TPM is present, host alone otherwise.  ``host+tpm2``
+#: pins the dual-factor combination explicitly; ``tpm2`` and ``host``
+#: pin the single-factor flavours.  We don't expose ``tpm2-absent`` or
+#: ``auto-initrd`` — those exist for boot-time / no-state environments
+#: that don't match the sandbox use case.
+KeyMode = Literal["auto", "host", "tpm2", "host+tpm2"]
 
 _SEAL_TIMEOUT = 10.0
 _UNSEAL_TIMEOUT = 10.0
@@ -60,13 +99,23 @@ _PROBE_TIMEOUT = 5.0
 # ── Sealing ─────────────────────────────────────────────────────────
 
 
-def seal(passphrase: str, credential_path: Path, *, tpm: bool = True) -> None:
-    """Encrypt *passphrase* into *credential_path* (user-scoped).
+def seal(passphrase: str, credential_path: Path, *, key_mode: KeyMode = "auto") -> None:
+    """Encrypt *passphrase* into *credential_path* under
+    [`_CREDENTIAL_NAME`][terok_sandbox.credentials.systemd_creds._CREDENTIAL_NAME].
 
-    *tpm=True* seals against TPM2; *tpm=False* falls through to the
-    host key.  Both go through ``--user`` so the credential is bound
-    to the calling UID + username + machine-id; PID 1's Varlink
-    interface handles the privileged half.
+    *key_mode* maps 1:1 onto ``systemd-creds --with-key=…``:
+
+    - ``"auto"`` (default) — systemd chooses ``host+tpm2`` on
+      TPM-equipped hosts and ``host`` otherwise.  Defense in depth on
+      hardware that supports it, graceful fallback on hardware that
+      doesn't.
+    - ``"host+tpm2"`` — pin the dual-factor combination explicitly.
+    - ``"tpm2"`` — TPM-only.  Refuses to seal on a host without a TPM.
+    - ``"host"`` — host-key only, no TPM dependency.
+
+    All seals go through ``--user`` so the credential is bound to the
+    calling UID + username + machine-id; PID 1's Varlink interface
+    handles the privileged half.
 
     The file is materialised at ``0o600`` after the seal so its
     contents stay inaccessible to other local users while still being
@@ -89,10 +138,17 @@ def seal(passphrase: str, credential_path: Path, *, tpm: bool = True) -> None:
             f"{_BINARY} unavailable: needs systemd ≥ {_MIN_SYSTEMD_VERSION} for non-root --user mode"
         )
     credential_path.parent.mkdir(parents=True, exist_ok=True)
-    key_arg = "--with-key=tpm2" if tpm else "--with-key=host"
     try:
         subprocess.run(  # nosec: B603 — fixed argv shape; credential_path is internally owned
-            [_BINARY, "encrypt", "--user", key_arg, "-", str(credential_path)],
+            [
+                _BINARY,
+                "encrypt",
+                "--user",
+                f"--name={_CREDENTIAL_NAME}",
+                f"--with-key={key_mode}",
+                "-",
+                str(credential_path),
+            ],
             input=passphrase,
             text=True,
             check=True,
@@ -120,14 +176,16 @@ def seal(passphrase: str, credential_path: Path, *, tpm: bool = True) -> None:
 def unseal(credential_path: Path) -> str | None:
     """Return the decrypted passphrase, or ``None`` if the credential isn't usable here.
 
-    Always passes ``--user`` so the Varlink delegation handles the
-    privileged decrypt (see module docstring).
+    Passes ``--user`` and the same ``--name=`` the credential was
+    sealed with, so a sealed blob can only be unsealed for its
+    intended purpose — systemd refuses cross-purpose decrypts even on
+    the same host.
 
     Returns ``None`` rather than raising so the resolver can fall
     through to the next tier on every failure mode: file missing,
     ``systemd-creds`` absent or too old, host can't decrypt (e.g.
     credential moved from another machine, TPM state changed), Varlink
-    socket unreachable, timeout.
+    socket unreachable, timeout, name mismatch.
 
     Empty decrypt output is also collapsed to ``None`` — SQLCipher's
     no-encryption sentinel must never reach the connection.
@@ -136,7 +194,14 @@ def unseal(credential_path: Path) -> str | None:
         return None
     try:
         result = subprocess.run(  # nosec: B603 — fixed argv, credential_path internally owned
-            [_BINARY, "decrypt", "--user", str(credential_path), "-"],
+            [
+                _BINARY,
+                "decrypt",
+                "--user",
+                f"--name={_CREDENTIAL_NAME}",
+                str(credential_path),
+                "-",
+            ],
             capture_output=True,
             text=True,
             check=True,
@@ -222,4 +287,4 @@ def _systemd_creds_version() -> int | None:
     return int(match.group(1))
 
 
-__all__ = ["has_tpm2", "is_available", "seal", "unseal"]
+__all__ = ["KeyMode", "has_tpm2", "is_available", "seal", "unseal"]

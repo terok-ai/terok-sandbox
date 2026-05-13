@@ -160,19 +160,40 @@ class TestSeal:
             systemd_creds.seal("pw", cred)
         assert "--user" in _seal_argv(run)
 
-    def test_tpm_key_argv(self, tmp_path: Path) -> None:
+    def test_namespaced_credential_name_embedded(self, tmp_path: Path) -> None:
+        """``--name=`` is set to prevent cross-purpose reuse of the sealed blob."""
         cred = tmp_path / "v.cred"
         with patch("subprocess.run", side_effect=_mock_seal_subprocess(cred)) as run:
-            systemd_creds.seal("pw", cred, tpm=True)
+            systemd_creds.seal("pw", cred)
+        argv = _seal_argv(run)
+        assert "--name=terok-sandbox.vault-passphrase" in argv
+
+    def test_default_key_mode_is_auto(self, tmp_path: Path) -> None:
+        """Default delegates the host-vs-TPM choice to systemd's own auto-detection."""
+        cred = tmp_path / "v.cred"
+        with patch("subprocess.run", side_effect=_mock_seal_subprocess(cred)) as run:
+            systemd_creds.seal("pw", cred)
+        assert "--with-key=auto" in _seal_argv(run)
+
+    @pytest.mark.parametrize(
+        ("key_mode", "expected_flag"),
+        [
+            ("auto", "--with-key=auto"),
+            ("host", "--with-key=host"),
+            ("tpm2", "--with-key=tpm2"),
+            ("host+tpm2", "--with-key=host+tpm2"),
+        ],
+    )
+    def test_key_mode_maps_through_to_systemd_flag(
+        self, tmp_path: Path, key_mode: systemd_creds.KeyMode, expected_flag: str
+    ) -> None:
+        """The wrapper passes the operator's key_mode through verbatim — no reinterpretation."""
+        cred = tmp_path / "v.cred"
+        with patch("subprocess.run", side_effect=_mock_seal_subprocess(cred)) as run:
+            systemd_creds.seal("pw", cred, key_mode=key_mode)
         argv = _seal_argv(run)
         assert argv[:2] == ["systemd-creds", "encrypt"]
-        assert "--with-key=tpm2" in argv
-
-    def test_host_key_argv(self, tmp_path: Path) -> None:
-        cred = tmp_path / "v.cred"
-        with patch("subprocess.run", side_effect=_mock_seal_subprocess(cred)) as run:
-            systemd_creds.seal("pw", cred, tpm=False)
-        assert "--with-key=host" in _seal_argv(run)
+        assert expected_flag in argv
 
     def test_passphrase_goes_to_stdin(self, tmp_path: Path) -> None:
         """The passphrase is piped to systemd-creds, not embedded in argv."""
@@ -288,9 +309,11 @@ class TestUnseal:
         with patch("subprocess.run", return_value=result) as run:
             assert systemd_creds.unseal(cred) == "my-passphrase"
         argv = run.call_args.args[0]
-        # ``--user`` engages the non-root Varlink delegation path
-        assert "--user" in argv
         assert argv[:2] == ["systemd-creds", "decrypt"]
+        # ``--user`` engages the non-root Varlink delegation path; ``--name=``
+        # matches the encrypt side so systemd refuses cross-purpose reuse.
+        assert "--user" in argv
+        assert "--name=terok-sandbox.vault-passphrase" in argv
 
     def test_empty_decrypt_output_returns_none(self, tmp_path: Path) -> None:
         """Empty plaintext is SQLCipher's no-encryption sentinel — collapse to None."""
