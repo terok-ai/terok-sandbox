@@ -100,6 +100,10 @@ from .credentials.ssh_keypair import (
     parse_openssh_keypair,
     public_line_of,
 )
+from .credentials.systemd_creds import (
+    has_tpm2 as systemd_creds_has_tpm2,
+    is_available as is_systemd_creds_available,
+)
 from .doctor import CheckVerdict, DoctorCheck, sandbox_doctor_checks
 from .gate.lifecycle import GateServerManager, GateServerStatus
 from .gate.mirror import GateAuthNotConfigured, GateStalenessInfo, GitGate, is_ssh_url
@@ -411,6 +415,8 @@ __all__ = [
     "PassphraseSource",
     "SSHKeyRecord",
     "SSHKeyRow",
+    "is_systemd_creds_available",
+    "systemd_creds_has_tpm2",
     # Vault
     "VaultStatus",
     "VaultUnreachableError",

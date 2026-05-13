@@ -265,11 +265,23 @@ class SandboxConfig:
         """
         return self.runtime_dir / "vault.passphrase"
 
+    @property
+    def vault_systemd_creds_file(self) -> Path:
+        """Return the sealed-credential path for the systemd-creds tier.
+
+        Lives under ``vault_dir`` (persistent state, ``0o600``) — the
+        credential is machine-bound (TPM2 or host key), so persistence
+        across reboots is the whole point.  Written by
+        ``terok-sandbox vault seal``; read on every chain walk via
+        [`terok_sandbox.credentials.systemd_creds`][terok_sandbox.credentials.systemd_creds].
+        """
+        return self.vault_dir / "vault.passphrase.cred"
+
     def open_credential_db(self, *, prompt_on_tty: bool = False) -> Any:
         """Open the credentials DB with this config's resolution-chain knobs.
 
         Single seam over [`open_credential_db`][terok_sandbox.credentials.db.open_credential_db]
-        so call sites don't have to thread the four tier-selection
+        so call sites don't have to thread the five tier-selection
         kwargs by hand.  CLI consumers pass ``prompt_on_tty=True`` to
         unlock the interactive fallback; daemons leave it off.
         """
@@ -278,6 +290,7 @@ class SandboxConfig:
         return open_credential_db(
             self.db_path,
             passphrase_file=self.vault_passphrase_file,
+            systemd_creds_file=self.vault_systemd_creds_file,
             use_keyring=self.credentials_use_keyring,
             config_fallback=self.credentials_passphrase,
             prompt_on_tty=prompt_on_tty,
@@ -298,6 +311,7 @@ class SandboxConfig:
         return open_credential_db_with_source(
             self.db_path,
             passphrase_file=self.vault_passphrase_file,
+            systemd_creds_file=self.vault_systemd_creds_file,
             use_keyring=self.credentials_use_keyring,
             config_fallback=self.credentials_passphrase,
             prompt_on_tty=prompt_on_tty,
@@ -310,6 +324,7 @@ class SandboxConfig:
         return open_sqlcipher_via_chain(
             db_path or self.db_path,
             passphrase_file=self.vault_passphrase_file,
+            systemd_creds_file=self.vault_systemd_creds_file,
             use_keyring=self.credentials_use_keyring,
             config_fallback=self.credentials_passphrase,
             **connect_kwargs,

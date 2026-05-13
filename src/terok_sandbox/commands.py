@@ -36,6 +36,7 @@ from ._util import sanitize_tty
 from ._yaml import update_section as _yaml_update_section
 from .config import SandboxConfig, credentials_passphrase, credentials_use_keyring
 from .credentials.encryption import PassphraseSource
+from .credentials.systemd_creds import KeyMode
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -631,6 +632,81 @@ def _handle_vault_lock(*, cfg: SandboxConfig | None = None, forget: bool = False
         print("→ vault daemon stopped")
 
 
+#: CLI verbs for ``vault seal --key=``, mapped to systemd-creds' own
+#: ``--with-key=`` vocabulary.  ``"auto"`` is the natural default —
+#: systemd already picks ``host+tpm2`` on TPM-equipped hosts and
+#: ``host`` otherwise, and second-guessing that decision here would
+#: silently weaken the dual-factor default.
+_SEAL_KEY_MODES: dict[str, KeyMode] = {
+    "auto": "auto",
+    "tpm": "tpm2",
+    "host": "host",
+    "tpm+host": "host+tpm2",
+}
+
+
+def _handle_vault_seal(*, cfg: SandboxConfig | None = None, key: str = "auto") -> None:
+    """Seal the credentials-DB passphrase into a systemd-creds credential.
+
+    Adds the systemd-creds tier to the resolution chain: machine-bound
+    (TPM2 + host key, or either alone), survives reboot, no OS
+    keyring required.  After sealing, the daemon resolves the
+    passphrase via ``systemd-creds decrypt`` on every start — no
+    operator interaction needed at boot, no plaintext-on-disk.
+
+    *key=auto* (default) lets systemd pick the strongest available
+    combination: ``host+tpm2`` on TPM-equipped hosts, ``host`` on
+    hosts without a TPM.  *key=tpm* / *key=host* pin a single factor;
+    *key=tpm+host* requires both (defense in depth, explicit).
+
+    Requires an already-resolvable passphrase — typically from a fresh
+    ``vault unlock`` in the current session.  Doesn't touch other tiers
+    or restart the daemon; the new tier is picked up on the next chain
+    walk.
+    """
+    from .credentials import systemd_creds
+    from .credentials.encryption import resolve_passphrase
+
+    if cfg is None:
+        cfg = SandboxConfig()
+
+    if not systemd_creds.is_available():
+        raise SystemExit(
+            "systemd-creds unavailable: needs systemd ≥ 257 with the Varlink"
+            " io.systemd.Credentials interface (Fedora ≥ 42, Debian ≥ 13)"
+        )
+
+    key_mode = _SEAL_KEY_MODES.get(key)
+    if key_mode is None:
+        choices = ", ".join(sorted(_SEAL_KEY_MODES))
+        raise SystemExit(f"unknown --key value: {key!r} (expected one of: {choices})")
+
+    # Seal must reuse an already-resolved passphrase — a prompt here
+    # would accept a fresh-typed value and seal *that*, leaving the
+    # next chain walk holding a key that doesn't open the DB.  The
+    # systemd_creds_file kwarg is also skipped so the resolver can't
+    # short-circuit on a stale credential we're about to replace.
+    passphrase = resolve_passphrase(
+        passphrase_file=cfg.vault_passphrase_file,
+        use_keyring=cfg.credentials_use_keyring,
+        config_fallback=cfg.credentials_passphrase,
+        prompt_on_tty=False,
+    )
+    if passphrase is None:
+        raise SystemExit("no current passphrase to seal — run `terok-sandbox vault unlock` first")
+
+    try:
+        systemd_creds.seal(passphrase, cfg.vault_systemd_creds_file, key_mode=key_mode)
+    except RuntimeError as exc:
+        # ``tpm2`` requested on a TPM-less host surfaces as a CalledProcessError
+        # bubbled to RuntimeError; pass it through with the operator-facing
+        # hint we'd otherwise have had to duplicate up here.
+        raise SystemExit(str(exc)) from exc
+
+    print(f"→ sealed passphrase to {cfg.vault_systemd_creds_file} (--with-key={key_mode})")
+    print("  the resolution chain will pick this up on the next daemon start; no restart required")
+
+
 VAULT_COMMANDS: tuple[CommandDef, ...] = (
     CommandDef(
         name="start",
@@ -680,6 +756,23 @@ VAULT_COMMANDS: tuple[CommandDef, ...] = (
                 help=(
                     "Also clear keyring + credentials.passphrase so the daemon"
                     " cannot auto-unlock from non-session tiers"
+                ),
+            ),
+        ),
+    ),
+    CommandDef(
+        name="seal",
+        help="Seal the current passphrase into a systemd-creds credential",
+        handler=_handle_vault_seal,
+        group="vault",
+        args=(
+            ArgDef(
+                name="--key",
+                default="auto",
+                help=(
+                    "Sealing key: 'auto' (host+TPM2 if a TPM is present,"
+                    " host alone otherwise), 'tpm' (require TPM2),"
+                    " 'host' (host key only), 'tpm+host' (pin both)"
                 ),
             ),
         ),
