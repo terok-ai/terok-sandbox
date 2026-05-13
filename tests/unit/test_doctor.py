@@ -10,6 +10,7 @@ import pytest
 from terok_sandbox.doctor import (
     CheckVerdict,
     DoctorCheck,
+    _make_plaintext_passphrase_warning_check,
     _make_shield_check,
     _make_ssh_signer_check,
     _make_token_broker_check,
@@ -175,6 +176,37 @@ class TestVaultUnlockedCheck:
         assert "vault unlock" in verdict.detail
 
 
+class TestPlaintextPassphraseWarningCheck:
+    """Host-side check (sandbox#282): visibility for plaintext-on-disk passphrase."""
+
+    def test_ok_when_field_absent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """No ``credentials.passphrase`` anywhere → silent ``ok`` verdict."""
+        from terok_sandbox import paths
+
+        monkeypatch.setattr(paths, "plaintext_passphrase_config_path", lambda: None)
+        check = _make_plaintext_passphrase_warning_check()
+        verdict = check.evaluate(0, "", "")
+        assert verdict.severity == "ok"
+
+    def test_warn_when_field_configured(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Configured field → ``warn`` verdict naming the file + the safer-tier hint."""
+        from pathlib import Path
+
+        from terok_sandbox import paths
+
+        seeded = Path("/etc/terok/config.yml")
+        monkeypatch.setattr(paths, "plaintext_passphrase_config_path", lambda: seeded)
+        check = _make_plaintext_passphrase_warning_check()
+        verdict = check.evaluate(0, "", "")
+        assert verdict.severity == "warn"
+        assert str(seeded) in verdict.detail
+        assert "plaintext" in verdict.detail
+        # The fix description names safer-tier mechanisms (not specific
+        # CLI verbs) so terok / sickbay can map them to their own surface.
+        assert "session-unlock" in check.fix_description
+        assert "systemd-creds" in check.fix_description
+
+
 class TestSandboxDoctorChecks:
     """Integration: sandbox_doctor_checks() assembly."""
 
@@ -186,10 +218,11 @@ class TestSandboxDoctorChecks:
         )
         labels = {c.label for c in checks}
         assert "Credentials DB passphrase" in labels
+        assert "Plaintext passphrase" in labels
         assert "Token broker (TCP)" in labels
         assert "SSH signer (TCP)" in labels
         assert "Shield state" in labels
-        assert len(checks) == 4
+        assert len(checks) == 5
 
     def test_skips_broker_when_none(self) -> None:
         checks = sandbox_doctor_checks(
@@ -219,7 +252,8 @@ class TestSandboxDoctorChecks:
             desired_shield_state=None,
         )
         categories = [c.category for c in checks]
-        assert categories == ["vault", "shield"]
+        # Two vault checks now: unlocked-passphrase + plaintext warning.
+        assert categories == ["vault", "vault", "shield"]
 
     def test_all_checks_are_doctor_check_instances(self) -> None:
         checks = sandbox_doctor_checks(

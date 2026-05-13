@@ -9,13 +9,22 @@ is no plaintext mode.
 Every daemon and CLI call walks the same chain top-to-bottom and
 stops at the first hit:
 
-1. **Session-unlock file** — `$XDG_RUNTIME_DIR/terok-sandbox/vault.passphrase`,
+1. **Session-unlock file** — `$XDG_RUNTIME_DIR/terok/sandbox/vault.passphrase`,
    RAM-backed, cleared on reboot.  Written by `vault unlock`.
-2. **OS keyring** — `(service=terok-sandbox, username=credentials-db)`,
+2. **systemd-creds** — sealed credential at
+   `${XDG_DATA_HOME:-~/.local/share}/terok/vault/vault.passphrase.cred`
+   (`XDG_DATA_HOME` is rarely set — the `~/.local/share` fallback is
+   what most hosts hit; the path matches `vault status`'s `DB:` line
+   directory).  Decrypted via `systemd-creds(1)`.  Machine-bound
+   (TPM2 or host key), survives reboot, no keyring needed.  Written
+   by `vault seal`.  Requires systemd ≥ 257.
+3. **OS keyring** — `(service=terok-sandbox, username=credentials-db)`,
    used only when `credentials.use_keyring: true` is set in `config.yml`.
-3. **Config fallback** — `credentials.passphrase` in `config.yml`.
-   Unsafe-on-disk; for headless hosts without a keyring.
-4. **Interactive prompt** — `*`-masked, TTY only.  CLI calls; daemons
+4. **Config fallback** — `credentials.passphrase` in `config.yml`.
+   Plaintext-on-disk; only as strong as filesystem-layer protection
+   (LUKS / signed image / permissions).  `vault status` and sickbay
+   permanently surface a WARNING when this tier is configured.
+5. **Interactive prompt** — `*`-masked, TTY only.  CLI calls; daemons
    fail loud instead.
 
 ## Day-to-day
@@ -37,10 +46,72 @@ terok-sandbox vault lock     # removes the session file, stops the daemon
 |--------|-----------------|
 | `[s]` session-unlock *(default)* | desktop + laptop; one prompt per boot |
 | `[k]` OS keyring                 | desktop with a working Secret Service / Keychain |
-| `[c]` config file                | headless server; no keyring available |
+| `[c]` config file                | headless server with no keyring (requires `yes` confirmation) |
 
 The default is `session-unlock` — terok never touches your keyring
-unless you opt in.
+unless you opt in.  The systemd-creds tier is opt-in via `vault seal`
+(below); the setup chooser doesn't surface it because TPM availability
+varies per host.
+
+## Changing tiers (move the passphrase to a different backend)
+
+The passphrase is one secret; the tier is just *where* it lives.
+Moving it is always three steps — **retrieve, lock, reseed** — so the
+ordering is the same whether you go session → keyring, keyring →
+systemd-creds, or anything else.
+
+### 1. Retrieve from the current tier
+
+```bash
+# session-file:
+cat "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/terok/sandbox/vault.passphrase"
+
+# OS keyring (libsecret / gnome-keyring / kwallet):
+secret-tool lookup service terok-sandbox username credentials-db
+
+# systemd-creds (sealed at rest; needs the same host that sealed it):
+systemd-creds --user --name=terok-sandbox.vault-passphrase \
+  decrypt "${XDG_DATA_HOME:-$HOME/.local/share}/terok/vault/vault.passphrase.cred" -
+
+# config.yml (plaintext-on-disk):
+yq '.credentials.passphrase' ~/.config/terok/config.yml
+```
+
+Keep the value somewhere safe for the duration of the swap — a
+password manager, or a `mktemp`d file you delete after step 3.
+
+### 2. Lock the vault
+
+```bash
+terok-sandbox vault lock --forget
+```
+
+`--forget` clears every persistent tier in one go (session file
+*plus* keyring, sealed systemd-creds, and `credentials.passphrase`).
+Without it, the daemon may auto-unlock from a leftover tier on next
+socket activation, defeating the swap.
+
+### 3. Provision in the new tier
+
+```bash
+# → session-file (default; ephemeral, cleared on reboot):
+echo -n "<passphrase>" | terok-sandbox vault unlock
+
+# → systemd-creds (machine-bound, persistent):
+echo -n "<passphrase>" | terok-sandbox vault unlock   # land it as session first
+terok-sandbox vault seal --key=auto                   # then seal from session
+terok-sandbox vault lock                              # remove the session file
+
+# → OS keyring:
+terok-sandbox setup     # chooser → [k]; reads + stores the passphrase
+
+# → config.yml plaintext (last-resort; requires `yes` confirmation):
+terok-sandbox setup     # chooser → [c] → type "yes" to accept the trust boundary
+```
+
+Run `terok-sandbox vault status` afterwards to confirm
+`Passphrase: resolved via <new-tier>` — and to verify no stale
+plaintext WARNING is still pointing at `config.yml`.
 
 ## Migrating a legacy plaintext DB
 

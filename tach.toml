@@ -99,6 +99,7 @@ layer = "foundation"
 depends_on = [
     "terok_sandbox.vault",
     "terok_sandbox.config",
+    "terok_sandbox.paths",
     "terok_sandbox.credentials.encryption",
 ]
 

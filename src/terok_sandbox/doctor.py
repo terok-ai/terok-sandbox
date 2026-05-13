@@ -105,7 +105,10 @@ def sandbox_doctor_checks(
     Returns:
         List of [`DoctorCheck`][terok_sandbox.doctor.DoctorCheck] instances ready for orchestration.
     """
-    checks: list[DoctorCheck] = [_make_vault_unlocked_check()]
+    checks: list[DoctorCheck] = [
+        _make_vault_unlocked_check(),
+        _make_plaintext_passphrase_warning_check(),
+    ]
     if token_broker_port is not None:
         checks.append(_make_token_broker_check(token_broker_port))
     if ssh_signer_port is not None:
@@ -151,6 +154,45 @@ def _make_vault_unlocked_check() -> DoctorCheck:
         host_side=True,
         fix_description=(
             "Run `terok-sandbox vault unlock` to provision the passphrase for this session."
+        ),
+    )
+
+
+def _make_plaintext_passphrase_warning_check() -> DoctorCheck:
+    """Flag a plaintext ``credentials.passphrase`` field in any layered config.
+
+    The visibility hook for sandbox#282: the field is one of the
+    supported chain tiers, but it's the *only* tier whose security
+    boundary is "operator accepted plaintext on disk".  Surface that
+    decision permanently — both in [`terok_sandbox.commands._handle_vault_status`][terok_sandbox.commands._handle_vault_status]
+    and here in doctor — so its visibility doesn't depend on the
+    operator running a specific verb.
+    """
+
+    def _eval(_rc: int, _stdout: str, _stderr: str) -> CheckVerdict:
+        """Walk the config files for ``credentials.passphrase``; warn if found."""
+        from .paths import plaintext_passphrase_config_path
+
+        path = plaintext_passphrase_config_path()
+        if path is None:
+            return CheckVerdict("ok", "no plaintext passphrase configured")
+        return CheckVerdict(
+            "warn",
+            f"vault passphrase stored in plaintext at {path};"
+            " accept on-disk plaintext as your trust boundary,"
+            " or migrate to keyring/systemd-creds.",
+        )
+
+    return DoctorCheck(
+        category="vault",
+        label="Plaintext passphrase",
+        probe_cmd=[],
+        evaluate=_eval,
+        host_side=True,
+        fix_description=(
+            "Remove `credentials.passphrase` from config.yml; provision the same value via"
+            " the session-unlock file (RAM-backed, cleared on reboot) or a sealed"
+            " systemd-creds credential (TPM2 / host-key bound)."
         ),
     )
 

@@ -91,6 +91,17 @@ class VaultStatus:
     open was attempted and failed for passphrase reasons.
     """
 
+    plaintext_passphrase_path: Path | None = None
+    """Config file that stores the SQLCipher passphrase as plaintext, or ``None``.
+
+    Set whenever ``credentials.passphrase`` is configured *anywhere* in
+    the layered config — independent of which tier actually unlocked
+    the DB this call.  Renderers (sandbox ``vault status``, executor
+    status table, terok TUI) surface this as a WARNING so the
+    plaintext-on-disk trust boundary scales visibility with risk
+    instead of disappearing into the resolver chain.
+    """
+
 
 class VaultUnreachableError(RuntimeError):
     """Raised when the vault is not reachable.
@@ -292,6 +303,8 @@ class VaultManager:
         # since TCP mode also binds a Unix socket).
         transport = self._installed_transport() if mode == "systemd" else None
 
+        from ..paths import plaintext_passphrase_config_path
+
         return VaultStatus(
             mode=mode,
             running=running,
@@ -305,6 +318,7 @@ class VaultManager:
             ssh_keys_stored=ssh_keys_count,
             passphrase_source=passphrase_source,
             locked=locked,
+            plaintext_passphrase_path=plaintext_passphrase_config_path(),
         )
 
     @property

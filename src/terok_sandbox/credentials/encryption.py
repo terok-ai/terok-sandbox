@@ -142,8 +142,12 @@ def resolve_passphrase(
        [`terok_sandbox.credentials.systemd_creds`][terok_sandbox.credentials.systemd_creds].
     3. OS keyring — only when *use_keyring* is true; off by default because
        Linux Secret Service grants access per-collection, not per-item.
-    4. *config_fallback* — ``credentials.passphrase`` from ``config.yml``
-       (unsafe-on-disk; headless hosts without a keyring).
+    4. *config_fallback* — ``credentials.passphrase`` from ``config.yml``.
+       Plaintext-on-disk trust boundary: the operator accepts that
+       filesystem-level protection (LUKS / signed image / permissions)
+       is their security perimeter.  Sandbox#282 surfaces a permanent
+       WARNING in ``vault status`` and sickbay whenever this tier is
+       set, regardless of which tier actually unlocked the call.
     5. Interactive prompt — only when *prompt_on_tty* and ``sys.stdin.isatty()``.
 
     *config_fallback* is threaded through as a parameter rather than

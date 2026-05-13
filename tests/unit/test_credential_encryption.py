@@ -1063,6 +1063,40 @@ class TestAskPassphraseMode:
         monkeypatch.setattr("sys.stdin.isatty", lambda: False)
         assert _ask_passphrase_mode() == "session"
 
+    def test_session_keyring_pass_through(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``s`` / ``k`` choices skip the config-tier confirmation entirely."""
+        from terok_sandbox.commands import _ask_passphrase_mode
+
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        for letter, expected in (("s", "session"), ("k", "keyring")):
+            monkeypatch.setattr("sys.stdin.readline", lambda _letter=letter: _letter + "\n")
+            assert _ask_passphrase_mode() == expected
+
+    def test_config_choice_requires_yes(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """``c`` then ``yes`` accepts the plaintext-on-disk trust boundary."""
+        from terok_sandbox.commands import _ask_passphrase_mode
+
+        responses = iter(["c\n", "yes\n"])
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        monkeypatch.setattr("sys.stdin.readline", lambda: next(responses))
+        assert _ask_passphrase_mode() == "config"
+        # The stern explanation must surface so the operator sees what
+        # they're confirming.
+        out = capsys.readouterr().out
+        assert "plaintext" in out
+        assert "trust boundary" in out or "filesystem" in out
+
+    def test_config_choice_declined_reprompts(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``c`` then anything-but-``yes`` re-prompts; eventual ``s`` lands."""
+        from terok_sandbox.commands import _ask_passphrase_mode
+
+        responses = iter(["c\n", "no\n", "s\n"])
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        monkeypatch.setattr("sys.stdin.readline", lambda: next(responses))
+        assert _ask_passphrase_mode() == "session"
+
 
 class TestVaultUnlockLock:
     """``terok-sandbox vault unlock`` / ``vault lock`` CLI handlers."""
