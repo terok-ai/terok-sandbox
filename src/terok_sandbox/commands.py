@@ -36,6 +36,7 @@ from ._util import sanitize_tty
 from ._yaml import update_section as _yaml_update_section
 from .config import SandboxConfig, credentials_passphrase, credentials_use_keyring
 from .credentials.encryption import PassphraseSource
+from .credentials.systemd_creds import KeyMode
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -574,14 +575,14 @@ def _handle_vault_unlock(*, cfg: SandboxConfig | None = None) -> None:
 def _handle_vault_lock(*, cfg: SandboxConfig | None = None, forget: bool = False) -> None:
     """Delete the session-unlock tmpfs file and stop the vault daemon.
 
-    By default this only clears the *session* tier; if keyring or
-    ``credentials.passphrase`` are also configured, socket activation
-    can re-spawn the daemon and auto-unlock immediately — and the
+    By default this only clears the *session* tier; any of keyring,
+    ``credentials.passphrase``, or a sealed systemd-creds credential
+    can re-unlock the daemon at the next socket activation — and the
     operator may not realise that's not "locked".  Pass
     ``forget=True`` (``--forget`` on the CLI) to also remove the
-    keyring entry and clear ``credentials.passphrase`` from
-    ``config.yml`` so the next daemon start *must* have an explicit
-    ``vault unlock``.
+    keyring entry, clear ``credentials.passphrase`` from ``config.yml``,
+    and delete the sealed systemd-creds credential so the next daemon
+    start *must* have an explicit ``vault unlock``.
     """
     from .credentials.encryption import forget_passphrase_in_keyring
     from .vault.lifecycle import VaultManager
@@ -596,9 +597,23 @@ def _handle_vault_lock(*, cfg: SandboxConfig | None = None, forget: bool = False
     else:
         print(f"→ {path} was not present")
 
+    sealed_cred = cfg.vault_systemd_creds_file
     if forget:
-        if cfg.credentials_use_keyring and forget_passphrase_in_keyring():
-            print("→ cleared keyring entry")
+        if cfg.credentials_use_keyring:
+            from .credentials.encryption import load_passphrase_from_keyring
+
+            if forget_passphrase_in_keyring():
+                print("→ cleared keyring entry")
+            elif load_passphrase_from_keyring() is None:
+                # ``keyring.delete_password`` raises on a missing entry on most
+                # backends, which the helper folds to False — treat that as
+                # "nothing to clear", but a residual entry after a False
+                # return means the backend rejected the delete.
+                print("→ keyring entry already absent")
+            else:
+                raise SystemExit(
+                    "failed to clear keyring entry; daemon may still auto-unlock from keyring"
+                )
         if cfg.credentials_passphrase:
             from . import config as _config
             from .paths import _config_file_paths
@@ -612,23 +627,112 @@ def _handle_vault_lock(*, cfg: SandboxConfig | None = None, forget: bool = False
                 )
                 _config._credentials_section.cache_clear()
                 print("→ cleared credentials.passphrase from config.yml")
-    elif cfg.credentials_use_keyring or cfg.credentials_passphrase:
+        if sealed_cred.exists():
+            try:
+                sealed_cred.unlink()
+            except OSError as exc:
+                raise SystemExit(
+                    f"failed to remove sealed credential at {sealed_cred}: {exc}"
+                ) from exc
+            print(f"→ removed sealed credential at {sealed_cred}")
+    else:
         active = []
         if cfg.credentials_use_keyring:
             active.append("keyring")
         if cfg.credentials_passphrase:
             active.append("config.yml")
-        print(
-            f"warning: non-session passphrase tiers still active ({', '.join(active)});"
-            " the daemon may auto-unlock on next socket activation.\n"
-            "         Use `terok-sandbox vault lock --forget` to clear them too.",
-            file=sys.stderr,
-        )
+        if sealed_cred.is_file():
+            active.append("systemd-creds")
+        if active:
+            print(
+                f"warning: non-session passphrase tiers still active ({', '.join(active)});"
+                " the daemon may auto-unlock on next socket activation.\n"
+                "         Use `terok-sandbox vault lock --forget` to clear them too.",
+                file=sys.stderr,
+            )
 
     mgr = VaultManager(cfg)
     if mgr.is_daemon_running():
         mgr.stop_daemon()
         print("→ vault daemon stopped")
+
+
+#: CLI verbs for ``vault seal --key=``, mapped to systemd-creds' own
+#: ``--with-key=`` vocabulary.  ``"auto"`` is the natural default —
+#: systemd already picks ``host+tpm2`` on TPM-equipped hosts and
+#: ``host`` otherwise, and second-guessing that decision here would
+#: silently weaken the dual-factor default.
+_SEAL_KEY_MODES: dict[str, KeyMode] = {
+    "auto": "auto",
+    "tpm": "tpm2",
+    "host": "host",
+    "tpm+host": "host+tpm2",
+}
+
+
+def _handle_vault_seal(*, cfg: SandboxConfig | None = None, key: str = "auto") -> None:
+    """Seal the credentials-DB passphrase into a systemd-creds credential.
+
+    Adds the systemd-creds tier to the resolution chain: machine-bound
+    (TPM2 + host key, or either alone), survives reboot, no OS
+    keyring required.  After sealing, the daemon resolves the
+    passphrase via ``systemd-creds decrypt`` on every start — no
+    operator interaction needed at boot, no plaintext-on-disk.
+
+    *key=auto* (default) lets systemd pick the strongest available
+    combination: ``host+tpm2`` on TPM-equipped hosts, ``host`` on
+    hosts without a TPM.  *key=tpm* / *key=host* pin a single factor;
+    *key=tpm+host* requires both (defense in depth, explicit).
+
+    Requires an already-resolvable passphrase — typically from a fresh
+    ``vault unlock`` in the current session.  Doesn't touch other tiers
+    or restart the daemon; the new tier is picked up on the next chain
+    walk.
+    """
+    from .credentials import systemd_creds
+    from .credentials.encryption import resolve_passphrase
+
+    if cfg is None:
+        cfg = SandboxConfig()
+
+    if not systemd_creds.is_available():
+        raise SystemExit(
+            "systemd-creds unavailable: needs systemd ≥ 257 with the Varlink"
+            " io.systemd.Credentials interface (Fedora ≥ 42, Debian ≥ 13)"
+        )
+
+    key_mode = _SEAL_KEY_MODES.get(key)
+    if key_mode is None:
+        choices = ", ".join(sorted(_SEAL_KEY_MODES))
+        raise SystemExit(f"unknown --key value: {key!r} (expected one of: {choices})")
+
+    # Seal must reuse an already-resolved passphrase — a prompt here
+    # would accept a fresh-typed value and seal *that*, leaving the
+    # next chain walk holding a key that doesn't open the DB.  Every
+    # persistent tier is included so re-sealing with a different
+    # ``--key=`` mode on a headless host (where systemd-creds may be
+    # the only resolvable source) is idempotent: the resolver returns
+    # the same passphrase regardless of which tier it came from.
+    passphrase = resolve_passphrase(
+        passphrase_file=cfg.vault_passphrase_file,
+        systemd_creds_file=cfg.vault_systemd_creds_file,
+        use_keyring=cfg.credentials_use_keyring,
+        config_fallback=cfg.credentials_passphrase,
+        prompt_on_tty=False,
+    )
+    if passphrase is None:
+        raise SystemExit("no current passphrase to seal — run `terok-sandbox vault unlock` first")
+
+    try:
+        systemd_creds.seal(passphrase, cfg.vault_systemd_creds_file, key_mode=key_mode)
+    except RuntimeError as exc:
+        # ``tpm2`` requested on a TPM-less host surfaces as a CalledProcessError
+        # bubbled to RuntimeError; pass it through with the operator-facing
+        # hint we'd otherwise have had to duplicate up here.
+        raise SystemExit(str(exc)) from exc
+
+    print(f"→ sealed passphrase to {cfg.vault_systemd_creds_file} (--with-key={key_mode})")
+    print("  the resolution chain will pick this up on the next daemon start; no restart required")
 
 
 VAULT_COMMANDS: tuple[CommandDef, ...] = (
@@ -680,6 +784,23 @@ VAULT_COMMANDS: tuple[CommandDef, ...] = (
                 help=(
                     "Also clear keyring + credentials.passphrase so the daemon"
                     " cannot auto-unlock from non-session tiers"
+                ),
+            ),
+        ),
+    ),
+    CommandDef(
+        name="seal",
+        help="Seal the current passphrase into a systemd-creds credential",
+        handler=_handle_vault_seal,
+        group="vault",
+        args=(
+            ArgDef(
+                name="--key",
+                default="auto",
+                help=(
+                    "Sealing key: 'auto' (host+TPM2 if a TPM is present,"
+                    " host alone otherwise), 'tpm' (require TPM2),"
+                    " 'host' (host key only), 'tpm+host' (pin both)"
                 ),
             ),
         ),
