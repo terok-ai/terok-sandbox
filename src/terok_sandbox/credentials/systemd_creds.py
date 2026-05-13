@@ -35,6 +35,7 @@ systemd-creds and the CLI is the supported entry point.  Tests stub
 
 from __future__ import annotations
 
+import functools
 import re
 import shutil
 import subprocess  # nosec: B404 — sealed credential lifecycle requires the systemd-creds CLI
@@ -54,6 +55,7 @@ _UNSEAL_TIMEOUT = 10.0
 _PROBE_TIMEOUT = 5.0
 
 
+@functools.cache
 def _systemd_creds_version() -> int | None:
     """Return the major version of the installed ``systemd-creds``, or ``None``.
 
@@ -61,6 +63,13 @@ def _systemd_creds_version() -> int | None:
     Returns ``None`` if the binary is absent, the call fails, or the
     output doesn't contain an integer — callers treat all three as
     "tier unavailable" and fall through.
+
+    Cached for the process lifetime: the host's systemd version doesn't
+    change between invocations, and a single ``vault seal`` already
+    funnels through ``is_available`` → ``has_tpm2`` → ``seal``, three
+    redundant probes at ~5 ms each.  Tests clear the cache between
+    cases via the ``_isolate_systemd_creds_version_cache`` autouse
+    fixture in ``conftest.py``.
     """
     if shutil.which(_BINARY) is None:
         return None

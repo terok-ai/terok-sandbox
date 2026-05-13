@@ -631,7 +631,10 @@ def _handle_vault_lock(*, cfg: SandboxConfig | None = None, forget: bool = False
         print("→ vault daemon stopped")
 
 
-def _handle_vault_seal(*, cfg: SandboxConfig | None = None, key: str = "auto") -> None:
+_SealKey = Literal["auto", "tpm", "host"]
+
+
+def _handle_vault_seal(*, cfg: SandboxConfig | None = None, key: _SealKey = "auto") -> None:
     """Seal the credentials-DB passphrase into a systemd-creds credential.
 
     Adds the systemd-creds tier to the resolution chain: machine-bound

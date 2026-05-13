@@ -36,6 +36,22 @@ def _isolate_port_registry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
 
 
 @pytest.fixture(autouse=True)
+def _isolate_systemd_creds_version_cache() -> Iterator[None]:
+    """Clear the ``_systemd_creds_version`` ``@cache`` between tests.
+
+    The production cache is process-lifetime correct (systemd doesn't
+    re-version mid-process), but tests stub ``subprocess.run`` /
+    ``shutil.which`` with different return values per case; leaking the
+    first test's probe result into the next is a guaranteed false-pass.
+    """
+    from terok_sandbox.credentials import systemd_creds as _sc
+
+    _sc._systemd_creds_version.cache_clear()
+    yield
+    _sc._systemd_creds_version.cache_clear()
+
+
+@pytest.fixture(autouse=True)
 def _isolate_credential_keyring(monkeypatch: pytest.MonkeyPatch) -> None:
     """Stub the resolution chain so tests get a deterministic ``"test"`` passphrase.
 
