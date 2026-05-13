@@ -56,10 +56,13 @@ systemd-creds and the CLI is the supported entry point.  Tests stub
 
 from __future__ import annotations
 
+import contextlib
 import functools
+import os
 import re
 import shutil
 import subprocess  # nosec: B404 — sealed credential lifecycle requires the systemd-creds CLI
+import tempfile
 from pathlib import Path
 from typing import Literal
 
@@ -117,9 +120,11 @@ def seal(passphrase: str, credential_path: Path, *, key_mode: KeyMode = "auto") 
     calling UID + username + machine-id; PID 1's Varlink interface
     handles the privileged half.
 
-    The file is materialised at ``0o600`` after the seal so its
-    contents stay inaccessible to other local users while still being
-    machine-decryptable.
+    The encrypted blob is captured from systemd-creds' stdout and
+    written atomically via ``tempfile.mkstemp`` + ``os.replace`` — the
+    leaf is materialised at ``0o600`` from creation (no umask window)
+    and the rename never follows a symlink at the destination.
+    Symlinks at the parent or the leaf are refused outright.
 
     Empty *passphrase* is rejected — sealing nothing produces a
     credential that decrypts to nothing, which the chain would treat
@@ -137,20 +142,32 @@ def seal(passphrase: str, credential_path: Path, *, key_mode: KeyMode = "auto") 
         raise RuntimeError(
             f"{_BINARY} unavailable: needs systemd ≥ {_MIN_SYSTEMD_VERSION} for non-root --user mode"
         )
-    credential_path.parent.mkdir(parents=True, exist_ok=True)
+    exe = _require_exe()
+
+    parent = credential_path.parent
+    # Refuse symlinked parent or leaf — both would let an attacker
+    # who can pre-create the path redirect the write to an arbitrary
+    # location.  ``tempfile.mkstemp`` below also prevents racy
+    # leaf-replacement, but the parent check has to happen before we
+    # touch the filesystem.
+    if parent.exists() and parent.is_symlink():
+        raise RuntimeError(f"refusing to seal credential under symlinked parent: {parent}")
+    if credential_path.is_symlink():
+        raise RuntimeError(f"refusing to overwrite symlinked credential path: {credential_path}")
+    parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+
     try:
-        subprocess.run(  # nosec: B603 — fixed argv shape; credential_path is internally owned
+        result = subprocess.run(  # nosec: B603 — fixed argv shape, absolute path, captured output
             [
-                _BINARY,
+                exe,
                 "encrypt",
                 "--user",
                 f"--name={_CREDENTIAL_NAME}",
                 f"--with-key={key_mode}",
                 "-",
-                str(credential_path),
+                "-",
             ],
-            input=passphrase,
-            text=True,
+            input=passphrase.encode("utf-8"),
             check=True,
             capture_output=True,
             timeout=_SEAL_TIMEOUT,
@@ -158,18 +175,32 @@ def seal(passphrase: str, credential_path: Path, *, key_mode: KeyMode = "auto") 
     except FileNotFoundError as exc:
         raise RuntimeError(f"{_BINARY} binary not found on PATH") from exc
     except subprocess.CalledProcessError as exc:
-        raise RuntimeError(
-            f"{_BINARY} encrypt failed (exit {exc.returncode}): {(exc.stderr or '').strip()}"
-        ) from exc
+        stderr = (exc.stderr or b"").decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"{_BINARY} encrypt failed (exit {exc.returncode}): {stderr}") from exc
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(f"{_BINARY} encrypt timed out after {_SEAL_TIMEOUT:.0f}s") from exc
     except OSError as exc:
         raise RuntimeError(f"{_BINARY} encrypt failed: {exc}") from exc
+
+    # Write the sealed blob atomically via a same-dir tempfile.
+    # ``mkstemp`` creates with mode 0600 by design — no umask window
+    # between create and chmod — and ``os.replace`` swaps the entry
+    # atomically without following any symlink the destination might
+    # acquire mid-operation.
+    sealed_blob = result.stdout
     try:
-        credential_path.chmod(0o600)
+        fd, tmp_path = tempfile.mkstemp(prefix=credential_path.name + ".", dir=parent)
     except OSError as exc:
+        raise RuntimeError(f"failed to stage sealed credential at {parent}: {exc}") from exc
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(sealed_blob)
+        os.replace(tmp_path, credential_path)
+    except OSError as exc:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_path)
         raise RuntimeError(
-            f"failed to secure sealed credential at {credential_path}: {exc}"
+            f"failed to materialise sealed credential at {credential_path}: {exc}"
         ) from exc
 
 
@@ -192,10 +223,13 @@ def unseal(credential_path: Path) -> str | None:
     """
     if not credential_path.is_file():
         return None
+    exe = _systemd_creds_exe()
+    if exe is None:
+        return None
     try:
-        result = subprocess.run(  # nosec: B603 — fixed argv, credential_path internally owned
+        result = subprocess.run(  # nosec: B603 — fixed argv, absolute path, internally-owned target
             [
-                _BINARY,
+                exe,
                 "decrypt",
                 "--user",
                 f"--name={_CREDENTIAL_NAME}",
@@ -239,8 +273,8 @@ def has_tpm2() -> bool:
     if not is_available():
         return False
     try:
-        result = subprocess.run(  # nosec: B603 — fixed argv, no shell, no user input
-            [_BINARY, "has-tpm2"],
+        result = subprocess.run(  # nosec: B603 — absolute path, fixed argv, no user input
+            [_require_exe(), "has-tpm2"],
             capture_output=True,
             timeout=_PROBE_TIMEOUT,
             check=False,
@@ -269,11 +303,12 @@ def _systemd_creds_version() -> int | None:
     ``_isolate_systemd_creds_version_cache`` autouse fixture in
     ``conftest.py``.
     """
-    if shutil.which(_BINARY) is None:
+    exe = _systemd_creds_exe()
+    if exe is None:
         return None
     try:
-        result = subprocess.run(  # nosec: B603 — fixed argv, no user input
-            [_BINARY, "--version"],
+        result = subprocess.run(  # nosec: B603 — absolute path, fixed argv, no user input
+            [exe, "--version"],
             capture_output=True,
             text=True,
             check=True,
@@ -285,6 +320,35 @@ def _systemd_creds_version() -> int | None:
     if match is None:
         return None
     return int(match.group(1))
+
+
+@functools.cache
+def _systemd_creds_exe() -> str | None:
+    """Return the absolute path of ``systemd-creds``, or ``None`` if absent.
+
+    Resolved once via ``shutil.which`` and reused for every subprocess
+    call; this pins us to the binary that was on ``PATH`` at first
+    look, defending against later ``PATH``-shuffling that would
+    otherwise allow a same-UID attacker to substitute the binary
+    between calls.
+
+    Cached for the process lifetime — ``PATH`` resolution is stable
+    while the process runs.  Tests clear the cache via the
+    ``_isolate_systemd_creds_version_cache`` conftest fixture.
+    """
+    return shutil.which(_BINARY)
+
+
+def _require_exe() -> str:
+    """Return the resolved absolute path; raise if the binary is absent.
+
+    Used at every code-path that must run the CLI (rather than just
+    probe its presence): ``seal`` / ``unseal`` / ``has_tpm2``.
+    """
+    exe = _systemd_creds_exe()
+    if exe is None:
+        raise RuntimeError(f"{_BINARY} binary not found on PATH")
+    return exe
 
 
 __all__ = ["KeyMode", "has_tpm2", "is_available", "seal", "unseal"]

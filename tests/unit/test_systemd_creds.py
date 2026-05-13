@@ -112,13 +112,19 @@ class TestAvailability:
             assert systemd_creds.has_tpm2() is False
 
 
-def _mock_seal_subprocess(cred: Path):
+_SYSTEMD_CREDS_EXE = "/usr/bin/systemd-creds"
+"""Stable absolute path returned by ``shutil.which`` in the
+``_have_systemd_creds`` fixture; tests assert on this so subprocess
+calls visibly pin the binary instead of resolving via PATH."""
+
+
+def _mock_seal_subprocess(sealed_blob: bytes = b"sealed-blob"):
     """Return a ``subprocess.run`` side_effect for the [version, encrypt] pair.
 
-    ``seal()`` calls ``is_available()`` first (one subprocess for the
-    ``--version`` probe) then ``systemd-creds encrypt`` (which is the
-    call the test wants to inspect).  This helper materialises *cred*
-    on the encrypt call so the post-write ``chmod`` finds the file.
+    ``seal()`` runs ``--version`` first (via ``is_available()``) then
+    ``encrypt`` (which captures the sealed blob from stdout).  Tests
+    that don't override the encrypt output get the default
+    ``b"sealed-blob"`` value.
     """
     calls = {"n": 0}
 
@@ -126,8 +132,7 @@ def _mock_seal_subprocess(cred: Path):
         calls["n"] += 1
         if calls["n"] == 1:
             return _version_output(259)
-        cred.write_bytes(b"sealed-blob")
-        return MagicMock(returncode=0)
+        return MagicMock(returncode=0, stdout=sealed_blob)
 
     return _run
 
@@ -141,7 +146,7 @@ def _have_systemd_creds(monkeypatch: pytest.MonkeyPatch) -> None:
     seal / unseal need that gate open so they can drive
     ``subprocess.run`` directly.
     """
-    monkeypatch.setattr("shutil.which", lambda _name: "/usr/bin/systemd-creds")
+    monkeypatch.setattr("shutil.which", lambda _name: _SYSTEMD_CREDS_EXE)
 
 
 def _seal_argv(run_mock: MagicMock) -> list[str]:
@@ -151,27 +156,35 @@ def _seal_argv(run_mock: MagicMock) -> list[str]:
 
 @pytest.mark.usefixtures("_have_systemd_creds")
 class TestSeal:
-    """``seal`` shells out to ``systemd-creds encrypt``."""
+    """``seal`` shells out to ``systemd-creds encrypt`` and writes the captured blob atomically."""
 
     def test_user_mode_always_set(self, tmp_path: Path) -> None:
         """Every seal goes through ``--user`` so non-root Varlink delegation engages."""
         cred = tmp_path / "v.cred"
-        with patch("subprocess.run", side_effect=_mock_seal_subprocess(cred)) as run:
+        with patch("subprocess.run", side_effect=_mock_seal_subprocess()) as run:
             systemd_creds.seal("pw", cred)
         assert "--user" in _seal_argv(run)
+
+    def test_absolute_binary_path_used(self, tmp_path: Path) -> None:
+        """Subprocess argv pins the resolved absolute path, not the bare name on PATH."""
+        cred = tmp_path / "v.cred"
+        with patch("subprocess.run", side_effect=_mock_seal_subprocess()) as run:
+            systemd_creds.seal("pw", cred)
+        argv = _seal_argv(run)
+        assert argv[0] == _SYSTEMD_CREDS_EXE
+        assert argv[1] == "encrypt"
 
     def test_namespaced_credential_name_embedded(self, tmp_path: Path) -> None:
         """``--name=`` is set to prevent cross-purpose reuse of the sealed blob."""
         cred = tmp_path / "v.cred"
-        with patch("subprocess.run", side_effect=_mock_seal_subprocess(cred)) as run:
+        with patch("subprocess.run", side_effect=_mock_seal_subprocess()) as run:
             systemd_creds.seal("pw", cred)
-        argv = _seal_argv(run)
-        assert "--name=terok-sandbox.vault-passphrase" in argv
+        assert "--name=terok-sandbox.vault-passphrase" in _seal_argv(run)
 
     def test_default_key_mode_is_auto(self, tmp_path: Path) -> None:
         """Default delegates the host-vs-TPM choice to systemd's own auto-detection."""
         cred = tmp_path / "v.cred"
-        with patch("subprocess.run", side_effect=_mock_seal_subprocess(cred)) as run:
+        with patch("subprocess.run", side_effect=_mock_seal_subprocess()) as run:
             systemd_creds.seal("pw", cred)
         assert "--with-key=auto" in _seal_argv(run)
 
@@ -189,20 +202,27 @@ class TestSeal:
     ) -> None:
         """The wrapper passes the operator's key_mode through verbatim — no reinterpretation."""
         cred = tmp_path / "v.cred"
-        with patch("subprocess.run", side_effect=_mock_seal_subprocess(cred)) as run:
+        with patch("subprocess.run", side_effect=_mock_seal_subprocess()) as run:
             systemd_creds.seal("pw", cred, key_mode=key_mode)
-        argv = _seal_argv(run)
-        assert argv[:2] == ["systemd-creds", "encrypt"]
-        assert expected_flag in argv
+        assert expected_flag in _seal_argv(run)
 
-    def test_passphrase_goes_to_stdin(self, tmp_path: Path) -> None:
-        """The passphrase is piped to systemd-creds, not embedded in argv."""
+    def test_sealed_blob_routed_to_stdout_and_written_atomically(self, tmp_path: Path) -> None:
+        """systemd-creds writes the blob to stdout; we capture and rename into place."""
         cred = tmp_path / "v.cred"
-        with patch("subprocess.run", side_effect=_mock_seal_subprocess(cred)) as run:
+        with patch("subprocess.run", side_effect=_mock_seal_subprocess(b"opaque-blob")) as run:
+            systemd_creds.seal("pw", cred)
+        # ``-`` ``-`` means stdin → stdout, never touching the destination directly
+        argv = _seal_argv(run)
+        assert argv[-2:] == ["-", "-"]
+        assert cred.read_bytes() == b"opaque-blob"
+
+    def test_passphrase_piped_as_bytes_not_in_argv(self, tmp_path: Path) -> None:
+        """The passphrase reaches systemd-creds as stdin bytes, never as an argv element."""
+        cred = tmp_path / "v.cred"
+        with patch("subprocess.run", side_effect=_mock_seal_subprocess()) as run:
             systemd_creds.seal("secret", cred)
         encrypt_call = run.call_args_list[1]
-        assert encrypt_call.kwargs["input"] == "secret"
-        # And explicitly not in argv:
+        assert encrypt_call.kwargs["input"] == b"secret"
         assert "secret" not in _seal_argv(run)
 
     def test_empty_passphrase_rejected(self, tmp_path: Path) -> None:
@@ -217,11 +237,39 @@ class TestSeal:
         ):
             systemd_creds.seal("pw", tmp_path / "v.cred")
 
-    def test_credential_path_locked_to_0o600(self, tmp_path: Path) -> None:
+    def test_credential_file_created_at_0o600(self, tmp_path: Path) -> None:
+        """Atomic-write via ``mkstemp`` materialises the leaf at 0o600 from inception — no umask window."""
         cred = tmp_path / "v.cred"
-        with patch("subprocess.run", side_effect=_mock_seal_subprocess(cred)):
+        with patch("subprocess.run", side_effect=_mock_seal_subprocess()):
             systemd_creds.seal("pw", cred)
         assert oct(cred.stat().st_mode & 0o777) == oct(0o600)
+
+    def test_refuses_symlinked_leaf(self, tmp_path: Path) -> None:
+        """A pre-existing symlink at the leaf would redirect the rename — refuse."""
+        cred = tmp_path / "v.cred"
+        target = tmp_path / "victim"
+        target.touch()
+        cred.symlink_to(target)
+        with (
+            patch("subprocess.run", side_effect=_mock_seal_subprocess()),
+            pytest.raises(RuntimeError, match="symlinked credential path"),
+        ):
+            systemd_creds.seal("pw", cred)
+        # The symlink target stays untouched.
+        assert target.read_bytes() == b""
+
+    def test_refuses_symlinked_parent(self, tmp_path: Path) -> None:
+        """A symlinked parent would let ``mkstemp(dir=…)`` write into the link target — refuse."""
+        real_dir = tmp_path / "real"
+        real_dir.mkdir()
+        link_dir = tmp_path / "vault"
+        link_dir.symlink_to(real_dir)
+        cred = link_dir / "v.cred"
+        with (
+            patch("subprocess.run", side_effect=_mock_seal_subprocess()),
+            pytest.raises(RuntimeError, match="symlinked parent"),
+        ):
+            systemd_creds.seal("pw", cred)
 
     def test_binary_missing_raises_runtime_error(self, tmp_path: Path) -> None:
         """Race: ``is_available`` saw the binary but it vanished before encrypt."""
@@ -245,7 +293,7 @@ class TestSeal:
             if argv and "--version" in argv:
                 return _version_output(259)
             raise subprocess.CalledProcessError(
-                returncode=1, cmd=["systemd-creds"], stderr="TPM unavailable"
+                returncode=1, cmd=["systemd-creds"], stderr=b"TPM unavailable"
             )
 
         with (
@@ -269,13 +317,13 @@ class TestSeal:
         ):
             systemd_creds.seal("pw", tmp_path / "v.cred")
 
-    def test_chmod_failure_translated_to_runtime_error(self, tmp_path: Path) -> None:
-        """An OSError from the post-write chmod stays inside the documented contract."""
+    def test_replace_failure_translated_to_runtime_error(self, tmp_path: Path) -> None:
+        """An OSError on the atomic rename stays inside the documented contract."""
         cred = tmp_path / "v.cred"
         with (
-            patch("subprocess.run", side_effect=_mock_seal_subprocess(cred)),
-            patch("pathlib.Path.chmod", side_effect=OSError("read-only fs")),
-            pytest.raises(RuntimeError, match="failed to secure sealed credential"),
+            patch("subprocess.run", side_effect=_mock_seal_subprocess()),
+            patch("os.replace", side_effect=OSError("read-only fs")),
+            pytest.raises(RuntimeError, match="failed to materialise sealed credential"),
         ):
             systemd_creds.seal("pw", cred)
 
@@ -302,18 +350,34 @@ class TestUnseal:
     def test_missing_file_returns_none(self, tmp_path: Path) -> None:
         assert systemd_creds.unseal(tmp_path / "nope.cred") is None
 
-    def test_successful_decrypt_returns_passphrase(self, tmp_path: Path) -> None:
+    def test_successful_decrypt_returns_passphrase(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         cred = tmp_path / "v.cred"
         cred.write_bytes(b"sealed-blob")
+        monkeypatch.setattr("shutil.which", lambda _name: _SYSTEMD_CREDS_EXE)
         result = MagicMock(returncode=0, stdout="my-passphrase\n")
         with patch("subprocess.run", return_value=result) as run:
             assert systemd_creds.unseal(cred) == "my-passphrase"
         argv = run.call_args.args[0]
-        assert argv[:2] == ["systemd-creds", "decrypt"]
-        # ``--user`` engages the non-root Varlink delegation path; ``--name=``
-        # matches the encrypt side so systemd refuses cross-purpose reuse.
+        # Absolute path pins the binary (PATH-hijack defense); ``--user``
+        # engages the non-root Varlink delegation; ``--name=`` matches the
+        # encrypt side so systemd refuses cross-purpose reuse.
+        assert argv[0] == _SYSTEMD_CREDS_EXE
+        assert argv[1] == "decrypt"
         assert "--user" in argv
         assert "--name=terok-sandbox.vault-passphrase" in argv
+
+    def test_returns_none_when_binary_absent(self, tmp_path: Path) -> None:
+        """Without the binary we can't decrypt — fall through cleanly, no subprocess spawn."""
+        cred = tmp_path / "v.cred"
+        cred.write_bytes(b"sealed-blob")
+        with (
+            patch("shutil.which", return_value=None),
+            patch("subprocess.run") as run,
+        ):
+            assert systemd_creds.unseal(cred) is None
+            run.assert_not_called()
 
     def test_empty_decrypt_output_returns_none(self, tmp_path: Path) -> None:
         """Empty plaintext is SQLCipher's no-encryption sentinel — collapse to None."""

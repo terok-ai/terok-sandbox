@@ -235,20 +235,41 @@ class TestResolvePassphraseWithSource:
             "systemd-creds",
         )
 
-    def test_systemd_creds_misses_falls_through(
+    def test_systemd_creds_present_but_unsealable_fails_closed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A locked / corrupt / wrong-machine credential falls through to the next tier."""
+        """A locked / corrupt / wrong-machine credential raises rather than silently downgrading.
+
+        Falling through to keyring / config would change the security
+        posture (machine-bound → keyring or plaintext-on-disk) without
+        the operator's knowledge — a classic auth-chain downgrade.
+        """
         from terok_sandbox.credentials import encryption as enc, systemd_creds as sc
 
         monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda: "ring-pw")
-        monkeypatch.setattr(sc, "unseal", lambda _p: None)  # decrypt failed
+        monkeypatch.setattr(sc, "unseal", lambda _p: None)
         cred = tmp_path / "v.cred"
         cred.write_bytes(b"sealed-blob")
-        assert resolve_passphrase_with_source(systemd_creds_file=cred, use_keyring=True) == (
+        with pytest.raises(WrongPassphraseError, match="could not be unsealed"):
+            resolve_passphrase_with_source(systemd_creds_file=cred, use_keyring=True)
+
+    def test_systemd_creds_absent_falls_through(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A missing credential file is "tier not configured" — fall through cleanly."""
+        from unittest.mock import MagicMock
+
+        from terok_sandbox.credentials import encryption as enc, systemd_creds as sc
+
+        monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda: "ring-pw")
+        unseal = MagicMock()
+        monkeypatch.setattr(sc, "unseal", unseal)
+        absent = tmp_path / "never-created.cred"
+        assert resolve_passphrase_with_source(systemd_creds_file=absent, use_keyring=True) == (
             "ring-pw",
             "keyring",
         )
+        unseal.assert_not_called()
 
     def test_session_file_pre_empts_systemd_creds(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

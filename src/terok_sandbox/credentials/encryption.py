@@ -98,10 +98,20 @@ def resolve_passphrase_with_source(
         file_pw = load_passphrase_from_file(passphrase_file)
         if file_pw:
             return file_pw, "session-file"
-    if systemd_creds_file is not None:
+    if systemd_creds_file is not None and systemd_creds_file.is_file():
         sealed_pw = _systemd_creds.unseal(systemd_creds_file)
         if sealed_pw:
             return sealed_pw, "systemd-creds"
+        # Fail closed: a present-but-unsealable credential is a
+        # downgrade vector — silent fall-through to keyring / config
+        # would change the security posture (machine-bound → keyring
+        # or plaintext-on-disk) without the operator's knowledge.
+        # Surface as ``locked`` so the caller sees the broken state
+        # instead of a working-but-weaker vault.
+        raise WrongPassphraseError(
+            f"sealed systemd-creds credential present at {systemd_creds_file}"
+            " but could not be unsealed"
+        )
     if use_keyring:
         keyring_pw = load_passphrase_from_keyring()
         if keyring_pw:
