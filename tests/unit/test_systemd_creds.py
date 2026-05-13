@@ -20,11 +20,6 @@ import pytest
 from terok_sandbox.credentials import systemd_creds
 
 
-def _version_output(version: int) -> MagicMock:
-    """Return a ``subprocess.run`` result that mimics ``systemd-creds --version``."""
-    return MagicMock(returncode=0, stdout=f"systemd {version} ({version}.5-1.fc44)\n+PAM +AUDIT\n")
-
-
 class TestAvailability:
     """The presence probes that gate every other operation."""
 
@@ -110,48 +105,6 @@ class TestAvailability:
             ),
         ):
             assert systemd_creds.has_tpm2() is False
-
-
-_SYSTEMD_CREDS_EXE = "/usr/bin/systemd-creds"
-"""Stable absolute path returned by ``shutil.which`` in the
-``_have_systemd_creds`` fixture; tests assert on this so subprocess
-calls visibly pin the binary instead of resolving via PATH."""
-
-
-def _mock_seal_subprocess(sealed_blob: bytes = b"sealed-blob"):
-    """Return a ``subprocess.run`` side_effect for the [version, encrypt] pair.
-
-    ``seal()`` runs ``--version`` first (via ``is_available()``) then
-    ``encrypt`` (which captures the sealed blob from stdout).  Tests
-    that don't override the encrypt output get the default
-    ``b"sealed-blob"`` value.
-    """
-    calls = {"n": 0}
-
-    def _run(*_a: object, **_kw: object) -> MagicMock:
-        calls["n"] += 1
-        if calls["n"] == 1:
-            return _version_output(259)
-        return MagicMock(returncode=0, stdout=sealed_blob)
-
-    return _run
-
-
-@pytest.fixture()
-def _have_systemd_creds(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Make ``shutil.which`` report systemd-creds present for the duration of the test.
-
-    ``is_available()`` short-circuits to False when the binary isn't on
-    PATH, which it never is in the test container.  Tests that exercise
-    seal / unseal need that gate open so they can drive
-    ``subprocess.run`` directly.
-    """
-    monkeypatch.setattr("shutil.which", lambda _name: _SYSTEMD_CREDS_EXE)
-
-
-def _seal_argv(run_mock: MagicMock) -> list[str]:
-    """Return the argv of the *encrypt* call (second subprocess.run invocation)."""
-    return run_mock.call_args_list[1].args[0]
 
 
 @pytest.mark.usefixtures("_have_systemd_creds")
@@ -410,3 +363,52 @@ class TestUnseal:
             side_effect=subprocess.TimeoutExpired(cmd="systemd-creds", timeout=10),
         ):
             assert systemd_creds.unseal(cred) is None
+
+
+# ── Test helpers ────────────────────────────────────────────────────
+
+_SYSTEMD_CREDS_EXE = "/usr/bin/systemd-creds"
+"""Stable absolute path returned by ``shutil.which`` in the
+``_have_systemd_creds`` fixture; tests assert on this so subprocess
+calls visibly pin the binary instead of resolving via PATH."""
+
+
+def _version_output(version: int) -> MagicMock:
+    """Return a ``subprocess.run`` result that mimics ``systemd-creds --version``."""
+    return MagicMock(returncode=0, stdout=f"systemd {version} ({version}.5-1.fc44)\n+PAM +AUDIT\n")
+
+
+def _mock_seal_subprocess(sealed_blob: bytes = b"sealed-blob"):
+    """Return a ``subprocess.run`` side_effect for the [version, encrypt] pair.
+
+    ``seal()`` runs ``--version`` first (via ``is_available()``) then
+    ``encrypt`` (which captures the sealed blob from stdout).  Tests
+    that don't override the encrypt output get the default
+    ``b"sealed-blob"`` value.
+    """
+    calls = {"n": 0}
+
+    def _run(*_a: object, **_kw: object) -> MagicMock:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _version_output(259)
+        return MagicMock(returncode=0, stdout=sealed_blob)
+
+    return _run
+
+
+def _seal_argv(run_mock: MagicMock) -> list[str]:
+    """Return the argv of the *encrypt* call (second subprocess.run invocation)."""
+    return run_mock.call_args_list[1].args[0]
+
+
+@pytest.fixture()
+def _have_systemd_creds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make ``shutil.which`` report systemd-creds present for the duration of the test.
+
+    ``is_available()`` short-circuits to False when the binary isn't on
+    PATH, which it never is in the test container.  Tests that exercise
+    seal / unseal need that gate open so they can drive
+    ``subprocess.run`` directly.
+    """
+    monkeypatch.setattr("shutil.which", lambda _name: _SYSTEMD_CREDS_EXE)

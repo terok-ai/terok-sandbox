@@ -1302,9 +1302,19 @@ class TestVaultUnlockLock:
         mgr = MagicMock()
         mgr.is_daemon_running.return_value = False
         monkeypatch.setattr("terok_sandbox.vault.lifecycle.VaultManager", lambda _cfg: mgr)
-        monkeypatch.setattr(
-            "pathlib.Path.unlink", MagicMock(side_effect=OSError("permission denied"))
-        )
+
+        # Target only the sealed-credential unlink so any other Path.unlink
+        # call inside the handler (e.g. ``cfg.vault_passphrase_file`` clearing
+        # in another branch) keeps its real behaviour and the test stays
+        # robust against future changes to ``_handle_vault_lock``.
+        original_unlink = Path.unlink
+
+        def _conditional_unlink(self: Path, missing_ok: bool = False) -> None:
+            if self == cfg.vault_systemd_creds_file:
+                raise OSError("permission denied")
+            return original_unlink(self, missing_ok=missing_ok)
+
+        monkeypatch.setattr("pathlib.Path.unlink", _conditional_unlink)
 
         with pytest.raises(SystemExit, match="failed to remove sealed credential"):
             _handle_vault_lock(cfg=cfg, forget=True)
@@ -1344,32 +1354,6 @@ class TestVaultSeal:
     systemd's own ``--with-key=`` values.  Tests stub ``sc.seal`` so the
     actual subprocess is unit-test-irrelevant.
     """
-
-    @staticmethod
-    def _seed_cfg(tmp_path: Path) -> object:
-        """Return a cfg with a session-unlock file already populated."""
-        cfg = _make_cfg(tmp_path)
-        cfg.vault_passphrase_file.parent.mkdir(parents=True, exist_ok=True)
-        cfg.vault_passphrase_file.write_text("current-pw\n")
-        return cfg
-
-    @staticmethod
-    def _stub_seal_ready(
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> tuple[object, object]:
-        """Stub ``sc.is_available`` true and capture ``sc.seal`` invocations."""
-        from unittest.mock import MagicMock
-
-        from terok_sandbox.credentials import systemd_creds as sc
-
-        monkeypatch.setattr(sc, "is_available", lambda: True)
-        monkeypatch.setattr(
-            "terok_sandbox.credentials.encryption.load_passphrase_from_file",
-            load_passphrase_from_file,
-        )
-        seal = MagicMock()
-        monkeypatch.setattr(sc, "seal", seal)
-        return sc, seal
 
     @pytest.mark.parametrize(
         ("cli_key", "expected_mode"),
@@ -1493,6 +1477,34 @@ class TestVaultSeal:
         with pytest.raises(SystemExit, match="no current passphrase"):
             _handle_vault_seal(cfg=cfg)
         prompt.assert_not_called()
+
+    # ── Lifecycle helpers ──────────────────────────────────────────
+
+    @staticmethod
+    def _seed_cfg(tmp_path: Path) -> object:
+        """Return a cfg with a session-unlock file already populated."""
+        cfg = _make_cfg(tmp_path)
+        cfg.vault_passphrase_file.parent.mkdir(parents=True, exist_ok=True)
+        cfg.vault_passphrase_file.write_text("current-pw\n")
+        return cfg
+
+    @staticmethod
+    def _stub_seal_ready(
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> tuple[object, object]:
+        """Stub ``sc.is_available`` true and capture ``sc.seal`` invocations."""
+        from unittest.mock import MagicMock
+
+        from terok_sandbox.credentials import systemd_creds as sc
+
+        monkeypatch.setattr(sc, "is_available", lambda: True)
+        monkeypatch.setattr(
+            "terok_sandbox.credentials.encryption.load_passphrase_from_file",
+            load_passphrase_from_file,
+        )
+        seal = MagicMock()
+        monkeypatch.setattr(sc, "seal", seal)
+        return sc, seal
 
 
 class TestCredentialsSetupPhaseDaemonHandling:
