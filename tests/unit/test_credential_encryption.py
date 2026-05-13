@@ -53,6 +53,57 @@ def _scripted_tty_prompt(monkeypatch: pytest.MonkeyPatch, *responses: str) -> No
     monkeypatch.setattr("sys.stdin.readline", lambda: "")
 
 
+def _disable_systemd_creds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Force the chooser path by pretending systemd-creds isn't available.
+
+    ``_handle_credentials_encrypt_db`` auto-detects systemd-creds and
+    bypasses the chooser when present.  Tests that exercise the
+    chooser path need to disable that detection explicitly so the
+    test outcome doesn't depend on the host's systemd version.
+    """
+    monkeypatch.setattr("terok_sandbox.credentials.systemd_creds.is_available", lambda: False)
+
+
+class _TtyCapture:
+    """Records everything written to ``/dev/tty`` via ``Path.open``."""
+
+    def __init__(self) -> None:
+        self.value = ""
+
+    def __enter__(self) -> _TtyCapture:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        return None
+
+    def write(self, s: str) -> int:
+        self.value += s
+        return len(s)
+
+
+def _patch_dev_tty(monkeypatch: pytest.MonkeyPatch) -> _TtyCapture:
+    """Divert ``Path("/dev/tty").open(...)`` into an in-memory capture.
+
+    The production helpers write the generated passphrase to ``/dev/tty``
+    explicitly so stdout redirects can't capture the recovery key.
+    Tests patch ``Path.open`` selectively (only for the ``/dev/tty``
+    target) so other ``Path`` reads keep working and we can inspect
+    what the helper would have written to the operator's terminal.
+    """
+    from pathlib import Path as _Path
+
+    capture = _TtyCapture()
+    real_open = _Path.open
+
+    def _selective_open(self, *args, **kwargs):
+        if str(self) == "/dev/tty":
+            return capture
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(_Path, "open", _selective_open)
+    return capture
+
+
 def _make_cfg(tmp_path: Path, *, use_keyring: bool = False, passphrase: str | None = None):
     """Return a SandboxConfig rooted under tmp_path with deterministic credential knobs."""
     from terok_sandbox.config import SandboxConfig
@@ -566,20 +617,56 @@ class TestPromptPassphrase:
 
     def test_empty_confirm_generates(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Setup-path empty entry mints a fresh passphrase — UX affordance, not error."""
+        _patch_dev_tty(monkeypatch)
         _scripted_tty_prompt(monkeypatch, "")
         pw = prompt_passphrase(confirm=True)
         assert len(pw) >= 40
         assert all(c.isalnum() or c in "-_" for c in pw)
 
-    def test_generated_passphrase_goes_to_stderr_not_stdout(
+    def test_generated_passphrase_announced_to_controlling_tty(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """Pipe-fed automation captures stdout; the generated secret must NOT land there."""
+        """Auto-mint at setup writes to ``/dev/tty`` so a redirected stdout can't capture it.
+
+        Earlier versions printed to stdout on the theory that the
+        operator was reading the terminal.  Aisle review (CWE-532)
+        flagged that stdout is exactly the surface
+        ``terok-sandbox setup > install.log`` (CI pipelines, Ansible,
+        cloud-init) does capture, so we route via the controlling
+        TTY now.  ``/dev/tty`` reaches the operator's screen even
+        through a stdout redirect; missing TTY (fully automated
+        install) raises ``SystemExit`` rather than silently dropping
+        the recovery key.
+        """
+        tty_text = _patch_dev_tty(monkeypatch)
         _scripted_tty_prompt(monkeypatch, "")
         pw = prompt_passphrase(confirm=True)
-        captured = capsys.readouterr()
-        assert pw not in captured.out
-        assert pw in captured.err
+        assert pw in tty_text.value
+        assert "Write this down" in tty_text.value
+        # Stdout + stderr stay free of the secret — that's the whole
+        # point of the /dev/tty routing.
+        capture = capsys.readouterr()
+        assert pw not in capture.out
+        assert pw not in capture.err
+
+    def test_generated_passphrase_refused_without_controlling_tty(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No ``/dev/tty`` (CI, fully detached process) raises rather than dropping the value silently."""
+        from pathlib import Path as _Path
+
+        real_open = _Path.open
+
+        def _selective_open(self, *args, **kwargs):
+            if str(self) == "/dev/tty":
+                raise OSError("no such device or address")
+            return real_open(self, *args, **kwargs)
+
+        monkeypatch.setattr(_Path, "open", _selective_open)
+        _scripted_tty_prompt(monkeypatch, "")
+        with pytest.raises(SystemExit) as exc:
+            prompt_passphrase(confirm=True)
+        assert "no controlling TTY" in str(exc.value)
 
 
 class TestKeyringHelpers:
@@ -762,6 +849,7 @@ class TestProvisionPassphrase:
         cfg = _make_cfg(tmp_path)
         # Empty entry takes the generate-and-echo affordance — same UX
         # as ``vault unlock`` against a fresh DB.
+        _patch_dev_tty(monkeypatch)
         _scripted_tty_prompt(monkeypatch, "")
         pw, source = _provision_passphrase(cfg, mode="session")
         assert source == "session-file"
@@ -810,6 +898,7 @@ class TestProvisionPassphrase:
         from terok_sandbox.credentials import encryption as enc
 
         stored: dict[str, str] = {}
+        _patch_dev_tty(monkeypatch)
         monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda: None)
         monkeypatch.setattr(
             enc, "store_passphrase_in_keyring", lambda pw: stored.__setitem__("pw", pw) or True
@@ -869,13 +958,20 @@ class TestChooserAndEncryptHandler:
     def test_fresh_install_session_mode_creates_passphrase(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Setup with no existing DB writes the session-unlock file."""
+        """Setup with no existing DB and explicit ``[s]`` writes the session-unlock file."""
         from terok_sandbox.commands import _handle_credentials_encrypt_db
 
         cfg = _make_cfg(tmp_path)
         assert not cfg.db_path.exists()
         assert not cfg.vault_passphrase_file.exists()
-        _scripted_tty_prompt(monkeypatch, "")
+        _disable_systemd_creds(monkeypatch)
+        _patch_dev_tty(monkeypatch)
+        # Pick ``[s]`` explicitly: the chooser default is now keyring, so
+        # an empty answer would take the keyring tier instead of session.
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        responses = iter(["s\n"])
+        monkeypatch.setattr("sys.stdin.readline", lambda: next(responses))
+        monkeypatch.setattr("prompt_toolkit.prompt", lambda *_a, **_kw: "")
         _handle_credentials_encrypt_db(cfg=cfg)
         assert cfg.vault_passphrase_file.exists()
 
@@ -901,7 +997,13 @@ class TestChooserAndEncryptHandler:
         plaintext.close()
         assert is_plaintext_sqlite(cfg.db_path)
 
-        _scripted_tty_prompt(monkeypatch, "")
+        _disable_systemd_creds(monkeypatch)
+        _patch_dev_tty(monkeypatch)
+        # Pick ``[s]`` so the test still verifies the session-file path.
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        responses = iter(["s\n"])
+        monkeypatch.setattr("sys.stdin.readline", lambda: next(responses))
+        monkeypatch.setattr("prompt_toolkit.prompt", lambda *_a, **_kw: "")
         _handle_credentials_encrypt_db(cfg=cfg)
         assert not is_plaintext_sqlite(cfg.db_path)
         passphrase = cfg.vault_passphrase_file.read_text().rstrip("\n")
@@ -1096,6 +1198,81 @@ class TestAskPassphraseMode:
         monkeypatch.setattr("sys.stdin.isatty", lambda: True)
         monkeypatch.setattr("sys.stdin.readline", lambda: next(responses))
         assert _ask_passphrase_mode() == "session"
+
+    def test_empty_choice_defaults_to_keyring(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Pressing Enter at the chooser takes the recommended default (keyring)."""
+        from terok_sandbox.commands import _ask_passphrase_mode
+
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        monkeypatch.setattr("sys.stdin.readline", lambda: "\n")
+        assert _ask_passphrase_mode() == "keyring"
+
+    def test_chooser_prompt_lists_keyring_first_and_hints_systemd_creds(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Prompt names keyring as recommended and points operators at the systemd upgrade."""
+        from terok_sandbox.commands import _ask_passphrase_mode
+
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        monkeypatch.setattr("sys.stdin.readline", lambda: "\n")
+        _ask_passphrase_mode()
+        out = capsys.readouterr().out
+        assert "[k] keyring" in out
+        assert "recommended" in out.lower()
+        assert "systemd" in out and "≥ 257" in out
+
+
+class TestAutoSystemdCredsBranch:
+    """When systemd-creds is available, ``_handle_credentials_encrypt_db`` skips the chooser.
+
+    The strongest available tier is unambiguous on hosts where the
+    Varlink service is up — asking would only slow the operator down.
+    """
+
+    def test_uses_systemd_creds_without_chooser(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Fresh install on a TPM-capable host seals; announce lands on ``/dev/tty``."""
+        from terok_sandbox.commands import _handle_credentials_encrypt_db
+
+        cfg = _make_cfg(tmp_path)
+        seal_calls: list[tuple] = []
+
+        def _fake_seal(passphrase: str, path: Path, *, key_mode: str = "auto") -> None:
+            seal_calls.append((passphrase, path, key_mode))
+
+        tty_text = _patch_dev_tty(monkeypatch)
+        monkeypatch.setattr("terok_sandbox.credentials.systemd_creds.is_available", lambda: True)
+        monkeypatch.setattr("terok_sandbox.credentials.systemd_creds.seal", _fake_seal)
+        # If the chooser fired we'd hang on readline; failing fast here
+        # tells us the auto-branch short-circuited correctly.
+        monkeypatch.setattr(
+            "sys.stdin.readline",
+            lambda: pytest.fail("chooser should not be invoked on systemd-creds-available hosts"),
+        )
+
+        _handle_credentials_encrypt_db(cfg=cfg)
+
+        assert len(seal_calls) == 1
+        sealed_passphrase, sealed_path, key_mode = seal_calls[0]
+        # Passphrase was minted (non-empty) and sealed under the systemd
+        # credential name with ``--with-key=auto`` (TPM2 + host on
+        # equipped hosts, host alone otherwise).
+        assert sealed_passphrase
+        assert sealed_path == cfg.vault_systemd_creds_file
+        assert key_mode == "auto"
+        # Token-mint framing reaches the controlling TTY (not stdout)
+        # so a redirected install — ``setup > install.log``, CI — can't
+        # capture the recovery key.
+        assert sealed_passphrase in tty_text.value
+        assert "Write this down" in tty_text.value
+        # Source label still lands on stdout so ``vault status`` readers
+        # see ``passphrase source: systemd-creds`` in their pipe.
+        out = capsys.readouterr()
+        assert "systemd-creds" in out.out
+        # And the secret stays OFF stdout/stderr.
+        assert sealed_passphrase not in out.out
+        assert sealed_passphrase not in out.err
 
 
 class TestVaultUnlockLock:
@@ -1563,7 +1740,15 @@ class TestCredentialsSetupPhaseDaemonHandling:
         # — and we still expect stop_daemon to fire.
         mgr.is_daemon_running.return_value = False
         monkeypatch.setattr("terok_sandbox.vault.lifecycle.VaultManager", lambda _cfg: mgr)
-        _scripted_tty_prompt(monkeypatch, "")
+        # Force the chooser path with an explicit ``[s]``.  Default is now
+        # keyring; this test doesn't actually depend on which tier wins,
+        # but pinning it makes the test deterministic across hosts.
+        _disable_systemd_creds(monkeypatch)
+        _patch_dev_tty(monkeypatch)
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        responses = iter(["s\n"])
+        monkeypatch.setattr("sys.stdin.readline", lambda: next(responses))
+        monkeypatch.setattr("prompt_toolkit.prompt", lambda *_a, **_kw: "")
 
         assert _run_credentials_setup_phase(cfg) is True
         mgr.stop_daemon.assert_called_once()
@@ -1703,7 +1888,14 @@ class TestCredentialsSetupPhase:
         from terok_sandbox.commands import _run_credentials_setup_phase
 
         cfg = _make_cfg(tmp_path)
-        _scripted_tty_prompt(monkeypatch, "")
+        # Drive the chooser path explicitly (default is keyring; tests on
+        # CI shouldn't depend on which tier the host actually has).
+        _disable_systemd_creds(monkeypatch)
+        _patch_dev_tty(monkeypatch)
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        responses = iter(["s\n"])
+        monkeypatch.setattr("sys.stdin.readline", lambda: next(responses))
+        monkeypatch.setattr("prompt_toolkit.prompt", lambda *_a, **_kw: "")
         assert _run_credentials_setup_phase(cfg) is True
 
     def test_returns_false_when_handler_raises(

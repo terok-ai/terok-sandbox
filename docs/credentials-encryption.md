@@ -40,18 +40,24 @@ terok-sandbox vault lock     # removes the session file, stops the daemon
 
 ## Picking a tier at setup
 
-`terok setup` (or `terok-sandbox setup`) asks once:
+`terok setup` (or `terok-sandbox setup`) **auto-detects systemd-creds**
+when the host supports it (systemd ≥ 257 with the `io.systemd.Credentials`
+Varlink service) and uses it silently — that's the strongest tier
+available, and asking when the answer is unambiguous just slows the
+install down.  Either `host+tpm2` (TPM-equipped hosts) or `host` only,
+chosen by `systemd-creds --with-key=auto`.
+
+When systemd-creds isn't available, setup asks once:
 
 | Choice | When to pick it |
 |--------|-----------------|
-| `[s]` session-unlock *(default)* | desktop + laptop; one prompt per boot |
-| `[k]` OS keyring                 | desktop with a working Secret Service / Keychain |
-| `[c]` config file                | headless server with no keyring (requires `yes` confirmation) |
+| `[k]` OS keyring *(default)*      | desktop with a working Secret Service / Keychain |
+| `[s]` session-unlock              | servers with no keyring; one `vault unlock` per boot |
+| `[c]` config file                 | last-resort plaintext-on-disk; requires `yes` confirmation |
 
-The default is `session-unlock` — terok never touches your keyring
-unless you opt in.  The systemd-creds tier is opt-in via `vault seal`
-(below); the setup chooser doesn't surface it because TPM availability
-varies per host.
+Either branch **auto-generates the passphrase** and prints it once
+("write this down") — that's your recovery key for rebuilds and other
+hosts.
 
 ## Changing tiers (move the passphrase to a different backend)
 

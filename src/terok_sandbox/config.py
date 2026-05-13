@@ -277,18 +277,28 @@ class SandboxConfig:
         """
         return self.vault_dir / "vault.passphrase.cred"
 
-    def open_credential_db(self, *, prompt_on_tty: bool = False) -> Any:
+    def open_credential_db(
+        self, db_path: Path | None = None, *, prompt_on_tty: bool = False
+    ) -> Any:
         """Open the credentials DB with this config's resolution-chain knobs.
 
         Single seam over [`open_credential_db`][terok_sandbox.credentials.db.open_credential_db]
-        so call sites don't have to thread the five tier-selection
-        kwargs by hand.  CLI consumers pass ``prompt_on_tty=True`` to
-        unlock the interactive fallback; daemons leave it off.
+        so call sites never have to thread the tier-selection kwargs
+        (``passphrase_file``, ``systemd_creds_file``, ``use_keyring``,
+        ``config_fallback``) by hand — adding a new tier means
+        editing *this* method only, no cross-package fan-out.
+
+        *db_path* defaults to ``self.db_path``; callers that already
+        hold a path (typically ``VaultStatus.db_path`` for the running
+        daemon, or a test override) pass it explicitly so the open
+        targets that DB while still using this config's tier policy.
+        CLI consumers pass ``prompt_on_tty=True`` to unlock the
+        interactive fallback; daemons leave it off.
         """
         from .credentials.db import open_credential_db  # noqa: PLC0415
 
         return open_credential_db(
-            self.db_path,
+            db_path if db_path is not None else self.db_path,
             passphrase_file=self.vault_passphrase_file,
             systemd_creds_file=self.vault_systemd_creds_file,
             use_keyring=self.credentials_use_keyring,
@@ -297,11 +307,13 @@ class SandboxConfig:
         )
 
     def open_credential_db_with_source(
-        self, *, prompt_on_tty: bool = False
+        self, db_path: Path | None = None, *, prompt_on_tty: bool = False
     ) -> tuple[CredentialDB, PassphraseSource]:
         """Same as [`open_credential_db`][terok_sandbox.SandboxConfig.open_credential_db]
         but also returns which tier of the chain hit.
 
+        *db_path* override semantics match
+        [`open_credential_db`][terok_sandbox.SandboxConfig.open_credential_db].
         The returned source flows into
         [`VaultStatus.passphrase_source`][terok_sandbox.VaultStatus] so
         callers don't have to second-guess the resolver.
@@ -309,7 +321,7 @@ class SandboxConfig:
         from .credentials.db import open_credential_db_with_source  # noqa: PLC0415
 
         return open_credential_db_with_source(
-            self.db_path,
+            db_path if db_path is not None else self.db_path,
             passphrase_file=self.vault_passphrase_file,
             systemd_creds_file=self.vault_systemd_creds_file,
             use_keyring=self.credentials_use_keyring,

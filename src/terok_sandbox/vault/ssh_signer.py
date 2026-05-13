@@ -36,6 +36,7 @@ from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
 from cryptography.hazmat.primitives.hashes import SHA256, SHA512
 from cryptography.hazmat.primitives.serialization import load_der_private_key
 
+from .._util import sanitize_tty
 from ..credentials.db import SSHKeyRecord
 
 _logger = logging.getLogger("terok-ssh-agent")
@@ -189,6 +190,47 @@ def _sign(key: Ed25519PrivateKey | RSAPrivateKey, data: bytes, flags: int) -> by
 # ---------------------------------------------------------------------------
 
 
+def _peer_label(writer: asyncio.StreamWriter) -> str:
+    """Return a useful human-readable label for the peer end of a connection.
+
+    ``writer.get_extra_info("peername")`` is empty for Unix-socket
+    clients that don't bind a filesystem name (the common case), so
+    bare ``"from %s"`` logs render as ``"from "`` — useless when
+    triaging where a stray connection is coming from.
+
+    For Unix sockets, query ``SO_PEERCRED`` for the peer's pid+uid+gid
+    and read ``/proc/<pid>/comm`` (best-effort) for the program name.
+    For TCP, fall back to the ``(host, port)`` tuple.  ``"<unknown>"``
+    on any failure — logging must never throw on a connection close.
+    """
+    import socket as _socket
+
+    try:
+        sock = writer.get_extra_info("socket")
+        if sock is not None and sock.family == _socket.AF_UNIX:
+            cred_struct = sock.getsockopt(_socket.SOL_SOCKET, _socket.SO_PEERCRED, 12)
+            pid, uid, gid = struct.unpack("3i", cred_struct)
+            comm = ""
+            try:
+                with Path(f"/proc/{pid}/comm").open(encoding="utf-8") as fh:
+                    # ``comm`` is peer-controllable via prctl(PR_SET_NAME);
+                    # neutralise C0/ANSI/etc. before it lands in log
+                    # output to keep CWE-117 (log injection) closed.
+                    comm = sanitize_tty(fh.read().strip())[:64]
+            except OSError:
+                pass
+            tail = f" ({comm})" if comm else ""
+            return f"unix peer pid={pid} uid={uid} gid={gid}{tail}"
+        peer = writer.get_extra_info("peername")
+        if isinstance(peer, tuple) and len(peer) >= 2:
+            return f"{peer[0]}:{peer[1]}"
+        if peer:
+            return str(peer)
+    except Exception:  # noqa: BLE001 — logging must never raise
+        pass
+    return "<unknown>"
+
+
 async def _read_handshake(reader: asyncio.StreamReader) -> str | None:
     """Read the phantom-token handshake prefix.
 
@@ -214,7 +256,7 @@ async def _resolve_scope_from_token(
     reader: asyncio.StreamReader, writer: asyncio.StreamWriter, token_db: Any
 ) -> str | None:
     """Container-facing: read and validate the phantom token, return the scope."""
-    peer = writer.get_extra_info("peername")
+    peer = _peer_label(writer)
     token = await _read_handshake(reader)
     if not token:
         _logger.info("Handshake failed (no token) from %s", peer)
@@ -236,7 +278,7 @@ async def _serve_agent_session(
     key_cache: _DBKeyCache,
 ) -> None:
     """Run the agent message loop for a connection bound to *scope*."""
-    peer = writer.get_extra_info("peername")
+    peer = _peer_label(writer)
     keys = key_cache.get(scope)
     if not keys:
         _logger.warning("No SSH keys loaded for scope %r", scope)
@@ -312,7 +354,7 @@ async def _handle_container_connection(
             return
         await _serve_agent_session(reader, writer, scope, key_cache)
     except Exception:
-        _logger.exception("SSH agent connection error from %s", writer.get_extra_info("peername"))
+        _logger.exception("SSH agent connection error from %s", _peer_label(writer))
     finally:
         writer.close()
         try:

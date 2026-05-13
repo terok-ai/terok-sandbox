@@ -200,10 +200,115 @@ class TestResolveScopeFromToken:
         assert await _resolve_scope_from_token(reader, writer, token_db) is None
 
 
-class _FakeWriter:
-    """Stub writer for ``writer.get_extra_info('peername')`` and nothing else."""
+class TestPeerLabel:
+    """Verify ``_peer_label`` produces useful strings for log messages."""
 
-    def get_extra_info(self, _key: str) -> str:
+    def test_tcp_tuple_peername(self) -> None:
+        """A TCP ``(host, port)`` peername round-trips into a ``host:port`` label."""
+        from terok_sandbox.vault.ssh_signer import _peer_label
+
+        class _Writer:
+            def get_extra_info(self, key: str):
+                if key == "socket":
+                    return None
+                return ("203.0.113.7", 51234)
+
+        assert _peer_label(_Writer()) == "203.0.113.7:51234"
+
+    def test_unix_peer_uses_so_peercred(self) -> None:
+        """For an AF_UNIX socket, ``SO_PEERCRED`` drives the label (not ``peername``)."""
+        import os
+        import socket as _socket
+
+        from terok_sandbox.vault.ssh_signer import _peer_label
+
+        # A real socket pair gives us a live AF_UNIX peer with our own
+        # pid+uid+gid in SO_PEERCRED — the cheapest way to exercise the
+        # branch without faking the struct layout.
+        a, b = _socket.socketpair(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        try:
+
+            class _Writer:
+                def get_extra_info(self, key: str):
+                    if key == "socket":
+                        return a
+                    return ""  # peername is empty for unbound unix sockets
+
+            label = _peer_label(_Writer())
+        finally:
+            a.close()
+            b.close()
+        # The fields must surface so triage actually has somewhere to start.
+        assert f"pid={os.getpid()}" in label
+        assert f"uid={os.geteuid()}" in label
+        assert "unix peer" in label
+
+    def test_empty_peer_falls_back_to_unknown(self) -> None:
+        """No usable info → ``<unknown>``; the helper never raises on a bare connection."""
+        from terok_sandbox.vault.ssh_signer import _peer_label
+
+        class _Writer:
+            def get_extra_info(self, _key: str):
+                return None
+
+        assert _peer_label(_Writer()) == "<unknown>"
+
+    def test_proc_comm_unreadable_still_returns_pid_uid_gid(self, monkeypatch) -> None:
+        """``/proc/<pid>/comm`` read failure is swallowed; pid/uid/gid still surface."""
+        import socket as _socket
+
+        from terok_sandbox.vault.ssh_signer import _peer_label
+
+        a, b = _socket.socketpair(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        try:
+
+            class _Writer:
+                def get_extra_info(self, key: str):
+                    return a if key == "socket" else ""
+
+            # Force the inner Path.open() to raise the way it would on a
+            # dead peer process — the outer ``unix peer pid=…`` label
+            # must still come back, just without the ``(comm)`` suffix.
+            real_open = type(__import__("pathlib").Path("/")).open
+
+            def _open_raises(self, *args, **kwargs):
+                if str(self).startswith("/proc/"):
+                    raise OSError("no such process")
+                return real_open(self, *args, **kwargs)
+
+            monkeypatch.setattr("pathlib.Path.open", _open_raises)
+            label = _peer_label(_Writer())
+        finally:
+            a.close()
+            b.close()
+        assert "unix peer pid=" in label
+        # The ``(comm)`` suffix is absent because /proc was unreadable.
+        assert "(" not in label
+
+    def test_outer_exception_returns_unknown(self) -> None:
+        """A writer that throws on ``get_extra_info`` falls all the way through to ``<unknown>``."""
+        from terok_sandbox.vault.ssh_signer import _peer_label
+
+        class _Writer:
+            def get_extra_info(self, _key: str):
+                raise RuntimeError("writer is detached")
+
+        # Logging must never raise; the safety-net ``except`` swallows
+        # and the helper returns the sentinel string.
+        assert _peer_label(_Writer()) == "<unknown>"
+
+
+class _FakeWriter:
+    """Stub writer for ``writer.get_extra_info('peername'/'socket')``.
+
+    Returns ``None`` for ``socket`` so ``_peer_label`` skips the Unix
+    SO_PEERCRED branch and falls through to the ``peername`` form —
+    which yields ``"test-peer"`` for handler-level logging.
+    """
+
+    def get_extra_info(self, key: str) -> str | None:
+        if key == "socket":
+            return None
         return "test-peer"
 
 
