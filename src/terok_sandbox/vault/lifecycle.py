@@ -27,6 +27,11 @@ from pathlib import Path
 from .._util import _systemctl
 from .._util._logging import log_warning
 from ..config import SandboxConfig
+from ..credentials.encryption import (
+    NoPassphraseError,
+    PassphraseSource,
+    WrongPassphraseError,
+)
 from .constants import HEALTH_PATH as _HEALTH_PATH
 
 # ---------- Vocabulary ----------
@@ -66,6 +71,25 @@ class VaultStatus:
 
     transport: str | None = None
     """Detected transport: ``"tcp"``, ``"socket"``, or ``None`` if not running."""
+
+    ssh_keys_stored: int = 0
+    """Number of distinct SSH keypairs in the credential DB (0 when locked or absent)."""
+
+    passphrase_source: PassphraseSource | None = None
+    """Which tier of the resolution chain unlocked the DB this call.
+
+    ``None`` when the DB couldn't be opened (locked, absent, or
+    schema-corrupted).  See [`PassphraseSource`][terok_sandbox.credentials.encryption.PassphraseSource]
+    for the closed set of values.
+    """
+
+    locked: bool = False
+    """``True`` when the DB exists but no passphrase tier could open it.
+
+    Distinct from ``credentials_stored == ()`` (empty but unlocked) and
+    from ``not db_path.is_file()`` (no DB at all) — set only when an
+    open was attempted and failed for passphrase reasons.
+    """
 
 
 class VaultUnreachableError(RuntimeError):
@@ -230,13 +254,19 @@ class VaultManager:
                 pass
 
         creds: tuple[str, ...] = ()
+        ssh_keys_count = 0
+        passphrase_source: PassphraseSource | None = None
+        locked = False
         if self._cfg.db_path.is_file():
             try:
-                db = self._cfg.open_credential_db()
+                db, passphrase_source = self._cfg.open_credential_db_with_source()
                 try:
                     creds = tuple(db.list_credentials("default"))
+                    ssh_keys_count = db.count_ssh_keys()
                 finally:
                     db.close()
+            except (NoPassphraseError, WrongPassphraseError):
+                locked = True
             except Exception as exc:  # noqa: BLE001
                 log_warning(f"Failed to read credential DB for status: {exc}")
 
@@ -272,6 +302,9 @@ class VaultManager:
             routes_configured=routes_count,
             credentials_stored=creds,
             transport=transport,
+            ssh_keys_stored=ssh_keys_count,
+            passphrase_source=passphrase_source,
+            locked=locked,
         )
 
     @property

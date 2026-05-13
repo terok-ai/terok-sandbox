@@ -82,6 +82,7 @@ from .config_schema import (
 )
 from .config_stack import ConfigScope, ConfigStack
 from .credentials.db import CredentialDB, SSHKeyRecord, SSHKeyRow
+from .credentials.encryption import PassphraseSource
 from .credentials.ssh import SSHInitResult, SSHManager
 from .credentials.ssh_keypair import (
     DEFAULT_RSA_BITS,
@@ -407,6 +408,7 @@ __all__ = [
     "PHANTOM_CREDENTIALS_MARKER",
     # Credential DB
     "CredentialDB",
+    "PassphraseSource",
     "SSHKeyRecord",
     "SSHKeyRow",
     # Vault

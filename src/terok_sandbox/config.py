@@ -29,6 +29,8 @@ from .paths import (
 
 if TYPE_CHECKING:
     from .config_schema import RawCredentialsSection, ServicesMode
+    from .credentials.db import CredentialDB
+    from .credentials.encryption import PassphraseSource
 
 CONTAINER_RUNTIME_DIR = "/run/terok"
 """Container-side mount point for the host runtime directory (socket mode)."""
@@ -274,6 +276,26 @@ class SandboxConfig:
         from .credentials.db import open_credential_db  # noqa: PLC0415
 
         return open_credential_db(
+            self.db_path,
+            passphrase_file=self.vault_passphrase_file,
+            use_keyring=self.credentials_use_keyring,
+            config_fallback=self.credentials_passphrase,
+            prompt_on_tty=prompt_on_tty,
+        )
+
+    def open_credential_db_with_source(
+        self, *, prompt_on_tty: bool = False
+    ) -> tuple[CredentialDB, PassphraseSource]:
+        """Same as [`open_credential_db`][terok_sandbox.SandboxConfig.open_credential_db]
+        but also returns which tier of the chain hit.
+
+        The returned source flows into
+        [`VaultStatus.passphrase_source`][terok_sandbox.VaultStatus] so
+        callers don't have to second-guess the resolver.
+        """
+        from .credentials.db import open_credential_db_with_source  # noqa: PLC0415
+
+        return open_credential_db_with_source(
             self.db_path,
             passphrase_file=self.vault_passphrase_file,
             use_keyring=self.credentials_use_keyring,

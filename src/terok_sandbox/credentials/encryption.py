@@ -64,11 +64,44 @@ def open_sqlcipher_via_chain(
         prompt_on_tty=prompt_on_tty,
     )
     if passphrase is None:
-        raise NoPassphraseError(
-            f"no SQLCipher passphrase available for {db_path}"
-            " — run `terok-sandbox vault unlock` or `terok-sandbox setup` to provision one"
-        )
+        raise NoPassphraseError(f"no SQLCipher passphrase available for {db_path}")
     return open_sqlcipher(db_path, passphrase, **connect_kwargs)
+
+
+def resolve_passphrase_with_source(
+    *,
+    passphrase_file: Path | None = None,
+    use_keyring: bool = False,
+    config_fallback: str | None = None,
+    prompt_on_tty: bool = False,
+) -> tuple[str | None, PassphraseSource | None]:
+    """Walk the runtime resolution chain; return ``(passphrase, source)``.
+
+    Single source of truth for the resolution order — see
+    [`resolve_passphrase`][terok_sandbox.credentials.encryption.resolve_passphrase]
+    for the tier semantics.  Both elements of the tuple are ``None``
+    when no tier had a passphrase.
+
+    The source half is what feeds
+    [`VaultStatus.passphrase_source`][terok_sandbox.VaultStatus] and the
+    TUI status pill — keep the labels stable, callers dispatch on them.
+    """
+    # Truthy checks throughout: an empty string anywhere in the chain
+    # is SQLCipher's no-encryption sentinel; treat it as "not present"
+    # rather than letting it overrule a real later tier.
+    if passphrase_file is not None:
+        file_pw = load_passphrase_from_file(passphrase_file)
+        if file_pw:
+            return file_pw, "session-file"
+    if use_keyring:
+        keyring_pw = load_passphrase_from_keyring()
+        if keyring_pw:
+            return keyring_pw, "keyring"
+    if config_fallback:
+        return config_fallback, "config"
+    if prompt_on_tty and sys.stdin.isatty():
+        return prompt_passphrase(), "prompt"
+    return None, None
 
 
 def resolve_passphrase(
@@ -94,22 +127,13 @@ def resolve_passphrase(
     sandbox config layer — the config module already imports from
     credentials.db, and the back-edge would close a tach cycle.
     """
-    # Truthy checks throughout: an empty string anywhere in the chain
-    # is SQLCipher's no-encryption sentinel; treat it as "not present"
-    # rather than letting it overrule a real later tier.
-    if passphrase_file is not None:
-        file_pw = load_passphrase_from_file(passphrase_file)
-        if file_pw:
-            return file_pw
-    if use_keyring:
-        keyring_pw = load_passphrase_from_keyring()
-        if keyring_pw:
-            return keyring_pw
-    if config_fallback:
-        return config_fallback
-    if prompt_on_tty and sys.stdin.isatty():
-        return prompt_passphrase()
-    return None
+    passphrase, _source = resolve_passphrase_with_source(
+        passphrase_file=passphrase_file,
+        use_keyring=use_keyring,
+        config_fallback=config_fallback,
+        prompt_on_tty=prompt_on_tty,
+    )
+    return passphrase
 
 
 # ── Tier primitives ─────────────────────────────────────────────────
@@ -378,5 +402,6 @@ __all__ = [
     "open_sqlcipher_via_chain",
     "prompt_passphrase",
     "resolve_passphrase",
+    "resolve_passphrase_with_source",
     "store_passphrase_in_keyring",
 ]

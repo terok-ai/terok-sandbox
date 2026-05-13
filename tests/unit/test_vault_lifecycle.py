@@ -438,6 +438,99 @@ class TestGetVaultStatus:
 
         assert status.credentials_stored == ()
 
+    def test_counts_ssh_keys(self, tmp_path: Path) -> None:
+        """ssh_keys_stored reflects the number of stored keypairs."""
+        from terok_sandbox.credentials.db import CredentialDB
+
+        cfg = _make_cfg(tmp_path)
+        db = CredentialDB(cfg.db_path, passphrase="test")
+        db.store_ssh_key(
+            key_type="ed25519",
+            private_der=b"priv-1",
+            public_blob=b"pub-1",
+            comment="c",
+            fingerprint="fp-1",
+        )
+        db.store_ssh_key(
+            key_type="ed25519",
+            private_der=b"priv-2",
+            public_blob=b"pub-2",
+            comment="c",
+            fingerprint="fp-2",
+        )
+        db.close()
+
+        mgr = VaultManager(cfg)
+        with (
+            _no_systemd(),
+            patch.object(VaultManager, "is_daemon_running", return_value=False),
+        ):
+            status = mgr.get_status()
+
+        assert status.ssh_keys_stored == 2
+
+    def test_unlocked_db_reports_passphrase_source(self, tmp_path: Path) -> None:
+        """passphrase_source labels which chain tier opened the DB."""
+        from terok_sandbox.credentials.db import CredentialDB
+
+        cfg = _make_cfg(tmp_path)
+        db = CredentialDB(cfg.db_path, passphrase="test")
+        db.close()
+
+        mgr = VaultManager(cfg)
+        with (
+            _no_systemd(),
+            patch.object(VaultManager, "is_daemon_running", return_value=False),
+        ):
+            status = mgr.get_status()
+
+        # The autouse keyring stub in conftest returns "test" via the
+        # keyring tier — same passphrase the DB was created with.
+        assert status.passphrase_source == "keyring"
+        assert status.locked is False
+
+    def test_locked_db_sets_locked_flag(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unopenable DB → locked=True; ssh_keys_stored / passphrase_source stay at defaults."""
+        from terok_sandbox.credentials import encryption as _enc
+        from terok_sandbox.credentials.db import CredentialDB
+
+        cfg = _make_cfg(tmp_path)
+        db = CredentialDB(cfg.db_path, passphrase="test")
+        db.close()
+
+        # Blank every tier of the chain so the open fails with NoPassphraseError.
+        monkeypatch.setattr(_enc, "load_passphrase_from_keyring", lambda: None)
+
+        mgr = VaultManager(cfg)
+        with (
+            _no_systemd(),
+            patch.object(VaultManager, "is_daemon_running", return_value=False),
+        ):
+            status = mgr.get_status()
+
+        assert status.locked is True
+        assert status.passphrase_source is None
+        assert status.ssh_keys_stored == 0
+        assert status.credentials_stored == ()
+
+    def test_no_db_leaves_locked_false(self, tmp_path: Path) -> None:
+        """Missing DB is a fresh install, not a locked vault — locked stays False."""
+        cfg = _make_cfg(tmp_path)
+        assert not cfg.db_path.is_file()
+
+        mgr = VaultManager(cfg)
+        with (
+            _no_systemd(),
+            patch.object(VaultManager, "is_daemon_running", return_value=False),
+        ):
+            status = mgr.get_status()
+
+        assert status.locked is False
+        assert status.passphrase_source is None
+        assert status.ssh_keys_stored == 0
+
 
 class TestEnsureVaultReachable:
     """Verify ensure_vault_reachable."""
