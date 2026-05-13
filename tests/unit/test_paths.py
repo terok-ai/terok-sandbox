@@ -573,3 +573,19 @@ class TestPlaintextPassphraseConfigPath:
             lambda: [("system", system), ("user", user)],
         )
         assert plaintext_passphrase_config_path() == user
+
+    def test_bad_layer_is_swallowed(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A malformed YAML layer doesn't kill the walk — visibility surfaces must not crash."""
+        from terok_sandbox.paths import plaintext_passphrase_config_path
+
+        broken = tmp_path / "broken.yml"
+        good = tmp_path / "good.yml"
+        # ``: : :`` is unambiguously not valid YAML; the parse error must
+        # NOT propagate out of the helper.
+        broken.write_text(": : :\n", encoding="utf-8")
+        good.write_text("credentials:\n  passphrase: visible\n", encoding="utf-8")
+        monkeypatch.setattr(
+            "terok_sandbox.paths._config_file_paths",
+            lambda: [("system", broken), ("user", good)],
+        )
+        assert plaintext_passphrase_config_path() == good

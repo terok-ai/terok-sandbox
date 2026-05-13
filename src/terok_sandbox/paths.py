@@ -110,15 +110,24 @@ def plaintext_passphrase_config_path() -> Path | None:
     Lives in ``paths`` rather than ``config`` so the tach foundation
     layer stays free of the ``config_stack`` import; the helper is a
     file-locator, not a schema-validated reader.
+
+    Per-file failures (unreadable, malformed YAML, non-mapping
+    top-level) are swallowed and the walk continues — same fail-silent
+    contract as [`read_config_section`][terok_sandbox.paths.read_config_section],
+    since this helper feeds visibility surfaces (``vault status``,
+    sickbay) that must never crash on a bad config layer.
     """
     from .config_stack import load_yaml_scope
 
     found: Path | None = None
     for label, path in _config_file_paths():
-        scope = load_yaml_scope(label, path)
-        creds = scope.data.get("credentials") if isinstance(scope.data, dict) else None
-        if isinstance(creds, dict) and creds.get("passphrase"):
-            found = path
+        try:
+            scope = load_yaml_scope(label, path)
+            creds = scope.data.get("credentials") if isinstance(scope.data, dict) else None
+            if isinstance(creds, dict) and creds.get("passphrase"):
+                found = path
+        except Exception:  # noqa: BLE001 — fail-silent; bad config layer must not crash the walk
+            continue
     return found
 
 

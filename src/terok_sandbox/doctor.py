@@ -191,7 +191,8 @@ def _make_plaintext_passphrase_warning_check() -> DoctorCheck:
         host_side=True,
         fix_description=(
             "Remove `credentials.passphrase` from config.yml; provision the same value via"
-            " `terok-sandbox vault unlock` (session-file) or `terok-sandbox vault seal` (systemd-creds)."
+            " the session-unlock file (RAM-backed, cleared on reboot) or a sealed"
+            " systemd-creds credential (TPM2 / host-key bound)."
         ),
     )
 

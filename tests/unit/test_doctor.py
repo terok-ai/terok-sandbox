@@ -201,8 +201,10 @@ class TestPlaintextPassphraseWarningCheck:
         assert verdict.severity == "warn"
         assert str(seeded) in verdict.detail
         assert "plaintext" in verdict.detail
-        # The fix description points the operator at a safer-tier verb.
-        assert "vault unlock" in check.fix_description or "vault seal" in check.fix_description
+        # The fix description names safer-tier mechanisms (not specific
+        # CLI verbs) so terok / sickbay can map them to their own surface.
+        assert "session-unlock" in check.fix_description
+        assert "systemd-creds" in check.fix_description
 
 
 class TestSandboxDoctorChecks:
