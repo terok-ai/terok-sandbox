@@ -18,6 +18,8 @@ import sys
 from pathlib import Path
 from typing import Any, Literal
 
+from . import systemd_creds as _systemd_creds
+
 KEYRING_SERVICE = "terok-sandbox"
 KEYRING_USERNAME = "credentials-db"
 
@@ -97,12 +99,7 @@ def resolve_passphrase_with_source(
         if file_pw:
             return file_pw, "session-file"
     if systemd_creds_file is not None:
-        # Local import: ``systemd_creds`` shells out to a subprocess and
-        # pulls in ``subprocess`` only when the tier is actually used —
-        # daemons that never see a sealed credential pay zero import cost.
-        from . import systemd_creds as _sc  # noqa: PLC0415
-
-        sealed_pw = _sc.unseal(systemd_creds_file)
+        sealed_pw = _systemd_creds.unseal(systemd_creds_file)
         if sealed_pw:
             return sealed_pw, "systemd-creds"
     if use_keyring:

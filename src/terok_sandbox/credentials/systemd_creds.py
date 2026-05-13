@@ -28,7 +28,7 @@ local credential key: Permission denied``.  [`is_available`][terok_sandbox.crede
 gates on the version so the tier reports as unavailable rather than
 failing at runtime.
 
-This module is a thin subprocess shim — no Python binding exists for
+The module is a thin subprocess shim — no Python binding exists for
 systemd-creds and the CLI is the supported entry point.  Tests stub
 ``subprocess.run`` directly; production code stays trivial.
 """
@@ -40,6 +40,8 @@ import re
 import shutil
 import subprocess  # nosec: B404 — sealed credential lifecycle requires the systemd-creds CLI
 from pathlib import Path
+
+# ── Vocabulary ──────────────────────────────────────────────────────
 
 _BINARY = "systemd-creds"
 
@@ -55,72 +57,7 @@ _UNSEAL_TIMEOUT = 10.0
 _PROBE_TIMEOUT = 5.0
 
 
-@functools.cache
-def _systemd_creds_version() -> int | None:
-    """Return the major version of the installed ``systemd-creds``, or ``None``.
-
-    Parses the first integer out of ``systemd-creds --version``.
-    Returns ``None`` if the binary is absent, the call fails, or the
-    output doesn't contain an integer — callers treat all three as
-    "tier unavailable" and fall through.
-
-    Cached for the process lifetime: the host's systemd version doesn't
-    change between invocations, and a single ``vault seal`` already
-    funnels through ``is_available`` → ``has_tpm2`` → ``seal``, three
-    redundant probes at ~5 ms each.  Tests clear the cache between
-    cases via the ``_isolate_systemd_creds_version_cache`` autouse
-    fixture in ``conftest.py``.
-    """
-    if shutil.which(_BINARY) is None:
-        return None
-    try:
-        result = subprocess.run(  # nosec: B603 — fixed argv, no user input
-            [_BINARY, "--version"],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=_PROBE_TIMEOUT,
-        )
-    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        return None
-    match = re.search(r"\b(\d+)\b", result.stdout.splitlines()[0] if result.stdout else "")
-    if match is None:
-        return None
-    return int(match.group(1))
-
-
-def is_available() -> bool:
-    """Return ``True`` if ``systemd-creds`` is usable from this process.
-
-    Requires the binary on ``PATH`` *and* a host systemd ≥ 257 so the
-    non-root Varlink delegation path is present.  Older systemd is
-    treated as "tier unavailable" — see the module docstring.
-    """
-    version = _systemd_creds_version()
-    return version is not None and version >= _MIN_SYSTEMD_VERSION
-
-
-def has_tpm2() -> bool:
-    """Return ``True`` if the host has a TPM2 device usable by systemd-creds.
-
-    Mirrors ``systemd-creds has-tpm2``'s exit code.  Used by ``vault
-    seal --key=auto`` to choose between TPM2 and host-key sealing — a
-    missing TPM doesn't break the tier (host-key fallback still works
-    in ``--user`` mode), so this is a *preference* probe, not a
-    precondition.
-    """
-    if not is_available():
-        return False
-    try:
-        result = subprocess.run(  # nosec: B603 — fixed argv, no shell, no user input
-            [_BINARY, "has-tpm2"],
-            capture_output=True,
-            timeout=_PROBE_TIMEOUT,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    return result.returncode == 0
+# ── Sealing ─────────────────────────────────────────────────────────
 
 
 def seal(passphrase: str, credential_path: Path, *, tpm: bool = True) -> None:
@@ -139,8 +76,11 @@ def seal(passphrase: str, credential_path: Path, *, tpm: bool = True) -> None:
     credential that decrypts to nothing, which the chain would treat
     as "tier empty" and silently skip.
 
-    Raises ``RuntimeError`` if the binary fails; the caller surfaces
-    actionable hints.
+    Raises:
+        ValueError: *passphrase* is empty.
+        RuntimeError: the binary is missing, too old, times out, or
+            its subprocess fails for any other reason; the caller
+            surfaces actionable hints.
     """
     if not passphrase:
         raise ValueError("refusing to seal an empty passphrase")
@@ -205,6 +145,81 @@ def unseal(credential_path: Path) -> str | None:
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return None
     return result.stdout.rstrip("\n") or None
+
+
+# ── Capability probes ───────────────────────────────────────────────
+
+
+def is_available() -> bool:
+    """Return ``True`` when ``systemd-creds`` is usable from a non-root caller.
+
+    Requires the binary on ``PATH`` and a host systemd ≥
+    ``_MIN_SYSTEMD_VERSION`` so the non-root Varlink delegation path
+    is present.  An older systemd is reported as unavailable rather
+    than left to fail at decrypt with the opaque ``Failed to determine
+    local credential key`` error.
+    """
+    version = _systemd_creds_version()
+    return version is not None and version >= _MIN_SYSTEMD_VERSION
+
+
+def has_tpm2() -> bool:
+    """Return ``True`` when the host has a TPM2 device usable by systemd-creds.
+
+    Mirrors ``systemd-creds has-tpm2``'s exit code.  A *preference*
+    probe, not a precondition: a missing TPM doesn't break the tier —
+    host-key sealing still works in ``--user`` mode — so callers use
+    this to choose between TPM2 and host-key, not to gate availability.
+    """
+    if not is_available():
+        return False
+    try:
+        result = subprocess.run(  # nosec: B603 — fixed argv, no shell, no user input
+            [_BINARY, "has-tpm2"],
+            capture_output=True,
+            timeout=_PROBE_TIMEOUT,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
+# ── Version detection ───────────────────────────────────────────────
+
+
+@functools.cache
+def _systemd_creds_version() -> int | None:
+    """Return the major version of the installed ``systemd-creds``, or ``None``.
+
+    Parses the first integer out of ``systemd-creds --version``.
+    Returns ``None`` if the binary is absent, the call fails, or the
+    output doesn't contain an integer — callers treat all three as
+    "tier unavailable" and fall through.
+
+    Cached for the process lifetime: the host's systemd version doesn't
+    change between invocations, and a single ``vault seal`` already
+    funnels through ``is_available`` → ``has_tpm2`` → ``seal``.  Tests
+    clear the cache between cases via the
+    ``_isolate_systemd_creds_version_cache`` autouse fixture in
+    ``conftest.py``.
+    """
+    if shutil.which(_BINARY) is None:
+        return None
+    try:
+        result = subprocess.run(  # nosec: B603 — fixed argv, no user input
+            [_BINARY, "--version"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=_PROBE_TIMEOUT,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return None
+    match = re.search(r"\b(\d+)\b", result.stdout.splitlines()[0] if result.stdout else "")
+    if match is None:
+        return None
+    return int(match.group(1))
 
 
 __all__ = ["has_tpm2", "is_available", "seal", "unseal"]

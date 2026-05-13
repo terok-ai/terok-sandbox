@@ -677,12 +677,10 @@ def _handle_vault_seal(*, cfg: SandboxConfig | None = None, key: _SealKey = "aut
     else:
         raise SystemExit(f"unknown --key value: {key!r} (expected: auto, tpm, host)")
 
-    # Seal must reuse an *already-resolved* passphrase — prompting
-    # here would happily accept whatever the operator just typed and
-    # seal it, only for the next reboot to find that the sealed value
-    # is not the one that opens the DB.  ``prompt_on_tty=False`` makes
-    # "no tier resolves" a loud precondition failure instead.  Skip
-    # the systemd_creds_file kwarg as well so the resolver can't
+    # Seal must reuse an already-resolved passphrase — a prompt here
+    # would accept a fresh-typed value and seal *that*, leaving the
+    # next chain walk holding a key that doesn't open the DB.  The
+    # systemd_creds_file kwarg is also skipped so the resolver can't
     # short-circuit on a stale credential we're about to replace.
     passphrase = resolve_passphrase(
         passphrase_file=cfg.vault_passphrase_file,
