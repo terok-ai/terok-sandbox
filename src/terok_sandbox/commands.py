@@ -1288,14 +1288,11 @@ def _handle_ssh_rename(
     db = _open_db(cfg)
     try:
         try:
-            updated = db.set_ssh_key_comment(full_fp, comment)
+            db.set_ssh_key_comment(full_fp, comment)
         except UnsafeCommentError as exc:
             raise SystemExit(f"Invalid comment: {exc}") from exc
     finally:
         db.close()
-
-    if not updated:
-        raise SystemExit(f"Key {full_fp} disappeared before the rename committed.")
 
     print(f"Renamed {full_fp} → {sanitize_tty(comment)!r}")
 

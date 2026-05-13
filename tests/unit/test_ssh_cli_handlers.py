@@ -549,9 +549,7 @@ class TestRename:
         finally:
             verify.close()
 
-    def test_no_match_errors(
-        self, db_path: Path, mock_cfg: MagicMock, patched_open_db
-    ) -> None:
+    def test_no_match_errors(self, db_path: Path, mock_cfg: MagicMock, patched_open_db) -> None:
         """A prefix that matches nothing exits with a clear message."""
         _seed(db_path, "proj")
         with pytest.raises(SystemExit, match="No SSH key matches"):
@@ -608,5 +606,24 @@ class TestRename:
         try:
             for scope in ("proj-a", "proj-b"):
                 assert verify.list_ssh_keys_for_scope(scope)[0].comment == "shared-new"
+        finally:
+            verify.close()
+
+    def test_omitted_cfg_falls_back_to_default(
+        self,
+        db_path: Path,
+        mock_cfg: MagicMock,
+        patched_open_db,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Argparse-dispatched calls omit ``cfg``; handler builds a default ``SandboxConfig``."""
+        _seed(db_path, "proj")
+        prefix = _fingerprint_prefix(db_path, "proj")
+        with patch("terok_sandbox.config.SandboxConfig", return_value=mock_cfg):
+            _handle_ssh_rename(fingerprint=prefix, comment="defaulted")
+        assert "Renamed" in capsys.readouterr().out
+        verify = CredentialDB(db_path, passphrase="test")
+        try:
+            assert verify.list_ssh_keys_for_scope("proj")[0].comment == "defaulted"
         finally:
             verify.close()
