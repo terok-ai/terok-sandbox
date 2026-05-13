@@ -55,9 +55,9 @@ When systemd-creds isn't available, setup asks once:
 | `[s]` session-unlock              | servers with no keyring; one `vault unlock` per boot |
 | `[c]` config file                 | last-resort plaintext-on-disk; requires `yes` confirmation |
 
-Either branch **auto-generates the passphrase** and echoes it once to
-stderr — write it down before the install finishes, or use
-`terok-sandbox vault reveal-passphrase` later (see below).
+Either branch **auto-generates the passphrase** and prints it once
+("write this down") — that's your recovery key for rebuilds and other
+hosts.
 
 ## Changing tiers (move the passphrase to a different backend)
 
@@ -67,24 +67,6 @@ ordering is the same whether you go session → keyring, keyring →
 systemd-creds, or anything else.
 
 ### 1. Retrieve from the current tier
-
-```bash
-terok-sandbox vault reveal-passphrase
-```
-
-Walks the chain (same order as the daemon), prints the resolved
-passphrase to **stdout**, reports the source on stderr.  Pipe-friendly,
-so:
-
-```bash
-# stash in your password manager
-terok-sandbox vault reveal-passphrase | pass insert -e terok/vault
-
-# stash in a tempfile you delete after step 3
-terok-sandbox vault reveal-passphrase > /tmp/vault-pw && chmod 600 /tmp/vault-pw
-```
-
-Or, if you'd rather poke each tier directly:
 
 ```bash
 # session-file:
@@ -100,6 +82,9 @@ systemd-creds --user --name=terok-sandbox.vault-passphrase \
 # config.yml (plaintext-on-disk):
 yq '.credentials.passphrase' ~/.config/terok/config.yml
 ```
+
+Keep the value somewhere safe for the duration of the swap — a
+password manager, or a `mktemp`d file you delete after step 3.
 
 ### 2. Lock the vault
 

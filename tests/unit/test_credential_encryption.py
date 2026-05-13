@@ -582,15 +582,28 @@ class TestPromptPassphrase:
         assert len(pw) >= 40
         assert all(c.isalnum() or c in "-_" for c in pw)
 
-    def test_generated_passphrase_goes_to_stderr_not_stdout(
+    def test_generated_passphrase_announced_on_stdout(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """Pipe-fed automation captures stdout; the generated secret must NOT land there."""
+        """Auto-mint at setup is a provisioning ceremony — stdout is where the operator reads.
+
+        Earlier versions routed this to stderr on the (defensible)
+        theory that pipe-fed CI captures stdout.  Reversed when we
+        unified the auto-mint paths (systemd-creds, keyring, session)
+        into a single token-mint surface: ``terok setup`` is
+        interactive by design, the operator typed Enter to accept
+        an auto-generated value, and burying the answer on a stream
+        they may not be looking at is a worse failure mode than the
+        "secret in a captured log" risk.
+        """
         _scripted_tty_prompt(monkeypatch, "")
         pw = prompt_passphrase(confirm=True)
         captured = capsys.readouterr()
-        assert pw not in captured.out
-        assert pw in captured.err
+        assert pw in captured.out
+        assert "Write this down" in captured.out
+        # And stderr stays free of the secret — keeps a tee-stderr
+        # transcript from leaking it twice.
+        assert pw not in captured.err
 
 
 class TestKeyringHelpers:
@@ -1180,15 +1193,15 @@ class TestAutoSystemdCredsBranch:
         assert sealed_passphrase
         assert sealed_path == cfg.vault_systemd_creds_file
         assert key_mode == "auto"
-        # Source label surfaces on stdout so ``terok-sandbox vault status``
-        # readers see ``passphrase source: systemd-creds``.
+        # Token-mint framing: the passphrase lands on stdout once with
+        # a "write this down" hint.  Setup is a provisioning ceremony,
+        # not an ongoing log — stdout is where the operator is reading.
         out = capsys.readouterr()
+        assert sealed_passphrase in out.out
+        assert "Write this down" in out.out
+        # Source label also surfaces on stdout so ``vault status`` readers
+        # see ``passphrase source: systemd-creds``.
         assert "systemd-creds" in out.out
-        # Generated passphrase lands on stderr (not stdout) so a
-        # ``terok setup | tee install.log`` doesn't smuggle the secret
-        # into a captured stdout sink.
-        assert sealed_passphrase in out.err
-        assert "reveal-passphrase" in out.err
 
 
 class TestVaultUnlockLock:
@@ -1632,47 +1645,6 @@ class TestVaultSeal:
         seal = MagicMock()
         monkeypatch.setattr(sc, "seal", seal)
         return sc, seal
-
-
-class TestVaultRevealPassphrase:
-    """``terok-sandbox vault reveal-passphrase`` prints the resolved value for backup."""
-
-    def test_prints_passphrase_to_stdout_and_source_to_stderr(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        """Stdout carries the passphrase; stderr carries the human-eyes source label.
-
-        Pipe-friendly shape: ``... reveal-passphrase | pass insert -e
-        terok/vault`` works because stdout is *just* the passphrase.
-        """
-        from terok_sandbox.commands import _handle_vault_reveal_passphrase
-
-        cfg = _make_cfg(tmp_path)
-        monkeypatch.setattr(
-            "terok_sandbox.credentials.encryption.resolve_passphrase_with_source",
-            lambda **_kw: ("revealed-value", "systemd-creds"),
-        )
-        _handle_vault_reveal_passphrase(cfg=cfg)
-        captured = capsys.readouterr()
-        assert captured.out == "revealed-value\n"
-        assert "Resolved via: systemd-creds" in captured.err
-
-    def test_locked_vault_exits_with_actionable_hint(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """No tier resolved → ``SystemExit`` with the unlock hint, not a silent empty stdout."""
-        from terok_sandbox.commands import _handle_vault_reveal_passphrase
-
-        cfg = _make_cfg(tmp_path)
-        monkeypatch.setattr(
-            "terok_sandbox.credentials.encryption.resolve_passphrase_with_source",
-            lambda **_kw: (None, None),
-        )
-        with pytest.raises(SystemExit) as exc:
-            _handle_vault_reveal_passphrase(cfg=cfg)
-        msg = str(exc.value)
-        assert "vault is locked" in msg
-        assert "vault unlock" in msg
 
 
 class TestCredentialsSetupPhaseDaemonHandling:

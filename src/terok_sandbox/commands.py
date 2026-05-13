@@ -757,46 +757,6 @@ def _handle_vault_seal(*, cfg: SandboxConfig | None = None, key: str = "auto") -
     print("  the resolution chain will pick this up on the next daemon start; no restart required")
 
 
-def _handle_vault_reveal_passphrase(*, cfg: SandboxConfig | None = None) -> None:
-    """Print the currently resolved SQLCipher passphrase to stdout.
-
-    Walks the same chain the daemon walks and prints the result to
-    stdout so the operator can pipe it into a password manager or
-    redirect into a backup file:
-
-    ::
-
-        terok-sandbox vault reveal-passphrase | pass insert -e terok/vault
-        terok-sandbox vault reveal-passphrase > ~/backup/vault-passphrase
-
-    ``Resolved via: <tier>`` lands on stderr (human eyes) so stdout
-    stays clean for pipeable consumers — same pattern as ``ssh-keygen
-    -y`` and ``gpg --export-secret-keys``.
-
-    Reveals the value already in use; never re-mints.  Fails closed
-    when no tier resolves so a locked vault can't silently produce a
-    bogus secret.
-    """
-    from .credentials.encryption import resolve_passphrase_with_source
-
-    if cfg is None:
-        cfg = SandboxConfig()
-    passphrase, source = resolve_passphrase_with_source(
-        passphrase_file=cfg.vault_passphrase_file,
-        systemd_creds_file=cfg.vault_systemd_creds_file,
-        use_keyring=cfg.credentials_use_keyring,
-        config_fallback=cfg.credentials_passphrase,
-        prompt_on_tty=False,
-    )
-    if passphrase is None or source is None:
-        raise SystemExit(
-            "vault is locked — no tier resolved."
-            " Run `terok-sandbox vault unlock` to provision the passphrase first."
-        )
-    print(f"Resolved via: {source}", file=sys.stderr)
-    print(passphrase)
-
-
 VAULT_COMMANDS: tuple[CommandDef, ...] = (
     CommandDef(
         name="start",
@@ -866,12 +826,6 @@ VAULT_COMMANDS: tuple[CommandDef, ...] = (
                 ),
             ),
         ),
-    ),
-    CommandDef(
-        name="reveal-passphrase",
-        help="Print the resolved SQLCipher passphrase to stdout (for offline backup)",
-        handler=_handle_vault_reveal_passphrase,
-        group="vault",
     ),
 )
 
@@ -1880,38 +1834,36 @@ def _ask_passphrase_mode() -> _PassphraseMode:
             return mode
 
 
+def _announce_generated_passphrase(passphrase: str) -> None:
+    """Print an auto-minted passphrase as a token-mint ceremony.
+
+    Stdout (not stderr) — secrets land where the operator is reading,
+    same shape as ``ssh-keygen`` printing a public key or any "here's
+    your recovery code" provisioning step.  Short framing: this is
+    the value, write it down.  Deliberately silent about how to
+    retrieve it later (the docs cover that), to avoid a trap-door
+    feeling that "you can always get it back from us" sets up.
+    """
+    print(f"\nVault passphrase: {passphrase}")
+    print("  Write this down — it's your recovery key for rebuilds and other hosts.\n")
+
+
 def _provision_systemd_creds_tier(cfg: SandboxConfig) -> tuple[str, PassphraseSource]:
     """Auto-detected systemd-creds branch: mint a passphrase and seal it.
 
     No chooser, no prompt — ``systemd-creds`` is the strongest tier
     we know about and asking when the host has it just adds a step
-    operators ignore.  ``_handle_vault_seal``'s ``--key=auto`` lets
-    the host's TPM2 / host-key combination pick itself, so a
-    TPM-equipped laptop seals as ``host+tpm2`` and a headless server
-    without TPM falls back to ``host``-only without us having to
-    second-guess.
-
-    Echoes the generated passphrase to stderr once so the operator
-    can save it for offline backup before the function returns —
-    after this point the only way to recover it is through
-    ``terok-sandbox vault reveal-passphrase`` (which walks the same
-    chain).
+    operators ignore.  ``--with-key=auto`` lets the host's
+    TPM2 / host-key combination pick itself, so a TPM-equipped laptop
+    seals as ``host+tpm2`` and a headless server without TPM falls
+    back to ``host``-only without us having to second-guess.
     """
     from .credentials import systemd_creds as _systemd_creds
     from .credentials.encryption import generate_passphrase
 
     passphrase = generate_passphrase()
     _systemd_creds.seal(passphrase, cfg.vault_systemd_creds_file, key_mode="auto")
-    print(
-        f"\nGenerated vault passphrase: {passphrase}",
-        file=sys.stderr,
-    )
-    print(
-        "  write this down — you will need it on other hosts or if the chain is rebuilt.\n"
-        "  on this host, the sealed credential alone is enough to unlock the vault;\n"
-        "  to retrieve the value again later, run `terok-sandbox vault reveal-passphrase`.",
-        file=sys.stderr,
-    )
+    _announce_generated_passphrase(passphrase)
     return passphrase, "systemd-creds"
 
 
@@ -1935,9 +1887,9 @@ def _provision_passphrase(
         # Auto-generating silently would lock the operator out at next
         # boot — the tmpfs file vanishes, and ``vault unlock`` has no
         # way to re-type a passphrase they never saw.  Route through
-        # ``prompt_passphrase(confirm=True)``: empty entry still mints
-        # a fresh passphrase but echoes it once for the operator to
-        # copy out before it lands on the tmpfs file.
+        # ``prompt_passphrase(confirm=True)``: empty entry mints a
+        # fresh passphrase and announces it via the token-mint print
+        # inside the helper before this function lands it on disk.
         new = prompt_passphrase(confirm=True)
         write_secret_text(cfg.vault_passphrase_file, new + "\n")
         return new, "session-file"
@@ -1948,6 +1900,7 @@ def _provision_passphrase(
             return existing, "keyring"
         new = generate_passphrase()
         if store_passphrase_in_keyring(new):
+            _announce_generated_passphrase(new)
             return new, "keyring"
         raise RuntimeError("OS keyring is unreachable or denied; choose a different storage mode")
 

@@ -240,17 +240,13 @@ def prompt_passphrase(*, confirm: bool = False) -> str:
         try:
             passphrase = ptk_prompt("credentials.db passphrase: ", is_password=True).strip()
             if not passphrase and confirm:
+                # Empty + confirm = "mint one for me".  Echo the value
+                # to stdout once with token-mint framing so the operator
+                # can write it down before the setup phase finishes —
+                # this is a provisioning ceremony, not an ongoing log.
                 passphrase = generate_passphrase()
-                # Route to stderr, not stdout: stdout is what scripts /
-                # CI loggers / pipe-fed automation tend to capture; a
-                # session-recorder like ``script(1)`` or asciinema picks
-                # up both, but at least the secret doesn't land in a
-                # pipe target on plain shell capture.
-                print(f"generated passphrase: {passphrase}", file=sys.stderr)
-                print(
-                    "  write this down — you will need it on other hosts or if the chain is rebuilt.",
-                    file=sys.stderr,
-                )
+                print(f"\nVault passphrase: {passphrase}")
+                print("  Write this down — it's your recovery key for rebuilds and other hosts.\n")
                 return passphrase
             if confirm:
                 again = ptk_prompt("confirm passphrase:        ", is_password=True).strip()
