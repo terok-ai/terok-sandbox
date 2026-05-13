@@ -215,6 +215,28 @@ def forget_passphrase_in_keyring() -> bool:
         return False
 
 
+def _write_to_controlling_tty(message: str) -> None:
+    """Write *message* to ``/dev/tty`` so a redirected stdout can't capture it.
+
+    Fails closed when no controlling TTY is reachable (CI, headless
+    automation): refuses rather than letting an irrecoverable
+    generated passphrase fall on the floor.  Operators automating
+    setup must pre-provide the passphrase via a tier the resolver
+    can find.
+    """
+    try:
+        with Path("/dev/tty").open("w", encoding="utf-8") as tty:
+            tty.write(message)
+    except OSError as exc:
+        raise SystemExit(
+            "Refusing to print the generated vault passphrase: no controlling TTY"
+            f" ({exc.strerror}).\n"
+            "Re-run setup from an interactive terminal, or pre-provide the"
+            " passphrase (vault unlock / credentials.passphrase / sealed credential)"
+            " before re-running."
+        ) from exc
+
+
 def prompt_passphrase(*, confirm: bool = False) -> str:
     """Read a passphrase from the controlling TTY with ``*``-masked echo.
 
@@ -240,13 +262,18 @@ def prompt_passphrase(*, confirm: bool = False) -> str:
         try:
             passphrase = ptk_prompt("credentials.db passphrase: ", is_password=True).strip()
             if not passphrase and confirm:
-                # Empty + confirm = "mint one for me".  Echo the value
-                # to stdout once with token-mint framing so the operator
-                # can write it down before the setup phase finishes —
-                # this is a provisioning ceremony, not an ongoing log.
+                # Empty + confirm = "mint one for me".  Write to
+                # ``/dev/tty`` (not stdout) so a redirected install
+                # — ``terok-sandbox setup > install.log`` or CI —
+                # can't capture the recovery key.  ``commands._announce_generated_passphrase``
+                # does the same thing for non-``prompt_passphrase``
+                # paths; this is the foundation-layer mirror (we
+                # can't import from the surface layer per tach).
                 passphrase = generate_passphrase()
-                print(f"\nVault passphrase: {passphrase}")
-                print("  Write this down — it's your recovery key for rebuilds and other hosts.\n")
+                _write_to_controlling_tty(
+                    f"\nVault passphrase: {passphrase}\n"
+                    "  Write this down — it's your recovery key for rebuilds and other hosts.\n"
+                )
                 return passphrase
             if confirm:
                 again = ptk_prompt("confirm passphrase:        ", is_password=True).strip()

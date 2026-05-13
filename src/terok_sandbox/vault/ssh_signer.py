@@ -36,6 +36,7 @@ from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
 from cryptography.hazmat.primitives.hashes import SHA256, SHA512
 from cryptography.hazmat.primitives.serialization import load_der_private_key
 
+from .._util import sanitize_tty
 from ..credentials.db import SSHKeyRecord
 
 _logger = logging.getLogger("terok-ssh-agent")
@@ -212,7 +213,10 @@ def _peer_label(writer: asyncio.StreamWriter) -> str:
             comm = ""
             try:
                 with Path(f"/proc/{pid}/comm").open(encoding="utf-8") as fh:
-                    comm = fh.read().strip()
+                    # ``comm`` is peer-controllable via prctl(PR_SET_NAME);
+                    # neutralise C0/ANSI/etc. before it lands in log
+                    # output to keep CWE-117 (log injection) closed.
+                    comm = sanitize_tty(fh.read().strip())[:64]
             except OSError:
                 pass
             tail = f" ({comm})" if comm else ""

@@ -1835,17 +1835,23 @@ def _ask_passphrase_mode() -> _PassphraseMode:
 
 
 def _announce_generated_passphrase(passphrase: str) -> None:
-    """Print an auto-minted passphrase as a token-mint ceremony.
+    """Show an auto-minted passphrase to the operator's controlling terminal.
 
-    Stdout (not stderr) — secrets land where the operator is reading,
-    same shape as ``ssh-keygen`` printing a public key or any "here's
-    your recovery code" provisioning step.  Short framing: this is
-    the value, write it down.  Deliberately silent about how to
-    retrieve it later (the docs cover that), to avoid a trap-door
-    feeling that "you can always get it back from us" sets up.
+    Routes through ``_write_to_controlling_tty`` so a redirected
+    install — ``terok-sandbox setup > install.log``, a CI job, an
+    Ansible play, systemd-via-cloud-init — can't capture the
+    recovery key into a journal or log artifact.  Token-mint
+    framing: this is the value, write it down.  Deliberately silent
+    about how to retrieve it later (the docs cover that), to avoid
+    a trap-door feeling that "you can always get it back from us"
+    sets up.
     """
-    print(f"\nVault passphrase: {passphrase}")
-    print("  Write this down — it's your recovery key for rebuilds and other hosts.\n")
+    from .credentials.encryption import _write_to_controlling_tty
+
+    _write_to_controlling_tty(
+        f"\nVault passphrase: {passphrase}\n"
+        "  Write this down — it's your recovery key for rebuilds and other hosts.\n"
+    )
 
 
 def _provision_systemd_creds_tier(cfg: SandboxConfig) -> tuple[str, PassphraseSource]:
