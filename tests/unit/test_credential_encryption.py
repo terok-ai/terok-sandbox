@@ -1185,6 +1185,77 @@ class TestVaultUnlockLock:
         assert forget_calls["n"] == 1
         assert "passphrase: from-config" not in user_config.read_text()
 
+    def test_lock_forget_removes_sealed_credential(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``lock --forget`` deletes the systemd-creds blob so the next daemon start can't auto-unlock from it."""
+        from unittest.mock import MagicMock
+
+        from terok_sandbox.commands import _handle_vault_lock
+
+        cfg = _make_cfg(tmp_path)
+        cfg.vault_systemd_creds_file.parent.mkdir(parents=True, exist_ok=True)
+        cfg.vault_systemd_creds_file.write_bytes(b"sealed-blob")
+
+        mgr = MagicMock()
+        mgr.is_daemon_running.return_value = False
+        monkeypatch.setattr("terok_sandbox.vault.lifecycle.VaultManager", lambda _cfg: mgr)
+
+        _handle_vault_lock(cfg=cfg, forget=True)
+
+        assert not cfg.vault_systemd_creds_file.exists()
+
+    def test_lock_forget_surfaces_unlink_failure_as_systemexit(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A permissions / IO error on the sealed credential bubbles to SystemExit, not a traceback."""
+        from unittest.mock import MagicMock
+
+        from terok_sandbox.commands import _handle_vault_lock
+
+        cfg = _make_cfg(tmp_path)
+        cfg.vault_systemd_creds_file.parent.mkdir(parents=True, exist_ok=True)
+        cfg.vault_systemd_creds_file.write_bytes(b"sealed-blob")
+
+        mgr = MagicMock()
+        mgr.is_daemon_running.return_value = False
+        monkeypatch.setattr("terok_sandbox.vault.lifecycle.VaultManager", lambda _cfg: mgr)
+        monkeypatch.setattr(
+            "pathlib.Path.unlink", MagicMock(side_effect=OSError("permission denied"))
+        )
+
+        with pytest.raises(SystemExit, match="failed to remove sealed credential"):
+            _handle_vault_lock(cfg=cfg, forget=True)
+
+    def test_lock_warns_when_sealed_credential_still_present(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Plain ``lock`` with a sealed credential warns — that tier auto-unlocks on next start."""
+        from unittest.mock import MagicMock
+
+        from terok_sandbox.commands import _handle_vault_lock
+
+        cfg = _make_cfg(tmp_path)
+        cfg.vault_systemd_creds_file.parent.mkdir(parents=True, exist_ok=True)
+        cfg.vault_systemd_creds_file.write_bytes(b"sealed-blob")
+
+        mgr = MagicMock()
+        mgr.is_daemon_running.return_value = False
+        monkeypatch.setattr("terok_sandbox.vault.lifecycle.VaultManager", lambda _cfg: mgr)
+
+        _handle_vault_lock(cfg=cfg)
+
+        err = capsys.readouterr().err
+        assert "non-session passphrase tiers still active" in err
+        assert "systemd-creds" in err
+
 
 class TestVaultSeal:
     """``terok-sandbox vault seal`` CLI handler.

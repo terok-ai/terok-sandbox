@@ -575,14 +575,14 @@ def _handle_vault_unlock(*, cfg: SandboxConfig | None = None) -> None:
 def _handle_vault_lock(*, cfg: SandboxConfig | None = None, forget: bool = False) -> None:
     """Delete the session-unlock tmpfs file and stop the vault daemon.
 
-    By default this only clears the *session* tier; if keyring or
-    ``credentials.passphrase`` are also configured, socket activation
-    can re-spawn the daemon and auto-unlock immediately — and the
+    By default this only clears the *session* tier; any of keyring,
+    ``credentials.passphrase``, or a sealed systemd-creds credential
+    can re-unlock the daemon at the next socket activation — and the
     operator may not realise that's not "locked".  Pass
     ``forget=True`` (``--forget`` on the CLI) to also remove the
-    keyring entry and clear ``credentials.passphrase`` from
-    ``config.yml`` so the next daemon start *must* have an explicit
-    ``vault unlock``.
+    keyring entry, clear ``credentials.passphrase`` from ``config.yml``,
+    and delete the sealed systemd-creds credential so the next daemon
+    start *must* have an explicit ``vault unlock``.
     """
     from .credentials.encryption import forget_passphrase_in_keyring
     from .vault.lifecycle import VaultManager
@@ -597,6 +597,7 @@ def _handle_vault_lock(*, cfg: SandboxConfig | None = None, forget: bool = False
     else:
         print(f"→ {path} was not present")
 
+    sealed_cred = cfg.vault_systemd_creds_file
     if forget:
         if cfg.credentials_use_keyring and forget_passphrase_in_keyring():
             print("→ cleared keyring entry")
@@ -613,18 +614,29 @@ def _handle_vault_lock(*, cfg: SandboxConfig | None = None, forget: bool = False
                 )
                 _config._credentials_section.cache_clear()
                 print("→ cleared credentials.passphrase from config.yml")
-    elif cfg.credentials_use_keyring or cfg.credentials_passphrase:
+        if sealed_cred.exists():
+            try:
+                sealed_cred.unlink()
+            except OSError as exc:
+                raise SystemExit(
+                    f"failed to remove sealed credential at {sealed_cred}: {exc}"
+                ) from exc
+            print(f"→ removed sealed credential at {sealed_cred}")
+    else:
         active = []
         if cfg.credentials_use_keyring:
             active.append("keyring")
         if cfg.credentials_passphrase:
             active.append("config.yml")
-        print(
-            f"warning: non-session passphrase tiers still active ({', '.join(active)});"
-            " the daemon may auto-unlock on next socket activation.\n"
-            "         Use `terok-sandbox vault lock --forget` to clear them too.",
-            file=sys.stderr,
-        )
+        if sealed_cred.is_file():
+            active.append("systemd-creds")
+        if active:
+            print(
+                f"warning: non-session passphrase tiers still active ({', '.join(active)});"
+                " the daemon may auto-unlock on next socket activation.\n"
+                "         Use `terok-sandbox vault lock --forget` to clear them too.",
+                file=sys.stderr,
+            )
 
     mgr = VaultManager(cfg)
     if mgr.is_daemon_running():

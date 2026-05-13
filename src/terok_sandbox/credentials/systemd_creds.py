@@ -100,8 +100,8 @@ _PROBE_TIMEOUT = 5.0
 
 
 def seal(passphrase: str, credential_path: Path, *, key_mode: KeyMode = "auto") -> None:
-    """Encrypt *passphrase* into *credential_path* under
-    [`_CREDENTIAL_NAME`][terok_sandbox.credentials.systemd_creds._CREDENTIAL_NAME].
+    """Encrypt *passphrase* into *credential_path* under the namespaced
+    credential name ``terok-sandbox.vault-passphrase``.
 
     *key_mode* maps 1:1 onto ``systemd-creds --with-key=…``:
 
