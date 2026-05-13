@@ -757,6 +757,46 @@ def _handle_vault_seal(*, cfg: SandboxConfig | None = None, key: str = "auto") -
     print("  the resolution chain will pick this up on the next daemon start; no restart required")
 
 
+def _handle_vault_reveal_passphrase(*, cfg: SandboxConfig | None = None) -> None:
+    """Print the currently resolved SQLCipher passphrase to stdout.
+
+    Walks the same chain the daemon walks and prints the result to
+    stdout so the operator can pipe it into a password manager or
+    redirect into a backup file:
+
+    ::
+
+        terok-sandbox vault reveal-passphrase | pass insert -e terok/vault
+        terok-sandbox vault reveal-passphrase > ~/backup/vault-passphrase
+
+    ``Resolved via: <tier>`` lands on stderr (human eyes) so stdout
+    stays clean for pipeable consumers — same pattern as ``ssh-keygen
+    -y`` and ``gpg --export-secret-keys``.
+
+    Reveals the value already in use; never re-mints.  Fails closed
+    when no tier resolves so a locked vault can't silently produce a
+    bogus secret.
+    """
+    from .credentials.encryption import resolve_passphrase_with_source
+
+    if cfg is None:
+        cfg = SandboxConfig()
+    passphrase, source = resolve_passphrase_with_source(
+        passphrase_file=cfg.vault_passphrase_file,
+        systemd_creds_file=cfg.vault_systemd_creds_file,
+        use_keyring=cfg.credentials_use_keyring,
+        config_fallback=cfg.credentials_passphrase,
+        prompt_on_tty=False,
+    )
+    if passphrase is None or source is None:
+        raise SystemExit(
+            "vault is locked — no tier resolved."
+            " Run `terok-sandbox vault unlock` to provision the passphrase first."
+        )
+    print(f"Resolved via: {source}", file=sys.stderr)
+    print(passphrase)
+
+
 VAULT_COMMANDS: tuple[CommandDef, ...] = (
     CommandDef(
         name="start",
@@ -826,6 +866,12 @@ VAULT_COMMANDS: tuple[CommandDef, ...] = (
                 ),
             ),
         ),
+    ),
+    CommandDef(
+        name="reveal-passphrase",
+        help="Print the resolved SQLCipher passphrase to stdout (for offline backup)",
+        handler=_handle_vault_reveal_passphrase,
+        group="vault",
     ),
 )
 
@@ -1602,14 +1648,23 @@ _PassphraseMode = Literal["session", "keyring", "config"]
 
 _CHOOSER_PROMPT = """\
 
-Where should terok store the passphrase to encrypt the vault?
-  [s] session-unlock — terok-sandbox vault unlock after each boot (default)
-  [k] keyring — store passphrase in your login keyring
+systemd-creds isn't available on this host (needs systemd ≥ 257 with
+the user Varlink service).  Where should terok store the passphrase
+to encrypt the vault?
+
+  [k] keyring — your login keyring (recommended; auto-unlocks at login)
+  [s] session-unlock — terok-sandbox vault unlock after each boot
   [c] config file — plaintext on disk; same as encrypted DB (requires confirmation)
 
-Choice [s]:"""
+For the strongest protection, install systemd ≥ 257 and re-run setup.
+Choice [k]:"""
 
+# Operator's first character maps to the tier.  Empty input picks the
+# recommended default (keyring), matching the ``[k]`` brackets in the
+# prompt.  Anything outside this set falls back to keyring too — safer
+# than guessing the operator meant ``[s]``.
 _CHOICE_TO_MODE: dict[str, _PassphraseMode] = {"s": "session", "k": "keyring", "c": "config"}
+_DEFAULT_MODE: _PassphraseMode = "keyring"
 
 
 def _handle_credentials_encrypt_db(*, cfg: SandboxConfig | None = None) -> None:
@@ -1618,7 +1673,20 @@ def _handle_credentials_encrypt_db(*, cfg: SandboxConfig | None = None) -> None:
     An already-encrypted DB is short-circuited *before* we provision a
     new passphrase — minting a fresh one here would overwrite whatever
     tier currently holds the working key and lock the operator out.
+
+    Tier selection: if ``systemd-creds`` is available on this host
+    (systemd ≥ 257 with the user Varlink service), use it
+    automatically — that's the strongest available option and asking
+    when the answer is unambiguous just slows the operator down.
+    Otherwise show the chooser with keyring as the recommended
+    default; a hint points at the systemd-creds upgrade path.
+
+    Either way the passphrase itself is auto-generated and echoed
+    once for offline-backup copy-out — operators who want to migrate
+    to a different tier later use ``terok-sandbox vault reveal-passphrase``
+    to retrieve it.
     """
+    from .credentials import systemd_creds as _systemd_creds
     from .credentials.encryption import encrypt_in_place, is_plaintext_sqlite
 
     if cfg is None:
@@ -1629,9 +1697,12 @@ def _handle_credentials_encrypt_db(*, cfg: SandboxConfig | None = None) -> None:
         print(f"  {db_path} is already SQLCipher-encrypted.")
         return
 
-    mode = _ask_passphrase_mode()
-    passphrase, source = _provision_passphrase(cfg, mode=mode)
-    _persist_mode_choice(mode, passphrase)
+    if _systemd_creds.is_available():
+        passphrase, source = _provision_systemd_creds_tier(cfg)
+    else:
+        mode = _ask_passphrase_mode()
+        passphrase, source = _provision_passphrase(cfg, mode=mode)
+        _persist_mode_choice(mode, passphrase)
     print(f"  passphrase source: {source}")
 
     if not db_path.exists():
@@ -1783,7 +1854,12 @@ Type `yes` to confirm, anything else to choose a different tier:"""
 
 
 def _ask_passphrase_mode() -> _PassphraseMode:
-    """Return the operator's chosen mode; default to session on non-TTY runs.
+    """Return the operator's chosen mode; default to keyring on TTY, session on non-TTY.
+
+    Reached only when ``systemd-creds`` isn't available — the
+    auto-detected path in [`_handle_credentials_encrypt_db`][terok_sandbox.commands._handle_credentials_encrypt_db]
+    short-circuits before us when it is.  Non-TTY runs (``terok setup
+    < /dev/null``, CI) still land on session so installs don't hang.
 
     The config-file tier requires an explicit ``yes`` confirmation to
     block accidental selection — see [`_CONFIG_TIER_CONFIRMATION`][terok_sandbox.commands._CONFIG_TIER_CONFIRMATION]
@@ -1793,13 +1869,50 @@ def _ask_passphrase_mode() -> _PassphraseMode:
         return "session"
     while True:
         print(_CHOOSER_PROMPT)
-        choice = sys.stdin.readline().strip().lower()[:1] or "s"
-        mode = _CHOICE_TO_MODE.get(choice, "session")
+        choice = sys.stdin.readline().strip().lower()[:1]
+        if not choice:
+            return _DEFAULT_MODE
+        mode = _CHOICE_TO_MODE.get(choice, _DEFAULT_MODE)
         if mode != "config":
             return mode
         print(_CONFIG_TIER_CONFIRMATION)
         if sys.stdin.readline().strip().lower() == "yes":
             return mode
+
+
+def _provision_systemd_creds_tier(cfg: SandboxConfig) -> tuple[str, PassphraseSource]:
+    """Auto-detected systemd-creds branch: mint a passphrase and seal it.
+
+    No chooser, no prompt — ``systemd-creds`` is the strongest tier
+    we know about and asking when the host has it just adds a step
+    operators ignore.  ``_handle_vault_seal``'s ``--key=auto`` lets
+    the host's TPM2 / host-key combination pick itself, so a
+    TPM-equipped laptop seals as ``host+tpm2`` and a headless server
+    without TPM falls back to ``host``-only without us having to
+    second-guess.
+
+    Echoes the generated passphrase to stderr once so the operator
+    can save it for offline backup before the function returns —
+    after this point the only way to recover it is through
+    ``terok-sandbox vault reveal-passphrase`` (which walks the same
+    chain).
+    """
+    from .credentials import systemd_creds as _systemd_creds
+    from .credentials.encryption import generate_passphrase
+
+    passphrase = generate_passphrase()
+    _systemd_creds.seal(passphrase, cfg.vault_systemd_creds_file, key_mode="auto")
+    print(
+        f"\nGenerated vault passphrase: {passphrase}",
+        file=sys.stderr,
+    )
+    print(
+        "  write this down — you will need it on other hosts or if the chain is rebuilt.\n"
+        "  on this host, the sealed credential alone is enough to unlock the vault;\n"
+        "  to retrieve the value again later, run `terok-sandbox vault reveal-passphrase`.",
+        file=sys.stderr,
+    )
+    return passphrase, "systemd-creds"
 
 
 def _provision_passphrase(
