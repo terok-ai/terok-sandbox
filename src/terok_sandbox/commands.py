@@ -909,10 +909,10 @@ def _handle_ssh_import(
     from pathlib import Path
 
     from .config import SandboxConfig as _SandboxConfig
+    from .credentials.db import UnsafeCommentError
     from .credentials.ssh_keypair import (
         KeypairMismatchError,
         PasswordProtectedKeyError,
-        UnsafeCommentError,
         import_ssh_keypair,
     )
 

@@ -11,11 +11,10 @@ from pathlib import Path
 
 import pytest
 
-from terok_sandbox.credentials.db import CredentialDB
+from terok_sandbox.credentials.db import CredentialDB, UnsafeCommentError
 from terok_sandbox.credentials.ssh_keypair import (
     KeypairMismatchError,
     PasswordProtectedKeyError,
-    UnsafeCommentError,
     export_ssh_keypair,
     generate_keypair,
     import_ssh_keypair,
