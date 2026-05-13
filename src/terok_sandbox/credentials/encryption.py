@@ -64,10 +64,7 @@ def open_sqlcipher_via_chain(
         prompt_on_tty=prompt_on_tty,
     )
     if passphrase is None:
-        raise NoPassphraseError(
-            f"no SQLCipher passphrase available for {db_path}"
-            " — run `terok-sandbox vault unlock` or `terok-sandbox setup` to provision one"
-        )
+        raise NoPassphraseError(f"no SQLCipher passphrase available for {db_path}")
     return open_sqlcipher(db_path, passphrase, **connect_kwargs)
 
 

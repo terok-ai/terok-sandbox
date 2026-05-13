@@ -374,11 +374,11 @@ class TestCredentialDBEncryption:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Nothing in any tier → NoPassphraseError pointing at vault unlock or setup."""
+        """Nothing in any tier → diagnostic NoPassphraseError naming the DB path."""
         from terok_sandbox.credentials import encryption as enc
 
         monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda: None)
-        with pytest.raises(NoPassphraseError, match="vault unlock"):
+        with pytest.raises(NoPassphraseError, match="no SQLCipher passphrase"):
             open_credential_db(tmp_path / "no-key.db")
 
     def test_open_credential_db_prompt_on_tty(
@@ -417,11 +417,11 @@ class TestCredentialDBEncryption:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Empty chain → NoPassphraseError carrying the same actionable hint as the non-source variant."""
+        """Empty chain → diagnostic NoPassphraseError, same shape as the non-source variant."""
         from terok_sandbox.credentials import encryption as enc
 
         monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda: None)
-        with pytest.raises(NoPassphraseError, match="vault unlock"):
+        with pytest.raises(NoPassphraseError, match="no SQLCipher passphrase"):
             open_credential_db_with_source(tmp_path / "src.db")
 
 
@@ -467,11 +467,11 @@ class TestOpenSqlcipherViaChain:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Empty chain → NoPassphraseError with the actionable hint."""
+        """Empty chain → diagnostic NoPassphraseError naming the DB path."""
         from terok_sandbox.credentials import encryption as enc
 
         monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda: None)
-        with pytest.raises(NoPassphraseError, match="vault unlock"):
+        with pytest.raises(NoPassphraseError, match="no SQLCipher passphrase"):
             open_sqlcipher_via_chain(tmp_path / "empty.db")
 
 

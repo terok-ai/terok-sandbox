@@ -145,15 +145,14 @@ class CredentialDB:
     runtime resolution chain (keyring → ``credentials.passphrase``).
     A missing passphrase raises [`NoPassphraseError`][terok_sandbox.credentials.db.NoPassphraseError];
     a stale plaintext file raises [`PlaintextDBFoundError`][terok_sandbox.credentials.db.PlaintextDBFoundError]
-    — both point the operator at ``terok setup``.
+    — both are diagnostic-only.  Operator-facing remediation (which CLI
+    verb to run, which doc page to read) is the caller's job: library
+    code shouldn't bake one frontend's verbs into its exception text.
     """
 
     def __init__(self, db_path: Path, *, passphrase: str) -> None:
         if not passphrase:
-            raise NoPassphraseError(
-                f"no SQLCipher passphrase available for {db_path}"
-                " — run `terok-sandbox setup` to provision one"
-            )
+            raise NoPassphraseError(f"no SQLCipher passphrase available for {db_path}")
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = _open_connection(db_path, passphrase)
         try:
@@ -508,10 +507,7 @@ def open_credential_db_with_source(
         prompt_on_tty=prompt_on_tty,
     )
     if passphrase is None or source is None:
-        raise NoPassphraseError(
-            f"no SQLCipher passphrase available for {db_path}"
-            " — run `terok-sandbox vault unlock` or `terok setup` to provision one"
-        )
+        raise NoPassphraseError(f"no SQLCipher passphrase available for {db_path}")
     return CredentialDB(db_path, passphrase=passphrase), source
 
 
