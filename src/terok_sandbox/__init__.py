@@ -81,7 +81,7 @@ from .config_schema import (
     gate_use_personal_ssh_default,
 )
 from .config_stack import ConfigScope, ConfigStack
-from .credentials.db import CredentialDB, SSHKeyRecord, SSHKeyRow
+from .credentials.db import CredentialDB, SSHKeyRecord, SSHKeyRow, UnsafeCommentError
 from .credentials.encryption import PassphraseSource
 from .credentials.ssh import SSHInitResult, SSHManager
 from .credentials.ssh_keypair import (
@@ -91,7 +91,6 @@ from .credentials.ssh_keypair import (
     ImportResult,
     KeypairMismatchError,
     PasswordProtectedKeyError,
-    UnsafeCommentError,
     export_ssh_keypair,
     fingerprint_of,
     generate_keypair,

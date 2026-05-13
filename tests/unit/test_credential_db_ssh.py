@@ -9,7 +9,12 @@ from pathlib import Path
 
 import pytest
 
-from terok_sandbox.credentials.db import CredentialDB, InvalidScopeName, _require_safe_scope
+from terok_sandbox.credentials.db import (
+    CredentialDB,
+    InvalidScopeName,
+    UnsafeCommentError,
+    _require_safe_scope,
+)
 
 
 @pytest.fixture()
@@ -157,6 +162,45 @@ class TestLoadRecords:
         assert r.public_blob == b"pub-blob-fp-raw"
         assert r.comment == "hello"
         assert r.fingerprint == "fp-raw"
+
+
+class TestSetSshKeyComment:
+    """Verify set_ssh_key_comment edits the stored comment in place."""
+
+    def test_updates_existing_row(self, db: CredentialDB) -> None:
+        """A matching fingerprint has its comment rewritten and id preserved."""
+        key_id = _store_key(db, "fp-rename", comment="old@host")
+        assert db.set_ssh_key_comment("fp-rename", "new@host") is True
+        row = db.get_ssh_key_by_fingerprint("fp-rename")
+        assert row is not None
+        assert row.id == key_id
+        assert row.comment == "new@host"
+
+    def test_unknown_fingerprint_returns_false(self, db: CredentialDB) -> None:
+        """Missing fingerprint → no row touched, no version bump."""
+        _store_key(db, "fp-other", comment="kept")
+        v_before = db.ssh_keys_version()
+        assert db.set_ssh_key_comment("fp-missing", "irrelevant") is False
+        assert db.ssh_keys_version() == v_before
+        row = db.get_ssh_key_by_fingerprint("fp-other")
+        assert row is not None
+        assert row.comment == "kept"
+
+    def test_bumps_version_on_success(self, db: CredentialDB) -> None:
+        """A successful rename advances ssh_keys_version so caches refresh."""
+        _store_key(db, "fp-bump", comment="before")
+        v_before = db.ssh_keys_version()
+        db.set_ssh_key_comment("fp-bump", "after")
+        assert db.ssh_keys_version() > v_before
+
+    def test_rejects_unsafe_input(self, db: CredentialDB) -> None:
+        """Control characters are refused and the existing comment is preserved."""
+        _store_key(db, "fp-safe", comment="safe")
+        with pytest.raises(UnsafeCommentError):
+            db.set_ssh_key_comment("fp-safe", "bad\x01comment")
+        row = db.get_ssh_key_by_fingerprint("fp-safe")
+        assert row is not None
+        assert row.comment == "safe"
 
 
 class TestScopeNameGuard:

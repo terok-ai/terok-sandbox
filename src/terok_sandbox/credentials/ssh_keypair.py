@@ -43,7 +43,7 @@ from cryptography.hazmat.primitives.serialization import (
     load_ssh_public_key,
 )
 
-from .db import CredentialDB, SSHKeyRecord
+from .db import CredentialDB, SSHKeyRecord, _require_safe_comment
 
 # ── Constants ───────────────────────────────────────────────────────────────
 
@@ -59,16 +59,6 @@ _PASSPHRASE_HINT = re.compile(r"(encrypted|password|passphrase)", re.IGNORECASE)
 Detection drives [`PasswordProtectedKeyError`][terok_sandbox.credentials.ssh_keypair.PasswordProtectedKeyError] translation so malformed
 non-protected PEMs keep bubbling up as plain ``ValueError``.
 """
-
-_UNSAFE_COMMENT_CHARS = re.compile(r"[\x00-\x1F\x7F]")
-"""Any C0 control character or DEL.  Newlines break the one-line public-key
-contract; ESC (``\\x1B``) enables terminal-escape output spoofing (CWE-150);
-the rest have no legitimate place in an SSH key comment."""
-
-_MAX_COMMENT_LEN = 200
-"""Bound embedded comments so a pathological input can't bloat every
-listing/export/stream indefinitely."""
-
 
 # ── Domain types ────────────────────────────────────────────────────────────
 
@@ -127,34 +117,6 @@ class KeypairMismatchError(ValueError):
     """Raised when provided public and private keys disagree."""
 
 
-class UnsafeCommentError(ValueError):
-    """Raised when a comment contains control characters or is too long.
-
-    Comments flow into SSH ``authorized_keys`` lines, public-line rendering,
-    ``ssh-add -L`` output, and terminal summaries — so embedded newlines or
-    escape sequences could break the wire format or spoof terminal output.
-    Rejection happens at the storage entry points; every display site then
-    trusts the DB to hold only safe strings.
-    """
-
-
-def _require_safe_comment(comment: str) -> str:
-    """Validate *comment* and return it unchanged; raise on unsafe input."""
-    if not isinstance(comment, str):
-        raise UnsafeCommentError(f"comment must be a string, got {type(comment).__name__}")
-    if len(comment) > _MAX_COMMENT_LEN:
-        raise UnsafeCommentError(
-            f"comment exceeds {_MAX_COMMENT_LEN}-character limit ({len(comment)} chars)"
-        )
-    match = _UNSAFE_COMMENT_CHARS.search(comment)
-    if match:
-        raise UnsafeCommentError(
-            f"comment contains disallowed control character "
-            f"\\x{ord(match.group(0)):02x} at position {match.start()}"
-        )
-    return comment
-
-
 # ── Generation ──────────────────────────────────────────────────────────────
 
 
@@ -165,7 +127,7 @@ def generate_keypair(key_type: str, *, comment: str) -> GeneratedKeypair:
         key_type: ``"ed25519"`` or ``"rsa"``.
         comment: Comment to embed in the public line.  Surfaces in
             ``ssh-add -L`` output and drives the signer's ``tk-main:``
-            promotion heuristic.  Rejected with [`UnsafeCommentError`][terok_sandbox.credentials.ssh_keypair.UnsafeCommentError]
+            promotion heuristic.  Rejected with [`UnsafeCommentError`][terok_sandbox.credentials.db.UnsafeCommentError]
             if it contains control characters or exceeds the length limit.
     """
     _require_safe_comment(comment)

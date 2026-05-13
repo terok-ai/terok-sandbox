@@ -22,6 +22,7 @@ from terok_sandbox.commands import (
     _handle_ssh_list,
     _handle_ssh_pub,
     _handle_ssh_remove,
+    _handle_ssh_rename,
 )
 from terok_sandbox.credentials.db import CredentialDB
 from terok_sandbox.credentials.ssh_keypair import generate_keypair, openssh_pem_of
@@ -515,3 +516,114 @@ class TestRemove:
         with patch("builtins.input", return_value="42"):
             with pytest.raises(SystemExit, match="Invalid selection"):
                 _handle_ssh_remove(cfg=mock_cfg)
+
+
+def _fingerprint_prefix(db_path: Path, scope: str, *, length: int = 12) -> str:
+    """Read back the seeded key's fingerprint and return a stable prefix."""
+    db = CredentialDB(db_path, passphrase="test")
+    try:
+        fp = db.list_ssh_keys_for_scope(scope)[0].fingerprint
+    finally:
+        db.close()
+    return fp.removeprefix("SHA256:")[:length]
+
+
+class TestRename:
+    """``ssh-rename`` edits a key's comment, identified by fingerprint prefix."""
+
+    def test_renames_by_fingerprint_prefix(
+        self,
+        db_path: Path,
+        mock_cfg: MagicMock,
+        patched_open_db,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A prefix matching exactly one key rewrites that row's comment."""
+        _seed(db_path, "proj")
+        prefix = _fingerprint_prefix(db_path, "proj")
+        _handle_ssh_rename(fingerprint=prefix, comment="renamed", cfg=mock_cfg)
+        assert "Renamed" in capsys.readouterr().out
+        verify = CredentialDB(db_path, passphrase="test")
+        try:
+            assert verify.list_ssh_keys_for_scope("proj")[0].comment == "renamed"
+        finally:
+            verify.close()
+
+    def test_no_match_errors(self, db_path: Path, mock_cfg: MagicMock, patched_open_db) -> None:
+        """A prefix that matches nothing exits with a clear message."""
+        _seed(db_path, "proj")
+        with pytest.raises(SystemExit, match="No SSH key matches"):
+            _handle_ssh_rename(fingerprint="zzzz-nope-zzzz", comment="x", cfg=mock_cfg)
+
+    def test_ambiguous_prefix_errors_without_writing(
+        self,
+        db_path: Path,
+        mock_cfg: MagicMock,
+        patched_open_db,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A prefix that matches >1 distinct fingerprint exits without writing."""
+        _seed(db_path, "proj-a")
+        _seed(db_path, "proj-b")
+        # Single-char prefix that happens to match both is unlikely, so we
+        # force ambiguity by feeding the truncated common prefix "SHA256".
+        # ``_filter_key_rows`` strips that prefix, so every key matches.
+        with pytest.raises(SystemExit, match="Refine the prefix"):
+            _handle_ssh_rename(fingerprint="SHA256:", comment="x", cfg=mock_cfg)
+        assert "Ambiguous" in capsys.readouterr().out
+        verify = CredentialDB(db_path, passphrase="test")
+        try:
+            for scope in ("proj-a", "proj-b"):
+                assert verify.list_ssh_keys_for_scope(scope)[0].comment.startswith("tk-main:")
+        finally:
+            verify.close()
+
+    def test_unsafe_comment_rejected(
+        self, db_path: Path, mock_cfg: MagicMock, patched_open_db
+    ) -> None:
+        """A comment with control characters surfaces as a user-facing error."""
+        _seed(db_path, "proj")
+        prefix = _fingerprint_prefix(db_path, "proj")
+        with pytest.raises(SystemExit, match="Invalid comment"):
+            _handle_ssh_rename(fingerprint=prefix, comment="bad\x01comment", cfg=mock_cfg)
+
+    def test_renames_across_all_linked_scopes(
+        self,
+        db_path: Path,
+        mock_cfg: MagicMock,
+        patched_open_db,
+    ) -> None:
+        """A key linked to multiple scopes has one comment row — rename hits all."""
+        key_id = _seed(db_path, "proj-a")
+        db = CredentialDB(db_path, passphrase="test")
+        try:
+            db.assign_ssh_key("proj-b", key_id)
+        finally:
+            db.close()
+        prefix = _fingerprint_prefix(db_path, "proj-a")
+        _handle_ssh_rename(fingerprint=prefix, comment="shared-new", cfg=mock_cfg)
+        verify = CredentialDB(db_path, passphrase="test")
+        try:
+            for scope in ("proj-a", "proj-b"):
+                assert verify.list_ssh_keys_for_scope(scope)[0].comment == "shared-new"
+        finally:
+            verify.close()
+
+    def test_omitted_cfg_falls_back_to_default(
+        self,
+        db_path: Path,
+        mock_cfg: MagicMock,
+        patched_open_db,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Argparse-dispatched calls omit ``cfg``; handler builds a default ``SandboxConfig``."""
+        _seed(db_path, "proj")
+        prefix = _fingerprint_prefix(db_path, "proj")
+        with patch("terok_sandbox.config.SandboxConfig", return_value=mock_cfg):
+            _handle_ssh_rename(fingerprint=prefix, comment="defaulted")
+        assert "Renamed" in capsys.readouterr().out
+        verify = CredentialDB(db_path, passphrase="test")
+        try:
+            assert verify.list_ssh_keys_for_scope("proj")[0].comment == "defaulted"
+        finally:
+            verify.close()

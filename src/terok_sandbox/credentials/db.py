@@ -58,6 +58,7 @@ __all__ = [
     "PlaintextDBFoundError",
     "SSHKeyRecord",
     "SSHKeyRow",
+    "UnsafeCommentError",
     "WrongPassphraseError",
     "ensure_credentials_schema",
     "migrate_credential_db_schema",
@@ -96,6 +97,46 @@ def _require_safe_scope(scope: str) -> None:
             f"invalid scope {scope!r}: must start with alphanumeric and match "
             "[A-Za-z0-9][A-Za-z0-9._-]*"
         )
+
+
+# ── Comment-safety guard ────────────────────────────────────────────────────
+
+_UNSAFE_COMMENT_CHARS = re.compile(r"[\x00-\x1F\x7F]")
+"""Any C0 control character or DEL.  Newlines break the one-line public-key
+contract; ESC (``\\x1B``) enables terminal-escape output spoofing (CWE-150);
+the rest have no legitimate place in an SSH key comment."""
+
+_MAX_COMMENT_LEN = 200
+"""Bound embedded comments so a pathological input can't bloat every
+listing/export/stream indefinitely."""
+
+
+class UnsafeCommentError(ValueError):
+    """Raised when a comment contains control characters or is too long.
+
+    Comments flow into SSH ``authorized_keys`` lines, public-line rendering,
+    ``ssh-add -L`` output, and terminal summaries — so embedded newlines or
+    escape sequences could break the wire format or spoof terminal output.
+    Rejection happens at the storage entry points; every display site then
+    trusts the DB to hold only safe strings.
+    """
+
+
+def _require_safe_comment(comment: str) -> str:
+    """Validate *comment* and return it unchanged; raise on unsafe input."""
+    if not isinstance(comment, str):
+        raise UnsafeCommentError(f"comment must be a string, got {type(comment).__name__}")
+    if len(comment) > _MAX_COMMENT_LEN:
+        raise UnsafeCommentError(
+            f"comment exceeds {_MAX_COMMENT_LEN}-character limit ({len(comment)} chars)"
+        )
+    match = _UNSAFE_COMMENT_CHARS.search(comment)
+    if match:
+        raise UnsafeCommentError(
+            f"comment contains disallowed control character "
+            f"\\x{ord(match.group(0)):02x} at position {match.start()}"
+        )
+    return comment
 
 
 # ── Domain types ────────────────────────────────────────────────────────────
@@ -245,6 +286,31 @@ class CredentialDB:
             (fingerprint,),
         ).fetchone()
         return SSHKeyRow(*row) if row else None
+
+    def set_ssh_key_comment(self, fingerprint: str, comment: str) -> bool:
+        """Update the comment of the key with *fingerprint*.
+
+        Returns ``True`` if a row was updated, ``False`` if the fingerprint
+        is unknown.  The comment is validated by the same safety helper
+        that gates ``import_ssh_keypair`` — control characters and
+        overlong strings raise
+        [`UnsafeCommentError`][terok_sandbox.credentials.db.UnsafeCommentError]
+        so the storage-entry-point invariant holds for this path too.
+
+        Bumps ``ssh_keys_version`` on success so the scope-socket
+        reconciler and ssh-signer drop their cached resolved-key state,
+        surfacing the new comment to subsequent ``ssh-add -L`` queries
+        from the container.
+        """
+        _require_safe_comment(comment)
+        cur = self._conn.execute(
+            "UPDATE ssh_keys SET comment = ? WHERE fingerprint = ?",
+            (comment, fingerprint),
+        )
+        if cur.rowcount:
+            self._bump_ssh_keys_version()
+        self._conn.commit()
+        return bool(cur.rowcount)
 
     def assign_ssh_key(self, scope: str, key_id: int) -> None:
         """Grant *scope* access to *key_id* (idempotent).
