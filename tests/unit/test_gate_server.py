@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest.mock
@@ -369,6 +370,7 @@ class TestDaemon:
                 mock_kill.assert_called_once_with(99999, unittest.mock.ANY)
             assert not pid_file.exists()
 
+    @pytest.mark.skipif(shutil.which("systemctl") is None, reason="needs systemctl on PATH")
     def test_stop_daemon_socket_mode_stops_systemd_unit(self) -> None:
         """In socket mode there is no PID file; ``stop_daemon`` still stops the active unit."""
         from terok_sandbox.config import SandboxConfig

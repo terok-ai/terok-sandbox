@@ -84,6 +84,15 @@ _CREDENTIAL_NAME = "terok-sandbox.vault-passphrase"
 #: leak through.
 _MIN_SYSTEMD_VERSION = 257
 
+#: Unix socket where PID 1 exposes the ``io.systemd.Credentials`` Varlink
+#: interface that the non-root ``--user`` decrypt path delegates to.
+#: Absent on hosts where PID 1 isn't a recent enough systemd (typical
+#: containers, minimal init systems) — surfacing that as "tier
+#: unavailable" stops ``seal()`` / ``unseal()`` from crashing at
+#: subprocess time with the bare ``Failed to connect to
+#: io.systemd.Credentials: No such file or directory`` error.
+_VARLINK_SOCKET = Path("/run/systemd/io.systemd.Credentials")
+
 #: Subset of systemd-creds' ``--with-key=`` values we expose.  These map
 #: 1:1 to the systemd flag so the wrapper doesn't reinvent the choice
 #: (or invite the choice to drift): ``auto`` is "let systemd pick" —
@@ -252,14 +261,21 @@ def unseal(credential_path: Path) -> str | None:
 def is_available() -> bool:
     """Return ``True`` when ``systemd-creds`` is usable from a non-root caller.
 
-    Requires the binary on ``PATH`` and a host systemd ≥
-    ``_MIN_SYSTEMD_VERSION`` so the non-root Varlink delegation path
-    is present.  An older systemd is reported as unavailable rather
-    than left to fail at decrypt with the opaque ``Failed to determine
-    local credential key`` error.
+    Requires three things, in order from cheapest to most decisive:
+
+    1. The binary on ``PATH``.
+    2. A host systemd ≥ ``_MIN_SYSTEMD_VERSION`` so the non-root
+       Varlink delegation path exists in the binary at all.
+    3. A live ``io.systemd.Credentials`` Varlink socket — present only
+       when PID 1 is a recent enough systemd actually serving the
+       interface.  Containers and minimal-init systems pass (1) + (2)
+       but fail (3); without this check ``seal()`` would surface the
+       opaque ``Failed to connect to io.systemd.Credentials`` error.
     """
     version = _systemd_creds_version()
-    return version is not None and version >= _MIN_SYSTEMD_VERSION
+    if version is None or version < _MIN_SYSTEMD_VERSION:
+        return False
+    return _VARLINK_SOCKET.is_socket()
 
 
 def has_tpm2() -> bool:

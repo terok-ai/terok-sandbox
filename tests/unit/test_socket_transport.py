@@ -11,6 +11,7 @@ and SSH signer Unix socket mode.
 from __future__ import annotations
 
 import asyncio
+import shutil
 import socket
 import struct
 import unittest.mock
@@ -702,6 +703,7 @@ class TestGateOrphanUnitSweep:
             GateServerManager()._sweep_orphan_units()
         assert other.exists()
 
+    @pytest.mark.skipif(shutil.which("systemctl") is None, reason="needs systemctl on PATH")
     def test_disable_invoked_before_unlink(self, tmp_path):
         """Each removed legacy unit is systemctl-disabled first (best-effort)."""
         unit_dir = tmp_path / "systemd-units"
