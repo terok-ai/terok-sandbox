@@ -124,6 +124,13 @@ depends_on = []
 [[modules]]
 path = "terok_sandbox.credentials.encryption"
 layer = "foundation"
+depends_on = ["terok_sandbox.credentials.systemd_creds"]
+
+# Subprocess wrapper around systemd-creds(1) for the machine-bound
+# passphrase tier between session-unlock and OS keyring.
+[[modules]]
+path = "terok_sandbox.credentials.systemd_creds"
+layer = "foundation"
 depends_on = []
 
 # Vault — token broker + SSH signer.  Depends on config to fetch the

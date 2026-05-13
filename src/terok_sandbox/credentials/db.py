@@ -487,6 +487,7 @@ def open_credential_db_with_source(
     db_path: Path,
     *,
     passphrase_file: Path | None = None,
+    systemd_creds_file: Path | None = None,
     use_keyring: bool = False,
     config_fallback: str | None = None,
     prompt_on_tty: bool = False,
@@ -502,6 +503,7 @@ def open_credential_db_with_source(
 
     passphrase, source = resolve_passphrase_with_source(
         passphrase_file=passphrase_file,
+        systemd_creds_file=systemd_creds_file,
         use_keyring=use_keyring,
         config_fallback=config_fallback,
         prompt_on_tty=prompt_on_tty,
@@ -515,14 +517,16 @@ def open_credential_db(
     db_path: Path,
     *,
     passphrase_file: Path | None = None,
+    systemd_creds_file: Path | None = None,
     use_keyring: bool = False,
     config_fallback: str | None = None,
     prompt_on_tty: bool = False,
 ) -> CredentialDB:
     """Open the credential DB, resolving the passphrase via the runtime chain.
 
-    Walks: *passphrase_file* (tmpfs session-unlock) → OS keyring (when
-    *use_keyring*) → *config_fallback* → (when *prompt_on_tty* and a
+    Walks: *passphrase_file* (tmpfs session-unlock) → *systemd_creds_file*
+    (sealed credential decrypted via ``systemd-creds(1)``) → OS keyring
+    (when *use_keyring*) → *config_fallback* → (when *prompt_on_tty* and a
     TTY is attached) interactive prompt.  CLI consumers pass
     ``prompt_on_tty=True``; daemons leave it ``False`` so they fail
     fast instead of blocking on stdin.
@@ -530,6 +534,7 @@ def open_credential_db(
     db, _source = open_credential_db_with_source(
         db_path,
         passphrase_file=passphrase_file,
+        systemd_creds_file=systemd_creds_file,
         use_keyring=use_keyring,
         config_fallback=config_fallback,
         prompt_on_tty=prompt_on_tty,

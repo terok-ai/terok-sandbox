@@ -28,7 +28,7 @@ _GENERATED_PASSPHRASE_BYTES = 32
 #: Where in the chain a passphrase came from — domain vocabulary so callers can
 #: dispatch on a closed set instead of stringly-typed branches.  ``"prompt"``
 #: covers both the runtime-prompt fallback and the setup-time chooser path.
-PassphraseSource = Literal["session-file", "keyring", "config", "prompt"]
+PassphraseSource = Literal["session-file", "systemd-creds", "keyring", "config", "prompt"]
 
 
 class NoPassphraseError(RuntimeError):
@@ -46,6 +46,7 @@ def open_sqlcipher_via_chain(
     db_path: str | Path,
     *,
     passphrase_file: Path | None = None,
+    systemd_creds_file: Path | None = None,
     use_keyring: bool = False,
     config_fallback: str | None = None,
     prompt_on_tty: bool = False,
@@ -59,6 +60,7 @@ def open_sqlcipher_via_chain(
     """
     passphrase = resolve_passphrase(
         passphrase_file=passphrase_file,
+        systemd_creds_file=systemd_creds_file,
         use_keyring=use_keyring,
         config_fallback=config_fallback,
         prompt_on_tty=prompt_on_tty,
@@ -71,6 +73,7 @@ def open_sqlcipher_via_chain(
 def resolve_passphrase_with_source(
     *,
     passphrase_file: Path | None = None,
+    systemd_creds_file: Path | None = None,
     use_keyring: bool = False,
     config_fallback: str | None = None,
     prompt_on_tty: bool = False,
@@ -93,6 +96,15 @@ def resolve_passphrase_with_source(
         file_pw = load_passphrase_from_file(passphrase_file)
         if file_pw:
             return file_pw, "session-file"
+    if systemd_creds_file is not None:
+        # Local import: ``systemd_creds`` shells out to a subprocess and
+        # pulls in ``subprocess`` only when the tier is actually used —
+        # daemons that never see a sealed credential pay zero import cost.
+        from . import systemd_creds as _sc  # noqa: PLC0415
+
+        sealed_pw = _sc.unseal(systemd_creds_file)
+        if sealed_pw:
+            return sealed_pw, "systemd-creds"
     if use_keyring:
         keyring_pw = load_passphrase_from_keyring()
         if keyring_pw:
@@ -107,6 +119,7 @@ def resolve_passphrase_with_source(
 def resolve_passphrase(
     *,
     passphrase_file: Path | None = None,
+    systemd_creds_file: Path | None = None,
     use_keyring: bool = False,
     config_fallback: str | None = None,
     prompt_on_tty: bool = False,
@@ -116,11 +129,15 @@ def resolve_passphrase(
     Order:
 
     1. *passphrase_file* — session-unlock tmpfs file (cleared on reboot).
-    2. OS keyring — only when *use_keyring* is true; off by default because
+    2. *systemd_creds_file* — sealed credential decrypted via
+       ``systemd-creds(1)``.  Machine-bound (TPM2 or host key), survives
+       reboot, no OS keyring required.  See
+       [`terok_sandbox.credentials.systemd_creds`][terok_sandbox.credentials.systemd_creds].
+    3. OS keyring — only when *use_keyring* is true; off by default because
        Linux Secret Service grants access per-collection, not per-item.
-    3. *config_fallback* — ``credentials.passphrase`` from ``config.yml``
+    4. *config_fallback* — ``credentials.passphrase`` from ``config.yml``
        (unsafe-on-disk; headless hosts without a keyring).
-    4. Interactive prompt — only when *prompt_on_tty* and ``sys.stdin.isatty()``.
+    5. Interactive prompt — only when *prompt_on_tty* and ``sys.stdin.isatty()``.
 
     *config_fallback* is threaded through as a parameter rather than
     read here so this module stays free of any dependency on the
@@ -129,6 +146,7 @@ def resolve_passphrase(
     """
     passphrase, _source = resolve_passphrase_with_source(
         passphrase_file=passphrase_file,
+        systemd_creds_file=systemd_creds_file,
         use_keyring=use_keyring,
         config_fallback=config_fallback,
         prompt_on_tty=prompt_on_tty,
