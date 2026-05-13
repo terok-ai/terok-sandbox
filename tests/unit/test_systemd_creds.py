@@ -58,6 +58,14 @@ class TestAvailability:
         ):
             assert systemd_creds.is_available() is False
 
+    def test_is_available_when_version_output_has_no_integer(self) -> None:
+        """Garbage output (no version number) is treated as unavailable, not crash."""
+        with (
+            patch("shutil.which", return_value="/usr/bin/systemd-creds"),
+            patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="garbage\n")),
+        ):
+            assert systemd_creds.is_available() is False
+
     def test_has_tpm2_short_circuits_when_unavailable(self) -> None:
         """``is_available`` False → no TPM probe; no extra subprocess spawned."""
         with (
@@ -224,6 +232,47 @@ class TestSeal:
             pytest.raises(RuntimeError, match="TPM unavailable"),
         ):
             systemd_creds.seal("pw", tmp_path / "v.cred")
+
+    def test_timeout_translated_to_runtime_error(self, tmp_path: Path) -> None:
+        """A hung ``systemd-creds`` surfaces as the documented RuntimeError, not TimeoutExpired."""
+
+        def _run(*_a: object, **kw: object) -> MagicMock:
+            argv = _a[0] if _a else kw.get("args")
+            if argv and "--version" in argv:
+                return _version_output(259)
+            raise subprocess.TimeoutExpired(cmd=["systemd-creds"], timeout=10)
+
+        with (
+            patch("subprocess.run", side_effect=_run),
+            pytest.raises(RuntimeError, match="timed out"),
+        ):
+            systemd_creds.seal("pw", tmp_path / "v.cred")
+
+    def test_chmod_failure_translated_to_runtime_error(self, tmp_path: Path) -> None:
+        """An OSError from the post-write chmod stays inside the documented contract."""
+        cred = tmp_path / "v.cred"
+        with (
+            patch("subprocess.run", side_effect=_mock_seal_subprocess(cred)),
+            patch("pathlib.Path.chmod", side_effect=OSError("read-only fs")),
+            pytest.raises(RuntimeError, match="failed to secure sealed credential"),
+        ):
+            systemd_creds.seal("pw", cred)
+
+    def test_generic_os_error_translated_to_runtime_error(self, tmp_path: Path) -> None:
+        """Any OSError from the subprocess (not just FileNotFoundError) folds to RuntimeError."""
+        cred = tmp_path / "v.cred"
+
+        def _run(*_a: object, **kw: object) -> MagicMock:
+            argv = _a[0] if _a else kw.get("args")
+            if argv and "--version" in argv:
+                return _version_output(259)
+            raise OSError("too many open files")
+
+        with (
+            patch("subprocess.run", side_effect=_run),
+            pytest.raises(RuntimeError, match="too many open files"),
+        ):
+            systemd_creds.seal("pw", cred)
 
 
 class TestUnseal:

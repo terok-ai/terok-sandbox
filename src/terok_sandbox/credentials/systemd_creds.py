@@ -156,7 +156,16 @@ def seal(passphrase: str, credential_path: Path, *, tpm: bool = True) -> None:
         raise RuntimeError(
             f"{_BINARY} encrypt failed (exit {exc.returncode}): {(exc.stderr or '').strip()}"
         ) from exc
-    credential_path.chmod(0o600)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"{_BINARY} encrypt timed out after {_SEAL_TIMEOUT:.0f}s") from exc
+    except OSError as exc:
+        raise RuntimeError(f"{_BINARY} encrypt failed: {exc}") from exc
+    try:
+        credential_path.chmod(0o600)
+    except OSError as exc:
+        raise RuntimeError(
+            f"failed to secure sealed credential at {credential_path}: {exc}"
+        ) from exc
 
 
 def unseal(credential_path: Path) -> str | None:

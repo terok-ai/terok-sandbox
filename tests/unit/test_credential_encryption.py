@@ -1254,6 +1254,70 @@ class TestVaultSeal:
         with pytest.raises(SystemExit, match="no TPM2"):
             _handle_vault_seal(cfg=_make_cfg(tmp_path), key="tpm")
 
+    def test_seal_key_tpm_explicit_with_tpm(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--key=tpm`` on a TPM-equipped host seals with TPM2 (operator pinning the choice)."""
+        from unittest.mock import MagicMock
+
+        from terok_sandbox.commands import _handle_vault_seal
+        from terok_sandbox.credentials import systemd_creds as sc
+
+        cfg = _make_cfg(tmp_path)
+        cfg.vault_passphrase_file.parent.mkdir(parents=True, exist_ok=True)
+        cfg.vault_passphrase_file.write_text("current-pw\n")
+
+        seal = MagicMock()
+        monkeypatch.setattr(sc, "is_available", lambda: True)
+        monkeypatch.setattr(sc, "has_tpm2", lambda: True)
+        monkeypatch.setattr(sc, "seal", seal)
+        monkeypatch.setattr(
+            "terok_sandbox.credentials.encryption.load_passphrase_from_file",
+            load_passphrase_from_file,
+        )
+
+        _handle_vault_seal(cfg=cfg, key="tpm")
+
+        assert seal.call_args.kwargs["tpm"] is True
+
+    def test_seal_key_host_explicit(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``--key=host`` skips the TPM and seals against the host key directly."""
+        from unittest.mock import MagicMock
+
+        from terok_sandbox.commands import _handle_vault_seal
+        from terok_sandbox.credentials import systemd_creds as sc
+
+        cfg = _make_cfg(tmp_path)
+        cfg.vault_passphrase_file.parent.mkdir(parents=True, exist_ok=True)
+        cfg.vault_passphrase_file.write_text("current-pw\n")
+
+        seal = MagicMock()
+        has_tpm = MagicMock(return_value=True)
+        monkeypatch.setattr(sc, "is_available", lambda: True)
+        monkeypatch.setattr(sc, "has_tpm2", has_tpm)
+        monkeypatch.setattr(sc, "seal", seal)
+        monkeypatch.setattr(
+            "terok_sandbox.credentials.encryption.load_passphrase_from_file",
+            load_passphrase_from_file,
+        )
+
+        _handle_vault_seal(cfg=cfg, key="host")
+
+        assert seal.call_args.kwargs["tpm"] is False
+        has_tpm.assert_not_called()  # --key=host shouldn't probe for TPM at all
+
+    def test_seal_unknown_key_value_rejected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A typo'd --key value fails loudly rather than silently picking a default."""
+        from terok_sandbox.commands import _handle_vault_seal
+        from terok_sandbox.credentials import systemd_creds as sc
+
+        monkeypatch.setattr(sc, "is_available", lambda: True)
+
+        with pytest.raises(SystemExit, match="unknown --key value"):
+            _handle_vault_seal(cfg=_make_cfg(tmp_path), key="bogus")
+
     def test_seal_refuses_when_binary_missing(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
