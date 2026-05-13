@@ -204,8 +204,8 @@ def _peer_label(writer: asyncio.StreamWriter) -> str:
     """
     import socket as _socket
 
-    sock = writer.get_extra_info("socket")
     try:
+        sock = writer.get_extra_info("socket")
         if sock is not None and sock.family == _socket.AF_UNIX:
             cred_struct = sock.getsockopt(_socket.SOL_SOCKET, _socket.SO_PEERCRED, 12)
             pid, uid, gid = struct.unpack("3i", cred_struct)

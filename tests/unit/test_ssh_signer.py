@@ -253,6 +253,50 @@ class TestPeerLabel:
 
         assert _peer_label(_Writer()) == "<unknown>"
 
+    def test_proc_comm_unreadable_still_returns_pid_uid_gid(self, monkeypatch) -> None:
+        """``/proc/<pid>/comm`` read failure is swallowed; pid/uid/gid still surface."""
+        import socket as _socket
+
+        from terok_sandbox.vault.ssh_signer import _peer_label
+
+        a, b = _socket.socketpair(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        try:
+
+            class _Writer:
+                def get_extra_info(self, key: str):
+                    return a if key == "socket" else ""
+
+            # Force the inner Path.open() to raise the way it would on a
+            # dead peer process — the outer ``unix peer pid=…`` label
+            # must still come back, just without the ``(comm)`` suffix.
+            real_open = type(__import__("pathlib").Path("/")).open
+
+            def _open_raises(self, *args, **kwargs):
+                if str(self).startswith("/proc/"):
+                    raise OSError("no such process")
+                return real_open(self, *args, **kwargs)
+
+            monkeypatch.setattr("pathlib.Path.open", _open_raises)
+            label = _peer_label(_Writer())
+        finally:
+            a.close()
+            b.close()
+        assert "unix peer pid=" in label
+        # The ``(comm)`` suffix is absent because /proc was unreadable.
+        assert "(" not in label
+
+    def test_outer_exception_returns_unknown(self) -> None:
+        """A writer that throws on ``get_extra_info`` falls all the way through to ``<unknown>``."""
+        from terok_sandbox.vault.ssh_signer import _peer_label
+
+        class _Writer:
+            def get_extra_info(self, _key: str):
+                raise RuntimeError("writer is detached")
+
+        # Logging must never raise; the safety-net ``except`` swallows
+        # and the helper returns the sentinel string.
+        assert _peer_label(_Writer()) == "<unknown>"
+
 
 class _FakeWriter:
     """Stub writer for ``writer.get_extra_info('peername'/'socket')``.
