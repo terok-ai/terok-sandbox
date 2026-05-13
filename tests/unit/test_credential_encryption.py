@@ -417,11 +417,11 @@ class TestCredentialDBEncryption:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Empty chain → NoPassphraseError, same as the non-source variant."""
+        """Empty chain → NoPassphraseError carrying the same actionable hint as the non-source variant."""
         from terok_sandbox.credentials import encryption as enc
 
         monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda: None)
-        with pytest.raises(NoPassphraseError):
+        with pytest.raises(NoPassphraseError, match="vault unlock"):
             open_credential_db_with_source(tmp_path / "src.db")
 
 

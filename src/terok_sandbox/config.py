@@ -29,6 +29,8 @@ from .paths import (
 
 if TYPE_CHECKING:
     from .config_schema import RawCredentialsSection, ServicesMode
+    from .credentials.db import CredentialDB
+    from .credentials.encryption import PassphraseSource
 
 CONTAINER_RUNTIME_DIR = "/run/terok"
 """Container-side mount point for the host runtime directory (socket mode)."""
@@ -281,7 +283,9 @@ class SandboxConfig:
             prompt_on_tty=prompt_on_tty,
         )
 
-    def open_credential_db_with_source(self, *, prompt_on_tty: bool = False) -> tuple[Any, Any]:
+    def open_credential_db_with_source(
+        self, *, prompt_on_tty: bool = False
+    ) -> tuple[CredentialDB, PassphraseSource]:
         """Same as [`open_credential_db`][terok_sandbox.SandboxConfig.open_credential_db]
         but also returns which tier of the chain hit.
 
