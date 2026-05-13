@@ -54,31 +54,6 @@ def _isolate_systemd_creds_version_cache() -> Iterator[None]:
     _sc._systemd_creds_exe.cache_clear()
 
 
-@pytest.fixture()
-def _systemctl_on_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pretend ``systemctl`` is on ``PATH`` so ``_systemctl`` helpers don't short-circuit.
-
-    [`run_best_effort`][terok_sandbox._util._systemctl.run_best_effort]
-    and [`run`][terok_sandbox._util._systemctl.run] both probe via
-    ``shutil.which`` and return silently when it isn't there — the
-    documented containerized-host leniency.  Tests that mock
-    ``subprocess.run`` to assert on the systemctl invocation need the
-    gate open so the call actually reaches the mock.  Opt-in via
-    ``@pytest.mark.usefixtures("_systemctl_on_path")`` rather than
-    autouse so other tests can still exercise the absent-binary path.
-    """
-    import shutil
-
-    real_which = shutil.which
-
-    def _which(cmd: str, *args: object, **kwargs: object) -> str | None:
-        if cmd == "systemctl":
-            return "/usr/bin/systemctl"
-        return real_which(cmd, *args, **kwargs)  # type: ignore[arg-type]
-
-    monkeypatch.setattr("shutil.which", _which)
-
-
 @pytest.fixture(autouse=True)
 def _isolate_credential_keyring(monkeypatch: pytest.MonkeyPatch) -> None:
     """Stub the resolution chain so tests get a deterministic ``"test"`` passphrase.

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -257,7 +258,7 @@ class TestStopDaemon:
 
         assert not pidfile.exists()
 
-    @pytest.mark.usefixtures("_systemctl_on_path")
+    @pytest.mark.skipif(shutil.which("systemctl") is None, reason="needs systemctl on PATH")
     def test_socket_mode_stops_systemd_unit(self, tmp_path: Path) -> None:
         """stop_daemon stops the socket-mode service when systemd-activated (no PID file)."""
         mgr = _make_mgr(tmp_path)
@@ -1016,7 +1017,7 @@ class TestInstallSystemdUnits:
 class TestUninstallSystemdUnits:
     """Verify uninstall_systemd_units."""
 
-    @pytest.mark.usefixtures("_systemctl_on_path")
+    @pytest.mark.skipif(shutil.which("systemctl") is None, reason="needs systemctl on PATH")
     def test_uninstall_removes_units(self, tmp_path: Path) -> None:
         """uninstall_systemd_units removes unit files and reloads."""
         unit_dir = tmp_path / "systemd-units"
@@ -1090,7 +1091,7 @@ class TestOrphanUnitSweep:
             VaultManager()._sweep_orphan_units()
         assert other.exists()
 
-    @pytest.mark.usefixtures("_systemctl_on_path")
+    @pytest.mark.skipif(shutil.which("systemctl") is None, reason="needs systemctl on PATH")
     def test_disable_invoked_before_unlink(self, tmp_path: Path) -> None:
         """Each removed unit is systemctl-disabled first (best-effort)."""
         unit_dir = tmp_path / "systemd-units"
