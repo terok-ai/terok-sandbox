@@ -599,8 +599,21 @@ def _handle_vault_lock(*, cfg: SandboxConfig | None = None, forget: bool = False
 
     sealed_cred = cfg.vault_systemd_creds_file
     if forget:
-        if cfg.credentials_use_keyring and forget_passphrase_in_keyring():
-            print("→ cleared keyring entry")
+        if cfg.credentials_use_keyring:
+            from .credentials.encryption import load_passphrase_from_keyring
+
+            if forget_passphrase_in_keyring():
+                print("→ cleared keyring entry")
+            elif load_passphrase_from_keyring() is None:
+                # ``keyring.delete_password`` raises on a missing entry on most
+                # backends, which the helper folds to False — treat that as
+                # "nothing to clear", but a residual entry after a False
+                # return means the backend rejected the delete.
+                print("→ keyring entry already absent")
+            else:
+                raise SystemExit(
+                    "failed to clear keyring entry; daemon may still auto-unlock from keyring"
+                )
         if cfg.credentials_passphrase:
             from . import config as _config
             from .paths import _config_file_paths
@@ -695,11 +708,14 @@ def _handle_vault_seal(*, cfg: SandboxConfig | None = None, key: str = "auto") -
 
     # Seal must reuse an already-resolved passphrase — a prompt here
     # would accept a fresh-typed value and seal *that*, leaving the
-    # next chain walk holding a key that doesn't open the DB.  The
-    # systemd_creds_file kwarg is also skipped so the resolver can't
-    # short-circuit on a stale credential we're about to replace.
+    # next chain walk holding a key that doesn't open the DB.  Every
+    # persistent tier is included so re-sealing with a different
+    # ``--key=`` mode on a headless host (where systemd-creds may be
+    # the only resolvable source) is idempotent: the resolver returns
+    # the same passphrase regardless of which tier it came from.
     passphrase = resolve_passphrase(
         passphrase_file=cfg.vault_passphrase_file,
+        systemd_creds_file=cfg.vault_systemd_creds_file,
         use_keyring=cfg.credentials_use_keyring,
         config_fallback=cfg.credentials_passphrase,
         prompt_on_tty=False,

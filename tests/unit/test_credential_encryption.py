@@ -1185,6 +1185,63 @@ class TestVaultUnlockLock:
         assert forget_calls["n"] == 1
         assert "passphrase: from-config" not in user_config.read_text()
 
+    def test_lock_forget_treats_absent_keyring_entry_as_idempotent(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Forget on a configured-but-empty keyring is success (not a hard failure)."""
+        from unittest.mock import MagicMock
+
+        from terok_sandbox.commands import _handle_vault_lock
+
+        cfg = _make_cfg(tmp_path, use_keyring=True)
+        mgr = MagicMock()
+        mgr.is_daemon_running.return_value = False
+        monkeypatch.setattr("terok_sandbox.vault.lifecycle.VaultManager", lambda _cfg: mgr)
+        # Helper returns False on missing entry (keyring.delete_password raises);
+        # the readback then confirms the entry really is absent.
+        monkeypatch.setattr(
+            "terok_sandbox.credentials.encryption.forget_passphrase_in_keyring",
+            lambda: False,
+        )
+        monkeypatch.setattr(
+            "terok_sandbox.credentials.encryption.load_passphrase_from_keyring",
+            lambda: None,
+        )
+
+        _handle_vault_lock(cfg=cfg, forget=True)  # must not raise
+
+        assert "already absent" in capsys.readouterr().out
+
+    def test_lock_forget_raises_when_keyring_backend_rejects_delete(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A residual entry after a failed delete means --forget couldn't honour its contract."""
+        from unittest.mock import MagicMock
+
+        from terok_sandbox.commands import _handle_vault_lock
+
+        cfg = _make_cfg(tmp_path, use_keyring=True)
+        mgr = MagicMock()
+        mgr.is_daemon_running.return_value = False
+        monkeypatch.setattr("terok_sandbox.vault.lifecycle.VaultManager", lambda _cfg: mgr)
+        # Helper claimed failure AND the entry is still there: real backend rejection.
+        monkeypatch.setattr(
+            "terok_sandbox.credentials.encryption.forget_passphrase_in_keyring",
+            lambda: False,
+        )
+        monkeypatch.setattr(
+            "terok_sandbox.credentials.encryption.load_passphrase_from_keyring",
+            lambda: "still-there",
+        )
+
+        with pytest.raises(SystemExit, match="failed to clear keyring entry"):
+            _handle_vault_lock(cfg=cfg, forget=True)
+
     def test_lock_forget_removes_sealed_credential(
         self,
         tmp_path: Path,
