@@ -23,13 +23,32 @@ from terok_sandbox.credentials import systemd_creds
 class TestAvailability:
     """The presence probes that gate every other operation."""
 
-    def test_is_available_when_binary_recent_enough(self) -> None:
+    def test_is_available_when_binary_recent_enough(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Fedora 44 / Debian 13 ship systemd 257+ which has the Varlink delegation."""
+        monkeypatch.setattr(
+            "terok_sandbox.credentials.systemd_creds._VARLINK_SOCKET",
+            _FakeVarlinkSocket(),
+        )
         with (
             patch("shutil.which", return_value="/usr/bin/systemd-creds"),
             patch("subprocess.run", return_value=_version_output(259)),
         ):
             assert systemd_creds.is_available() is True
+
+    def test_is_available_false_when_varlink_socket_missing(self) -> None:
+        """Recent binary + good version but no PID-1 systemd → tier unavailable.
+
+        Reproduces the typical container case: ``systemd-creds`` is
+        installed but PID 1 isn't a recent enough systemd, so the
+        ``io.systemd.Credentials`` Varlink socket isn't there.  The
+        non-root ``--user`` decrypt path would otherwise crash with
+        ``Failed to connect to io.systemd.Credentials``.
+        """
+        with (
+            patch("shutil.which", return_value="/usr/bin/systemd-creds"),
+            patch("subprocess.run", return_value=_version_output(259)),
+        ):
+            assert systemd_creds.is_available() is False
 
     def test_is_available_false_when_systemd_too_old(self) -> None:
         """systemd < 257 lacks the non-root --user decrypt path — tier is unusable."""
@@ -70,7 +89,11 @@ class TestAvailability:
             assert systemd_creds.has_tpm2() is False
             run.assert_not_called()
 
-    def test_has_tpm2_when_command_succeeds(self) -> None:
+    def test_has_tpm2_when_command_succeeds(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "terok_sandbox.credentials.systemd_creds._VARLINK_SOCKET",
+            _FakeVarlinkSocket(),
+        )
         with (
             patch("shutil.which", return_value="/usr/bin/systemd-creds"),
             patch(
@@ -402,13 +425,25 @@ def _seal_argv(run_mock: MagicMock) -> list[str]:
     return run_mock.call_args_list[1].args[0]
 
 
+class _FakeVarlinkSocket:
+    """Duck-typed ``Path`` whose ``is_socket()`` always reports True."""
+
+    def is_socket(self) -> bool:
+        return True
+
+
 @pytest.fixture()
 def _have_systemd_creds(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Make ``shutil.which`` report systemd-creds present for the duration of the test.
+    """Open every gate ``is_available()`` consults — for tests that exercise seal/unseal.
 
-    ``is_available()`` short-circuits to False when the binary isn't on
-    PATH, which it never is in the test container.  Tests that exercise
-    seal / unseal need that gate open so they can drive
-    ``subprocess.run`` directly.
+    ``is_available()`` checks three things, all of which fail in a bare
+    test container: the binary on PATH, the version probe, and the
+    ``io.systemd.Credentials`` Varlink socket.  The fixture stubs the
+    binary path and the socket; the version stays under the test's own
+    control via ``subprocess.run`` mocking.
     """
     monkeypatch.setattr("shutil.which", lambda _name: _SYSTEMD_CREDS_EXE)
+    monkeypatch.setattr(
+        "terok_sandbox.credentials.systemd_creds._VARLINK_SOCKET",
+        _FakeVarlinkSocket(),
+    )
