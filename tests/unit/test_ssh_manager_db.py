@@ -100,13 +100,24 @@ class TestInit:
 
 
 class TestOwnership:
-    """``SSHManager`` owns its DB iff constructed via [`SSHManager.open`][terok_sandbox.SSHManager.open]."""
+    """``SSHManager`` owns its DB iff constructed via [`SSHManager.open_for_config`][terok_sandbox.SSHManager.open_for_config]."""
 
-    def test_context_manager_closes_owned_db(self, tmp_path) -> None:
-        """``SSHManager.open`` + ``with`` closes the DB at block exit."""
+    def test_context_manager_closes_owned_db(self, tmp_path, monkeypatch) -> None:
+        """``SSHManager.open_for_config`` + ``with`` closes the DB at block exit."""
         import sqlcipher3.dbapi2 as _sqlcipher_dbapi
 
-        with SSHManager.open(scope="proj", db_path=tmp_path / "owned.db", use_keyring=True) as m:
+        from terok_sandbox import SandboxConfig
+
+        # Pin the chain to a deterministic test passphrase via the keyring
+        # tier so we don't depend on any session-file / sealed-cred state
+        # on the developer host.
+        monkeypatch.setattr(
+            "terok_sandbox.credentials.encryption.load_passphrase_from_keyring",
+            lambda: "test",
+        )
+        cfg = SandboxConfig(credentials_use_keyring=True)
+        db_path = tmp_path / "owned.db"
+        with SSHManager.open_for_config(scope="proj", cfg=cfg, db_path=db_path) as m:
             m.init()  # proves the DB is usable inside the block
         # Any read on the closed connection must raise — proves __exit__ really closed it.
         with pytest.raises(_sqlcipher_dbapi.ProgrammingError):

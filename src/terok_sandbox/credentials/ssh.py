@@ -49,9 +49,14 @@ class SSHManager:
     - ``SSHManager(scope=..., db=...)`` binds the manager to a
       caller-owned [`CredentialDB`][terok_sandbox.CredentialDB].  The manager uses it and
       never closes it.  Right shape for tests and pooled connections.
-    - [`SSHManager.open`][terok_sandbox.credentials.ssh.SSHManager.open] opens its own DB against a path and
-      closes it on [`close`][terok_sandbox.credentials.ssh.SSHManager.close] / context exit / garbage collection.
-      Right shape for one-shot CLI commands.
+    - [`SSHManager.open_for_config`][terok_sandbox.credentials.ssh.SSHManager.open_for_config]
+      opens its own DB via the supplied config's chain seam
+      (``cfg.open_credential_db``) and closes it on
+      [`close`][terok_sandbox.credentials.ssh.SSHManager.close] /
+      context exit / garbage collection.  Right shape for one-shot
+      CLI commands.  Pass ``db_path`` when the caller already holds a
+      runtime path (typically ``VaultStatus.db_path``) so the open
+      targets that DB while still using *cfg*'s tier policy.
     """
 
     def __init__(self, *, scope: str, db: CredentialDB) -> None:
@@ -61,36 +66,22 @@ class SSHManager:
         self._owned_db: CredentialDB | None = None
 
     @classmethod
-    def open(
+    def open_for_config(
         cls,
         *,
         scope: str,
-        db_path: Path | str,
-        passphrase_file: Path | None = None,
-        use_keyring: bool = False,
-        config_fallback: str | None = None,
+        cfg: SandboxConfig,
+        db_path: Path | None = None,
         prompt_on_tty: bool = False,
     ) -> SSHManager:
-        """Return a manager that owns a fresh DB connection from the resolution chain."""
-        from .db import open_credential_db  # noqa: PLC0415
+        """Return a manager that owns a connection opened via ``cfg.open_credential_db``.
 
-        db = open_credential_db(
-            Path(db_path),
-            passphrase_file=passphrase_file,
-            use_keyring=use_keyring,
-            config_fallback=config_fallback,
-            prompt_on_tty=prompt_on_tty,
-        )
-        manager = cls(scope=scope, db=db)
-        manager._owned_db = db
-        return manager
-
-    @classmethod
-    def open_for_config(
-        cls, *, scope: str, cfg: SandboxConfig, prompt_on_tty: bool = False
-    ) -> SSHManager:
-        """Return a manager that owns a connection opened via ``cfg.open_credential_db``."""
-        db = cfg.open_credential_db(prompt_on_tty=prompt_on_tty)
+        *db_path* defaults to ``cfg.db_path``; callers with a runtime
+        path override (e.g. the daemon's actual ``VaultStatus.db_path``)
+        pass it explicitly.  Tier knobs always come from *cfg* — no
+        cross-package fan-out when sandbox adds a new chain tier.
+        """
+        db = cfg.open_credential_db(db_path, prompt_on_tty=prompt_on_tty)
         manager = cls(scope=scope, db=db)
         manager._owned_db = db
         return manager
