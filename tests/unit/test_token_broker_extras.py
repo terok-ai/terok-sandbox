@@ -293,6 +293,57 @@ class TestMainCli:
         with patch("sys.argv", argv), pytest.raises(SystemExit):
             main()
 
+    def test_logs_resolved_passphrase_tier(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Daemon startup emits the resolved tier name so the journal records it.
+
+        Calls the helper directly rather than driving ``main()`` end-to-end:
+        ``main()`` also constructs the real aiohttp app + ``_TokenDB``, which
+        means the patched passphrase has to actually decrypt the on-disk
+        SQLCipher DB — out of scope for a log-format unit test.
+        """
+        import logging
+
+        from terok_sandbox.vault.token_broker import _log_resolved_passphrase_tier
+
+        caplog.set_level(logging.INFO, logger="terok-vault")
+        with patch(
+            "terok_sandbox.credentials.encryption.resolve_passphrase_with_source",
+            lambda **_kw: ("dummy-passphrase", "systemd-creds"),
+        ):
+            _log_resolved_passphrase_tier()
+        assert any("resolved via systemd-creds tier" in rec.getMessage() for rec in caplog.records)
+
+    def test_logs_no_tier_resolved(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Chain returning ``(None, None)`` surfaces an explicit no-tier line."""
+        import logging
+
+        from terok_sandbox.vault.token_broker import _log_resolved_passphrase_tier
+
+        caplog.set_level(logging.INFO, logger="terok-vault")
+        with patch(
+            "terok_sandbox.credentials.encryption.resolve_passphrase_with_source",
+            lambda **_kw: (None, None),
+        ):
+            _log_resolved_passphrase_tier()
+        assert any("no tier resolved" in rec.getMessage() for rec in caplog.records)
+
+    def test_resolution_failure_is_best_effort(self, caplog: pytest.LogCaptureFixture) -> None:
+        """A resolver crash during the startup log is swallowed; ``_TokenDB`` raises the real error."""
+        import logging
+
+        from terok_sandbox.vault.token_broker import _log_resolved_passphrase_tier
+
+        caplog.set_level(logging.DEBUG, logger="terok-vault")
+        with patch(
+            "terok_sandbox.credentials.encryption.resolve_passphrase_with_source",
+            side_effect=RuntimeError("resolver exploded"),
+        ):
+            # Must NOT raise — the diagnostic helper has to be best-effort.
+            _log_resolved_passphrase_tier()
+        assert any("Could not pre-resolve" in rec.getMessage() for rec in caplog.records)
+
     def test_invalid_log_level_falls_back_to_info(self, tmp_path: Path) -> None:
         """Unknown --log-level value falls through to logging.INFO."""
         argv = _argv_basics(tmp_path) + ["--log-level=NOTALEVEL"]

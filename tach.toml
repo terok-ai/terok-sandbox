@@ -141,6 +141,7 @@ path = "terok_sandbox.vault"
 layer = "foundation"
 depends_on = [
     "terok_sandbox.credentials.db",
+    "terok_sandbox.credentials.encryption",
     "terok_sandbox.config",
 ]
 
