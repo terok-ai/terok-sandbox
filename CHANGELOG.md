@@ -5,6 +5,14 @@ also the "Changelog" link in PyPI metadata.
 
 [rel]: https://github.com/terok-ai/terok-sandbox/releases
 
+## v0.0.119 — Passphrase Handling
+
+## What's Changed
+* feat(vault): permanent plaintext-passphrase visibility (#282) by @sliwowitz in https://github.com/terok-ai/terok-sandbox/pull/287
+
+
+**Full Changelog**: https://github.com/terok-ai/terok-sandbox/compare/v0.0.118...v0.0.119
+
 ## v0.0.118 — Trusted Platform Module
 
 ## What's Changed
