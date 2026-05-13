@@ -93,6 +93,8 @@ addopts = "-v --tb=short"
 markers = [
   "needs_podman: requires podman on the host",
   "needs_vault: vault integration (real server + DB)",
+  "needs_host_features: requires systemd-user, real filesystem, host services beyond a plain Python interpreter",
+  "needs_systemd_creds: requires systemd-creds ≥ 257 on PATH with the Varlink io.systemd.Credentials interface",
 ]
 asyncio_mode = "auto"
 
