@@ -702,6 +702,7 @@ class TestGateOrphanUnitSweep:
             GateServerManager()._sweep_orphan_units()
         assert other.exists()
 
+    @pytest.mark.usefixtures("_systemctl_on_path")
     def test_disable_invoked_before_unlink(self, tmp_path):
         """Each removed legacy unit is systemctl-disabled first (best-effort)."""
         unit_dir = tmp_path / "systemd-units"
