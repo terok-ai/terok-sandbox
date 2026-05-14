@@ -145,13 +145,21 @@ class TestShieldCLI:
         run_setup.assert_called_once_with(root=False, user=True)
 
     def test_shield_status_runs(self) -> None:
+        """``shield status`` resolves through shield's own registry handler.
+
+        Sandbox no longer hand-rolls a separate status function — the
+        verb is consumed from terok-shield's COMMANDS via the
+        CommandTree.  Mock at the Shield instance level so the
+        sandbox-wrapped path exercises the same code shield's
+        standalone CLI runs.
+        """
         from terok_shield import EnvironmentCheck
 
         mock_env = EnvironmentCheck(ok=True, hooks="per-container", health="ok")
         mock_cfg = {"mode": "hook", "profiles": ["dev-standard"], "audit_enabled": True}
         with (
-            patch("terok_sandbox.shield.check_environment", return_value=mock_env),
-            patch("terok_sandbox.shield.status", return_value=mock_cfg),
+            patch("terok_shield.Shield.status", return_value=mock_cfg),
+            patch("terok_shield.Shield.check_environment", return_value=mock_env),
         ):
             out, _, rc = _run_cli("shield", "status")
         assert rc == 0

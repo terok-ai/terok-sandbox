@@ -18,7 +18,6 @@ import pytest
 from terok_sandbox.commands import (
     _handle_doctor,
     _handle_gate_stop,
-    _handle_shield_status,
     _handle_vault_install,
     _handle_vault_uninstall,
 )
@@ -62,36 +61,9 @@ class TestHandleGateStopNotRunning:
         assert "not running" in out
 
 
-# ---------------------------------------------------------------------------
-# _handle_shield_status setup-hint branch (line 155)
-# ---------------------------------------------------------------------------
-
-
-class TestHandleShieldStatusHint:
-    """When shield needs setup, the hint is written to stderr."""
-
-    def test_setup_hint_emitted_on_stderr(self, capsys: pytest.CaptureFixture[str]) -> None:
-        env = MagicMock(hooks="missing", health="degraded", needs_setup=True, setup_hint="Run X.")
-        cfg = {"mode": "hook", "profiles": ["dev-standard"], "audit_enabled": True}
-        # The handler imports check_environment + status from .shield at runtime,
-        # so patching the shield module is what takes effect.
-        with (
-            patch("terok_sandbox.shield.check_environment", return_value=env),
-            patch("terok_sandbox.shield.status", return_value=cfg),
-        ):
-            _handle_shield_status()
-        captured = capsys.readouterr()
-        assert "Run X." in captured.err
-
-    def test_no_hint_when_not_needed(self, capsys: pytest.CaptureFixture[str]) -> None:
-        env = MagicMock(hooks="ok", health="ok", needs_setup=False, setup_hint="should not show")
-        cfg = {"mode": "hook", "profiles": [], "audit_enabled": False}
-        with (
-            patch("terok_sandbox.shield.check_environment", return_value=env),
-            patch("terok_sandbox.shield.status", return_value=cfg),
-        ):
-            _handle_shield_status()
-        assert "should not show" not in capsys.readouterr().err
+# Shield-status hint test moved to terok-shield's own suite — sandbox no
+# longer hand-rolls _handle_shield_status; it consumes shield's
+# registry verb directly via CommandTree.
 
 
 # ---------------------------------------------------------------------------

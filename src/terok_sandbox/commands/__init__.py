@@ -55,7 +55,6 @@ from .sandbox import SETUP_COMMANDS, _handle_sandbox_setup, _handle_sandbox_unin
 from .shield import (
     SHIELD_COMMANDS,
     _handle_shield_setup,
-    _handle_shield_status,
     _handle_shield_uninstall,
 )
 from .ssh import (
@@ -150,7 +149,6 @@ __all__ = [
     "_handle_sandbox_setup",
     "_handle_sandbox_uninstall",
     "_handle_shield_setup",
-    "_handle_shield_status",
     "_handle_shield_uninstall",
     "_handle_ssh_add",
     "_handle_ssh_export",

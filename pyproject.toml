@@ -33,7 +33,7 @@ documentation = "https://terok-ai.github.io/terok-sandbox/"
 
 [tool.poetry.dependencies]
 python = ">=3.12,<4.0"
-terok-shield = {url = "https://github.com/terok-ai/terok-shield/releases/download/v0.6.39/terok_shield-0.6.39-py3-none-any.whl"}
+terok-shield = {git = "https://github.com/sliwowitz/terok-shield.git", branch = "feat/command-def-children"}
 # Branch-pinned during the CommandTree unification chain so downstream
 # (terok) pins resolve to the same clearance version per the
 # package-pin-sync rule.  Sandbox itself doesn't consume clearance's
