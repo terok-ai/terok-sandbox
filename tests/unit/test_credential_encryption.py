@@ -955,7 +955,7 @@ class TestProvisionPassphrase:
         # as ``vault unlock`` against a fresh DB.
         _patch_dev_tty(monkeypatch)
         _scripted_tty_prompt(monkeypatch, "")
-        pw, source = _provision_passphrase(cfg, mode="session")
+        pw, source = _provision_passphrase(cfg, mode="session-file")
         assert source == "session-file"
         assert cfg.vault_passphrase_file.read_text().rstrip("\n") == pw
         # Mode 0600 enforced — same protection as the encrypted DB itself.
@@ -974,7 +974,7 @@ class TestProvisionPassphrase:
         cfg = _make_cfg(tmp_path)
         cfg.vault_passphrase_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         cfg.vault_passphrase_file.write_text(_PASSPHRASE + "\n")
-        pw, source = _provision_passphrase(cfg, mode="session")
+        pw, source = _provision_passphrase(cfg, mode="session-file")
         assert pw == _PASSPHRASE
         assert source == "session-file"
 
@@ -1267,14 +1267,14 @@ class TestAskPassphraseMode:
         from terok_sandbox.commands import _ask_passphrase_mode
 
         monkeypatch.setattr("sys.stdin.isatty", lambda: False)
-        assert _ask_passphrase_mode() == "session"
+        assert _ask_passphrase_mode() == "session-file"
 
     def test_session_keyring_pass_through(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """``s`` / ``k`` choices skip the config-tier confirmation entirely."""
         from terok_sandbox.commands import _ask_passphrase_mode
 
         monkeypatch.setattr("sys.stdin.isatty", lambda: True)
-        for letter, expected in (("s", "session"), ("k", "keyring")):
+        for letter, expected in (("s", "session-file"), ("k", "keyring")):
             monkeypatch.setattr("sys.stdin.readline", lambda _letter=letter: _letter + "\n")
             assert _ask_passphrase_mode() == expected
 
@@ -1301,7 +1301,7 @@ class TestAskPassphraseMode:
         responses = iter(["c\n", "no\n", "s\n"])
         monkeypatch.setattr("sys.stdin.isatty", lambda: True)
         monkeypatch.setattr("sys.stdin.readline", lambda: next(responses))
-        assert _ask_passphrase_mode() == "session"
+        assert _ask_passphrase_mode() == "session-file"
 
     def test_empty_choice_defaults_to_keyring(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Pressing Enter at the chooser takes the recommended default (keyring)."""
@@ -1923,7 +1923,7 @@ class TestCredentialsSetupPhaseDaemonHandling:
         """Socket-activation respawn race → uninstall units + retry → success."""
         from unittest.mock import MagicMock
 
-        from terok_sandbox import commands
+        from terok_sandbox.commands import credentials as commands
 
         cfg = _make_cfg(tmp_path)
         attempts = {"n": 0}
@@ -1952,7 +1952,7 @@ class TestCredentialsSetupPhaseDaemonHandling:
         """If the lock persists after uninstall, surface the ``fuser`` diagnostic."""
         from unittest.mock import MagicMock
 
-        from terok_sandbox import commands
+        from terok_sandbox.commands import credentials as commands
 
         def _always_locked(**_kw: object) -> None:
             raise RuntimeError("database is locked")
@@ -1975,7 +1975,7 @@ class TestCredentialsSetupPhaseDaemonHandling:
         """Unrelated migration errors must NOT trigger auto-uninstall."""
         from unittest.mock import MagicMock
 
-        from terok_sandbox import commands
+        from terok_sandbox.commands import credentials as commands
 
         def _boom(**_kw: object) -> None:
             raise RuntimeError("disk is on fire")
@@ -2036,7 +2036,7 @@ class TestPersistModeChoice:
         monkeypatch.setattr(
             "terok_sandbox.paths._config_file_paths", lambda: [("user", user_config)]
         )
-        _persist_mode_choice("session", "irrelevant")
+        _persist_mode_choice("session-file", "irrelevant")
         assert not user_config.exists()
 
 
@@ -2062,7 +2062,7 @@ class TestCredentialsSetupPhase:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Any exception → caller can mark ``failed`` and keep going through other phases."""
-        from terok_sandbox import commands
+        from terok_sandbox.commands import credentials as commands
 
         def _boom(**_kw: object) -> None:
             raise RuntimeError("simulated failure")

@@ -233,12 +233,72 @@ path = "terok_sandbox.sandbox"
 layer = "surface"
 depends_on = []
 
-# Command registry
+# Command registry — one module per subsystem under the package, plus a
+# shared types module.  Each submodule keeps its own ``*_COMMANDS``
+# tuple; the package ``__init__`` assembles ``COMMANDS`` from them.
 [[modules]]
 path = "terok_sandbox.commands"
 layer = "surface"
 depends_on = [
+    "terok_sandbox.commands.credentials",
+    "terok_sandbox.commands.doctor",
+    "terok_sandbox.commands.gate",
+    "terok_sandbox.commands.launch",
+    "terok_sandbox.commands.sandbox",
+    "terok_sandbox.commands.shield",
+    "terok_sandbox.commands.ssh",
+    "terok_sandbox.commands.vault",
+]
+
+# Shared CommandDef / ArgDef / KeyRow vocabulary.  Foundation-level so
+# subsystem modules in the surface layer can all import from it.
+[[modules]]
+path = "terok_sandbox.commands._types"
+layer = "foundation"
+depends_on = []
+
+[[modules]]
+path = "terok_sandbox.commands.sandbox"
+layer = "surface"
+depends_on = [
     "terok_sandbox._setup",
+    "terok_sandbox.commands.credentials",
+]
+
+[[modules]]
+path = "terok_sandbox.commands.gate"
+layer = "surface"
+depends_on = []
+
+[[modules]]
+path = "terok_sandbox.commands.shield"
+layer = "surface"
+depends_on = []
+
+[[modules]]
+path = "terok_sandbox.commands.vault"
+layer = "surface"
+depends_on = []
+
+[[modules]]
+path = "terok_sandbox.commands.ssh"
+layer = "surface"
+depends_on = []
+
+[[modules]]
+path = "terok_sandbox.commands.doctor"
+layer = "surface"
+depends_on = []
+
+[[modules]]
+path = "terok_sandbox.commands.credentials"
+layer = "surface"
+depends_on = []
+
+[[modules]]
+path = "terok_sandbox.commands.launch"
+layer = "surface"
+depends_on = [
     "terok_sandbox.launch",
 ]
 

@@ -54,7 +54,7 @@ def patched_open_db(db_path: Path):
     def _factory(_cfg):
         return CredentialDB(db_path, passphrase="test")
 
-    with patch("terok_sandbox.commands._open_db", side_effect=_factory):
+    with patch("terok_sandbox.commands.ssh._open_db", side_effect=_factory):
         yield
 
 
