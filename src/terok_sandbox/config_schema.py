@@ -71,6 +71,18 @@ class RawCredentialsSection(BaseModel):
             " Service has per-collection (not per-item) ACLs."
         ),
     )
+    passphrase_command: str | None = Field(
+        default=None,
+        description=(
+            "Operator-supplied shell command (e.g. ``pass show terok-sandbox/vault-passphrase``)"
+            " that prints the SQLCipher passphrase on stdout.  Tokenised with"
+            " ``shlex.split``; resolver tier slots between OS keyring and the"
+            " plaintext config-file fallback.  Canonical headless option for"
+            " hosts without systemd ≥ 257 — covers ``pass``, ``bw``, ``op``,"
+            " HashiCorp ``vault``, and the cloud secret-manager CLIs (AWS,"
+            " GCP, Azure)."
+        ),
+    )
 
 
 class RawPathsSection(BaseModel):

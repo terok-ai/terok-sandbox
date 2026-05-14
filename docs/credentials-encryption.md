@@ -20,12 +20,65 @@ stops at the first hit:
    by `vault seal`.  Requires systemd ≥ 257.
 3. **OS keyring** — `(service=terok-sandbox, username=credentials-db)`,
    used only when `credentials.use_keyring: true` is set in `config.yml`.
-4. **Config fallback** — `credentials.passphrase` in `config.yml`.
+4. **passphrase_command** — operator-supplied shell command set as
+   `credentials.passphrase_command` in `config.yml`.  Same shape as
+   `git config credential.helper`, ssh pinentry, or `BORG_PASSCOMMAND`
+   — one field plugs `pass`, `bw`, `op`, `vault kv`, or any cloud
+   secret-manager CLI into the resolver without per-backend code in
+   the sandbox.  See [Headless setup](#headless-setup-data-center-terminals)
+   below for the canonical recipe.  Fails closed when the helper is
+   configured but exits non-zero / times out — silent fall-through
+   to plaintext would be an unannounced security downgrade.
+5. **Config fallback** — `credentials.passphrase` in `config.yml`.
    Plaintext-on-disk; only as strong as filesystem-layer protection
    (LUKS / signed image / permissions).  `vault status` and sickbay
    permanently surface a WARNING when this tier is configured.
-5. **Interactive prompt** — `*`-masked, TTY only.  CLI calls; daemons
+   **Last-resort** on hosts with no systemd-creds and no usable
+   helper — prefer `passphrase_command` whenever the operator has
+   `pass`, `bw`, `op`, or a cloud secret-manager CLI available.
+6. **Interactive prompt** — `*`-masked, TTY only.  CLI calls; daemons
    fail loud instead.
+
+## Headless setup (data-center terminals)
+
+For hosts reached over SSH where systemd-creds isn't available (older
+systemd, distros without the user Varlink service, shared HPC nodes
+with no per-user TPM), point `passphrase_command` at whichever
+credential helper the operator already trusts:
+
+```yaml
+credentials:
+  passphrase_command: pass show terok-sandbox/vault-passphrase
+```
+
+The resolver tokenises with `shlex.split` and runs
+`subprocess.run(...)` with a 30-second timeout, then strips trailing
+whitespace from stdout.  Anything that prints a passphrase on stdout
+works; ready-to-use recipes:
+
+| Backend | `passphrase_command` value |
+|---------|----------------------------|
+| `pass` (gpg-agent) | `pass show terok-sandbox/vault-passphrase` |
+| Bitwarden CLI | `bw get password terok-sandbox` |
+| 1Password CLI | `op read op://vault/terok/passphrase` |
+| HashiCorp Vault | `vault kv get -field=passphrase secret/terok` |
+| AWS Secrets Manager | `aws secretsmanager get-secret-value --secret-id terok-vault --query SecretString --output text` |
+| GCP Secret Manager | `gcloud secrets versions access latest --secret=terok-vault` |
+| Azure Key Vault | `az keyvault secret show --vault-name terok --name vault-passphrase --query value -o tsv` |
+
+The `pass` recipe is the canonical headless choice: gpg-agent caches
+the GPG key passphrase for the session, so after one prompt the daemon
+unlocks silently on every restart.  Provision the entry once on a
+trusted workstation, then `pass git push` to your sync remote and
+`pass git pull` on the data-center host — the encrypted store sits in
+the same repo your dotfiles already follow.
+
+Diagnostics from the helper land in the vault journal:
+
+```bash
+journalctl --user -u terok-vault -n 50
+# look for: "passphrase_command 'pass' exited 1: <stderr>"
+```
 
 ## Day-to-day
 
@@ -79,6 +132,9 @@ secret-tool lookup service terok-sandbox username credentials-db
 systemd-creds --user --name=terok-sandbox.vault-passphrase \
   decrypt "${XDG_DATA_HOME:-$HOME/.local/share}/terok/vault/vault.passphrase.cred" -
 
+# passphrase_command (whatever the helper resolves to right now):
+sh -c "$(yq '.credentials.passphrase_command' ~/.config/terok/config.yml)"
+
 # config.yml (plaintext-on-disk):
 yq '.credentials.passphrase' ~/.config/terok/config.yml
 ```
@@ -93,9 +149,12 @@ terok-sandbox vault lock --forget
 ```
 
 `--forget` clears every persistent tier in one go (session file
-*plus* keyring, sealed systemd-creds, and `credentials.passphrase`).
-Without it, the daemon may auto-unlock from a leftover tier on next
-socket activation, defeating the swap.
+*plus* keyring, sealed systemd-creds, `credentials.passphrase`, and
+`credentials.passphrase_command`).  The underlying secret stays put in
+whichever store the helper points at (`pass`, 1Password, Vault, …) —
+only the resolver wiring is removed.  Without `--forget`, the daemon
+may auto-unlock from a leftover tier on next socket activation,
+defeating the swap.
 
 ### 3. Provision in the new tier
 
@@ -110,6 +169,12 @@ terok-sandbox vault lock                              # remove the session file
 
 # → OS keyring:
 terok-sandbox setup     # chooser → [k]; reads + stores the passphrase
+
+# → passphrase_command (headless; helper points at pass / bw / op / cloud CLI):
+pass insert -m terok-sandbox/vault-passphrase         # or your helper's
+                                                       #   "store this secret" verb
+yq -yi '.credentials.passphrase_command = "pass show terok-sandbox/vault-passphrase"' \
+  ~/.config/terok/config.yml
 
 # → config.yml plaintext (last-resort; requires `yes` confirmation):
 terok-sandbox setup     # chooser → [c] → type "yes" to accept the trust boundary

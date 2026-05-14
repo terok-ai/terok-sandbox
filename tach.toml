@@ -134,8 +134,10 @@ path = "terok_sandbox.credentials.systemd_creds"
 layer = "foundation"
 depends_on = []
 
-# Vault — token broker + SSH signer.  Depends on config to fetch the
-# resolution-chain knobs at daemon-init time via cfg.open_sqlcipher_connection.
+# Vault — token broker + SSH signer.  Resolves the SQLCipher passphrase
+# through SandboxConfig (cfg.resolve_passphrase_with_source) and the
+# foundation-level open_sqlcipher helper so the chain is walked exactly
+# once per daemon start.
 [[modules]]
 path = "terok_sandbox.vault"
 layer = "foundation"

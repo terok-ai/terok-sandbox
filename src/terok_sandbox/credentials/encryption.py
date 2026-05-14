@@ -11,9 +11,12 @@ plaintext sqlite files.
 
 from __future__ import annotations
 
+import logging
 import os
 import secrets
+import shlex
 import sqlite3
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Literal
@@ -27,10 +30,26 @@ KEYRING_USERNAME = "credentials-db"
 #: entropy from a 62-char alphabet plus ``-``/``_``, both shell-safe.
 _GENERATED_PASSPHRASE_BYTES = 32
 
+#: Wall-clock budget for a `passphrase_command` helper before the
+#: resolver gives up.  Generous enough for the slow cloud CLIs
+#: (``aws secretsmanager``, ``gcloud secrets``, ``az keyvault``) on a
+#: cold cache, tight enough that a wedged helper doesn't pin the daemon
+#: start.
+_PASSPHRASE_COMMAND_TIMEOUT_S = 30.0
+
+_logger = logging.getLogger(__name__)
+
 #: Where in the chain a passphrase came from — domain vocabulary so callers can
 #: dispatch on a closed set instead of stringly-typed branches.  ``"prompt"``
 #: covers both the runtime-prompt fallback and the setup-time chooser path.
-PassphraseSource = Literal["session-file", "systemd-creds", "keyring", "config", "prompt"]
+PassphraseSource = Literal[
+    "session-file",
+    "systemd-creds",
+    "keyring",
+    "passphrase-command",
+    "config",
+    "prompt",
+]
 
 
 class NoPassphraseError(RuntimeError):
@@ -50,6 +69,7 @@ def open_sqlcipher_via_chain(
     passphrase_file: Path | None = None,
     systemd_creds_file: Path | None = None,
     use_keyring: bool = False,
+    passphrase_command: str | None = None,
     config_fallback: str | None = None,
     prompt_on_tty: bool = False,
     **connect_kwargs: Any,
@@ -64,6 +84,7 @@ def open_sqlcipher_via_chain(
         passphrase_file=passphrase_file,
         systemd_creds_file=systemd_creds_file,
         use_keyring=use_keyring,
+        passphrase_command=passphrase_command,
         config_fallback=config_fallback,
         prompt_on_tty=prompt_on_tty,
     )
@@ -77,6 +98,7 @@ def resolve_passphrase_with_source(
     passphrase_file: Path | None = None,
     systemd_creds_file: Path | None = None,
     use_keyring: bool = False,
+    passphrase_command: str | None = None,
     config_fallback: str | None = None,
     prompt_on_tty: bool = False,
 ) -> tuple[str | None, PassphraseSource | None]:
@@ -116,6 +138,19 @@ def resolve_passphrase_with_source(
         keyring_pw = load_passphrase_from_keyring()
         if keyring_pw:
             return keyring_pw, "keyring"
+    if passphrase_command:
+        cmd_pw = load_passphrase_from_command(passphrase_command)
+        if cmd_pw:
+            return cmd_pw, "passphrase-command"
+        # The command string itself is not echoed: operators sometimes
+        # inline tokens, AWS ARNs, or vault paths there, and this
+        # exception flows into doctor output and journals.  The helper
+        # already logged its own diagnostic (argv[0] + stderr) at WARNING
+        # via load_passphrase_from_command.
+        raise WrongPassphraseError(
+            "passphrase_command produced no passphrase; run it manually to diagnose"
+            " (see WARNING in the vault journal)"
+        )
     if config_fallback:
         return config_fallback, "config"
     if prompt_on_tty and sys.stdin.isatty():
@@ -128,6 +163,7 @@ def resolve_passphrase(
     passphrase_file: Path | None = None,
     systemd_creds_file: Path | None = None,
     use_keyring: bool = False,
+    passphrase_command: str | None = None,
     config_fallback: str | None = None,
     prompt_on_tty: bool = False,
 ) -> str | None:
@@ -142,23 +178,31 @@ def resolve_passphrase(
        [`terok_sandbox.credentials.systemd_creds`][terok_sandbox.credentials.systemd_creds].
     3. OS keyring — only when *use_keyring* is true; off by default because
        Linux Secret Service grants access per-collection, not per-item.
-    4. *config_fallback* — ``credentials.passphrase`` from ``config.yml``.
+    4. *passphrase_command* — operator-supplied shell command
+       (``pass show …``, ``bw get``, ``op read``, cloud secret-manager
+       CLIs).  Delegates retrieval without per-backend integration code,
+       same shape as ``git config credential.helper`` or
+       ``BORG_PASSCOMMAND``.  Configured-but-broken fails closed so a
+       misbehaving helper can't silently demote security to plaintext.
+    5. *config_fallback* — ``credentials.passphrase`` from ``config.yml``.
        Plaintext-on-disk trust boundary: the operator accepts that
        filesystem-level protection (LUKS / signed image / permissions)
        is their security perimeter.  Sandbox#282 surfaces a permanent
        WARNING in ``vault status`` and sickbay whenever this tier is
        set, regardless of which tier actually unlocked the call.
-    5. Interactive prompt — only when *prompt_on_tty* and ``sys.stdin.isatty()``.
+    6. Interactive prompt — only when *prompt_on_tty* and ``sys.stdin.isatty()``.
 
-    *config_fallback* is threaded through as a parameter rather than
-    read here so this module stays free of any dependency on the
-    sandbox config layer — the config module already imports from
-    credentials.db, and the back-edge would close a tach cycle.
+    *config_fallback* and *passphrase_command* are threaded through as
+    parameters rather than read here so this module stays free of any
+    dependency on the sandbox config layer — the config module already
+    imports from credentials.db, and the back-edge would close a tach
+    cycle.
     """
     passphrase, _source = resolve_passphrase_with_source(
         passphrase_file=passphrase_file,
         systemd_creds_file=systemd_creds_file,
         use_keyring=use_keyring,
+        passphrase_command=passphrase_command,
         config_fallback=config_fallback,
         prompt_on_tty=prompt_on_tty,
     )
@@ -213,6 +257,59 @@ def forget_passphrase_in_keyring() -> bool:
         return True
     except Exception:  # noqa: BLE001
         return False
+
+
+def load_passphrase_from_command(
+    command: str, *, timeout: float = _PASSPHRASE_COMMAND_TIMEOUT_S
+) -> str | None:
+    """Run *command*, return its stdout with the trailing newline removed, or ``None`` on any failure.
+
+    Same shape as the other tier primitives ([`load_passphrase_from_file`][terok_sandbox.credentials.encryption.load_passphrase_from_file],
+    [`load_passphrase_from_keyring`][terok_sandbox.credentials.encryption.load_passphrase_from_keyring]):
+    silent on every failure path so the resolver can decide whether
+    ``None`` means "skip this tier" or "fail closed".  Diagnostic
+    detail (parse error, exec failure, non-zero exit, helper stderr,
+    timeout) is logged at WARNING so operators can triage their helper
+    via ``journalctl --user -u terok-vault`` without us crashing the
+    chain walk.
+
+    Same vocabulary as ``git config credential.helper``, ssh pinentry,
+    ``BORG_PASSCOMMAND``: one field plugs any credential backend into
+    the resolver — ``pass show …``, ``bw get password …``,
+    ``op read op://…``, ``vault kv get -field=passphrase …``,
+    ``aws secretsmanager get-secret-value …`` — without per-backend
+    integration code in the sandbox.
+    """
+    try:
+        argv = shlex.split(command)
+    except ValueError as exc:
+        _logger.warning("passphrase_command shlex parse failed: %s", exc)
+        return None
+    if not argv:
+        return None
+    try:
+        result = subprocess.run(  # noqa: S603 — argv is operator-configured
+            argv, capture_output=True, text=True, timeout=timeout, check=False
+        )
+    except OSError as exc:
+        _logger.warning("passphrase_command %r failed to spawn: %s", argv[0], exc)
+        return None
+    except subprocess.TimeoutExpired:
+        _logger.warning("passphrase_command %r timed out after %.0fs", argv[0], timeout)
+        return None
+    if result.returncode != 0:
+        _logger.warning(
+            "passphrase_command %r exited %d: %s",
+            argv[0],
+            result.returncode,
+            result.stderr.strip() or "(no stderr)",
+        )
+        return None
+    # rstrip only the line ending the helper appends — leading/trailing
+    # whitespace inside the passphrase is legitimate secret material and
+    # must reach SQLCipher verbatim.
+    passphrase = result.stdout.rstrip("\r\n")
+    return passphrase or None
 
 
 def _write_to_controlling_tty(message: str) -> None:
@@ -448,6 +545,7 @@ __all__ = [
     "forget_passphrase_in_keyring",
     "generate_passphrase",
     "is_plaintext_sqlite",
+    "load_passphrase_from_command",
     "load_passphrase_from_file",
     "load_passphrase_from_keyring",
     "open_sqlcipher",
