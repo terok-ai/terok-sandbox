@@ -33,9 +33,9 @@ from .runtime.podman import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from .credentials.ssh import SSHManager
     from .gate.lifecycle import GateServerStatus
     from .runtime import ContainerRemoveResult
+    from .vault.ssh.manager import SSHManager
 
 # ---------------------------------------------------------------------------
 # Container run specification
@@ -472,6 +472,6 @@ class Sandbox:
         manager (``with sandbox.init_ssh(scope) as m: ...``) or call
         [`SSHManager.close`][terok_sandbox.SSHManager.close] when done.
         """
-        from .credentials.ssh import SSHManager
+        from .vault.ssh.manager import SSHManager
 
         return SSHManager.open_for_config(scope=scope, cfg=self._cfg, prompt_on_tty=True)

@@ -125,7 +125,7 @@ def run_shield_install_phase(*, root: bool) -> bool:
 
 def run_vault_install_phase(cfg: SandboxConfig) -> bool:
     """Clean reinstall of the vault systemd units; verify reachability."""
-    from .vault.lifecycle import VaultManager, VaultUnreachableError
+    from .vault.daemon.lifecycle import VaultManager, VaultUnreachableError
 
     return _reinstall_systemd_service(
         label="Vault",
@@ -208,7 +208,7 @@ def run_shield_uninstall_phase(*, root: bool) -> bool:
 
 def run_vault_uninstall_phase(cfg: SandboxConfig) -> bool:
     """Remove vault systemd units; WARN-skip without a systemd user session."""
-    from .vault.lifecycle import VaultManager
+    from .vault.daemon.lifecycle import VaultManager
 
     mgr = VaultManager(cfg)
     with _stage_line("Vault") as s:

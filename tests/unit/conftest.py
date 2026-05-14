@@ -45,7 +45,7 @@ def _isolate_systemd_creds_version_cache() -> Iterator[None]:
     different return values per case; leaking the first test's probe
     result into the next is a guaranteed false-pass.
     """
-    from terok_sandbox.credentials import systemd_creds as _sc
+    from terok_sandbox.vault.store import systemd_creds as _sc
 
     _sc._systemd_creds_version.cache_clear()
     _sc._systemd_creds_exe.cache_clear()
@@ -65,7 +65,7 @@ def _isolate_credential_keyring(monkeypatch: pytest.MonkeyPatch) -> None:
     via a local monkeypatch.
     """
     import terok_sandbox.config as _config
-    import terok_sandbox.credentials.encryption as _enc
+    import terok_sandbox.vault.store.encryption as _enc
 
     monkeypatch.setattr(_enc, "load_passphrase_from_file", lambda _path: None)
     monkeypatch.setattr(_enc, "load_passphrase_from_keyring", lambda: "test")

@@ -21,14 +21,14 @@ import pytest
 
 from terok_sandbox._util._net import harden_socket, prepare_socket_path, probe_unix_socket
 from terok_sandbox.config import SandboxConfig
-from terok_sandbox.credentials.db import CredentialDB
 from terok_sandbox.gate.lifecycle import GateServerManager, GateServerStatus
-from terok_sandbox.vault.ssh_signer import (
+from terok_sandbox.vault.ssh.signer import (
     SSH_AGENT_IDENTITIES_ANSWER,
     SSH_AGENTC_REQUEST_IDENTITIES,
     _unpack_string,
     start_ssh_signer,
 )
+from terok_sandbox.vault.store.db import CredentialDB
 from tests.constants import MOCK_BASE
 
 MOCK_RUNTIME_DIR = MOCK_BASE / "runtime"
@@ -206,7 +206,7 @@ class TestWaitForUnixSocket:
 
     def test_returns_true_for_immediate_listener(self, tmp_path: Path) -> None:
         """Succeeds immediately when the socket is already listening."""
-        from terok_sandbox.vault.lifecycle import VaultManager
+        from terok_sandbox.vault.daemon.lifecycle import VaultManager
 
         sock_path = tmp_path / "test.sock"
         srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -219,7 +219,7 @@ class TestWaitForUnixSocket:
 
     def test_returns_false_on_timeout(self, tmp_path: Path) -> None:
         """Returns False when socket never appears within timeout."""
-        from terok_sandbox.vault.lifecycle import VaultManager
+        from terok_sandbox.vault.daemon.lifecycle import VaultManager
 
         missing = tmp_path / "missing.sock"
         assert VaultManager._wait_for_unix_socket(missing, timeout=0.3) is False
@@ -310,7 +310,7 @@ class TestSSHSignerUnixSocket:
 
     async def test_roundtrip_via_unix_socket(self, tmp_path: Path) -> None:
         """Full handshake + identity listing via a Unix domain socket."""
-        from terok_sandbox.credentials.ssh_keypair import generate_keypair
+        from terok_sandbox.vault.ssh.keypair import generate_keypair
 
         kp = generate_keypair("ed25519", comment="test-socket")
         db = CredentialDB(tmp_path / "test.db", passphrase="test")
@@ -521,7 +521,7 @@ class TestSSHSignerMutualExclusion:
                 "--ssh-keys-file=/tmp/terok-testing/keys.json",
             ],
         ):
-            from terok_sandbox.vault.token_broker import main as vault_main
+            from terok_sandbox.vault.daemon.token_broker import main as vault_main
 
             with pytest.raises(SystemExit):
                 vault_main()
@@ -569,7 +569,7 @@ class TestInstallSystemdPortGuards:
 
     def test_vault_tcp_install_without_port_raises(self) -> None:
         """cfg.services_mode='tcp' + token_broker_port=None → refuses to render."""
-        from terok_sandbox.vault.lifecycle import VaultManager
+        from terok_sandbox.vault.daemon.lifecycle import VaultManager
 
         mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
         mock_cfg.services_mode = "tcp"
@@ -586,7 +586,7 @@ class TestInstallSystemdPortGuards:
 
     def test_vault_tcp_install_without_ssh_signer_port_raises(self) -> None:
         """Same guard fires when only ssh_signer_port is unset."""
-        from terok_sandbox.vault.lifecycle import VaultManager
+        from terok_sandbox.vault.daemon.lifecycle import VaultManager
 
         mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
         mock_cfg.services_mode = "tcp"

@@ -17,7 +17,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from terok_sandbox.credentials import systemd_creds
+from terok_sandbox.vault.store import systemd_creds
 
 
 class TestAvailability:
@@ -26,7 +26,7 @@ class TestAvailability:
     def test_is_available_when_binary_recent_enough(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Fedora 44 / Debian 13 ship systemd 257+ which has the Varlink delegation."""
         monkeypatch.setattr(
-            "terok_sandbox.credentials.systemd_creds._VARLINK_SOCKET",
+            "terok_sandbox.vault.store.systemd_creds._VARLINK_SOCKET",
             _FakeVarlinkSocket(),
         )
         with (
@@ -91,7 +91,7 @@ class TestAvailability:
 
     def test_has_tpm2_when_command_succeeds(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
-            "terok_sandbox.credentials.systemd_creds._VARLINK_SOCKET",
+            "terok_sandbox.vault.store.systemd_creds._VARLINK_SOCKET",
             _FakeVarlinkSocket(),
         )
         with (
@@ -444,6 +444,6 @@ def _have_systemd_creds(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     monkeypatch.setattr("shutil.which", lambda _name: _SYSTEMD_CREDS_EXE)
     monkeypatch.setattr(
-        "terok_sandbox.credentials.systemd_creds._VARLINK_SOCKET",
+        "terok_sandbox.vault.store.systemd_creds._VARLINK_SOCKET",
         _FakeVarlinkSocket(),
     )

@@ -80,7 +80,7 @@ class TestCompose:
             patch("terok_sandbox.shield.pre_start", return_value=["--annotation=t-s=1"]),
             patch("terok_sandbox.gate.tokens.TokenStore.create", return_value="terok-g-abc"),
             patch(
-                "terok_sandbox.credentials.db.CredentialDB.create_token",
+                "terok_sandbox.vault.store.db.CredentialDB.create_token",
                 return_value="terok-p-xyz",
             ),
         ):
@@ -108,7 +108,7 @@ class TestCompose:
             patch("terok_sandbox.shield.pre_start", return_value=[]),
             patch("terok_sandbox.gate.tokens.TokenStore.create", return_value="terok-g-abc"),
             patch(
-                "terok_sandbox.credentials.db.CredentialDB.create_token",
+                "terok_sandbox.vault.store.db.CredentialDB.create_token",
                 return_value="terok-p-xyz",
             ),
         ):
@@ -169,10 +169,10 @@ class TestMetaAndCleanup:
             patch("terok_sandbox.shield.down") as down,
             patch("terok_sandbox.gate.tokens.TokenStore.create", return_value="terok-g-abc"),
             patch(
-                "terok_sandbox.credentials.db.CredentialDB.create_token",
+                "terok_sandbox.vault.store.db.CredentialDB.create_token",
                 return_value="terok-p-xyz",
             ),
-            patch("terok_sandbox.credentials.db.CredentialDB.revoke_tokens", return_value=2),
+            patch("terok_sandbox.vault.store.db.CredentialDB.revoke_tokens", return_value=2),
             patch("terok_sandbox.gate.tokens.TokenStore.revoke_for_task", return_value=None),
         ):
             compose("myc", cfg=cfg, shield=True, gate=True, broker=True, scope="proj")
@@ -188,11 +188,11 @@ class TestMetaAndCleanup:
             patch("terok_sandbox.shield.down"),
             patch("terok_sandbox.gate.tokens.TokenStore.create", return_value="terok-g-abc"),
             patch(
-                "terok_sandbox.credentials.db.CredentialDB.create_token",
+                "terok_sandbox.vault.store.db.CredentialDB.create_token",
                 return_value="terok-p-xyz",
             ),
             patch(
-                "terok_sandbox.credentials.db.CredentialDB.revoke_tokens", return_value=2
+                "terok_sandbox.vault.store.db.CredentialDB.revoke_tokens", return_value=2
             ) as revoke_db,
             patch(
                 "terok_sandbox.gate.tokens.TokenStore.revoke_for_task", return_value=None
@@ -207,7 +207,7 @@ class TestMetaAndCleanup:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """A locked vault during cleanup MUST warn so operator knows tokens linger."""
-        from terok_sandbox.credentials.db import NoPassphraseError
+        from terok_sandbox.vault.store.db import NoPassphraseError
 
         cfg = _make_cfg(tmp_path)
         with (
@@ -215,7 +215,7 @@ class TestMetaAndCleanup:
             patch("terok_sandbox.shield.down"),
             patch("terok_sandbox.gate.tokens.TokenStore.create", return_value="terok-g-abc"),
             patch(
-                "terok_sandbox.credentials.db.CredentialDB.create_token",
+                "terok_sandbox.vault.store.db.CredentialDB.create_token",
                 return_value="terok-p-xyz",
             ),
             patch("terok_sandbox.gate.tokens.TokenStore.revoke_for_task", return_value=None),
@@ -237,7 +237,7 @@ class TestMetaAndCleanup:
         Pre-fix: ``compose`` raised before ``_write_meta``; cleanup() had
         no meta to read and the gate token stayed in ``TokenStore``.
         """
-        from terok_sandbox.credentials.db import NoPassphraseError
+        from terok_sandbox.vault.store.db import NoPassphraseError
 
         cfg = _make_cfg(tmp_path)
         with (
@@ -520,7 +520,7 @@ class TestEdgeCases:
         with (
             patch("terok_sandbox.shield.pre_start", return_value=[]),
             patch("terok_sandbox.gate.tokens.TokenStore.create", return_value="t"),
-            patch("terok_sandbox.credentials.db.CredentialDB.create_token", return_value="p"),
+            patch("terok_sandbox.vault.store.db.CredentialDB.create_token", return_value="p"),
         ):
             compose("myc", cfg=cfg, shield=True, gate=True, broker=True, scope="proj")
         # Now make CredentialDB construction fail at cleanup.

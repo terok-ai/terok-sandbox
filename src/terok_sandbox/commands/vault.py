@@ -22,12 +22,12 @@ from ..config import SandboxConfig
 from ._types import ArgDef, CommandDef
 
 if TYPE_CHECKING:
-    from ..credentials.systemd_creds import KeyMode
+    from ..vault.store.systemd_creds import KeyMode
 
 
 def _handle_vault_start() -> None:
     """Start the vault daemon."""
-    from ..vault.lifecycle import VaultManager
+    from ..vault.daemon.lifecycle import VaultManager
 
     mgr = VaultManager()
     if mgr.get_status().running:
@@ -39,7 +39,7 @@ def _handle_vault_start() -> None:
 
 def _handle_vault_stop() -> None:
     """Stop the vault daemon."""
-    from ..vault.lifecycle import VaultManager
+    from ..vault.daemon.lifecycle import VaultManager
 
     mgr = VaultManager()
     if not mgr.is_daemon_running():
@@ -51,7 +51,7 @@ def _handle_vault_stop() -> None:
 
 def _handle_vault_status() -> None:
     """Show vault status."""
-    from ..vault.lifecycle import VaultManager
+    from ..vault.daemon.lifecycle import VaultManager
 
     status = VaultManager().get_status()
     state = "running" if status.running else "stopped"
@@ -89,7 +89,7 @@ def _print_plaintext_passphrase_warning(path: Path) -> None:
 
 def _handle_vault_install() -> None:
     """Install and start systemd socket activation for the vault."""
-    from ..vault.lifecycle import VaultManager
+    from ..vault.daemon.lifecycle import VaultManager
 
     mgr = VaultManager()
     if not mgr.is_systemd_available():
@@ -101,7 +101,7 @@ def _handle_vault_install() -> None:
 
 def _handle_vault_uninstall() -> None:
     """Remove vault systemd units."""
-    from ..vault.lifecycle import VaultManager
+    from ..vault.daemon.lifecycle import VaultManager
 
     mgr = VaultManager()
     if not mgr.is_systemd_available():
@@ -114,8 +114,8 @@ def _handle_vault_uninstall() -> None:
 def _handle_vault_unlock(*, cfg: SandboxConfig | None = None) -> None:
     """Write the credentials-DB passphrase to the session-unlock tmpfs file; restart the daemon."""
     from .._yaml import write_secret_text
-    from ..credentials.encryption import prompt_passphrase
-    from ..vault.lifecycle import VaultManager
+    from ..vault.daemon.lifecycle import VaultManager
+    from ..vault.store.encryption import prompt_passphrase
 
     if cfg is None:
         cfg = SandboxConfig()
@@ -158,8 +158,8 @@ def _handle_vault_lock(*, cfg: SandboxConfig | None = None, forget: bool = False
     ``config.yml``, and delete the sealed systemd-creds credential so
     the next daemon start *must* have an explicit ``vault unlock``.
     """
-    from ..credentials.encryption import forget_passphrase_in_keyring
-    from ..vault.lifecycle import VaultManager
+    from ..vault.daemon.lifecycle import VaultManager
+    from ..vault.store.encryption import forget_passphrase_in_keyring
 
     if cfg is None:
         cfg = SandboxConfig()
@@ -174,7 +174,7 @@ def _handle_vault_lock(*, cfg: SandboxConfig | None = None, forget: bool = False
     sealed_cred = cfg.vault_systemd_creds_file
     if forget:
         if cfg.credentials_use_keyring:
-            from ..credentials.encryption import load_passphrase_from_keyring
+            from ..vault.store.encryption import load_passphrase_from_keyring
 
             if forget_passphrase_in_keyring():
                 print("→ cleared keyring entry")
@@ -261,8 +261,8 @@ def _handle_vault_seal(*, cfg: SandboxConfig | None = None, key: str = "auto") -
     or restart the daemon; the new tier is picked up on the next chain
     walk.
     """
-    from ..credentials import systemd_creds
-    from ..credentials.encryption import WrongPassphraseError
+    from ..vault.store import systemd_creds
+    from ..vault.store.encryption import WrongPassphraseError
 
     if cfg is None:
         cfg = SandboxConfig()

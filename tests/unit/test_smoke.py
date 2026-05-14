@@ -98,12 +98,12 @@ def test_import_gate_tokens():
 
 def test_import_ssh():
     """SSH modules are importable."""
-    from terok_sandbox.credentials.ssh import SSHManager
-    from terok_sandbox.credentials.ssh_keypair import (
+    from terok_sandbox.vault.ssh.keypair import (
         export_ssh_keypair,
         generate_keypair,
         import_ssh_keypair,
     )
+    from terok_sandbox.vault.ssh.manager import SSHManager
 
     assert callable(SSHManager)
     assert callable(generate_keypair)

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for [`ScopeSocketReconciler`][terok_sandbox.vault.scope_sockets.ScopeSocketReconciler] — the per-scope socket manager."""
+"""Tests for [`ScopeSocketReconciler`][terok_sandbox.vault.ssh.scope_sockets.ScopeSocketReconciler] — the per-scope socket manager."""
 
 from __future__ import annotations
 
@@ -9,9 +9,9 @@ from pathlib import Path
 
 import pytest
 
-from terok_sandbox.credentials.db import CredentialDB
-from terok_sandbox.credentials.ssh_keypair import generate_keypair
-from terok_sandbox.vault.scope_sockets import ScopeSocketReconciler
+from terok_sandbox.vault.ssh.keypair import generate_keypair
+from terok_sandbox.vault.ssh.scope_sockets import ScopeSocketReconciler
+from terok_sandbox.vault.store.db import CredentialDB
 
 
 def _seed(db: CredentialDB, scope: str, comment: str = "c") -> int:
@@ -128,7 +128,7 @@ class TestReconciler:
         async def _boom(**_kwargs):
             raise RuntimeError("synthetic bind failure")
 
-        import terok_sandbox.vault.scope_sockets as mod
+        import terok_sandbox.vault.ssh.scope_sockets as mod
 
         original = mod.start_ssh_signer_local
         mod.start_ssh_signer_local = _boom

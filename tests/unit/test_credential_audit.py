@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from terok_sandbox.vault.audit import (
+from terok_sandbox.vault.daemon.audit import (
     AuditWriter,
     credential_audit_log_path,
 )
@@ -140,7 +140,7 @@ class TestAuditWriter:
             writer._fh.write = unittest.mock.MagicMock(  # type: ignore[union-attr]
                 side_effect=OSError("disk quota exceeded")
             )
-            with caplog.at_level("WARNING", logger="terok_sandbox.vault.audit"):
+            with caplog.at_level("WARNING", logger="terok_sandbox.vault.daemon.audit"):
                 await writer.write({"x": 2})  # must not raise
         finally:
             await writer.close()

@@ -22,14 +22,14 @@ from pathlib import Path
 import pytest
 
 from terok_sandbox.config import SandboxConfig
-from terok_sandbox.credentials import systemd_creds
-from terok_sandbox.credentials.db import CredentialDB
-from terok_sandbox.credentials.encryption import (
+from terok_sandbox.vault.daemon.lifecycle import VaultManager
+from terok_sandbox.vault.store import systemd_creds
+from terok_sandbox.vault.store.db import CredentialDB
+from terok_sandbox.vault.store.encryption import (
     encrypt_in_place,
     is_plaintext_sqlite,
     resolve_passphrase_with_source,
 )
-from terok_sandbox.vault.lifecycle import VaultManager
 
 pytestmark = pytest.mark.needs_host_features
 
@@ -201,7 +201,7 @@ class TestLockUnlockRoundTrip:
 
         mgr = MagicMock()
         mgr.is_daemon_running.return_value = False
-        monkeypatch.setattr("terok_sandbox.vault.lifecycle.VaultManager", lambda _c: mgr)
+        monkeypatch.setattr("terok_sandbox.vault.daemon.lifecycle.VaultManager", lambda _c: mgr)
 
         _handle_vault_lock(cfg=cfg, forget=True)
 
@@ -278,7 +278,7 @@ class TestSystemdCredsTier:
 
         mgr = MagicMock()
         mgr.is_daemon_running.return_value = False
-        monkeypatch.setattr("terok_sandbox.vault.lifecycle.VaultManager", lambda _c: mgr)
+        monkeypatch.setattr("terok_sandbox.vault.daemon.lifecycle.VaultManager", lambda _c: mgr)
 
         _handle_vault_lock(cfg=cfg, forget=True)
 

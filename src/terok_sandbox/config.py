@@ -29,8 +29,8 @@ from .paths import (
 
 if TYPE_CHECKING:
     from .config_schema import RawCredentialsSection, ServicesMode
-    from .credentials.db import CredentialDB
-    from .credentials.encryption import PassphraseSource
+    from .vault.store.db import CredentialDB
+    from .vault.store.encryption import PassphraseSource
 
 CONTAINER_RUNTIME_DIR = "/run/terok"
 """Container-side mount point for the host runtime directory (socket mode)."""
@@ -289,7 +289,7 @@ class SandboxConfig:
         credential is machine-bound (TPM2 or host key), so persistence
         across reboots is the whole point.  Written by
         ``terok-sandbox vault seal``; read on every chain walk via
-        [`terok_sandbox.credentials.systemd_creds`][terok_sandbox.credentials.systemd_creds].
+        [`terok_sandbox.vault.store.systemd_creds`][terok_sandbox.vault.store.systemd_creds].
         """
         return self.vault_dir / "vault.passphrase.cred"
 
@@ -298,7 +298,7 @@ class SandboxConfig:
     ) -> Any:
         """Open the credentials DB with this config's resolution-chain knobs.
 
-        Single seam over [`open_credential_db`][terok_sandbox.credentials.db.open_credential_db]
+        Single seam over [`open_credential_db`][terok_sandbox.vault.store.db.open_credential_db]
         so call sites never plumb tier-selection kwargs by hand — adding
         a new tier is one entry in the private ``_chain_kwargs`` helper,
         no cross-package fan-out.
@@ -310,7 +310,7 @@ class SandboxConfig:
         CLI consumers pass ``prompt_on_tty=True`` to unlock the
         interactive fallback; daemons leave it off.
         """
-        from .credentials.db import open_credential_db  # noqa: PLC0415
+        from .vault.store.db import open_credential_db  # noqa: PLC0415
 
         return open_credential_db(
             db_path if db_path is not None else self.db_path,
@@ -329,7 +329,7 @@ class SandboxConfig:
         [`VaultStatus.passphrase_source`][terok_sandbox.VaultStatus] so
         callers don't have to second-guess the resolver.
         """
-        from .credentials.db import open_credential_db_with_source  # noqa: PLC0415
+        from .vault.store.db import open_credential_db_with_source  # noqa: PLC0415
 
         return open_credential_db_with_source(
             db_path if db_path is not None else self.db_path,
@@ -338,7 +338,7 @@ class SandboxConfig:
 
     def open_sqlcipher_connection(self, db_path: Path | None = None, **connect_kwargs: Any) -> Any:
         """Open a raw sqlcipher3 connection via the chain (vault daemon path)."""
-        from .credentials.encryption import open_sqlcipher_via_chain  # noqa: PLC0415
+        from .vault.store.encryption import open_sqlcipher_via_chain  # noqa: PLC0415
 
         return open_sqlcipher_via_chain(
             db_path or self.db_path,
@@ -355,7 +355,7 @@ class SandboxConfig:
         [`open_credential_db`][terok_sandbox.SandboxConfig.open_credential_db]
         because both delegate here.
         """
-        from .credentials.encryption import resolve_passphrase  # noqa: PLC0415
+        from .vault.store.encryption import resolve_passphrase  # noqa: PLC0415
 
         return resolve_passphrase(**self._chain_kwargs(prompt_on_tty=prompt_on_tty))
 
@@ -369,7 +369,7 @@ class SandboxConfig:
         — feeds the daemon startup log so the operator sees *which*
         tier unlocked the vault on this boot.
         """
-        from .credentials.encryption import resolve_passphrase_with_source  # noqa: PLC0415
+        from .vault.store.encryption import resolve_passphrase_with_source  # noqa: PLC0415
 
         return resolve_passphrase_with_source(**self._chain_kwargs(prompt_on_tty=prompt_on_tty))
 
@@ -450,12 +450,12 @@ class SandboxConfig:
         assigned key, under the same ``runtime_dir`` as the main signer.
         Host-side ``gate-sync`` points ``SSH_AUTH_SOCK`` at this path.
 
-        Rejects unsafe scope names with [`InvalidScopeName`][terok_sandbox.credentials.db.InvalidScopeName]
+        Rejects unsafe scope names with [`InvalidScopeName`][terok_sandbox.vault.store.db.InvalidScopeName]
         as a belt-and-braces guard — writers in the DB layer enforce the
         same policy, but the socket path is public API and may be called
         without a preceding DB write.
         """
-        from .credentials.db import _require_safe_scope
+        from .vault.store.db import _require_safe_scope
 
         _require_safe_scope(scope)
         return self.runtime_dir / f"ssh-agent-local-{scope}.sock"

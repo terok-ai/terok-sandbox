@@ -420,7 +420,7 @@ def cleanup(container: str, *, cfg: SandboxConfig) -> bool:
     if plan.gate and plan.scope is not None:
         TokenStore(cfg).revoke_for_task(plan.scope, container)
     if (plan.broker or plan.ssh) and plan.scope is not None:
-        from .credentials.db import (  # noqa: PLC0415
+        from .vault.store.db import (  # noqa: PLC0415
             NoPassphraseError,
             PlaintextDBFoundError,
             WrongPassphraseError,

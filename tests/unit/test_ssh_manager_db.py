@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from terok_sandbox.credentials.db import CredentialDB
-from terok_sandbox.credentials.ssh import SSHManager
+from terok_sandbox.vault.ssh.manager import SSHManager
+from terok_sandbox.vault.store.db import CredentialDB
 
 
 @pytest.fixture()
@@ -88,7 +88,7 @@ class TestInit:
         self, db: CredentialDB
     ) -> None:
         """An unsafe scope fails fast — ``ssh_keys`` stays empty."""
-        from terok_sandbox.credentials.db import InvalidScopeName
+        from terok_sandbox.vault.store.db import InvalidScopeName
 
         with pytest.raises(InvalidScopeName):
             SSHManager(scope="../evil", db=db).init()
@@ -112,7 +112,7 @@ class TestOwnership:
         # tier so we don't depend on any session-file / sealed-cred state
         # on the developer host.
         monkeypatch.setattr(
-            "terok_sandbox.credentials.encryption.load_passphrase_from_keyring",
+            "terok_sandbox.vault.store.encryption.load_passphrase_from_keyring",
             lambda: "test",
         )
         cfg = SandboxConfig(credentials_use_keyring=True)

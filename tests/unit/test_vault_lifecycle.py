@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from terok_sandbox.config import SandboxConfig
-from terok_sandbox.vault.lifecycle import (
+from terok_sandbox.vault.daemon.lifecycle import (
     VaultManager,
     VaultStatus,
     VaultUnreachableError,
@@ -344,7 +344,7 @@ class TestIsDaemonRunning:
             assert mgr.is_daemon_running() is False
 
 
-_LIFECYCLE = "terok_sandbox.vault.lifecycle"
+_LIFECYCLE = "terok_sandbox.vault.daemon.lifecycle"
 
 
 def _no_systemd():
@@ -409,7 +409,7 @@ class TestGetVaultStatus:
 
     def test_lists_stored_credentials(self, tmp_path: Path) -> None:
         """credentials_stored lists providers from the credential DB."""
-        from terok_sandbox.credentials.db import CredentialDB
+        from terok_sandbox.vault.store.db import CredentialDB
 
         cfg = _make_cfg(tmp_path)
         db = CredentialDB(cfg.db_path, passphrase="test")
@@ -442,7 +442,7 @@ class TestGetVaultStatus:
 
     def test_counts_ssh_keys(self, tmp_path: Path) -> None:
         """ssh_keys_stored reflects the number of stored keypairs."""
-        from terok_sandbox.credentials.db import CredentialDB
+        from terok_sandbox.vault.store.db import CredentialDB
 
         cfg = _make_cfg(tmp_path)
         db = CredentialDB(cfg.db_path, passphrase="test")
@@ -473,7 +473,7 @@ class TestGetVaultStatus:
 
     def test_unlocked_db_reports_passphrase_source(self, tmp_path: Path) -> None:
         """passphrase_source labels which chain tier opened the DB."""
-        from terok_sandbox.credentials.db import CredentialDB
+        from terok_sandbox.vault.store.db import CredentialDB
 
         cfg = _make_cfg(tmp_path)
         db = CredentialDB(cfg.db_path, passphrase="test")
@@ -495,8 +495,8 @@ class TestGetVaultStatus:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """An unopenable DB → locked=True; ssh_keys_stored / passphrase_source stay at defaults."""
-        from terok_sandbox.credentials import encryption as _enc
-        from terok_sandbox.credentials.db import CredentialDB
+        from terok_sandbox.vault.store import encryption as _enc
+        from terok_sandbox.vault.store.db import CredentialDB
 
         cfg = _make_cfg(tmp_path)
         db = CredentialDB(cfg.db_path, passphrase="test")

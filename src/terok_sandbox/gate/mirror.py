@@ -543,7 +543,7 @@ _SOCKET_BIND_WAIT_SECONDS = 4.0
 """Client-side tolerance for the daemon's reconciler to bind a fresh scope socket.
 
 Roughly two of the reconciler's own poll ticks
-(`terok_sandbox.vault.scope_sockets._POLL_INTERVAL_SECONDS`) — enough to
+(`terok_sandbox.vault.ssh.scope_sockets._POLL_INTERVAL_SECONDS`) — enough to
 absorb one full miss plus the next bind attempt.
 """
 

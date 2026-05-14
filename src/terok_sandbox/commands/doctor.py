@@ -21,7 +21,7 @@ def _handle_doctor(*, cfg: SandboxConfig | None = None) -> None:
     the worst verdict (warn = 1, error = 2).
     """
     from ..doctor import sandbox_doctor_checks
-    from ..vault.lifecycle import VaultManager
+    from ..vault.daemon.lifecycle import VaultManager
 
     if cfg is None:
         cfg = SandboxConfig()

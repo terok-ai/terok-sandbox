@@ -1,19 +1,19 @@
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""Vault — unified credential service with token-broker and ssh-signer faces.
+"""Vault — unified credential service: store, SSH, daemon.
 
-The vault daemon protects API credentials and SSH keys behind phantom tokens.
-Containers never see real secrets; they present phantom tokens that the vault
-validates against a SQLite database, injects real credentials, and forwards
-requests upstream.
+The vault protects API credentials and SSH keys behind phantom tokens.
+Containers never see real secrets; they present phantom tokens that
+the daemon validates against the at-rest store, injects real
+credentials, and forwards requests upstream.
 
-Two protocol faces:
+Three sub-packages under one namespace:
 
-- [`token_broker`][terok_sandbox.vault.token_broker] — HTTP reverse proxy that swaps phantom tokens for
-  real API credentials (Anthropic, Mistral, GitHub, etc.).
-- [`ssh_signer`][terok_sandbox.vault.ssh_signer] — SSH agent protocol handler that signs git data
-  with host-side private keys.
-
-Both faces run in a single daemon process managed by [`lifecycle`][terok_sandbox.vault.lifecycle].
+- [`store`][terok_sandbox.vault.store] — the at-rest SQLCipher database and the six-tier
+  passphrase resolution chain that unlocks it.
+- [`ssh`][terok_sandbox.vault.ssh] — keypair I/O, scope provisioning, and the SSH-agent
+  protocol handler.
+- [`daemon`][terok_sandbox.vault.daemon] — the long-running process: lifecycle, the HTTP
+  token broker, audit logging.
 """

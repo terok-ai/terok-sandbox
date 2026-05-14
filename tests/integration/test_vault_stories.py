@@ -20,8 +20,8 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from terok_sandbox.credentials.db import CredentialDB
-from terok_sandbox.vault.token_broker import _build_app
+from terok_sandbox.vault.daemon.token_broker import _build_app
+from terok_sandbox.vault.store.db import CredentialDB
 
 pytestmark = pytest.mark.needs_vault
 

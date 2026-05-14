@@ -11,7 +11,7 @@ from unittest.mock import patch
 import pytest
 
 from terok_sandbox.commands import _handle_vault_start, _handle_vault_status, _handle_vault_stop
-from terok_sandbox.vault.lifecycle import VaultManager, VaultStatus
+from terok_sandbox.vault.daemon.lifecycle import VaultManager, VaultStatus
 
 
 class TestVaultStart:
@@ -211,7 +211,7 @@ class TestDefaultCfgConstruction:
 
         monkeypatch.setattr(vault_cmds, "SandboxConfig", _fake_sandbox_config)
         monkeypatch.setattr(
-            "terok_sandbox.credentials.encryption.prompt_passphrase", lambda **_: "pw"
+            "terok_sandbox.vault.store.encryption.prompt_passphrase", lambda **_: "pw"
         )
         with patch.object(VaultManager, "is_daemon_running", return_value=False):
             _handle_vault_unlock()  # cfg= omitted → default factory fires
@@ -261,7 +261,7 @@ class TestDefaultCfgConstruction:
             return cfg
 
         monkeypatch.setattr(vault_cmds, "SandboxConfig", _fake_sandbox_config)
-        monkeypatch.setattr("terok_sandbox.credentials.systemd_creds.is_available", lambda: False)
+        monkeypatch.setattr("terok_sandbox.vault.store.systemd_creds.is_available", lambda: False)
         with pytest.raises(SystemExit, match="systemd-creds unavailable"):
             _handle_vault_seal()
         assert "cfg" in called

@@ -9,7 +9,7 @@ import os
 import socket
 from unittest.mock import patch
 
-from terok_sandbox.vault.token_broker import _systemd_sockets
+from terok_sandbox.vault.daemon.token_broker import _systemd_sockets
 
 
 class TestSystemdSockets:

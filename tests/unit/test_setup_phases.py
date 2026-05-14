@@ -314,7 +314,7 @@ class TestVaultInstallPhase:
     def test_clean_reinstall_invokes_full_lifecycle(
         self, bare_cfg: SandboxConfig, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        from terok_sandbox.vault.lifecycle import VaultManager
+        from terok_sandbox.vault.daemon.lifecycle import VaultManager
 
         status = MagicMock(mode="systemd", transport="tcp")
         with (
@@ -337,7 +337,7 @@ class TestVaultInstallPhase:
         """Vault's typed ``VaultUnreachableError`` reaches FAIL through the custom exc tuple."""
         from pathlib import Path
 
-        from terok_sandbox.vault.lifecycle import VaultManager, VaultUnreachableError
+        from terok_sandbox.vault.daemon.lifecycle import VaultManager, VaultUnreachableError
 
         unreachable = VaultUnreachableError(
             socket_path=Path("/tmp/vault.sock"), db_path=Path("/tmp/vault.db")
@@ -524,7 +524,7 @@ class TestVaultUninstallPhase:
     """Vault uninstall: WARN-skip without systemd, FAIL on unit removal errors."""
 
     def test_no_systemd_warns_and_returns_ok(self, capsys: pytest.CaptureFixture[str]) -> None:
-        from terok_sandbox.vault.lifecycle import VaultManager
+        from terok_sandbox.vault.daemon.lifecycle import VaultManager
 
         with patch.object(VaultManager, "is_systemd_available", return_value=False):
             assert run_vault_uninstall_phase(SandboxConfig(services_mode="socket")) is True
@@ -532,7 +532,7 @@ class TestVaultUninstallPhase:
         assert "WARN" in out and "systemd unavailable" in out
 
     def test_clean_removal_reports_ok(self, capsys: pytest.CaptureFixture[str]) -> None:
-        from terok_sandbox.vault.lifecycle import VaultManager
+        from terok_sandbox.vault.daemon.lifecycle import VaultManager
 
         with (
             patch.object(VaultManager, "is_systemd_available", return_value=True),
@@ -546,7 +546,7 @@ class TestVaultUninstallPhase:
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """A ``SystemExit`` from the manager is surfaced verbatim, not promoted."""
-        from terok_sandbox.vault.lifecycle import VaultManager
+        from terok_sandbox.vault.daemon.lifecycle import VaultManager
 
         with (
             patch.object(VaultManager, "is_systemd_available", return_value=True),
@@ -562,7 +562,7 @@ class TestVaultUninstallPhase:
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """Generic exceptions are prefixed ``uninstall:`` so the phase is named in the line."""
-        from terok_sandbox.vault.lifecycle import VaultManager
+        from terok_sandbox.vault.daemon.lifecycle import VaultManager
 
         with (
             patch.object(VaultManager, "is_systemd_available", return_value=True),

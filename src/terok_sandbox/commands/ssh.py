@@ -21,7 +21,7 @@ from ..config import SandboxConfig
 from ._types import ArgDef, CommandDef, KeyRow
 
 if TYPE_CHECKING:
-    from ..credentials.db import CredentialDB
+    from ..vault.store.db import CredentialDB
 
 
 def _open_db(cfg: SandboxConfig) -> CredentialDB:
@@ -96,7 +96,7 @@ def _validate_scope_name(scope: str) -> None:
     *and* the length bound stay co-located with the write sites that
     depend on them.
     """
-    from ..credentials.db import InvalidScopeName, _require_safe_scope
+    from ..vault.store.db import InvalidScopeName, _require_safe_scope
 
     try:
         _require_safe_scope(scope)
@@ -155,12 +155,12 @@ def _handle_ssh_import(
     cfg: SandboxConfig | None = None,
 ) -> None:
     """Import an OpenSSH keypair from files into the vault DB for *scope*."""
-    from ..credentials.db import UnsafeCommentError
-    from ..credentials.ssh_keypair import (
+    from ..vault.ssh.keypair import (
         KeypairMismatchError,
         PasswordProtectedKeyError,
         import_ssh_keypair,
     )
+    from ..vault.store.db import UnsafeCommentError
 
     _validate_scope_name(scope)
     if cfg is None:
@@ -217,7 +217,7 @@ def _handle_ssh_add(
     cfg: SandboxConfig | None = None,
 ) -> None:
     """Generate a new SSH keypair in the vault for *scope*."""
-    from ..credentials.ssh import SSHManager
+    from ..vault.ssh.manager import SSHManager
 
     _validate_scope_name(scope)
     if key_type not in ("ed25519", "rsa"):
@@ -249,7 +249,7 @@ def _handle_ssh_export(
     cfg: SandboxConfig | None = None,
 ) -> None:
     """Write a scope's key back to a standard OpenSSH file pair."""
-    from ..credentials.ssh_keypair import export_ssh_keypair
+    from ..vault.ssh.keypair import export_ssh_keypair
 
     _validate_scope_name(scope)
     if cfg is None:
@@ -290,7 +290,7 @@ def _handle_ssh_pub(
     primary deploy key.  ``--all`` prints every key assigned to the scope
     (one per line, newest last); ``--key-id`` targets a specific row.
     """
-    from ..credentials.ssh_keypair import public_line_of
+    from ..vault.ssh.keypair import public_line_of
 
     _validate_scope_name(scope)
     if cfg is None:
@@ -374,7 +374,7 @@ def _handle_ssh_rename(
     more than one distinct fingerprint print the candidates and exit
     without writing anything.
     """
-    from ..credentials.db import UnsafeCommentError
+    from ..vault.store.db import UnsafeCommentError
 
     if cfg is None:
         cfg = SandboxConfig()

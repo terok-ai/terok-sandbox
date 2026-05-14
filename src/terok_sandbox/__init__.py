@@ -81,28 +81,6 @@ from .config_schema import (
     gate_use_personal_ssh_default,
 )
 from .config_stack import ConfigScope, ConfigStack
-from .credentials.db import CredentialDB, SSHKeyRecord, SSHKeyRow, UnsafeCommentError
-from .credentials.encryption import PassphraseSource
-from .credentials.ssh import SSHInitResult, SSHManager
-from .credentials.ssh_keypair import (
-    DEFAULT_RSA_BITS,
-    ExportResult,
-    GeneratedKeypair,
-    ImportResult,
-    KeypairMismatchError,
-    PasswordProtectedKeyError,
-    export_ssh_keypair,
-    fingerprint_of,
-    generate_keypair,
-    import_ssh_keypair,
-    openssh_pem_of,
-    parse_openssh_keypair,
-    public_line_of,
-)
-from .credentials.systemd_creds import (
-    has_tpm2 as systemd_creds_has_tpm2,
-    is_available as is_systemd_creds_available,
-)
 from .doctor import CheckVerdict, DoctorCheck, sandbox_doctor_checks
 from .gate.lifecycle import GateServerManager, GateServerStatus
 from .gate.mirror import GateAuthNotConfigured, GateStalenessInfo, GitGate, is_ssh_url
@@ -165,11 +143,33 @@ from .shield import (
     uninstall_hooks_direct,
     up,
 )
-from .vault.constants import CODEX_SHARED_OAUTH_MARKER, PHANTOM_CREDENTIALS_MARKER
-from .vault.lifecycle import (
+from .vault.daemon.constants import CODEX_SHARED_OAUTH_MARKER, PHANTOM_CREDENTIALS_MARKER
+from .vault.daemon.lifecycle import (
     VaultManager,
     VaultStatus,
     VaultUnreachableError,
+)
+from .vault.ssh.keypair import (
+    DEFAULT_RSA_BITS,
+    ExportResult,
+    GeneratedKeypair,
+    ImportResult,
+    KeypairMismatchError,
+    PasswordProtectedKeyError,
+    export_ssh_keypair,
+    fingerprint_of,
+    generate_keypair,
+    import_ssh_keypair,
+    openssh_pem_of,
+    parse_openssh_keypair,
+    public_line_of,
+)
+from .vault.ssh.manager import SSHInitResult, SSHManager
+from .vault.store.db import CredentialDB, SSHKeyRecord, SSHKeyRow, UnsafeCommentError
+from .vault.store.encryption import PassphraseSource
+from .vault.store.systemd_creds import (
+    has_tpm2 as systemd_creds_has_tpm2,
+    is_available as is_systemd_creds_available,
 )
 
 if TYPE_CHECKING:

@@ -13,14 +13,14 @@ from pathlib import Path
 
 import pytest
 
-from terok_sandbox.credentials.db import CredentialDB
-from terok_sandbox.credentials.ssh_keypair import generate_keypair
-from terok_sandbox.vault.ssh_signer import (
+from terok_sandbox.vault.ssh.keypair import generate_keypair
+from terok_sandbox.vault.ssh.signer import (
     SSH_AGENT_IDENTITIES_ANSWER,
     SSH_AGENTC_REQUEST_IDENTITIES,
     _unpack_string,
     start_ssh_signer_local,
 )
+from terok_sandbox.vault.store.db import CredentialDB
 
 _READ_TIMEOUT = 5.0
 
