@@ -227,7 +227,7 @@ def _peer_label(writer: asyncio.StreamWriter) -> str:
             return f"{peer[0]}:{peer[1]}"
         if peer:
             return str(peer)
-    except Exception:  # noqa: BLE001 — logging must never raise
+    except Exception:  # noqa: BLE001  # nosec B110 — logging must never raise
         pass
     return "<unknown>"
 
@@ -360,7 +360,7 @@ async def _handle_container_connection(
         writer.close()
         try:
             await writer.wait_closed()
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # nosec B110 — best-effort writer drain in finally
             pass
 
 
@@ -379,7 +379,7 @@ async def _handle_local_connection(
         writer.close()
         try:
             await writer.wait_closed()
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # nosec B110 — best-effort writer drain in finally
             pass
 
 

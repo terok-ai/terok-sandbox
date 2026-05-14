@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import signal
@@ -222,7 +223,7 @@ class _TokenDB:
         """Best-effort close on garbage collection."""
         try:
             self._conn.close()
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # nosec B110 — best-effort __del__ close on GC
             pass
 
 
@@ -713,10 +714,11 @@ async def _on_cleanup(app: web.Application) -> None:
     task = app.get(_KEY_REFRESH_TASK)
     if task is not None:
         task.cancel()
-        try:
+        # contextlib.suppress sidesteps Sonar S7497 — the CancelledError
+        # here is the *child*'s acknowledgement of our explicit cancel(),
+        # not the cleanup task's own cancellation, so it must not propagate.
+        with contextlib.suppress(asyncio.CancelledError):
             await task
-        except asyncio.CancelledError:
-            pass
     await app[_KEY_CLIENT].close()
     app[_KEY_TOKEN_DB].close()
     audit = app.get(_KEY_AUDIT)

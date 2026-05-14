@@ -20,7 +20,7 @@ from __future__ import annotations
 import os
 import shlex
 import signal
-import subprocess
+import subprocess  # nosec B404 — vault daemon Popen + systemctl helpers — vault daemon Popen + systemctl helpers
 import sys
 import time
 from pathlib import Path
@@ -114,11 +114,7 @@ class VaultManager:
             unit = (
                 _SOCKET_MODE_SERVICE if self._installed_transport() == "socket" else _SERVICE_UNIT
             )
-            subprocess.run(
-                ["systemctl", "--user", "start", unit],
-                check=False,
-                timeout=10,
-            )
+            _systemctl.run_best_effort("start", unit)
 
         # Probe the actually-configured transport — falling back to TCP in
         # socket mode would hit ``port=None`` and emit the famously confusing
@@ -244,17 +240,16 @@ class VaultManager:
     # -- Systemd lifecycle ---------------------------------------------------
 
     def is_systemd_available(self) -> bool:
-        """Check whether the systemd user session is reachable."""
-        try:
-            result = subprocess.run(
-                ["systemctl", "--user", "is-system-running"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            return result.returncode in (0, 1)
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            return False
+        """Check whether the systemd user session is reachable.
+
+        ``is-system-running`` returns 0 for ``running`` and a non-zero
+        code for every other state (``degraded`` / ``starting`` /
+        ``maintenance`` / …) — all of which still mean systemd is
+        *present*.  Only the synthetic 127 / 124
+        [`_systemctl.query`][terok_sandbox._util._systemctl.query] emits for a
+        missing binary or a timeout count as "absent".
+        """
+        return _systemctl.query("is-system-running").returncode not in (127, 124)
 
     def is_socket_installed(self) -> bool:
         """Check whether any vault systemd unit file exists (TCP or socket mode)."""
@@ -263,16 +258,7 @@ class VaultManager:
 
     def _is_unit_active(self, unit: str) -> bool:
         """Check whether a systemd unit is active."""
-        try:
-            result = subprocess.run(
-                ["systemctl", "--user", "is-active", unit],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            return result.stdout.strip() == "active"
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            return False
+        return _systemctl.query("is-active", unit).stdout.strip() == "active"
 
     def is_socket_active(self) -> bool:
         """Check whether the TCP socket unit or socket-mode service is active."""
@@ -483,7 +469,7 @@ class VaultManager:
 
         # Fork into background so the vault survives shell exit.
         # stderr=PIPE only for the startup-failure detection window.
-        proc = subprocess.Popen(
+        proc = subprocess.Popen(  # nosec B603 — argv is a fixed list controlled by this module — argv is a fixed list controlled by this module
             cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,

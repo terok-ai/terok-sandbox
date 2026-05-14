@@ -18,6 +18,7 @@ It runs as an asyncio background task inside the vault daemon.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from pathlib import Path
 from typing import Any
@@ -50,8 +51,15 @@ class ScopeSocketReconciler:
         self._conn: Any = None
 
     async def start(self) -> None:
-        """Bind sockets for the current assignment state, then begin polling."""
-        self._runtime_dir.mkdir(parents=True, exist_ok=True)
+        """Bind sockets for the current assignment state, then begin polling.
+
+        The module's access-control story is "same-UID only via 0700 on
+        the parent directory" — both the ``mkdir`` mode flag and an
+        explicit ``chmod`` are needed because ``mkdir(mode=0o700)``
+        is umask-masked and a no-op for an already-existing directory.
+        """
+        self._runtime_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self._runtime_dir.chmod(0o700)
         await self._reconcile()
         self._task = asyncio.create_task(self._poll(), name="scope-socket-reconciler")
 
@@ -59,16 +67,17 @@ class ScopeSocketReconciler:
         """Cancel the poller and tear down every bound socket."""
         if self._task is not None:
             self._task.cancel()
-            try:
+            # contextlib.suppress sidesteps Sonar S7497 — the CancelledError
+            # here is the *child*'s acknowledgement of our explicit cancel(),
+            # not stop()'s own cancellation, so it must not propagate.
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._task
-            except asyncio.CancelledError:
-                pass
             self._task = None
         for scope, server in list(self._servers.items()):
             server.close()
             try:
                 await server.wait_closed()
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001  # nosec B110 — best-effort during scope shutdown
                 pass
             self._socket_path(scope).unlink(missing_ok=True)
         self._servers.clear()
@@ -159,7 +168,18 @@ class ScopeSocketReconciler:
         return True
 
     def _socket_path(self, scope: str) -> Path:
-        """Return the canonical socket path for a scope."""
+        """Return the canonical socket path for a scope.
+
+        ``scope`` is interpolated into the filename, so a hostile or
+        malformed value (``../other.sock``) would let bind / unlink
+        escape ``runtime_dir``.  The DB layer validates at write time,
+        but enforcing the same policy at the path-composition seam is
+        cheap defense in depth — it also catches future callers that
+        bypass the DB entirely.
+        """
+        from ..store.db import _require_safe_scope
+
+        _require_safe_scope(scope)
         return self._runtime_dir / f"ssh-agent-local-{scope}.sock"
 
     def _snapshot(self) -> tuple[int, set[str]]:

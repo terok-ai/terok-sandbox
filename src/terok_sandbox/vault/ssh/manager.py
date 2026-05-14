@@ -104,7 +104,7 @@ class SSHManager:
         """Best-effort close on garbage collection."""
         try:
             self.close()
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # nosec B110 — best-effort __del__ close on GC
             pass
 
     def init(

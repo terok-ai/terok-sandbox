@@ -172,6 +172,7 @@ path = "terok_sandbox.vault.ssh.scope_sockets"
 layer = "foundation"
 depends_on = [
     "terok_sandbox.vault.ssh.signer",
+    "terok_sandbox.vault.store.db",
     "terok_sandbox.config",
 ]
 

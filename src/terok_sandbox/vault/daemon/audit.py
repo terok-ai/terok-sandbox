@@ -79,8 +79,18 @@ class AuditWriter:
         the write happens on the default executor, the lock keeps
         ordering across concurrent callers, and the soft-fail
         ``OSError`` path stays the same shape as the sync version.
+
+        Serialization failures (a non-JSON-serializable field slipping
+        into *entry*) are also soft-failed — a malformed audit entry
+        must not kill a credential-bearing request.
         """
-        line = json.dumps(entry, separators=(",", ":")) + "\n"
+        try:
+            line = json.dumps(entry, separators=(",", ":")) + "\n"
+        except (TypeError, ValueError) as exc:
+            _logger.warning(
+                "Credential audit entry not JSON-serializable (%s): %s", self._path, exc
+            )
+            return
         async with self._lock:
             if self._fh is None and not self._open_failed:
                 self._fh = self._lazy_open()

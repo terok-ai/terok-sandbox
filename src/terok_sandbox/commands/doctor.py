@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-import subprocess
+import subprocess  # nosec B404 — doctor probes shell out via subprocess.run — doctor probes (probe_cmd subprocess.run)
 import sys
 
 from ..config import SandboxConfig
@@ -38,7 +38,7 @@ def _handle_doctor(*, cfg: SandboxConfig | None = None) -> None:
             verdict = check.evaluate(0, "", "")
         elif check.probe_cmd:
             try:
-                result = subprocess.run(  # noqa: S603
+                result = subprocess.run(  # noqa: S603  # nosec B603 — argv is a fixed list controlled by this module — argv is a fixed list controlled by this module
                     check.probe_cmd,
                     capture_output=True,
                     text=True,

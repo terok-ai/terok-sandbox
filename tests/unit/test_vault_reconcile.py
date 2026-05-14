@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -210,3 +211,84 @@ class TestReconciler:
             # Clear the poisoned server so stop() doesn't try to close it again.
             reconciler._servers.clear()
             await reconciler.stop()
+
+    async def test_socket_path_rejects_unsafe_scope(self, tmp_path: Path) -> None:
+        """``socket_path`` validates the scope to block path-traversal vectors."""
+        from terok_sandbox.vault.store.db import InvalidScopeName
+
+        runtime_dir = tmp_path / "runtime"
+        runtime_dir.mkdir()
+        reconciler = ScopeSocketReconciler(
+            db_path=str(tmp_path / "unused.db"), runtime_dir=runtime_dir
+        )
+        with pytest.raises(InvalidScopeName):
+            reconciler.socket_path("../escape")
+
+    async def test_poll_swallows_inner_reconcile_exceptions(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failing reconcile inside ``_poll`` logs and continues, never crashes the task.
+
+        The poller is the long-running heartbeat that keeps scope sockets
+        in sync; an exception during one tick (DB locked, file system
+        hiccup) must not silently kill it.  Drives the loop by patching
+        the 2-second sleep to ``sleep(0)`` so a single tick fires
+        immediately.
+        """
+        import unittest.mock as mock
+
+        # Replace the long inter-tick wait with an immediate yield so the
+        # loop actually enters its reconcile branch under test.
+        monkeypatch.setattr("terok_sandbox.vault.ssh.scope_sockets._POLL_INTERVAL_SECONDS", 0)
+        db_path = tmp_path / "vault.db"
+        CredentialDB(db_path, passphrase="test").close()
+        reconciler = ScopeSocketReconciler(db_path=str(db_path), runtime_dir=tmp_path / "runtime")
+        try:
+            # Let ``start()`` complete its initial bind pass before we
+            # inject the failure — otherwise the boot reconcile itself
+            # would propagate the RuntimeError and stop() would never run.
+            await reconciler.start()
+            with mock.patch.object(
+                reconciler, "_reconcile", side_effect=RuntimeError("simulated tick failure")
+            ) as failing_reconcile:
+                # Yield enough times for the loop's sleep + reconcile +
+                # except cycle to fire at least once.
+                for _ in range(5):
+                    await asyncio.sleep(0)
+                assert failing_reconcile.call_count >= 1
+            # The poller task is still alive (the exception arm logged
+            # and continued instead of dying).
+            assert reconciler._task is not None and not reconciler._task.done()
+        finally:
+            await reconciler.stop()
+
+    async def test_stop_swallows_wait_closed_errors_on_each_server(self, tmp_path: Path) -> None:
+        """``stop()`` keeps tearing down sockets even when one ``wait_closed`` raises.
+
+        The blanket-except around ``await server.wait_closed()`` is best-effort
+        cleanup — a thrown shutdown error on one scope must not orphan the
+        sockets of every other scope.  Pins the except-arm coverage AND
+        the surviving-loop semantic.
+        """
+        import unittest.mock as mock
+
+        runtime_dir = tmp_path / "runtime"
+        runtime_dir.mkdir()
+        reconciler = ScopeSocketReconciler(
+            db_path=str(tmp_path / "unused.db"), runtime_dir=runtime_dir
+        )
+        # Materialise two socket files so .unlink(missing_ok=True) has
+        # something to remove (and we can verify both are gone after stop).
+        for scope in ("proj-a", "proj-b"):
+            (runtime_dir / f"ssh-agent-local-{scope}.sock").touch()
+        # One scope raises, the other succeeds — both must be cleaned up.
+        bad_server = mock.AsyncMock()
+        bad_server.close = mock.MagicMock()
+        bad_server.wait_closed = mock.AsyncMock(side_effect=RuntimeError("shutdown boom"))
+        good_server = mock.AsyncMock()
+        good_server.close = mock.MagicMock()
+        good_server.wait_closed = mock.AsyncMock()
+        reconciler._servers = {"proj-a": bad_server, "proj-b": good_server}
+        await reconciler.stop()
+        for scope in ("proj-a", "proj-b"):
+            assert not (runtime_dir / f"ssh-agent-local-{scope}.sock").exists()

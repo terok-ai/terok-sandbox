@@ -52,10 +52,12 @@ ruff-report:
 	mkdir -p $(REPORTS_DIR)
 	poetry run ruff check --exit-zero --output-format=json --output-file=$(RUFF_REPORT) .
 
-# Write Bandit's JSON report without failing on findings.
+# Write Bandit's JSON report without failing on findings.  Uses the
+# same [tool.bandit] config the ``security`` target consumes so the
+# Sonar import sees the same skip set we audited locally.
 bandit-report:
 	mkdir -p $(REPORTS_DIR)
-	poetry run bandit -r src/terok_sandbox/ --exit-zero -f json -o $(BANDIT_REPORT)
+	poetry run bandit -c pyproject.toml -r src/terok_sandbox/ --exit-zero -f json -o $(BANDIT_REPORT)
 
 # Generate the files SonarQube Cloud imports from reports/.
 sonar-inputs: test-unit ruff-report bandit-report
@@ -64,11 +66,14 @@ sonar-inputs: test-unit ruff-report bandit-report
 tach:
 	poetry run tach check
 
-# Run SAST security scan
+# Run SAST security scan.  Runs at default severity (low+) to match
+# SonarCloud's strictness — see [tool.bandit] in pyproject.toml for
+# the project-wide skips (B404, B603); B607/B110 are annotated
+# per-call.
 security:
 	mkdir -p $(REPORTS_DIR)
-	poetry run bandit -r src/terok_sandbox/ --exit-zero -f json -o $(BANDIT_REPORT)
-	poetry run bandit -r src/terok_sandbox/ -ll
+	poetry run bandit -c pyproject.toml -r src/terok_sandbox/ --exit-zero -f json -o $(BANDIT_REPORT)
+	poetry run bandit -c pyproject.toml -r src/terok_sandbox/
 
 # Check docstring coverage (minimum 95%)
 docstrings:

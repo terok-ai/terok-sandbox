@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import io
 import shlex
-import subprocess
+import subprocess  # nosec B404 — container exec for ready-marker probing — container exec for ready-marker probing
 import tarfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -331,7 +331,7 @@ class Sandbox:
         if input is not None:
             kwargs["input"] = input
         try:
-            subprocess.run(cmd, **kwargs)
+            subprocess.run(cmd, **kwargs)  # nosec B603 — argv built from fixed verbs + caller-controlled scope/container names — argv built from fixed verbs + caller-controlled scope/container names
         except FileNotFoundError:
             raise SystemExit("podman not found; please install podman")
         except subprocess.CalledProcessError as exc:

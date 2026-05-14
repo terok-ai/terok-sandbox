@@ -22,7 +22,7 @@ import os
 import secrets
 import shlex
 import sqlite3
-import subprocess
+import subprocess  # nosec B404 — operator-supplied passphrase_command helper — operator-supplied passphrase_command helper + systemd-creds
 import sys
 from pathlib import Path
 from typing import Any, Literal
@@ -290,7 +290,7 @@ def load_passphrase_from_command(
     if not argv:
         return None
     try:
-        result = subprocess.run(  # noqa: S603 — argv is operator-configured
+        result = subprocess.run(  # noqa: S603 — argv is operator-configured  # nosec B603 — argv is a fixed list controlled by this module — argv is a fixed list controlled by this module
             argv, capture_output=True, text=True, timeout=timeout, check=False
         )
     except OSError as exc:
