@@ -152,7 +152,7 @@ class CommandTree:
                 return _descend(root, tuple(rest))
         raise KeyError(f"no top-level verb {first!r}")
 
-    def overlay(self, overrides: Mapping[Sequence[str], Callable[..., Any]]) -> CommandTree:
+    def overlay(self, overrides: Mapping[tuple[str, ...], Callable[..., Any]]) -> CommandTree:
         """Return a new tree with handlers replaced at the named paths.
 
         *overrides* maps verb-name tuples (e.g. ``("vault", "status")``)
@@ -166,12 +166,7 @@ class CommandTree:
         names you'd type on the CLI — so the override map reads like a
         routing table.
         """
-        # Normalise keys to tuples so a dict literal with tuple keys
-        # and a callsite using list keys both work.
-        normalised: dict[tuple[str, ...], Callable[..., Any]] = {
-            tuple(p): h for p, h in overrides.items()
-        }
-        return CommandTree(_overlay_forest(self._roots, normalised, ()))
+        return CommandTree(_overlay_forest(self._roots, dict(overrides), ()))
 
     def extend_at(self, path: Sequence[str], additions: Iterable[CommandDef]) -> CommandTree:
         """Return a new tree with *additions* appended at the path's children.
