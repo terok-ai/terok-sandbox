@@ -73,7 +73,9 @@ your encryption is only as strong as the filesystem layer
 Type `yes` to confirm, anything else to choose a different tier:"""
 
 
-def _handle_credentials_encrypt_db(*, cfg: SandboxConfig | None = None) -> None:
+def _handle_credentials_encrypt_db(
+    *, cfg: SandboxConfig | None = None, echo_passphrase: bool = False
+) -> None:
     """Provision the credentials-DB passphrase; migrate any legacy plaintext file.
 
     Short-circuits when the DB is already SQLCipher-encrypted: minting
@@ -84,6 +86,12 @@ def _handle_credentials_encrypt_db(*, cfg: SandboxConfig | None = None) -> None:
     automatically — that's the strongest option and asking when the
     answer is unambiguous just slows the operator down.  Otherwise
     show the chooser with keyring as the recommended default.
+
+    *echo_passphrase* mirrors the announce path: when ``True``, any
+    auto-generated passphrase is also printed to stdout so
+    non-interactive bootstraps (CI, Ansible) can capture it into their
+    own secret store.  Default ``False`` so a routine ``setup > log``
+    can't leak it.
     """
     from ..vault.store import systemd_creds as _systemd_creds
     from ..vault.store.encryption import encrypt_in_place, is_plaintext_sqlite
@@ -97,10 +105,10 @@ def _handle_credentials_encrypt_db(*, cfg: SandboxConfig | None = None) -> None:
         return
 
     if _systemd_creds.is_available():
-        passphrase, source = _provision_systemd_creds_tier(cfg)
+        passphrase, source = _provision_systemd_creds_tier(cfg, echo_passphrase=echo_passphrase)
     else:
         mode = _ask_passphrase_mode()
-        passphrase, source = _provision_passphrase(cfg, mode=mode)
+        passphrase, source = _provision_passphrase(cfg, mode=mode, echo_passphrase=echo_passphrase)
         _persist_mode_choice(mode, passphrase)
     print(f"  passphrase source: {source}")
 
@@ -143,7 +151,9 @@ def _ask_passphrase_mode() -> SetupTier:
             return mode
 
 
-def _provision_systemd_creds_tier(cfg: SandboxConfig) -> tuple[str, PassphraseSource]:
+def _provision_systemd_creds_tier(
+    cfg: SandboxConfig, *, echo_passphrase: bool = False
+) -> tuple[str, PassphraseSource]:
     """Auto-detected systemd-creds branch: mint a passphrase and seal it.
 
     ``--with-key=auto`` lets the host's TPM2 / host-key combination
@@ -155,11 +165,13 @@ def _provision_systemd_creds_tier(cfg: SandboxConfig) -> tuple[str, PassphraseSo
 
     passphrase = generate_passphrase()
     _systemd_creds.seal(passphrase, cfg.vault_systemd_creds_file, key_mode="auto")
-    _announce_generated_passphrase(passphrase)
+    _announce_generated_passphrase(passphrase, echo_to_stdout=echo_passphrase)
     return passphrase, "systemd-creds"
 
 
-def _provision_passphrase(cfg: SandboxConfig, *, mode: SetupTier) -> tuple[str, PassphraseSource]:
+def _provision_passphrase(
+    cfg: SandboxConfig, *, mode: SetupTier, echo_passphrase: bool = False
+) -> tuple[str, PassphraseSource]:
     """Resolve or mint a passphrase for *mode*; return ``(passphrase, source)``."""
     from .._yaml import write_secret_text
     from ..vault.store.encryption import (
@@ -189,7 +201,7 @@ def _provision_passphrase(cfg: SandboxConfig, *, mode: SetupTier) -> tuple[str, 
             return existing, "keyring"
         new = generate_passphrase()
         if store_passphrase_in_keyring(new):
-            _announce_generated_passphrase(new)
+            _announce_generated_passphrase(new, echo_to_stdout=echo_passphrase)
             return new, "keyring"
         raise RuntimeError("OS keyring is unreachable or denied; choose a different storage mode")
 
@@ -202,20 +214,28 @@ def _provision_passphrase(cfg: SandboxConfig, *, mode: SetupTier) -> tuple[str, 
     raise ValueError(f"unknown mode: {mode!r}")
 
 
-def _announce_generated_passphrase(passphrase: str) -> None:
+def _announce_generated_passphrase(passphrase: str, *, echo_to_stdout: bool = False) -> None:
     """Show an auto-minted passphrase to the operator's controlling terminal.
 
     Routes through ``_write_to_controlling_tty`` so a redirected
     install — ``terok-sandbox setup > install.log``, a CI job, an
     Ansible play — can't capture the recovery key into a journal or
     log artifact.
+
+    *echo_to_stdout* is the opt-in for the no-TTY case: CI / Ansible
+    drivers explicitly pass ``--echo-passphrase`` to ``setup`` so they
+    can capture the value into their own secret manager.  Off by default
+    so a routine ``setup > install.log`` can't leak it.
     """
     from ..vault.store.encryption import _write_to_controlling_tty
 
-    _write_to_controlling_tty(
+    message = (
         f"\nVault passphrase: {passphrase}\n"
         "  Write this down — it's your recovery key for rebuilds and other hosts.\n"
     )
+    _write_to_controlling_tty(message)
+    if echo_to_stdout:
+        print(message, end="")
 
 
 def _persist_mode_choice(mode: SetupTier, passphrase: str) -> None:
@@ -287,7 +307,7 @@ def _warn_about_plaintext_backup(backup_path: Path) -> None:
     )
 
 
-def _run_credentials_setup_phase(cfg: SandboxConfig) -> bool:
+def _run_credentials_setup_phase(cfg: SandboxConfig, *, echo_passphrase: bool = False) -> bool:
     """Migrate the credentials DB to SQLCipher; no-op on already-encrypted or absent.
 
     The vault daemon, if installed from a previous setup, holds a write
@@ -307,7 +327,7 @@ def _run_credentials_setup_phase(cfg: SandboxConfig) -> bool:
     mgr = VaultManager(cfg)
     _quiesce_vault_for_migration(mgr)
     try:
-        _handle_credentials_encrypt_db(cfg=cfg)
+        _handle_credentials_encrypt_db(cfg=cfg, echo_passphrase=echo_passphrase)
     except Exception as exc:  # noqa: BLE001
         if not _looks_like_db_lock(exc):
             print(f" — FAILED: {exc}")
@@ -315,7 +335,7 @@ def _run_credentials_setup_phase(cfg: SandboxConfig) -> bool:
         print(" — locked, auto-recovering by uninstalling vault units …", flush=True)
         _quiesce_vault_for_migration(mgr, force_uninstall=True)
         try:
-            _handle_credentials_encrypt_db(cfg=cfg)
+            _handle_credentials_encrypt_db(cfg=cfg, echo_passphrase=echo_passphrase)
         except Exception as retry_exc:  # noqa: BLE001
             print(f"  recovery FAILED: {retry_exc}")
             if _looks_like_db_lock(retry_exc):

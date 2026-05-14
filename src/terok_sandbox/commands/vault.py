@@ -1,13 +1,21 @@
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""Vault-daemon CLI verbs — start, stop, status, install, uninstall, unlock, lock, seal.
+"""Vault-daemon CLI verbs — daemon lifecycle plus the ``vault passphrase`` subverbs.
 
-The unlock/lock/seal trio drives the SQLCipher passphrase resolution chain:
-``unlock`` lands a passphrase on the session-unlock tmpfs file; ``lock``
-removes it (with ``--forget`` clearing every other auto-resolution tier
-too); ``seal`` promotes whatever tier currently holds the passphrase
-into a machine-bound ``systemd-creds`` credential.
+The unlock/lock pair drives the session-tier slot of the SQLCipher
+passphrase resolution chain: ``unlock`` lands a passphrase on the
+session-unlock tmpfs file; ``lock`` removes it.  Everything else lives
+under ``vault passphrase``:
+
+- ``vault passphrase seal`` promotes the current passphrase into a
+  machine-bound ``systemd-creds`` credential.
+- ``vault passphrase to-keyring`` moves it from whichever tier holds it
+  now into the OS keyring (the recommended upgrade path off the
+  session-file / plaintext-config tiers).
+- ``vault passphrase destroy`` clears every persistent tier so the
+  vault becomes irrecoverable without an external copy of the
+  passphrase.
 """
 
 from __future__ import annotations
@@ -133,7 +141,7 @@ def _handle_vault_unlock(*, cfg: SandboxConfig | None = None) -> None:
 
 
 def _forget_config_tier_updates(cfg: SandboxConfig) -> dict[str, object | None]:
-    """Return the config-section patch ``vault lock --forget`` should apply.
+    """Return the config-section patch ``vault passphrase destroy`` should apply.
 
     Both fields are auto-resolution wirings — leaving either would let
     the daemon re-unlock on next socket activation and defeat the lock.
@@ -153,10 +161,11 @@ def _handle_vault_lock(*, cfg: SandboxConfig | None = None, forget: bool = False
     ``credentials.passphrase``, ``credentials.passphrase_command``, or a
     sealed systemd-creds credential can re-unlock the daemon at the next
     socket activation — and the operator may not realise that's not
-    "locked".  Pass ``forget=True`` (``--forget`` on the CLI) to also
-    remove the keyring entry, clear those config keys from
-    ``config.yml``, and delete the sealed systemd-creds credential so
-    the next daemon start *must* have an explicit ``vault unlock``.
+    "locked".  Pass ``forget=True`` (CLI:
+    ``terok-sandbox vault passphrase destroy``) to also remove the
+    keyring entry, clear those config keys from ``config.yml``, and
+    delete the sealed systemd-creds credential so the next daemon start
+    *must* have an explicit ``vault unlock``.
     """
     from ..vault.daemon.lifecycle import VaultManager
     from ..vault.store.encryption import forget_passphrase_in_keyring
@@ -224,7 +233,7 @@ def _handle_vault_lock(*, cfg: SandboxConfig | None = None, forget: bool = False
             print(
                 f"warning: non-session passphrase tiers still active ({', '.join(active)});"
                 " the daemon may auto-unlock on next socket activation.\n"
-                "         Use `terok-sandbox vault lock --forget` to clear them too.",
+                "         Use `terok-sandbox vault passphrase destroy` to clear them too.",
                 file=sys.stderr,
             )
 
@@ -298,6 +307,93 @@ def _handle_vault_seal(*, cfg: SandboxConfig | None = None, key: str = "auto") -
     print("  the resolution chain will pick this up on the next daemon start; no restart required")
 
 
+def _handle_vault_to_keyring(*, cfg: SandboxConfig | None = None) -> None:
+    """Move the current passphrase from its current tier into the OS keyring.
+
+    Resolves the passphrase via the chain (or prompts as a last resort),
+    writes it to the keyring, flips ``credentials.use_keyring`` to true
+    in ``config.yml``, clears any plaintext ``credentials.passphrase`` /
+    ``credentials.passphrase_command`` wiring, removes the session-file
+    and sealed systemd-creds copies, and restarts the daemon so the
+    next chain walk hits keyring.
+
+    The validate-before-destroy ordering is deliberate: if the keyring
+    write fails, the source tier is still intact.
+    """
+    from .. import config as _config
+    from ..vault.daemon.lifecycle import VaultManager
+    from ..vault.store.encryption import (
+        WrongPassphraseError,
+        store_passphrase_in_keyring,
+    )
+
+    if cfg is None:
+        cfg = SandboxConfig()
+
+    try:
+        passphrase, source = cfg.resolve_passphrase_with_source(prompt_on_tty=True)
+    except WrongPassphraseError as exc:
+        raise SystemExit(f"cannot move to keyring: {exc}") from exc
+
+    if not passphrase:
+        raise SystemExit("no current passphrase resolvable; run `terok-sandbox vault unlock` first")
+    if source == "keyring":
+        print("→ passphrase is already in the keyring; nothing to do")
+        return
+
+    if not store_passphrase_in_keyring(passphrase):
+        raise SystemExit("OS keyring is unreachable or denied; aborting (nothing was changed)")
+    print(f"→ stored passphrase in keyring (was: {source})")
+
+    # Switch the config's tier wiring atomically: flip use_keyring on,
+    # drop the plaintext + helper fallbacks so the chain can't re-resolve
+    # via a stale lower tier.
+    from ..paths import _config_file_paths
+
+    user_config = next((p for label, p in _config_file_paths() if label == "user"), None)
+    if user_config is not None:
+        # nosec: B105 — clearing config keys to None, not hardcoding secrets
+        updates = {  # nosec: B105
+            "use_keyring": True,
+            "passphrase": None,  # nosec: B105
+            "passphrase_command": None,  # nosec: B105
+        }
+        _yaml_update_section(user_config, "credentials", updates)
+        _config._credentials_section.cache_clear()
+        print(f"→ updated {user_config} (use_keyring: true, plaintext fields cleared)")
+
+    # Remove the old tier's persistent copy.  Session file is removed
+    # because the chain prefers it over keyring; sealed systemd-creds
+    # likewise outranks keyring on the resolution order.
+    for stale in (cfg.vault_passphrase_file, cfg.vault_systemd_creds_file):
+        if stale.exists():
+            stale.unlink()
+            print(f"→ removed {sanitize_tty(str(stale))}")
+
+    mgr = VaultManager(cfg)
+    if mgr.is_daemon_running():
+        mgr.stop_daemon()
+        mgr.start_daemon()
+        print("→ vault daemon restarted")
+
+
+def _handle_vault_destroy_passphrase(*, cfg: SandboxConfig | None = None) -> None:
+    """Clear every persistent passphrase tier — the destructive lock.
+
+    Removes the session file, keyring entry, sealed systemd-creds
+    credential, and plaintext ``config.yml`` fields, then stops the
+    daemon.  The vault becomes unrecoverable unless the operator has an
+    external copy of the passphrase.
+
+    See [`_handle_vault_lock`][terok_sandbox.commands.vault._handle_vault_lock]
+    — this is its ``forget=True`` mode, exposed as a distinct verb so
+    the operation reads as "I am throwing away the key" in shell
+    history rather than as a flag on the routine "lock for this
+    session" verb.
+    """
+    _handle_vault_lock(cfg=cfg, forget=True)
+
+
 VAULT_COMMANDS: tuple[CommandDef, ...] = (
     CommandDef(
         name="start",
@@ -340,22 +436,16 @@ VAULT_COMMANDS: tuple[CommandDef, ...] = (
         help="Remove the session-unlock tmpfs file and stop the vault daemon",
         handler=_handle_vault_lock,
         group="vault",
-        args=(
-            ArgDef(
-                name="--forget",
-                action="store_true",
-                help=(
-                    "Also clear keyring + credentials.passphrase so the daemon"
-                    " cannot auto-unlock from non-session tiers"
-                ),
-            ),
-        ),
     ),
+)
+
+
+VAULT_PASSPHRASE_COMMANDS: tuple[CommandDef, ...] = (
     CommandDef(
         name="seal",
         help="Seal the current passphrase into a systemd-creds credential",
         handler=_handle_vault_seal,
-        group="vault",
+        group="vault-passphrase",
         args=(
             ArgDef(
                 name="--key",
@@ -368,7 +458,22 @@ VAULT_COMMANDS: tuple[CommandDef, ...] = (
             ),
         ),
     ),
+    CommandDef(
+        name="to-keyring",
+        help="Move the current passphrase from its current tier into the OS keyring",
+        handler=_handle_vault_to_keyring,
+        group="vault-passphrase",
+    ),
+    CommandDef(
+        name="destroy",
+        help=(
+            "Clear every persistent passphrase tier — the vault becomes"
+            " unrecoverable without an external copy"
+        ),
+        handler=_handle_vault_destroy_passphrase,
+        group="vault-passphrase",
+    ),
 )
 
 
-__all__ = ["VAULT_COMMANDS"]
+__all__ = ["VAULT_COMMANDS", "VAULT_PASSPHRASE_COMMANDS"]

@@ -22,6 +22,7 @@ from .commands import (
     SHIELD_COMMANDS,
     SSH_COMMANDS,
     VAULT_COMMANDS,
+    VAULT_PASSPHRASE_COMMANDS,
     CommandDef,
 )
 
@@ -129,6 +130,14 @@ def main(argv: list[str] | None = None) -> None:
     vault_sub = vault_p.add_subparsers()
     for cmd in VAULT_COMMANDS:
         _wire_command(vault_sub, cmd)
+    # ``vault passphrase`` — second-level subparser for the verbs that
+    # operate on the passphrase itself (seal, to-keyring, destroy)
+    # rather than on the daemon's running state.
+    pass_p = vault_sub.add_parser("passphrase", help="Manage where the vault passphrase lives")
+    pass_sub = pass_p.add_subparsers()
+    for cmd in VAULT_PASSPHRASE_COMMANDS:
+        _wire_command(pass_sub, cmd)
+    pass_p.set_defaults(_group_help=pass_p)
     vault_p.set_defaults(_group_help=vault_p)
 
     # -- ssh --
