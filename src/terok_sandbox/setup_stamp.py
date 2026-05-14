@@ -116,11 +116,11 @@ def needs_setup() -> SetupVerdict:
         return SetupVerdict.STAMP_CORRUPT
 
     try:
-        stamped = _read_stamp(path)
+        stamped = read_stamp(path)
     except (OSError, json.JSONDecodeError, ValueError):
         return SetupVerdict.STAMP_CORRUPT
 
-    installed = _installed_versions()
+    installed = installed_versions()
     return _compare(stamped, installed)
 
 
@@ -137,7 +137,7 @@ def write_stamp() -> Path:
     payload = {
         "version": _STAMP_SCHEMA_VERSION,
         "completed_at": datetime.now(UTC).isoformat(timespec="seconds"),
-        "packages": _installed_versions(),
+        "packages": installed_versions(),
     }
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
@@ -165,7 +165,7 @@ def clear_stamp() -> bool:
 # ── Internals ─────────────────────────────────────────────────────────
 
 
-def _installed_versions() -> dict[str, str]:
+def installed_versions() -> dict[str, str]:
     """Return ``{package: version}`` for every tracked package present in the install.
 
     Missing packages are silently dropped — a standalone ``terok-sandbox``
@@ -180,7 +180,7 @@ def _installed_versions() -> dict[str, str]:
     return out
 
 
-def _read_stamp(path: Path) -> dict[str, str]:
+def read_stamp(path: Path) -> dict[str, str]:
     """Parse the stamp file, returning the ``packages`` mapping.
 
     Raises [`ValueError`][ValueError] if the schema version doesn't match — a

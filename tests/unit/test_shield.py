@@ -357,7 +357,7 @@ def test_setup_hooks_direct(
         mock_conf.assert_not_called()
 
 
-@patch("terok_shield.cli.simple_clearance.run_simple_clearance")
+@patch("terok_shield.simple_clearance.run_simple_clearance")
 def test_shield_interactive_session_delegates_to_simple_clearance(
     mock_run_simple_clearance: MagicMock,
 ) -> None:
@@ -367,7 +367,7 @@ def test_shield_interactive_session_delegates_to_simple_clearance(
     mock_run_simple_clearance.assert_called_once_with(MOCK_TASK_DIR / "shield", "task-ctr")
 
 
-@patch("terok_shield.cli.watch.run_watch")
+@patch("terok_shield.watch.run_watch")
 def test_shield_watch_session_delegates_to_run_watch(mock_run_watch: MagicMock) -> None:
     """Session helper forwards the shield state_dir and container to terok-shield."""
     shield_watch_session("task-ctr", MOCK_TASK_DIR)

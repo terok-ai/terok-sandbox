@@ -256,7 +256,7 @@ _SEAL_KEY_MODES: dict[str, KeyMode] = {
 }
 
 
-def _handle_vault_seal(*, cfg: SandboxConfig | None = None, key: str = "auto") -> None:
+def handle_vault_seal(*, cfg: SandboxConfig | None = None, key: str = "auto") -> None:
     """Seal the credentials-DB passphrase into a systemd-creds credential.
 
     Adds the systemd-creds tier to the resolution chain: machine-bound
@@ -307,7 +307,7 @@ def _handle_vault_seal(*, cfg: SandboxConfig | None = None, key: str = "auto") -
     print("  the resolution chain will pick this up on the next daemon start; no restart required")
 
 
-def _handle_vault_to_keyring(*, cfg: SandboxConfig | None = None) -> None:
+def handle_vault_to_keyring(*, cfg: SandboxConfig | None = None) -> None:
     """Move the current passphrase from its current tier into the OS keyring.
 
     Resolves the passphrase via the chain (or prompts as a last resort),
@@ -405,7 +405,7 @@ _PASSPHRASE_GROUP = CommandDef(
         CommandDef(
             name="seal",
             help="Seal the current passphrase into a systemd-creds credential",
-            handler=_handle_vault_seal,
+            handler=handle_vault_seal,
             args=(
                 ArgDef(
                     name="--key",
@@ -421,7 +421,7 @@ _PASSPHRASE_GROUP = CommandDef(
         CommandDef(
             name="to-keyring",
             help="Move the current passphrase from its current tier into the OS keyring",
-            handler=_handle_vault_to_keyring,
+            handler=handle_vault_to_keyring,
         ),
         CommandDef(
             name="destroy",

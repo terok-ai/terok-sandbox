@@ -243,7 +243,7 @@ class TestDefaultCfgConstruction:
 
     def test_seal_defaults_cfg(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """``vault seal`` without ``cfg=`` (systemd-creds unavailable → early SystemExit)."""
-        from terok_sandbox.commands import _handle_vault_seal, vault as vault_cmds
+        from terok_sandbox.commands import handle_vault_seal, vault as vault_cmds
 
         called = {}
 
@@ -263,5 +263,5 @@ class TestDefaultCfgConstruction:
         monkeypatch.setattr(vault_cmds, "SandboxConfig", _fake_sandbox_config)
         monkeypatch.setattr("terok_sandbox.vault.store.systemd_creds.is_available", lambda: False)
         with pytest.raises(SystemExit, match="systemd-creds unavailable"):
-            _handle_vault_seal()
+            handle_vault_seal()
         assert "cfg" in called
