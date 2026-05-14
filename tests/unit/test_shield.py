@@ -25,11 +25,11 @@ from terok_sandbox.config import SandboxConfig
 from terok_sandbox.shield import (
     _BYPASS_WARNING,
     _HOOK_FILES,
-    block,
     check_environment,
     down,
     make_shield,
     pre_start,
+    quarantine,
     run_setup,
     run_uninstall,
     setup_hooks_direct,
@@ -144,7 +144,7 @@ def test_shield_state_is_reexported() -> None:
     [
         pytest.param(down, "down", None, id="down"),
         pytest.param(up, "up", None, id="up"),
-        pytest.param(block, "block", None, id="block"),
+        pytest.param(quarantine, "quarantine", None, id="quarantine"),
         pytest.param(state, "state", ShieldState.UP, id="state"),
         pytest.param(pre_start, "pre_start", ["--network", "hook-net"], id="pre-start"),
     ],
@@ -216,16 +216,16 @@ def test_bypass_makes_down_and_up_noops(
 
 
 @patch("terok_sandbox.shield.make_shield")
-def test_block_ignores_bypass(mock_make: MagicMock) -> None:
-    """Block overrides bypass — panic must always work."""
+def test_quarantine_ignores_bypass(mock_make: MagicMock) -> None:
+    """Quarantine overrides bypass — panic must always work."""
     mock_shield = make_mock_shield()
     mock_make.return_value = mock_shield
     cfg = SandboxConfig(shield_bypass=True)
 
-    block("ctr", MOCK_TASK_DIR, cfg=cfg)
+    quarantine("ctr", MOCK_TASK_DIR, cfg=cfg)
 
     mock_make.assert_called_once()
-    mock_shield.block.assert_called_once_with("ctr")
+    mock_shield.quarantine.assert_called_once_with("ctr")
 
 
 def test_bypass_pre_start_returns_empty_with_warning() -> None:

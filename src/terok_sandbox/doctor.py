@@ -100,7 +100,7 @@ def sandbox_doctor_checks(
         token_broker_port: Token broker TCP port (skip check if ``None``).
         ssh_signer_port: SSH signer TCP port (skip check if ``None``).
         desired_shield_state: Expected shield state from ``shield_desired_state``
-            file (``"up"``, ``"down"``, ``"down_all"``, or ``None`` to skip).
+            file (``"up"``, ``"down"``, ``"disengaged"``, or ``None`` to skip).
 
     Returns:
         List of [`DoctorCheck`][terok_sandbox.doctor.DoctorCheck] instances ready for orchestration.

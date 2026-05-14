@@ -123,13 +123,13 @@ def up(container: str, task_dir: Path, cfg: SandboxConfig | None = None) -> None
     make_shield(task_dir, cfg).up(container)
 
 
-def block(container: str, task_dir: Path, cfg: SandboxConfig | None = None) -> None:
-    """Total network blackout — drop all traffic, log for forensics.
+def quarantine(container: str, task_dir: Path, cfg: SandboxConfig | None = None) -> None:
+    """Total network blackout — drop all traffic, log dropped traffic.
 
     Unlike [`up`][terok_sandbox.shield.up] and [`down`][terok_sandbox.shield.down], this ignores ``shield_bypass``
     because panic overrides all safety bypasses.
     """
-    make_shield(task_dir, cfg).block(container)
+    make_shield(task_dir, cfg).quarantine(container)
 
 
 def state(container: str, task_dir: Path, cfg: SandboxConfig | None = None) -> ShieldState:

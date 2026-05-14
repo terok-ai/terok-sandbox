@@ -33,8 +33,8 @@ documentation = "https://terok-ai.github.io/terok-sandbox/"
 
 [tool.poetry.dependencies]
 python = ">=3.12,<4.0"
-terok-shield = {url = "https://github.com/terok-ai/terok-shield/releases/download/v0.6.40/terok_shield-0.6.40-py3-none-any.whl"}
-terok-clearance = {url = "https://github.com/terok-ai/terok-clearance/releases/download/v0.6.12/terok_clearance-0.6.12-py3-none-any.whl"}
+terok-shield = {git = "https://github.com/sliwowitz/terok-shield.git", branch = "feat/shield-rename-disengaged"}
+terok-clearance = {git = "https://github.com/sliwowitz/terok-clearance.git", branch = "feat/shield-rename-disengaged"}
 platformdirs = ">=4.9.6"
 aiohttp = ">=3.9"
 cryptography = ">=46.0.7"
