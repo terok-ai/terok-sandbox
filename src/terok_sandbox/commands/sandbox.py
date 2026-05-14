@@ -16,6 +16,8 @@ from __future__ import annotations
 import dataclasses
 
 from .._setup import (
+    EXIT_MANUAL_STEP_NEEDED,
+    print_selinux_install_hint,
     run_clearance_install_phase,
     run_clearance_uninstall_phase,
     run_gate_install_phase,
@@ -26,6 +28,7 @@ from .._setup import (
     run_vault_install_phase,
     run_vault_uninstall_phase,
 )
+from .._util._selinux import SelinuxStatus
 from ..config import SandboxConfig, credentials_passphrase, credentials_use_keyring
 from ._types import ArgDef, CommandDef
 from .credentials import _run_credentials_setup_phase
@@ -79,7 +82,7 @@ def _handle_sandbox_setup(
     if cfg is None:
         cfg = SandboxConfig()
 
-    run_prereq_report(cfg)
+    selinux_result = run_prereq_report(cfg)
     print()
     print("Services:")
 
@@ -105,8 +108,19 @@ def _handle_sandbox_setup(
     if not no_clearance:
         failed |= not run_clearance_install_phase()
 
+    # Re-surface the SELinux install command at the bottom of output
+    # so it isn't scrolled away by service install banners.  Sandbox#854.
+    print_selinux_install_hint(selinux_result)
+
     if failed:
         raise SystemExit(1)
+    if selinux_result.status is SelinuxStatus.POLICY_MISSING:
+        # All install phases succeeded but the host still can't reach
+        # the sockets without the policy — setup is functionally
+        # incomplete.  Exit 5 ("manual host configuration needed") so
+        # scripts and the TUI can distinguish this from a phase failure
+        # and offer the specific remediation.
+        raise SystemExit(EXIT_MANUAL_STEP_NEEDED)
 
     stamp = write_stamp()
     print(f"→ setup stamp written: {stamp}")
