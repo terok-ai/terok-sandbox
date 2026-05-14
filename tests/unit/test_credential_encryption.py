@@ -1755,12 +1755,12 @@ class TestVaultSeal:
         TPM-equipped hosts (defense in depth) rather than the weaker
         TPM-only default the wrapper used to imply.
         """
-        from terok_sandbox.commands import _handle_vault_seal
+        from terok_sandbox.commands import handle_vault_seal
 
         cfg = self._seed_cfg(tmp_path)
         _, seal = self._stub_seal_ready(monkeypatch)
 
-        _handle_vault_seal(cfg=cfg, key=cli_key)
+        handle_vault_seal(cfg=cfg, key=cli_key)
 
         seal.assert_called_once_with(
             "current-pw", cfg.vault_systemd_creds_file, key_mode=expected_mode
@@ -1775,44 +1775,44 @@ class TestVaultSeal:
         is the authority — so the handler trusts ``seal()`` to fail loudly and
         translates the resulting RuntimeError into a CLI-friendly SystemExit.
         """
-        from terok_sandbox.commands import _handle_vault_seal
+        from terok_sandbox.commands import handle_vault_seal
 
         cfg = self._seed_cfg(tmp_path)
         _, seal = self._stub_seal_ready(monkeypatch)
         seal.side_effect = RuntimeError("systemd-creds encrypt failed (exit 1): no TPM2 device")
 
         with pytest.raises(SystemExit, match="no TPM2 device"):
-            _handle_vault_seal(cfg=cfg, key="tpm")
+            handle_vault_seal(cfg=cfg, key="tpm")
 
     def test_seal_unknown_key_value_rejected(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A typo'd --key value fails loudly rather than silently picking a default."""
-        from terok_sandbox.commands import _handle_vault_seal
+        from terok_sandbox.commands import handle_vault_seal
         from terok_sandbox.vault.store import systemd_creds as sc
 
         monkeypatch.setattr(sc, "is_available", lambda: True)
 
         with pytest.raises(SystemExit, match="unknown --key value"):
-            _handle_vault_seal(cfg=_make_cfg(tmp_path), key="bogus")
+            handle_vault_seal(cfg=_make_cfg(tmp_path), key="bogus")
 
     def test_seal_refuses_when_binary_missing(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """``systemd-creds`` absent or too old → exit with an actionable hint."""
-        from terok_sandbox.commands import _handle_vault_seal
+        from terok_sandbox.commands import handle_vault_seal
         from terok_sandbox.vault.store import systemd_creds as sc
 
         monkeypatch.setattr(sc, "is_available", lambda: False)
 
         with pytest.raises(SystemExit, match="needs systemd"):
-            _handle_vault_seal(cfg=_make_cfg(tmp_path))
+            handle_vault_seal(cfg=_make_cfg(tmp_path))
 
     def test_seal_refuses_when_no_current_passphrase(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Without an existing tier to seal from, the command fails loudly."""
-        from terok_sandbox.commands import _handle_vault_seal
+        from terok_sandbox.commands import handle_vault_seal
         from terok_sandbox.vault.store import systemd_creds as sc
 
         cfg = _make_cfg(tmp_path)
@@ -1823,13 +1823,13 @@ class TestVaultSeal:
         )
 
         with pytest.raises(SystemExit, match="no current passphrase"):
-            _handle_vault_seal(cfg=cfg)
+            handle_vault_seal(cfg=cfg)
 
     def test_seal_converts_broken_tier_to_systemexit(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A fail-closed resolver error (e.g. broken `passphrase_command`) surfaces as a clean CLI exit, not a traceback."""
-        from terok_sandbox.commands import _handle_vault_seal
+        from terok_sandbox.commands import handle_vault_seal
         from terok_sandbox.vault.store import systemd_creds as sc
 
         cfg = _make_cfg(tmp_path, passphrase_command="/bin/false")
@@ -1842,7 +1842,7 @@ class TestVaultSeal:
         with pytest.raises(
             SystemExit, match="cannot seal: passphrase_command produced no passphrase"
         ):
-            _handle_vault_seal(cfg=cfg)
+            handle_vault_seal(cfg=cfg)
 
     def test_seal_never_prompts_for_passphrase(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1857,7 +1857,7 @@ class TestVaultSeal:
         """
         from unittest.mock import MagicMock
 
-        from terok_sandbox.commands import _handle_vault_seal
+        from terok_sandbox.commands import handle_vault_seal
         from terok_sandbox.vault.store import systemd_creds as sc
 
         cfg = _make_cfg(tmp_path)
@@ -1871,7 +1871,7 @@ class TestVaultSeal:
         monkeypatch.setattr("prompt_toolkit.prompt", prompt)
 
         with pytest.raises(SystemExit, match="no current passphrase"):
-            _handle_vault_seal(cfg=cfg)
+            handle_vault_seal(cfg=cfg)
         prompt.assert_not_called()
 
     # ── Lifecycle helpers ──────────────────────────────────────────

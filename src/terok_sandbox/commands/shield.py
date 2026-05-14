@@ -5,7 +5,7 @@
 
 Composes sandbox's own ``install-hooks`` / ``uninstall-hooks`` admin
 verbs with every non-standalone-only entry from
-[`terok_shield.cli.registry.COMMANDS`][terok_shield.cli.registry.COMMANDS].  ``standalone_only=True``
+[`terok_shield.COMMANDS`][terok_shield.COMMANDS].  ``standalone_only=True``
 on shield's CommandDefs is the explicit "skip me when consumed
 downstream" marker; we honour it (filters ``setup``, ``prepare``,
 ``run``, ``resolve``).
@@ -22,9 +22,8 @@ from __future__ import annotations
 import functools
 from typing import TYPE_CHECKING, Any
 
-from terok_shield import Shield
+from terok_shield import COMMANDS as _SHIELD_REGISTRY, Shield
 from terok_shield.cli.main import _build_config as _shield_build_config  # noqa: PLC2701
-from terok_shield.cli.registry import COMMANDS as _SHIELD_REGISTRY
 
 from ._types import ArgDef, CommandDef
 

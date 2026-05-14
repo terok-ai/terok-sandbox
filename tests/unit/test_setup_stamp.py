@@ -46,7 +46,7 @@ def test_ok_after_write_with_unchanged_packages(monkeypatch) -> None:
     """Write a stamp, immediately read — installed versions match exactly → ``OK``."""
     monkeypatch.setattr(
         setup_stamp,
-        "_installed_versions",
+        "installed_versions",
         lambda: {"terok-sandbox": "0.0.95"},
     )
     write_stamp()
@@ -57,13 +57,13 @@ def test_stale_after_update_when_installed_is_newer(monkeypatch) -> None:
     """Bumping any installed package > stamp → ``STALE_AFTER_UPDATE``."""
     monkeypatch.setattr(
         setup_stamp,
-        "_installed_versions",
+        "installed_versions",
         lambda: {"terok-sandbox": "0.0.95"},
     )
     write_stamp()
     monkeypatch.setattr(
         setup_stamp,
-        "_installed_versions",
+        "installed_versions",
         lambda: {"terok-sandbox": "0.0.96"},
     )
     assert needs_setup() is SetupVerdict.STALE_AFTER_UPDATE
@@ -73,13 +73,13 @@ def test_stale_after_downgrade_when_installed_is_older(monkeypatch) -> None:
     """Any installed package < stamp → ``STALE_AFTER_DOWNGRADE`` — refuses by default."""
     monkeypatch.setattr(
         setup_stamp,
-        "_installed_versions",
+        "installed_versions",
         lambda: {"terok-sandbox": "0.0.95"},
     )
     write_stamp()
     monkeypatch.setattr(
         setup_stamp,
-        "_installed_versions",
+        "installed_versions",
         lambda: {"terok-sandbox": "0.0.90"},
     )
     assert needs_setup() is SetupVerdict.STALE_AFTER_DOWNGRADE
@@ -93,13 +93,13 @@ def test_stale_after_downgrade_when_installed_lost_a_package(monkeypatch) -> Non
     """
     monkeypatch.setattr(
         setup_stamp,
-        "_installed_versions",
+        "installed_versions",
         lambda: {"terok-sandbox": "0.0.95", "terok-shield": "0.6.30"},
     )
     write_stamp()
     monkeypatch.setattr(
         setup_stamp,
-        "_installed_versions",
+        "installed_versions",
         lambda: {"terok-sandbox": "0.0.95"},  # shield gone
     )
     assert needs_setup() is SetupVerdict.STALE_AFTER_DOWNGRADE
@@ -163,7 +163,7 @@ def test_write_stamp_atomic_via_tmp_then_rename(monkeypatch, tmp_path) -> None:
     mid-write, the next launch sees no stamp (FIRST_RUN), not a half
     one (STAMP_CORRUPT).
     """
-    monkeypatch.setattr(setup_stamp, "_installed_versions", lambda: {"x": "1.0.0"})
+    monkeypatch.setattr(setup_stamp, "installed_versions", lambda: {"x": "1.0.0"})
     path = write_stamp()
     assert path.is_file()
     # The temp sibling shouldn't survive a successful write.
@@ -181,7 +181,7 @@ def test_write_stamp_atomic_via_tmp_then_rename(monkeypatch, tmp_path) -> None:
 
 def test_clear_stamp_removes_file_returns_true(monkeypatch) -> None:
     """``clear_stamp`` removes a present file and reports True."""
-    monkeypatch.setattr(setup_stamp, "_installed_versions", lambda: {"x": "1.0.0"})
+    monkeypatch.setattr(setup_stamp, "installed_versions", lambda: {"x": "1.0.0"})
     write_stamp()
     assert clear_stamp() is True
     assert not stamp_path().exists()
@@ -195,7 +195,7 @@ def test_clear_stamp_no_op_when_absent_returns_false() -> None:
 # ── _compare_versions fallback ────────────────────────────────────────
 
 
-def test_installed_versions_includes_at_least_terok_sandbox() -> None:
+def testinstalled_versions_includes_at_least_terok_sandbox() -> None:
     """The default reader walks the tracked-package list via ``importlib.metadata``.
 
     Run against the real install — the test harness has terok-sandbox
@@ -203,9 +203,9 @@ def test_installed_versions_includes_at_least_terok_sandbox() -> None:
     (terok, terok-executor, etc.) may or may not be present in a
     sandbox-only environment; we don't assert on them.
     """
-    from terok_sandbox.setup_stamp import _installed_versions
+    from terok_sandbox.setup_stamp import installed_versions
 
-    versions = _installed_versions()
+    versions = installed_versions()
     assert "terok-sandbox" in versions
     # Any present version must be a non-empty string.
     assert all(isinstance(v, str) and v for v in versions.values())

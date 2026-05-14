@@ -179,11 +179,11 @@ def shield_interactive_session(
     """Run the terminal clearance fallback for a task's shield.
 
     Thin wrapper that spares callers from reaching into
-    [`terok_shield.cli.simple_clearance`][terok_shield.cli.simple_clearance] and rebuilding the
+    [`terok_shield.simple_clearance`][terok_shield.simple_clearance] and rebuilding the
     ``state_dir`` themselves.  Refuses to run when the D-Bus
     clearance hub is already handling the session.
     """
-    from terok_shield.cli.simple_clearance import run_simple_clearance
+    from terok_shield.simple_clearance import run_simple_clearance
 
     run_simple_clearance(make_shield(task_dir, cfg).config.state_dir, container)
 
@@ -196,10 +196,10 @@ def shield_watch_session(
     """Stream shield blocked-access events for a task as JSON lines.
 
     Thin wrapper that spares callers from reaching into
-    [`terok_shield.cli.watch`][terok_shield.cli.watch] and rebuilding the ``state_dir``
+    [`terok_shield.watch`][terok_shield.watch] and rebuilding the ``state_dir``
     themselves.
     """
-    from terok_shield.cli.watch import run_watch
+    from terok_shield.watch import run_watch
 
     run_watch(make_shield(task_dir, cfg).config.state_dir, container)
 

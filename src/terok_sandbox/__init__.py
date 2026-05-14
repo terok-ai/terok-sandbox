@@ -61,10 +61,13 @@ from .commands import (
     SHIELD_COMMANDS,
     SSH_COMMANDS,
     VAULT_COMMANDS,
+    ArgDef,
     CommandDef,
+    CommandTree,
     KeyRow,
     _handle_sandbox_setup as sandbox_setup,
     _handle_sandbox_uninstall as sandbox_uninstall,
+    handle_vault_seal,
 )
 from .config import CONTAINER_RUNTIME_DIR, SandboxConfig
 from .config_schema import (
@@ -121,7 +124,15 @@ from .runtime import (
     PortReservation,
 )
 from .sandbox import READY_MARKER, LifecycleHooks, RunSpec, Sandbox, Sharing, VolumeSpec
-from .setup_stamp import SetupVerdict, clear_stamp, needs_setup, stamp_path, write_stamp
+from .setup_stamp import (
+    SetupVerdict,
+    clear_stamp,
+    installed_versions,
+    needs_setup,
+    read_stamp,
+    stamp_path,
+    write_stamp,
+)
 from .shield import (
     EnvironmentCheck,
     NftNotFoundError,
@@ -167,7 +178,7 @@ from .vault.ssh.keypair import (
 )
 from .vault.ssh.manager import SSHInitResult, SSHManager
 from .vault.store.db import CredentialDB, SSHKeyRecord, SSHKeyRow, UnsafeCommentError
-from .vault.store.encryption import PassphraseSource
+from .vault.store.encryption import NoPassphraseError, PassphraseSource, WrongPassphraseError
 from .vault.store.systemd_creds import (
     has_tpm2 as systemd_creds_has_tpm2,
     is_available as is_systemd_creds_available,
@@ -346,7 +357,9 @@ __all__ = [
     # Setup stamp (epic #685 phase 1 — TUI's cheap "needs_setup" probe)
     "SetupVerdict",
     "clear_stamp",
+    "installed_versions",
     "needs_setup",
+    "read_stamp",
     "stamp_path",
     "write_stamp",
     # Lifecycle managers
@@ -414,9 +427,11 @@ __all__ = [
     "PHANTOM_CREDENTIALS_MARKER",
     # Credential DB
     "CredentialDB",
+    "NoPassphraseError",
     "PassphraseSource",
     "SSHKeyRecord",
     "SSHKeyRow",
+    "WrongPassphraseError",
     "is_systemd_creds_available",
     "systemd_creds_has_tpm2",
     # Vault
@@ -436,7 +451,9 @@ __all__ = [
     "stop_vault",
     "uninstall_vault_systemd",
     # Command registry
+    "ArgDef",
     "CommandDef",
+    "CommandTree",
     "CODEX_SHARED_OAUTH_MARKER",
     "KeyRow",
     "DOCTOR_COMMANDS",
@@ -446,6 +463,7 @@ __all__ = [
     "SANDBOX_COMMANDS",
     "SHIELD_COMMANDS",
     "SSH_COMMANDS",
+    "handle_vault_seal",
     # Aggregator entry points — one-call install/teardown of the
     # full shield+vault+gate+clearance stack.
     "sandbox_setup",

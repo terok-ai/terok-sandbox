@@ -256,7 +256,7 @@ _SEAL_KEY_MODES: dict[str, KeyMode] = {
 }
 
 
-def _handle_vault_seal(*, cfg: SandboxConfig | None = None, key: str = "auto") -> None:
+def handle_vault_seal(*, cfg: SandboxConfig | None = None, key: str = "auto") -> None:
     """Seal the credentials-DB passphrase into a systemd-creds credential.
 
     Adds the systemd-creds tier to the resolution chain: machine-bound
@@ -405,7 +405,7 @@ _PASSPHRASE_GROUP = CommandDef(
         CommandDef(
             name="seal",
             help="Seal the current passphrase into a systemd-creds credential",
-            handler=_handle_vault_seal,
+            handler=handle_vault_seal,
             args=(
                 ArgDef(
                     name="--key",
