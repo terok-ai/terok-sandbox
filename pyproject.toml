@@ -34,13 +34,6 @@ documentation = "https://terok-ai.github.io/terok-sandbox/"
 [tool.poetry.dependencies]
 python = ">=3.12,<4.0"
 terok-shield = {url = "https://github.com/terok-ai/terok-shield/releases/download/v0.6.40/terok_shield-0.6.40-py3-none-any.whl"}
-# Branch-pinned during the CommandTree unification chain so downstream
-# (terok) pins resolve to the same clearance version per the
-# package-pin-sync rule.  Sandbox itself doesn't consume clearance's
-# new ``children`` field — shield is the consumer's higher-level
-# adapter (terok consumes clearance's COMMANDS directly via the
-# CommandTree path).  Flipped back to the released wheel by the
-# release script once the chain merges.
 terok-clearance = {url = "https://github.com/terok-ai/terok-clearance/releases/download/v0.6.12/terok_clearance-0.6.12-py3-none-any.whl"}
 platformdirs = ">=4.9.6"
 aiohttp = ">=3.9"
