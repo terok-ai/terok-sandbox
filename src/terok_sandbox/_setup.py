@@ -30,13 +30,19 @@ import shutil
 from collections.abc import Callable, Iterable
 from typing import Any
 
+from ._exit_codes import EXIT_MANUAL_STEP_NEEDED
 from ._stage import stage_line as _stage_line
 from ._util import _systemctl
 from ._util._selinux import (
+    SelinuxCheckResult,
     SelinuxStatus,
     check_status as check_selinux_status,
     install_command as selinux_install_command,
 )
+
+# Re-export so existing callers ``from ._setup import EXIT_MANUAL_STEP_NEEDED``
+# keep working without reaching for the new foundation module.
+__all__ = ["EXIT_MANUAL_STEP_NEEDED"]
 from .config import SandboxConfig
 
 _HOST_BINARIES: tuple[str, ...] = ("podman", "git", "ssh-keygen")
@@ -45,12 +51,18 @@ _HOST_BINARIES: tuple[str, ...] = ("podman", "git", "ssh-keygen")
 # ── Prereq reporting (host binaries, firewall binaries, SELinux) ─────
 
 
-def run_prereq_report(cfg: SandboxConfig) -> None:
-    """Print host prerequisites.  Never blocks — purely informational."""
+def run_prereq_report(cfg: SandboxConfig) -> SelinuxCheckResult:
+    """Print host prerequisites and return the SELinux check result.
+
+    The result lets the caller decide whether to fail the setup or
+    re-surface the install hint at the end of output — sandbox#854's
+    fix for the install command getting buried mid-output.  Purely
+    informational for the binary checks; never blocks on those.
+    """
     print("Prerequisites:")
     _report_host_binaries()
     _report_firewall_binaries()
-    _report_selinux(cfg)
+    return _report_selinux(cfg)
 
 
 def _report_host_binaries() -> None:
@@ -80,14 +92,21 @@ def _report_firewall_binaries() -> None:
                 s.missing(check.purpose)
 
 
-def _report_selinux(cfg: SandboxConfig) -> None:
-    """Print SELinux policy status; stay silent when the host doesn't need one."""
+def _report_selinux(cfg: SandboxConfig) -> SelinuxCheckResult:
+    """Print SELinux policy status and return the check result.
+
+    Stays silent when the host doesn't need a policy (TCP mode or
+    SELinux disabled/permissive); the return value still carries the
+    structured outcome so the caller can re-surface the install
+    command at the end of setup output (where it's not scrolled out
+    of view).
+    """
     result = check_selinux_status(services_mode=cfg.services_mode)
     if result.status in (
         SelinuxStatus.NOT_APPLICABLE_TCP_MODE,
         SelinuxStatus.NOT_APPLICABLE_PERMISSIVE,
     ):
-        return
+        return result
     with _stage_line("SELinux policy") as s:
         match result.status:
             case SelinuxStatus.OK:
@@ -96,6 +115,38 @@ def _report_selinux(cfg: SandboxConfig) -> None:
                 s.missing(f"install: {selinux_install_command()}")
             case SelinuxStatus.LIBSELINUX_MISSING:
                 s.missing("libselinux.so.1 not loadable")
+    return result
+
+
+def print_selinux_install_hint(result: SelinuxCheckResult) -> None:
+    """Print the SELinux install command + TCP-mode alternative at end of setup output.
+
+    No-op when the SELinux state doesn't require operator action
+    (``OK``, ``NOT_APPLICABLE_*``).  Renders the two alternatives on
+    their own lines so the operator can copy-paste either without
+    surrounding output bleeding in.
+
+    Called *after* all install phases finish so the hint is the last
+    thing the operator sees — sandbox#854's complaint was that the
+    install command landed mid-output and scrolled out of view by the
+    time the install banner printed at the bottom.
+    """
+    if result.status is not SelinuxStatus.POLICY_MISSING:
+        return
+    print()
+    print("─ SELinux policy required ─────────────────────────────────────")
+    print("Socket-transport services need the terok_socket_t policy to be")
+    print("loaded; without it, containers can't reach the host sockets.")
+    print()
+    print("Install the policy (recommended):")
+    print()
+    print(f"  {selinux_install_command()}")
+    print()
+    print("Or switch to TCP mode (no SELinux policy needed):")
+    print()
+    print("  yq -yi '.services.mode = \"tcp\"' ~/.config/terok/config.yml")
+    print("  terok-sandbox setup")
+    print()
 
 
 # ── Service install phases ────────────────────────────────────────────

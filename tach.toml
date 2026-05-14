@@ -374,6 +374,14 @@ path = "terok_sandbox._setup"
 layer = "surface"
 depends_on = []
 
+# Foundation-level constants shared by the surface layer (orchestrators
+# that raise them) and the package init (re-exports them as public
+# API).  Zero internal imports.
+[[modules]]
+path = "terok_sandbox._exit_codes"
+layer = "foundation"
+depends_on = []
+
 # CLI entry point — same-layer dep on commands
 [[modules]]
 path = "terok_sandbox.cli"

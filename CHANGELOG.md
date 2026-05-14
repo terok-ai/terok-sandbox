@@ -5,6 +5,13 @@ also the "Changelog" link in PyPI metadata.
 
 [rel]: https://github.com/terok-ai/terok-sandbox/releases
 
+## v0.0.123 — SELinux Rules Hint
+
+## What's Changed
+* feat(setup): re-surface SELinux install command + TCP alternative at end of setup in https://github.com/terok-ai/terok-sandbox/pull/298
+
+**Full Changelog**: https://github.com/terok-ai/terok-sandbox/compare/v0.0.122...v0.0.123
+
 ## v0.0.122 — The State of the Shields
 
 ## What's Changed

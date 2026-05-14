@@ -36,8 +36,16 @@ def install_spies():
     — it shells out for host binaries which would noisily poll the CI
     runner's PATH.
     """
+    from terok_sandbox._util._selinux import SelinuxCheckResult, SelinuxStatus
+
+    # Default prereq result: TCP-mode equivalent ("no SELinux policy needed").
+    # Tests that exercise the SELinux POLICY_MISSING branch override this.
+    _no_selinux_concern = SelinuxCheckResult(SelinuxStatus.NOT_APPLICABLE_TCP_MODE)
     with (
-        patch("terok_sandbox.commands.sandbox.run_prereq_report") as prereq,
+        patch(
+            "terok_sandbox.commands.sandbox.run_prereq_report",
+            return_value=_no_selinux_concern,
+        ) as prereq,
         patch(
             "terok_sandbox.commands.sandbox.run_shield_install_phase", return_value=True
         ) as shield,
@@ -94,8 +102,11 @@ class TestSandboxSetup:
     """``sandbox setup`` orchestrates prereq → shield → vault → gate → clearance."""
 
     def test_default_runs_all_phases_in_order(self, install_spies) -> None:
+        from terok_sandbox._util._selinux import SelinuxCheckResult, SelinuxStatus
+
         order: list[str] = []
-        install_spies["prereq"].side_effect = lambda _cfg: order.append("prereq")
+        no_selinux = SelinuxCheckResult(SelinuxStatus.NOT_APPLICABLE_TCP_MODE)
+        install_spies["prereq"].side_effect = lambda _cfg: order.append("prereq") or no_selinux
         install_spies["shield"].side_effect = lambda **_: order.append("shield") or True
         install_spies["vault"].side_effect = lambda _cfg: order.append("vault") or True
         install_spies["gate"].side_effect = lambda _cfg: order.append("gate") or True
@@ -139,6 +150,43 @@ class TestSandboxSetup:
     def test_happy_path_does_not_raise(self, install_spies) -> None:
         """Every phase reports ``ok=True`` → the aggregator returns normally."""
         _handle_sandbox_setup()  # no SystemExit expected
+
+    def test_policy_missing_exits_5_with_actionable_hint(
+        self, install_spies, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """``POLICY_MISSING`` re-surfaces the install command + TCP alternative and exits 5."""
+        from terok_sandbox._util._selinux import SelinuxCheckResult, SelinuxStatus
+
+        install_spies["prereq"].return_value = SelinuxCheckResult(SelinuxStatus.POLICY_MISSING)
+
+        with pytest.raises(SystemExit) as exc:
+            _handle_sandbox_setup()
+        # Exit code 5 ("manual host configuration needed") distinguishes
+        # this from a phase failure (1) so the TUI can offer the
+        # specific fix instead of a generic "setup failed" banner.
+        assert exc.value.code == 5
+
+        out = capsys.readouterr().out
+        # Both the install command and the TCP-mode alternative land
+        # at the end of output, each on its own line so the operator
+        # can copy-paste either without bleed.
+        assert "SELinux policy required" in out
+        assert "install_policy.sh" in out
+        assert 'services.mode = "tcp"' in out
+
+    def test_policy_missing_skipped_when_phases_already_failed(self, install_spies) -> None:
+        """A prior phase failure exits 1; the SELinux exit-5 path doesn't override that."""
+        from terok_sandbox._util._selinux import SelinuxCheckResult, SelinuxStatus
+
+        install_spies["prereq"].return_value = SelinuxCheckResult(SelinuxStatus.POLICY_MISSING)
+        install_spies["vault"].return_value = False
+
+        with pytest.raises(SystemExit) as exc:
+            _handle_sandbox_setup()
+        # Phase failures take precedence — exit 1, not 5.  The SELinux
+        # hint is still printed (operator-facing) but the contract for
+        # the exit code is "the first thing that went wrong".
+        assert exc.value.code == 1
 
 
 # ── Uninstall aggregator ──────────────────────────────────────────────────

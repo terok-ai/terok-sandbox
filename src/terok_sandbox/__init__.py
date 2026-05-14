@@ -24,6 +24,7 @@ from importlib.metadata import PackageNotFoundError, version as _meta_version
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ._exit_codes import EXIT_MANUAL_STEP_NEEDED
 from ._stage import (
     STAGE_WIDTH,
     Marker,
@@ -322,6 +323,7 @@ def stop_vault(cfg: SandboxConfig | None = None) -> None:
 __all__ = [
     # Cross-package utilities
     "BestEffortLogger",
+    "EXIT_MANUAL_STEP_NEEDED",
     "sanitize_tty",
     # Config
     "CONTAINER_RUNTIME_DIR",
