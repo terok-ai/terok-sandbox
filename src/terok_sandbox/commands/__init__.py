@@ -31,7 +31,7 @@ Shield commands are delegated to terok-shield's own registry —
 
 from __future__ import annotations
 
-from ._types import ArgDef, CommandDef, KeyRow
+from ._types import ArgDef, CommandDef, CommandTree, KeyRow
 from .credentials import (
     CREDENTIALS_COMMANDS,
     _ask_passphrase_mode,
@@ -55,7 +55,6 @@ from .sandbox import SETUP_COMMANDS, _handle_sandbox_setup, _handle_sandbox_unin
 from .shield import (
     SHIELD_COMMANDS,
     _handle_shield_setup,
-    _handle_shield_status,
     _handle_shield_uninstall,
 )
 from .ssh import (
@@ -77,7 +76,6 @@ from .ssh import (
 )
 from .vault import (
     VAULT_COMMANDS,
-    VAULT_PASSPHRASE_COMMANDS,
     _forget_config_tier_updates,
     _handle_vault_destroy_passphrase,
     _handle_vault_install,
@@ -92,21 +90,24 @@ from .vault import (
     _print_plaintext_passphrase_warning,
 )
 
-#: Top-level sandbox commands, grouped by subsystem.  ``CREDENTIALS_COMMANDS``
-#: is **deliberately** absent — credentials verbs sit under their own
-#: ``credentials`` subparser group, wired separately in
-#: [`terok_sandbox.cli`][terok_sandbox.cli], so they don't pollute the
-#: flat top-level namespace that out-of-tree frontends (terok TUI,
-#: terok-executor) consume from this tuple.
-COMMANDS: tuple[CommandDef, ...] = (
+#: Sandbox's top-level command forest — a [`CommandTree`][terok_sandbox.commands.CommandTree]
+#: of every verb the package exposes.  Each per-subsystem ``*_COMMANDS``
+#: tuple contributes one or more root verbs; subsystem groups (gate,
+#: shield, vault, ssh, credentials) each contribute exactly one root
+#: holding their subverbs as ``children`` so the structural nesting
+#: matches the operator-facing CLI surface.  Out-of-tree consumers
+#: (terok, terok-executor) walk this tree via
+#: [`CommandTree.overlay`][terok_sandbox.commands.CommandTree.overlay]
+#: and [`CommandTree.wire`][terok_sandbox.commands.CommandTree.wire].
+COMMANDS: CommandTree = CommandTree(
     SETUP_COMMANDS
     + GATE_COMMANDS
     + SHIELD_COMMANDS
     + VAULT_COMMANDS
-    + VAULT_PASSPHRASE_COMMANDS
     + SSH_COMMANDS
-    + DOCTOR_COMMANDS
+    + CREDENTIALS_COMMANDS
     + LAUNCH_COMMANDS
+    + DOCTOR_COMMANDS
 )
 
 
@@ -114,6 +115,7 @@ __all__ = [
     # Vocabulary
     "ArgDef",
     "CommandDef",
+    "CommandTree",
     "KeyRow",
     # Aggregated registries
     "COMMANDS",
@@ -125,7 +127,6 @@ __all__ = [
     "SHIELD_COMMANDS",
     "SSH_COMMANDS",
     "VAULT_COMMANDS",
-    "VAULT_PASSPHRASE_COMMANDS",
     # Handlers re-exported for testing and out-of-tree consumers (terok
     # frontends sometimes call them directly).  The underscore prefix
     # marks them as "registry-only" — the registry is the public entry
@@ -148,7 +149,6 @@ __all__ = [
     "_handle_sandbox_setup",
     "_handle_sandbox_uninstall",
     "_handle_shield_setup",
-    "_handle_shield_status",
     "_handle_shield_uninstall",
     "_handle_ssh_add",
     "_handle_ssh_export",

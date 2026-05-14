@@ -485,179 +485,178 @@ def _handle_ssh_remove(
     print(f"Unassigned {n} key{'s' if n != 1 else ''} from their scope(s).")
 
 
+#: The SSH-keypair management group exposed at sandbox's top level.
 SSH_COMMANDS: tuple[CommandDef, ...] = (
     CommandDef(
-        name="list",
-        help="List SSH keys stored in the vault",
-        handler=_handle_ssh_list,
-        group="ssh",
-        args=(
-            ArgDef(
-                name="--scope",
-                help="Show keys for a specific credential scope only",
-                default=None,
+        name="ssh",
+        help="SSH keypair management",
+        children=(
+            CommandDef(
+                name="list",
+                help="List SSH keys stored in the vault",
+                handler=_handle_ssh_list,
+                args=(
+                    ArgDef(
+                        name="--scope",
+                        help="Show keys for a specific credential scope only",
+                        default=None,
+                    ),
+                ),
             ),
-        ),
-    ),
-    CommandDef(
-        name="import",
-        help="Import an OpenSSH keypair from files into the vault DB",
-        handler=_handle_ssh_import,
-        group="ssh",
-        args=(
-            ArgDef(name="scope", help="Credential scope to associate the key with"),
-            ArgDef(
-                name="--private-key",
-                help="Path to the private key file",
-                dest="private_key",
-                required=True,
+            CommandDef(
+                name="import",
+                help="Import an OpenSSH keypair from files into the vault DB",
+                handler=_handle_ssh_import,
+                args=(
+                    ArgDef(name="scope", help="Credential scope to associate the key with"),
+                    ArgDef(
+                        name="--private-key",
+                        help="Path to the private key file",
+                        dest="private_key",
+                        required=True,
+                    ),
+                    ArgDef(
+                        name="--public-key",
+                        help="Path to the .pub file (default: derive from the private key)",
+                        default=None,
+                        dest="public_key",
+                    ),
+                    ArgDef(
+                        name="--comment",
+                        help="Override the key's comment string",
+                        default=None,
+                    ),
+                ),
             ),
-            ArgDef(
-                name="--public-key",
-                help="Path to the .pub file (default: derive from the private key)",
-                default=None,
-                dest="public_key",
+            CommandDef(
+                name="add",
+                help="Generate a new SSH keypair in the vault for a credential scope",
+                handler=_handle_ssh_add,
+                args=(
+                    ArgDef(name="scope", help="Credential scope to associate the key with"),
+                    ArgDef(
+                        name="--key-type",
+                        help="Key algorithm: ed25519 (default) or rsa",
+                        default="ed25519",
+                        dest="key_type",
+                    ),
+                    ArgDef(
+                        name="--comment",
+                        help="Comment embedded in the public key (default: tk-main:<scope>)",
+                        default=None,
+                    ),
+                    ArgDef(
+                        name="--force",
+                        help="Rotate — unassign all existing keys from the scope and generate fresh",
+                        action="store_true",
+                    ),
+                ),
             ),
-            ArgDef(
-                name="--comment",
-                help="Override the key's comment string",
-                default=None,
+            CommandDef(
+                name="export",
+                help="Export a scope's SSH keypair to standard OpenSSH files",
+                handler=_handle_ssh_export,
+                args=(
+                    ArgDef(name="scope", help="Credential scope to export"),
+                    ArgDef(
+                        name="--out-dir",
+                        help="Directory to write files into",
+                        dest="out_dir",
+                        required=True,
+                    ),
+                    ArgDef(
+                        name="--key-id",
+                        help="Export a specific ssh_keys.id (default: most recently added)",
+                        default=None,
+                        dest="key_id",
+                        type=int,
+                    ),
+                    ArgDef(
+                        name="--out-name",
+                        help="Override the output filename stem (default: id_<type>_<fp8>)",
+                        default=None,
+                        dest="out_name",
+                    ),
+                ),
             ),
-        ),
-    ),
-    CommandDef(
-        name="add",
-        help="Generate a new SSH keypair in the vault for a credential scope",
-        handler=_handle_ssh_add,
-        group="ssh",
-        args=(
-            ArgDef(name="scope", help="Credential scope to associate the key with"),
-            ArgDef(
-                name="--key-type",
-                help="Key algorithm: ed25519 (default) or rsa",
-                default="ed25519",
-                dest="key_type",
+            CommandDef(
+                name="pub",
+                help="Print a scope's public key to stdout",
+                handler=_handle_ssh_pub,
+                args=(
+                    ArgDef(name="scope", help="Credential scope"),
+                    ArgDef(
+                        name="--key-id",
+                        help="Specific ssh_keys.id (default: most recently added)",
+                        default=None,
+                        dest="key_id",
+                        type=int,
+                    ),
+                    ArgDef(
+                        name="--all",
+                        help="Print every key assigned to the scope, one per line",
+                        action="store_true",
+                        dest="all_keys",
+                    ),
+                ),
             ),
-            ArgDef(
-                name="--comment",
-                help="Comment embedded in the public key (default: tk-main:<scope>)",
-                default=None,
+            CommandDef(
+                name="link",
+                help="Link an existing vault key to an additional scope",
+                handler=_handle_ssh_link,
+                args=(
+                    ArgDef(name="scope", help="Credential scope to link the key to"),
+                    ArgDef(
+                        name="--key-id",
+                        help="ssh_keys.id of the key already stored in the vault",
+                        dest="key_id",
+                        type=int,
+                        required=True,
+                    ),
+                ),
             ),
-            ArgDef(
-                name="--force",
-                help="Rotate — unassign all existing keys from the scope and generate fresh",
-                action="store_true",
+            CommandDef(
+                name="rename",
+                help="Change the comment of a stored SSH key (selected by fingerprint prefix)",
+                handler=_handle_ssh_rename,
+                args=(
+                    ArgDef(
+                        name="fingerprint",
+                        help="Fingerprint prefix identifying the key (min 8 chars recommended)",
+                    ),
+                    ArgDef(
+                        name="comment",
+                        help="New comment text",
+                    ),
+                ),
             ),
-        ),
-    ),
-    CommandDef(
-        name="export",
-        help="Export a scope's SSH keypair to standard OpenSSH files",
-        handler=_handle_ssh_export,
-        group="ssh",
-        args=(
-            ArgDef(name="scope", help="Credential scope to export"),
-            ArgDef(
-                name="--out-dir",
-                help="Directory to write files into",
-                dest="out_dir",
-                required=True,
-            ),
-            ArgDef(
-                name="--key-id",
-                help="Export a specific ssh_keys.id (default: most recently added)",
-                default=None,
-                dest="key_id",
-                type=int,
-            ),
-            ArgDef(
-                name="--out-name",
-                help="Override the output filename stem (default: id_<type>_<fp8>)",
-                default=None,
-                dest="out_name",
-            ),
-        ),
-    ),
-    CommandDef(
-        name="pub",
-        help="Print a scope's public key to stdout",
-        handler=_handle_ssh_pub,
-        group="ssh",
-        args=(
-            ArgDef(name="scope", help="Credential scope"),
-            ArgDef(
-                name="--key-id",
-                help="Specific ssh_keys.id (default: most recently added)",
-                default=None,
-                dest="key_id",
-                type=int,
-            ),
-            ArgDef(
-                name="--all",
-                help="Print every key assigned to the scope, one per line",
-                action="store_true",
-                dest="all_keys",
-            ),
-        ),
-    ),
-    CommandDef(
-        name="link",
-        help="Link an existing vault key to an additional scope",
-        handler=_handle_ssh_link,
-        group="ssh",
-        args=(
-            ArgDef(name="scope", help="Credential scope to link the key to"),
-            ArgDef(
-                name="--key-id",
-                help="ssh_keys.id of the key already stored in the vault",
-                dest="key_id",
-                type=int,
-                required=True,
-            ),
-        ),
-    ),
-    CommandDef(
-        name="rename",
-        help="Change the comment of a stored SSH key (selected by fingerprint prefix)",
-        handler=_handle_ssh_rename,
-        group="ssh",
-        args=(
-            ArgDef(
-                name="fingerprint",
-                help="Fingerprint prefix identifying the key (min 8 chars recommended)",
-            ),
-            ArgDef(
-                name="comment",
-                help="New comment text",
-            ),
-        ),
-    ),
-    CommandDef(
-        name="remove",
-        help="Unassign SSH keys from scopes (orphaned keys cascade-delete)",
-        handler=_handle_ssh_remove,
-        group="ssh",
-        args=(
-            ArgDef(
-                name="--scope",
-                help="Filter by credential scope (exact match)",
-                default=None,
-            ),
-            ArgDef(
-                name="--comment",
-                help="Filter by comment (supports glob wildcards)",
-                default=None,
-            ),
-            ArgDef(
-                name="--fingerprint",
-                help="Filter by fingerprint prefix (min 8 chars recommended)",
-                default=None,
-            ),
-            ArgDef(
-                name="--yes",
-                help="Skip confirmation prompts",
-                action="store_true",
-                dest="yes",
+            CommandDef(
+                name="remove",
+                help="Unassign SSH keys from scopes (orphaned keys cascade-delete)",
+                handler=_handle_ssh_remove,
+                args=(
+                    ArgDef(
+                        name="--scope",
+                        help="Filter by credential scope (exact match)",
+                        default=None,
+                    ),
+                    ArgDef(
+                        name="--comment",
+                        help="Filter by comment (supports glob wildcards)",
+                        default=None,
+                    ),
+                    ArgDef(
+                        name="--fingerprint",
+                        help="Filter by fingerprint prefix (min 8 chars recommended)",
+                        default=None,
+                    ),
+                    ArgDef(
+                        name="--yes",
+                        help="Skip confirmation prompts",
+                        action="store_true",
+                        dest="yes",
+                    ),
+                ),
             ),
         ),
     ),

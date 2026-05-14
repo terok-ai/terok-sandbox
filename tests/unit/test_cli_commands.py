@@ -12,7 +12,6 @@ from terok_sandbox.cli import main
 from terok_sandbox.commands import (
     COMMANDS,
     GATE_COMMANDS,
-    SHIELD_COMMANDS,
     SSH_COMMANDS,
     CommandDef,
 )
@@ -47,30 +46,37 @@ class TestCommandRegistry:
             assert isinstance(cmd, CommandDef)
 
     def test_all_commands_have_names(self) -> None:
-        for cmd in COMMANDS:
+        for _path, cmd in COMMANDS.walk():
             assert cmd.name, f"Command missing name: {cmd}"
 
-    def test_all_commands_have_handlers(self) -> None:
-        for cmd in COMMANDS:
-            assert cmd.handler is not None, f"Command '{cmd.name}' has no handler"
+    def test_every_leaf_has_a_handler(self) -> None:
+        """Group nodes have ``children`` and no handler; leaves have a handler."""
+        for path, cmd in COMMANDS.walk():
+            if cmd.children:
+                assert cmd.handler is None, f"group {'.'.join(path)} has a handler"
+            else:
+                assert cmd.handler is not None, f"leaf {'.'.join(path)} has no handler"
 
-    def test_gate_commands_grouped(self) -> None:
-        assert all(cmd.group == "gate" for cmd in GATE_COMMANDS)
-
-    def test_shield_commands_grouped(self) -> None:
-        assert all(cmd.group == "shield" for cmd in SHIELD_COMMANDS)
-
-    def test_gate_has_start_stop_status(self) -> None:
-        names = {cmd.name for cmd in GATE_COMMANDS}
+    def test_gate_subverbs_present(self) -> None:
+        gate = COMMANDS.find_at(("gate",))
+        names = {c.name for c in gate.children}
         assert {"start", "stop", "status"} <= names
 
-    def test_shield_has_install_hooks_and_status(self) -> None:
-        names = {cmd.name for cmd in SHIELD_COMMANDS}
+    def test_shield_subverbs_present(self) -> None:
+        shield = COMMANDS.find_at(("shield",))
+        names = {c.name for c in shield.children}
         assert {"install-hooks", "status"} <= names
 
-    def test_ssh_has_import_add_and_remove(self) -> None:
-        names = {cmd.name for cmd in SSH_COMMANDS}
+    def test_ssh_subverbs_present(self) -> None:
+        ssh = COMMANDS.find_at(("ssh",))
+        names = {c.name for c in ssh.children}
         assert {"import", "add", "remove"} <= names
+
+    def test_vault_passphrase_nested_subgroup(self) -> None:
+        """The ``vault passphrase`` subgroup is reachable as a nested CommandDef."""
+        passphrase = COMMANDS.find_at(("vault", "passphrase"))
+        names = {c.name for c in passphrase.children}
+        assert {"seal", "to-keyring", "destroy"} == names
 
 
 # ---------------------------------------------------------------------------
@@ -139,13 +145,21 @@ class TestShieldCLI:
         run_setup.assert_called_once_with(root=False, user=True)
 
     def test_shield_status_runs(self) -> None:
+        """``shield status`` resolves through shield's own registry handler.
+
+        Sandbox no longer hand-rolls a separate status function — the
+        verb is consumed from terok-shield's COMMANDS via the
+        CommandTree.  Mock at the Shield instance level so the
+        sandbox-wrapped path exercises the same code shield's
+        standalone CLI runs.
+        """
         from terok_shield import EnvironmentCheck
 
         mock_env = EnvironmentCheck(ok=True, hooks="per-container", health="ok")
         mock_cfg = {"mode": "hook", "profiles": ["dev-standard"], "audit_enabled": True}
         with (
-            patch("terok_sandbox.shield.check_environment", return_value=mock_env),
-            patch("terok_sandbox.shield.status", return_value=mock_cfg),
+            patch("terok_shield.Shield.status", return_value=mock_cfg),
+            patch("terok_shield.Shield.check_environment", return_value=mock_env),
         ):
             out, _, rc = _run_cli("shield", "status")
         assert rc == 0
@@ -160,14 +174,16 @@ class TestHandlerCfgSignatures:
     def test_gate_handlers_accept_cfg(self) -> None:
         import inspect
 
-        for cmd in GATE_COMMANDS:
+        gate = GATE_COMMANDS[0]
+        for cmd in gate.children:
             sig = inspect.signature(cmd.handler)
             assert "cfg" in sig.parameters, f"{cmd.handler.__name__} missing cfg param"
 
     def test_ssh_handlers_accept_cfg(self) -> None:
         import inspect
 
-        for cmd in SSH_COMMANDS:
+        ssh = SSH_COMMANDS[0]
+        for cmd in ssh.children:
             sig = inspect.signature(cmd.handler)
             assert "cfg" in sig.parameters, f"{cmd.handler.__name__} missing cfg param"
 

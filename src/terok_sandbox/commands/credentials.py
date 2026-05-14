@@ -372,15 +372,21 @@ def _looks_like_db_lock(exc: BaseException) -> bool:
     return "database is locked" in str(exc).lower()
 
 
+#: The credentials-DB management group exposed at sandbox's top level.
 CREDENTIALS_COMMANDS: tuple[CommandDef, ...] = (
     CommandDef(
-        name="encrypt-db",
-        help=(
-            "Migrate a legacy plaintext credentials DB to SQLCipher-encrypted "
-            "(deprecated in 0.9.0, removed in 0.10.0)"
+        name="credentials",
+        help="Credentials DB management",
+        children=(
+            CommandDef(
+                name="encrypt-db",
+                help=(
+                    "Migrate a legacy plaintext credentials DB to SQLCipher-encrypted "
+                    "(deprecated in 0.9.0, removed in 0.10.0)"
+                ),
+                handler=_handle_credentials_encrypt_db,
+            ),
         ),
-        handler=_handle_credentials_encrypt_db,
-        group="credentials",
     ),
 )
 

@@ -5,6 +5,16 @@ also the "Changelog" link in PyPI metadata.
 
 [rel]: https://github.com/terok-ai/terok-sandbox/releases
 
+## v0.0.121 — The Tree of Command
+
+## What's Changed
+* feat(cli): unified CommandTree + structural nesting (no more flat tuples) in https://github.com/terok-ai/terok-sandbox/pull/295
+* feat(vault): consolidate passphrase management under `vault passphrase` namespace by @sliwowitz in https://github.com/terok-ai/terok-sandbox/pull/294
+* test(matrix): pin exact podman versions, warn on drift; refresh dev deps by @sliwowitz in https://github.com/terok-ai/terok-sandbox/pull/296
+
+
+**Full Changelog**: https://github.com/terok-ai/terok-sandbox/compare/v0.0.120...v0.0.121
+
 ## v0.0.120 — Sandbox API restructure
 
 ## What's Changed
