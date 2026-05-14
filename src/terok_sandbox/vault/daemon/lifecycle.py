@@ -21,12 +21,12 @@ import os
 import shlex
 import signal
 import subprocess  # nosec B404 — vault daemon Popen + systemctl helpers — vault daemon Popen + systemctl helpers
-import sys
 import time
 from pathlib import Path
 
 from terok_sandbox._util import _systemctl
 from terok_sandbox._util._logging import log_warning
+from terok_sandbox._util._subprocess_env import child_process_env
 from terok_sandbox.config import SandboxConfig
 
 from ..store.encryption import (
@@ -461,11 +461,10 @@ class VaultManager:
         # that normally rewrites the env on startup) spawning ``python -m
         # terok_sandbox.vault`` from a running terok_sandbox process bypasses
         # that wrapper, and the vault daemon can't find its own package on
-        # the import path.  Passing the parent's ``sys.path`` through as
-        # ``PYTHONPATH`` lets the subprocess resolve the same install this
-        # process is running from.  See terok-ai/terok-shield#242 by
-        # Franz Pöschel — same fix pattern, different spawn site.
-        env = {**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)}
+        # the import path.  ``child_process_env`` threads the parent's
+        # ``sys.path`` through as ``PYTHONPATH`` so the subprocess resolves
+        # the same install this process is running from.
+        env = child_process_env()
 
         # Fork into background so the vault survives shell exit.
         # stderr=PIPE only for the startup-failure detection window.
