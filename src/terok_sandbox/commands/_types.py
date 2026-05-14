@@ -356,7 +356,10 @@ def _wire_command(sub: argparse._SubParsersAction, cmd: CommandDef) -> None:
             kwargs["dest"] = arg.dest
         if arg.nargs is not None:
             kwargs["nargs"] = arg.nargs
-        if arg.required and arg.name.startswith("-"):
+        # ``required`` is sandbox-specific (clearance / shield ArgDefs
+        # don't declare it); getattr defaults keep the wire layer
+        # tolerant of slimmer foreign shapes.
+        if getattr(arg, "required", False) and arg.name.startswith("-"):
             kwargs["required"] = True
         # Slash-separated names (e.g. ``-t/--timeout``) expand to argparse's
         # multi-name form so a downstream registry (clearance) can declare
