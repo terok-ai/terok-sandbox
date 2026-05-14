@@ -5,6 +5,17 @@ also the "Changelog" link in PyPI metadata.
 
 [rel]: https://github.com/terok-ai/terok-sandbox/releases
 
+## v0.0.120 — Sandbox API restructure
+
+## What's Changed
+* refactor: drop the vault/credentials back-compat shims in https://github.com/terok-ai/terok-sandbox/pull/293
+* feat(vault): pluggable passphrase_command chain tier (closes #283) by @sliwowitz in https://github.com/terok-ai/terok-sandbox/pull/290
+* refactor: split commands.py into per-subsystem package; tighten vocabulary by @sliwowitz in https://github.com/terok-ai/terok-sandbox/pull/291
+* refactor: unify vault and credentials under vault/{store,ssh,daemon} by @sliwowitz in https://github.com/terok-ai/terok-sandbox/pull/292
+
+
+**Full Changelog**: https://github.com/terok-ai/terok-sandbox/compare/v0.0.119...v0.0.120
+
 ## v0.0.119 — Passphrase Handling
 
 ## What's Changed

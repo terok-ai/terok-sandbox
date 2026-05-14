@@ -4,7 +4,7 @@ build-backend = "poetry_dynamic_versioning.backend"
 
 [tool.poetry]
 name = "terok-sandbox"
-version = "0.0.119"
+version = "0.0.120"
 description = "Hardened Podman container runner with gate server and shield integration"
 readme = "README.md"
 license = "Apache-2.0"
@@ -83,7 +83,7 @@ mkdocs-terok = "^0.6"
 [tool.poetry.scripts]
 terok-sandbox = "terok_sandbox.cli:main"
 terok-gate = "terok_sandbox.gate.server:main"
-terok-vault = "terok_sandbox.vault.token_broker:main"
+terok-vault = "terok_sandbox.vault.daemon.token_broker:main"
 
 [tool.poetry.urls]
 Issues = "https://github.com/terok-ai/terok-sandbox/issues"
