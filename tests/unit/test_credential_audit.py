@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from terok_sandbox.vault.audit import (
+from terok_sandbox.vault.daemon.audit import (
     AuditWriter,
     credential_audit_log_path,
 )
@@ -140,10 +140,33 @@ class TestAuditWriter:
             writer._fh.write = unittest.mock.MagicMock(  # type: ignore[union-attr]
                 side_effect=OSError("disk quota exceeded")
             )
-            with caplog.at_level("WARNING", logger="terok_sandbox.vault.audit"):
+            with caplog.at_level("WARNING", logger="terok_sandbox.vault.daemon.audit"):
                 await writer.write({"x": 2})  # must not raise
         finally:
             await writer.close()
 
         warnings = [r for r in caplog.records if r.levelname == "WARNING"]
         assert any("audit write failed" in r.message for r in warnings)
+
+    @pytest.mark.asyncio
+    async def test_write_serialization_error_logs_warning_and_returns(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A non-JSON-serializable field is soft-failed, not raised.
+
+        Pins the documented "audit write must never block or kill a
+        credential-bearing request" contract against a serialization
+        failure (e.g. an object slipping into the entry that has no
+        ``__json__``).
+        """
+        path = tmp_path / "audit.jsonl"
+        writer = AuditWriter(path)
+        with caplog.at_level("WARNING", logger="terok_sandbox.vault.daemon.audit"):
+            # ``set`` is the canonical non-JSON-serializable type.
+            await writer.write({"bad": {1, 2, 3}})
+        await writer.close()
+
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert any("not JSON-serializable" in r.message for r in warnings)
+        # Nothing was written — the lazy file should never have been opened.
+        assert not path.exists()

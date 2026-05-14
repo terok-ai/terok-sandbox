@@ -401,7 +401,7 @@ class TestParseSshSignerPort:
         unit = tmp_path / "terok-vault.service"
         unit.write_text(
             "[Service]\n"
-            "ExecStart=/usr/bin/python3 -m terok_sandbox.vault.token_broker "
+            "ExecStart=/usr/bin/python3 -m terok_sandbox.vault.daemon.token_broker "
             "--port=18751 --ssh-signer-port=18752 --db-path=/tmp/db\n"
         )
         assert _parse_ssh_signer_port(unit) == 18752

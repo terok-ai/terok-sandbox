@@ -86,7 +86,7 @@ def read_config_section(section: str) -> dict[str, str]:
             stack.push(load_yaml_scope(label, path))
         merged = stack.resolve_section(section)
         result = {k: str(v) for k, v in merged.items() if v is not None}
-    except Exception:  # noqa: BLE001 — fail-silent; bad config should not crash path resolution
+    except Exception:  # noqa: BLE001 — fail-silent; bad config should not crash path resolution  # nosec B110 — best-effort probe; failure is non-fatal
         pass
     _config_section_cache[section] = result
     return result
@@ -126,7 +126,7 @@ def plaintext_passphrase_config_path() -> Path | None:
             creds = scope.data.get("credentials") if isinstance(scope.data, dict) else None
             if isinstance(creds, dict) and creds.get("passphrase"):
                 found = path
-        except Exception:  # noqa: BLE001 — fail-silent; bad config layer must not crash the walk
+        except Exception:  # noqa: BLE001 — fail-silent; bad config layer must not crash the walk  # nosec B112 — best-effort iteration; skip-on-error keeps the scan going
             continue
     return found
 

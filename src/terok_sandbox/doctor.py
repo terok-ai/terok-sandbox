@@ -129,7 +129,7 @@ def _make_vault_unlocked_check() -> DoctorCheck:
     def _eval(_rc: int, _stdout: str, _stderr: str) -> CheckVerdict:
         """Walk the resolution chain locally; report the verdict."""
         from .config import SandboxConfig
-        from .credentials.encryption import WrongPassphraseError
+        from .vault.store.encryption import WrongPassphraseError
 
         try:
             passphrase = SandboxConfig().resolve_passphrase()
@@ -203,7 +203,7 @@ def _make_plaintext_passphrase_warning_check() -> DoctorCheck:
 
 def _make_token_broker_check(token_broker_port: int) -> DoctorCheck:
     """Check that the token broker is reachable from inside the container."""
-    from .vault.constants import HEALTH_PATH
+    from .vault.daemon.constants import HEALTH_PATH
 
     url = f"http://host.containers.internal:{token_broker_port}{HEALTH_PATH}"
 

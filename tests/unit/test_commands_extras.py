@@ -25,7 +25,7 @@ from terok_sandbox.commands import (
 from terok_sandbox.config import SandboxConfig
 from terok_sandbox.doctor import CheckVerdict, DoctorCheck
 from terok_sandbox.gate.lifecycle import GateServerManager, GateServerStatus
-from terok_sandbox.vault.lifecycle import VaultManager
+from terok_sandbox.vault.daemon.lifecycle import VaultManager
 
 # ---------------------------------------------------------------------------
 # Helpers

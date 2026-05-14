@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import os
 import signal
-import subprocess
+import subprocess  # nosec B404 — spawning the gate server daemon — spawning the gate server daemon
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -209,20 +209,14 @@ class GateServerManager:
     def is_systemd_available(self) -> bool:
         """Check whether ``systemctl --user`` is usable.
 
-        Uses ``is-system-running`` which returns well-defined exit codes:
-        0 = running, 1 = degraded/starting/stopping — both mean systemd is
-        present.  Any other code (or missing binary) means unavailable.
+        ``is-system-running`` returns exit code 0 only when the manager
+        is fully ``running``; any other state (``degraded``, ``starting``,
+        ``maintenance``, …) returns a non-zero code that nevertheless
+        means systemd is *present*.  The only "systemd absent" signals
+        are the synthetic 127 / 124 [`_systemctl.query`][terok_sandbox._util._systemctl.query]
+        emits for a missing binary or a timeout.
         """
-        try:
-            result = subprocess.run(
-                ["systemctl", "--user", "is-system-running"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            return result.returncode in (0, 1)
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            return False
+        return _systemctl.query("is-system-running").returncode not in (127, 124)
 
     def is_socket_installed(self) -> bool:
         """Check whether any gate systemd unit file exists (TCP or socket mode)."""
@@ -231,16 +225,7 @@ class GateServerManager:
 
     def _is_unit_active(self, unit: str) -> bool:
         """Check whether a systemd unit is active."""
-        try:
-            result = subprocess.run(
-                ["systemctl", "--user", "is-active", unit],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            return result.stdout.strip() == "active"
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            return False
+        return _systemctl.query("is-active", unit).stdout.strip() == "active"
 
     def is_socket_active(self) -> bool:
         """Check whether the TCP socket unit or socket-mode service is active."""
@@ -415,7 +400,7 @@ class GateServerManager:
         if admin_token:
             env["TEROK_GATE_ADMIN_TOKEN"] = admin_token
 
-        subprocess.run(cmd, check=True, timeout=10, env=env)
+        subprocess.run(cmd, check=True, timeout=10, env=env)  # nosec B603 — argv is a fixed list controlled by this module — argv is a fixed list controlled by this module
 
     def stop_daemon(self) -> None:
         """Stop the gate server, whether running as a systemd unit or a PID-file daemon.

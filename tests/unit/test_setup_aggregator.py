@@ -312,7 +312,7 @@ class TestAggregatorSocketMode:
     def test_vault_install_phase_reaches_install_without_port_guard(self) -> None:
         """Socket-mode vault install must fall through to install_systemd_units."""
         from terok_sandbox._setup import run_vault_install_phase
-        from terok_sandbox.vault.lifecycle import VaultManager
+        from terok_sandbox.vault.daemon.lifecycle import VaultManager
 
         cfg = self._socket_cfg()
         assert cfg.token_broker_port is None and cfg.ssh_signer_port is None

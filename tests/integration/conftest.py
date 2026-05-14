@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from terok_sandbox.credentials.db import CredentialDB
+from terok_sandbox.vault.store.db import CredentialDB
 
 
 @pytest.fixture()
@@ -23,7 +23,7 @@ def db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     Pins every chain tier to a deterministic "test" outcome so
     downstream code that re-opens the DB via
     ``SandboxConfig().open_sqlcipher_connection()`` — notably
-    [`_TokenDB`][terok_sandbox.vault.token_broker._TokenDB], which
+    [`_TokenDB`][terok_sandbox.vault.daemon.token_broker._TokenDB], which
     builds a fresh config and walks the production chain — resolves
     the same ``"test"`` value the DB was sealed with.
 
@@ -34,7 +34,7 @@ def db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     failure under the SQLCipher first-query path.
     """
     from terok_sandbox import config as _config
-    from terok_sandbox.credentials import encryption as _enc, systemd_creds as _sc
+    from terok_sandbox.vault.store import encryption as _enc, systemd_creds as _sc
 
     # Blank the upper tiers so the chain falls through to keyring.
     monkeypatch.setattr(_enc, "load_passphrase_from_file", lambda _path: None)

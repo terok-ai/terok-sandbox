@@ -27,10 +27,10 @@ from typing import Any, Literal
 
 from .._yaml import update_section as _yaml_update_section
 from ..config import SandboxConfig
-from ..credentials.encryption import PassphraseSource
+from ..vault.store.encryption import PassphraseSource
 from ._types import CommandDef
 
-#: The chooser-offered subset of [`PassphraseSource`][terok_sandbox.credentials.encryption.PassphraseSource].
+#: The chooser-offered subset of [`PassphraseSource`][terok_sandbox.vault.store.encryption.PassphraseSource].
 #: ``systemd-creds`` is auto-detected (not offered); ``passphrase-command``
 #: is an opt-in config-file edit (not offered); ``prompt`` is a
 #: runtime-only fallback.  Same vocabulary as the resolver so a chooser
@@ -85,8 +85,8 @@ def _handle_credentials_encrypt_db(*, cfg: SandboxConfig | None = None) -> None:
     answer is unambiguous just slows the operator down.  Otherwise
     show the chooser with keyring as the recommended default.
     """
-    from ..credentials import systemd_creds as _systemd_creds
-    from ..credentials.encryption import encrypt_in_place, is_plaintext_sqlite
+    from ..vault.store import systemd_creds as _systemd_creds
+    from ..vault.store.encryption import encrypt_in_place, is_plaintext_sqlite
 
     if cfg is None:
         cfg = SandboxConfig()
@@ -150,8 +150,8 @@ def _provision_systemd_creds_tier(cfg: SandboxConfig) -> tuple[str, PassphraseSo
     pick itself: a TPM-equipped laptop seals as ``host+tpm2``, a
     headless server without TPM falls back to ``host``-only.
     """
-    from ..credentials import systemd_creds as _systemd_creds
-    from ..credentials.encryption import generate_passphrase
+    from ..vault.store import systemd_creds as _systemd_creds
+    from ..vault.store.encryption import generate_passphrase
 
     passphrase = generate_passphrase()
     _systemd_creds.seal(passphrase, cfg.vault_systemd_creds_file, key_mode="auto")
@@ -162,7 +162,7 @@ def _provision_systemd_creds_tier(cfg: SandboxConfig) -> tuple[str, PassphraseSo
 def _provision_passphrase(cfg: SandboxConfig, *, mode: SetupTier) -> tuple[str, PassphraseSource]:
     """Resolve or mint a passphrase for *mode*; return ``(passphrase, source)``."""
     from .._yaml import write_secret_text
-    from ..credentials.encryption import (
+    from ..vault.store.encryption import (
         generate_passphrase,
         load_passphrase_from_file,
         load_passphrase_from_keyring,
@@ -210,7 +210,7 @@ def _announce_generated_passphrase(passphrase: str) -> None:
     Ansible play — can't capture the recovery key into a journal or
     log artifact.
     """
-    from ..credentials.encryption import _write_to_controlling_tty
+    from ..vault.store.encryption import _write_to_controlling_tty
 
     _write_to_controlling_tty(
         f"\nVault passphrase: {passphrase}\n"
@@ -301,7 +301,7 @@ def _run_credentials_setup_phase(cfg: SandboxConfig) -> bool:
     we uninstall the units to kill the trigger entirely, then retry
     once before bailing.
     """
-    from ..vault.lifecycle import VaultManager
+    from ..vault.daemon.lifecycle import VaultManager
 
     print("→ credentials", end="", flush=True)
     mgr = VaultManager(cfg)

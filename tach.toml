@@ -5,6 +5,16 @@ exclude = [
     "dist",
     ".venv",
     "docs",
+    # Back-compat shims at the pre-vault-unification import paths.
+    # Each is a one-line star re-export from the new ``vault.{store,ssh,daemon}.*``
+    # home; removed once cross-repo consumers (terok, terok-executor) update.
+    "src/terok_sandbox/credentials",
+    "src/terok_sandbox/vault/lifecycle.py",
+    "src/terok_sandbox/vault/token_broker.py",
+    "src/terok_sandbox/vault/audit.py",
+    "src/terok_sandbox/vault/constants.py",
+    "src/terok_sandbox/vault/ssh_signer.py",
+    "src/terok_sandbox/vault/scope_sockets.py",
 ]
 
 source_roots = ["src"]
@@ -78,7 +88,7 @@ depends_on = [
 ]
 
 # Configuration dataclass — same-layer dep on paths + port_registry,
-# plus credentials.db for the scope-name guard reused by per-scope
+# plus vault.store.db for the scope-name guard reused by per-scope
 # socket paths.  Reads ``services.mode`` through ``config_schema`` so
 # standalone sandbox and embedded (terok) paths share one validator.
 [[modules]]
@@ -87,8 +97,8 @@ layer = "foundation"
 depends_on = [
     "terok_sandbox.paths",
     "terok_sandbox.port_registry",
-    "terok_sandbox.credentials.db",
-    "terok_sandbox.credentials.encryption",
+    "terok_sandbox.vault.store.db",
+    "terok_sandbox.vault.store.encryption",
     "terok_sandbox.config_schema",
 ]
 
@@ -97,61 +107,108 @@ depends_on = [
 path = "terok_sandbox.doctor"
 layer = "foundation"
 depends_on = [
-    "terok_sandbox.vault",
     "terok_sandbox.config",
     "terok_sandbox.paths",
-    "terok_sandbox.credentials.encryption",
+    "terok_sandbox.vault.store.encryption",
+    "terok_sandbox.vault.daemon.constants",
 ]
 
-# Credential DB — standalone SQLite store; re-exports schema helpers
-# from the migrations module so out-of-tree consumers keep one import.
-[[modules]]
-path = "terok_sandbox.credentials.db"
-layer = "foundation"
-depends_on = [
-    "terok_sandbox.credentials.migrations",
-    "terok_sandbox.credentials.encryption",
-]
+# ── Vault: store, ssh, daemon ──────────────────────────────
+# Three sub-packages under one namespace.  store/ is the at-rest data
+# layer (SQLCipher DB + passphrase chain); ssh/ holds the SSH story
+# end-to-end (keypair I/O, scope manager, agent-protocol signer,
+# scope sockets); daemon/ is the long-running process and its lifecycle.
 
-# Schema bootstrap + forward migrations for the credential DB.  Standalone
-# so future schema bumps have a focused review target without disturbing
-# the data-access layer.
-[[modules]]
-path = "terok_sandbox.credentials.migrations"
-layer = "foundation"
-depends_on = []
-
-# Passphrase resolution chain + SQLCipher open/migrate helpers.
-[[modules]]
-path = "terok_sandbox.credentials.encryption"
-layer = "foundation"
-depends_on = ["terok_sandbox.credentials.systemd_creds"]
-
-# Subprocess wrapper around systemd-creds(1) for the machine-bound
-# passphrase tier between session-unlock and OS keyring.
-[[modules]]
-path = "terok_sandbox.credentials.systemd_creds"
-layer = "foundation"
-depends_on = []
-
-# Vault — token broker + SSH signer.  Resolves the SQLCipher passphrase
-# through SandboxConfig (cfg.resolve_passphrase_with_source) and the
-# foundation-level open_sqlcipher helper so the chain is walked exactly
-# once per daemon start.
 [[modules]]
 path = "terok_sandbox.vault"
 layer = "foundation"
+depends_on = []
+
+# Vault.store — at-rest data layer.
+[[modules]]
+path = "terok_sandbox.vault.store"
+layer = "foundation"
+depends_on = []
+
+[[modules]]
+path = "terok_sandbox.vault.store.db"
+layer = "foundation"
 depends_on = [
-    "terok_sandbox.credentials.db",
-    "terok_sandbox.credentials.encryption",
+    "terok_sandbox.vault.store.migrations",
+    "terok_sandbox.vault.store.encryption",
+]
+
+[[modules]]
+path = "terok_sandbox.vault.store.migrations"
+layer = "foundation"
+depends_on = []
+
+[[modules]]
+path = "terok_sandbox.vault.store.encryption"
+layer = "foundation"
+depends_on = ["terok_sandbox.vault.store.systemd_creds"]
+
+[[modules]]
+path = "terok_sandbox.vault.store.systemd_creds"
+layer = "foundation"
+depends_on = []
+
+# Vault.ssh — keypair I/O + scope manager + agent protocol + sockets.
+[[modules]]
+path = "terok_sandbox.vault.ssh"
+layer = "foundation"
+depends_on = []
+
+[[modules]]
+path = "terok_sandbox.vault.ssh.signer"
+layer = "foundation"
+depends_on = [
+    "terok_sandbox.vault.store.db",
+    "terok_sandbox.vault.daemon.token_broker",
+]
+
+[[modules]]
+path = "terok_sandbox.vault.ssh.scope_sockets"
+layer = "foundation"
+depends_on = [
+    "terok_sandbox.vault.ssh.signer",
+    "terok_sandbox.vault.store.db",
     "terok_sandbox.config",
 ]
 
-# Credentials package root — standalone (DB + SSH key management)
+# Vault.daemon — the long-running process: lifecycle, broker, audit.
 [[modules]]
-path = "terok_sandbox.credentials"
+path = "terok_sandbox.vault.daemon"
 layer = "foundation"
 depends_on = []
+
+[[modules]]
+path = "terok_sandbox.vault.daemon.token_broker"
+layer = "foundation"
+depends_on = [
+    "terok_sandbox.vault.daemon.audit",
+    "terok_sandbox.vault.daemon.constants",
+    "terok_sandbox.vault.store.db",
+    "terok_sandbox.vault.store.encryption",
+    "terok_sandbox.config",
+]
+
+[[modules]]
+path = "terok_sandbox.vault.daemon.audit"
+layer = "foundation"
+depends_on = []
+
+[[modules]]
+path = "terok_sandbox.vault.daemon.constants"
+layer = "foundation"
+depends_on = []
+
+# VaultStatus dataclass + VaultUnreachableError exception — the vocabulary
+# every renderer (sandbox CLI, executor, terok TUI, doctor) builds against.
+[[modules]]
+path = "terok_sandbox.vault.daemon.status"
+layer = "foundation"
+depends_on = ["terok_sandbox.vault.store.encryption"]
 
 # Gate standalone HTTP server — zero internal imports
 [[modules]]
@@ -197,17 +254,15 @@ depends_on = [
     "terok_sandbox.gate.tokens",
 ]
 
-# SSH key management — user-facing SSHManager
+# Vault SSH manager — user-facing SSHManager façade over the store
+# and the keypair primitives.
 [[modules]]
-path = "terok_sandbox.credentials.ssh"
+path = "terok_sandbox.vault.ssh.manager"
 layer = "core"
-depends_on = [
-    "terok_sandbox.credentials.ssh_keypair",
-]
+depends_on = ["terok_sandbox.vault.ssh.keypair"]
 
-# SSH keypair generation, import, and export against the credential DB
 [[modules]]
-path = "terok_sandbox.credentials.ssh_keypair"
+path = "terok_sandbox.vault.ssh.keypair"
 layer = "core"
 depends_on = []
 
@@ -217,9 +272,11 @@ path = "terok_sandbox.gate.mirror"
 layer = "core"
 depends_on = []
 
-# Vault lifecycle (daemon start/stop, systemd units)
+# Vault daemon lifecycle (start/stop, systemd units, status probes).
+# ``status`` is implicitly imported from a lower layer (foundation),
+# so no explicit dep is needed.
 [[modules]]
-path = "terok_sandbox.vault.lifecycle"
+path = "terok_sandbox.vault.daemon.lifecycle"
 layer = "core"
 depends_on = []
 

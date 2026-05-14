@@ -31,7 +31,7 @@ import re
 import signal
 import socket
 import stat
-import subprocess
+import subprocess  # nosec B404 — spawning git http-backend (CGI)
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -346,7 +346,7 @@ def _make_handler_class(base_path: Path, token_store: TokenStore) -> type[BaseHT
             )
 
             try:
-                proc = subprocess.Popen(
+                proc = subprocess.Popen(  # nosec B603 B607 — argv built from fixed verbs + repo-relative paths — binary PATH lookup is the cross-distro contract
                     ["git", "http-backend"],
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
@@ -361,9 +361,9 @@ def _make_handler_class(base_path: Path, token_store: TokenStore) -> type[BaseHT
                 return
 
             # All three streams are guaranteed by ``subprocess.PIPE`` above.
-            assert proc.stdin is not None
-            assert proc.stdout is not None
-            assert proc.stderr is not None
+            assert proc.stdin is not None  # nosec B101 — type narrowing; subprocess.PIPE guarantees non-None
+            assert proc.stdout is not None  # nosec B101 — type narrowing; subprocess.PIPE guarantees non-None
+            assert proc.stderr is not None  # nosec B101 — type narrowing; subprocess.PIPE guarantees non-None
 
             _stream_request_body(self.rfile, proc.stdin, content_length)
             proc.stdin.close()

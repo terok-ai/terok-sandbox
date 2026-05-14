@@ -98,3 +98,52 @@ class TestRunBestEffort:
             patch("terok_sandbox._util._systemctl.subprocess.run", mock_run),
         ):
             _systemctl.run_best_effort("disable", "terok-vault.socket")  # must not raise
+
+
+class TestQuery:
+    """``query`` — read-only variant that returns the captured result."""
+
+    def test_returns_completed_process_with_stdout(self) -> None:
+        """Successful runs return the real ``CompletedProcess`` for caller inspection."""
+        result = subprocess.CompletedProcess(args=[], returncode=0, stdout="active\n", stderr="")
+        with patch("terok_sandbox._util._systemctl.subprocess.run", return_value=result) as run:
+            got = _systemctl.query("is-active", "terok-vault.service")
+        assert got.returncode == 0
+        assert got.stdout == "active\n"
+        # The argv is the fixed ``systemctl --user`` prefix + caller verb/args.
+        assert run.call_args.args[0] == ["systemctl", "--user", "is-active", "terok-vault.service"]
+
+    def test_missing_binary_returns_synthetic_127(self) -> None:
+        """No ``systemctl`` on PATH → returncode 127 (shell convention)."""
+        with patch(
+            "terok_sandbox._util._systemctl.subprocess.run",
+            side_effect=FileNotFoundError,
+        ):
+            result = _systemctl.query("is-system-running")
+        assert result.returncode == 127
+        assert result.stdout == "" and result.stderr == ""
+
+    def test_timeout_returns_synthetic_124(self) -> None:
+        """A wedged call → returncode 124, also the shell convention."""
+        with patch(
+            "terok_sandbox._util._systemctl.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd=[], timeout=5),
+        ):
+            result = _systemctl.query("status", "terok-vault.service")
+        assert result.returncode == 124
+        assert result.stdout == "" and result.stderr == ""
+
+
+class TestFormatCaptured:
+    """The internal output formatter copes with bytes, str, and None streams."""
+
+    def test_str_stream_passes_through(self) -> None:
+        """Already-decoded captured output is rendered verbatim."""
+        rendered = _systemctl._format_captured("stdout text", "stderr text")
+        assert "stderr text" in rendered
+        assert "stdout text" in rendered
+
+    def test_empty_streams_render_empty(self) -> None:
+        """Both streams empty → no trailing ``"; …"`` suffix."""
+        assert _systemctl._format_captured(None, None) == ""
+        assert _systemctl._format_captured(b"", b"") == ""

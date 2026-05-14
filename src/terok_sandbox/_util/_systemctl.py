@@ -3,23 +3,31 @@
 
 """Shared ``systemctl --user`` invocation helpers.
 
-Two flavours, both targeting the user session bus:
+Three flavours, all targeting the user session bus:
 
-* [`run`][terok_sandbox.Sandbox.run] — the authoritative variant.  Raises [`SystemExit`][SystemExit]
+* [`run`][terok_sandbox._util._systemctl.run] — the authoritative variant.  Raises [`SystemExit`][SystemExit]
   with captured stderr on failure so setup phases that depend on the
   call succeeding (e.g. enabling a freshly rendered unit) surface the
   real ``Failed to connect to bus`` / ``Unit X not loaded`` line
   rather than the bare exit code ``subprocess.CalledProcessError``
   prints by default.
 
-* `run_best_effort` — the idempotent variant.  Swallows every
+* [`run_best_effort`][terok_sandbox._util._systemctl.run_best_effort] — the idempotent variant.  Swallows every
   error, including a missing ``systemctl`` binary and a
   [`subprocess.TimeoutExpired`][subprocess.TimeoutExpired] on a wedged unit, so cleanup
   passes (stop, disable, sweep orphans) can't turn a non-failure
   into a raised exception.
 
+* [`query`][terok_sandbox._util._systemctl.query] — the read-only variant.  Returns the captured
+  [`subprocess.CompletedProcess`][subprocess.CompletedProcess] so callers can inspect ``returncode``
+  and ``stdout`` (``is-active``, ``is-system-running``, …).  A
+  missing ``systemctl`` binary or a timeout is normalised into a
+  synthetic non-zero result so callers never need their own
+  try/except for the cross-platform "systemd absent" path.
+
 Pick ``run`` when the call sits on the critical install path;
-``run_best_effort`` when the call is cleanup-shaped.
+``run_best_effort`` when the call is cleanup-shaped; ``query`` when
+the caller cares about the output, not the success/failure outcome.
 """
 
 from __future__ import annotations
@@ -58,6 +66,35 @@ def run(verb: str, *args: str) -> None:
         raise SystemExit(f"{' '.join(argv)} timed out after {exc.timeout}s{captured}") from exc
     except FileNotFoundError as exc:
         raise SystemExit(f"{argv[0]}: command not found on PATH") from exc
+
+
+def query(verb: str, *args: str, timeout: float = 5.0) -> subprocess.CompletedProcess[str]:
+    """Run ``systemctl --user <verb> <args…>`` and return the captured result.
+
+    Read-only variant for status probes (``is-active``,
+    ``is-system-running``, …) where the caller inspects ``returncode``
+    and ``stdout`` rather than treating any non-zero exit as fatal.
+
+    A missing ``systemctl`` binary (containerised host, CI) and a
+    [`subprocess.TimeoutExpired`][subprocess.TimeoutExpired] are normalised into a synthetic
+    non-zero [`CompletedProcess`][subprocess.CompletedProcess] (returncodes ``127`` and
+    ``124`` respectively, mirroring the shell convention) so callers
+    never need their own try/except for the cross-platform "systemd
+    absent" path.
+    """
+    argv = ["systemctl", "--user", verb, *args]
+    try:
+        return subprocess.run(  # nosec B603 — argv is a fixed prefix + caller-controlled verb/args
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except FileNotFoundError:
+        return subprocess.CompletedProcess(argv, returncode=127, stdout="", stderr="")
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(argv, returncode=124, stdout="", stderr="")
 
 
 def run_best_effort(verb: str, *args: str) -> None:

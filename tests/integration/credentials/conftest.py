@@ -26,7 +26,7 @@ from pathlib import Path
 import pytest
 
 from terok_sandbox.config import SandboxConfig
-from terok_sandbox.credentials.db import CredentialDB
+from terok_sandbox.vault.store.db import CredentialDB
 
 
 @pytest.fixture()
@@ -116,9 +116,9 @@ def stubbed_keyring(monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, str]]
     def _forget() -> bool:
         return store.pop("passphrase", None) is not None
 
-    monkeypatch.setattr("terok_sandbox.credentials.encryption.load_passphrase_from_keyring", _load)
-    monkeypatch.setattr("terok_sandbox.credentials.encryption.store_passphrase_in_keyring", _store)
+    monkeypatch.setattr("terok_sandbox.vault.store.encryption.load_passphrase_from_keyring", _load)
+    monkeypatch.setattr("terok_sandbox.vault.store.encryption.store_passphrase_in_keyring", _store)
     monkeypatch.setattr(
-        "terok_sandbox.credentials.encryption.forget_passphrase_in_keyring", _forget
+        "terok_sandbox.vault.store.encryption.forget_passphrase_in_keyring", _forget
     )
     yield store

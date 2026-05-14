@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from terok_sandbox.config import SandboxConfig
-from terok_sandbox.vault.lifecycle import (
+from terok_sandbox.vault.daemon.lifecycle import (
     VaultManager,
     VaultStatus,
     VaultUnreachableError,
@@ -344,7 +344,7 @@ class TestIsDaemonRunning:
             assert mgr.is_daemon_running() is False
 
 
-_LIFECYCLE = "terok_sandbox.vault.lifecycle"
+_LIFECYCLE = "terok_sandbox.vault.daemon.lifecycle"
 
 
 def _no_systemd():
@@ -409,7 +409,7 @@ class TestGetVaultStatus:
 
     def test_lists_stored_credentials(self, tmp_path: Path) -> None:
         """credentials_stored lists providers from the credential DB."""
-        from terok_sandbox.credentials.db import CredentialDB
+        from terok_sandbox.vault.store.db import CredentialDB
 
         cfg = _make_cfg(tmp_path)
         db = CredentialDB(cfg.db_path, passphrase="test")
@@ -442,7 +442,7 @@ class TestGetVaultStatus:
 
     def test_counts_ssh_keys(self, tmp_path: Path) -> None:
         """ssh_keys_stored reflects the number of stored keypairs."""
-        from terok_sandbox.credentials.db import CredentialDB
+        from terok_sandbox.vault.store.db import CredentialDB
 
         cfg = _make_cfg(tmp_path)
         db = CredentialDB(cfg.db_path, passphrase="test")
@@ -473,7 +473,7 @@ class TestGetVaultStatus:
 
     def test_unlocked_db_reports_passphrase_source(self, tmp_path: Path) -> None:
         """passphrase_source labels which chain tier opened the DB."""
-        from terok_sandbox.credentials.db import CredentialDB
+        from terok_sandbox.vault.store.db import CredentialDB
 
         cfg = _make_cfg(tmp_path)
         db = CredentialDB(cfg.db_path, passphrase="test")
@@ -495,8 +495,8 @@ class TestGetVaultStatus:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """An unopenable DB → locked=True; ssh_keys_stored / passphrase_source stay at defaults."""
-        from terok_sandbox.credentials import encryption as _enc
-        from terok_sandbox.credentials.db import CredentialDB
+        from terok_sandbox.vault.store import encryption as _enc
+        from terok_sandbox.vault.store.db import CredentialDB
 
         cfg = _make_cfg(tmp_path)
         db = CredentialDB(cfg.db_path, passphrase="test")
@@ -574,12 +574,12 @@ class TestEnsureVaultReachable:
         mgr = _make_mgr(tmp_path)
         with (
             patch.object(VaultManager, "is_socket_active", return_value=True),
-            patch(f"{_LIFECYCLE}.subprocess") as mock_sub,
+            patch(f"{_LIFECYCLE}._systemctl.run_best_effort") as mock_start,
             patch.object(VaultManager, "_wait_for_ready", return_value=True),
             patch.object(VaultManager, "_wait_for_tcp_port", return_value=True),
         ):
             mgr.ensure_reachable()  # should not raise
-            mock_sub.run.assert_called_once()  # systemctl --user start
+            mock_start.assert_called_once()  # systemctl --user start <unit>
 
     def test_raises_when_health_unreachable(self, tmp_path: Path) -> None:
         """Service started but health endpoint never responds -- raises SystemExit."""
@@ -730,21 +730,29 @@ class TestSystemdHelpers:
         ):
             VaultManager._systemd_unit_dir()
 
-    def test_is_systemd_available_true(self) -> None:
-        """Returns True when systemctl is-system-running exits 0."""
+    def test_is_systemd_available_running(self) -> None:
+        """Returns True when systemctl is-system-running exits 0 (``running``)."""
         result = MagicMock(returncode=0)
         with patch("subprocess.run", return_value=result):
             assert VaultManager().is_systemd_available() is True
 
-    def test_is_systemd_available_degraded(self) -> None:
-        """Returns True for degraded state (exit code 1)."""
-        result = MagicMock(returncode=1)
-        with patch("subprocess.run", return_value=result):
-            assert VaultManager().is_systemd_available() is True
+    def test_is_systemd_available_non_zero_states(self) -> None:
+        """Returns True for any non-zero exit (``degraded``, ``starting``, …) — systemd is still present."""
+        for code in (1, 2, 3):
+            result = MagicMock(returncode=code)
+            with patch("subprocess.run", return_value=result):
+                assert VaultManager().is_systemd_available() is True, f"returncode={code}"
 
     def test_is_systemd_available_missing(self) -> None:
         """Returns False when systemctl is not found."""
         with patch("subprocess.run", side_effect=FileNotFoundError):
+            assert VaultManager().is_systemd_available() is False
+
+    def test_is_systemd_available_timeout(self) -> None:
+        """Returns False when the systemctl probe times out (synthetic 124)."""
+        import subprocess as _sp
+
+        with patch("subprocess.run", side_effect=_sp.TimeoutExpired(cmd=[], timeout=5)):
             assert VaultManager().is_systemd_available() is False
 
     def test_is_socket_installed_true(self, tmp_path: Path) -> None:

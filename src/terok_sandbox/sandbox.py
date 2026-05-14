@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import io
 import shlex
-import subprocess
+import subprocess  # nosec B404 — container exec for ready-marker probing — container exec for ready-marker probing
 import tarfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -33,9 +33,9 @@ from .runtime.podman import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from .credentials.ssh import SSHManager
     from .gate.lifecycle import GateServerStatus
     from .runtime import ContainerRemoveResult
+    from .vault.ssh.manager import SSHManager
 
 # ---------------------------------------------------------------------------
 # Container run specification
@@ -331,7 +331,7 @@ class Sandbox:
         if input is not None:
             kwargs["input"] = input
         try:
-            subprocess.run(cmd, **kwargs)
+            subprocess.run(cmd, **kwargs)  # nosec B603 — argv built from fixed verbs + caller-controlled scope/container names — argv built from fixed verbs + caller-controlled scope/container names
         except FileNotFoundError:
             raise SystemExit("podman not found; please install podman")
         except subprocess.CalledProcessError as exc:
@@ -472,6 +472,6 @@ class Sandbox:
         manager (``with sandbox.init_ssh(scope) as m: ...``) or call
         [`SSHManager.close`][terok_sandbox.SSHManager.close] when done.
         """
-        from .credentials.ssh import SSHManager
+        from .vault.ssh.manager import SSHManager
 
         return SSHManager.open_for_config(scope=scope, cfg=self._cfg, prompt_on_tty=True)

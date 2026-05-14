@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from terok_sandbox.credentials.db import (
+from terok_sandbox.vault.store.db import (
     CredentialDB,
     InvalidScopeName,
     UnsafeCommentError,

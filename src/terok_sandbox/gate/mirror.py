@@ -37,7 +37,7 @@ import shlex
 import shutil
 import sqlite3
 import stat
-import subprocess
+import subprocess  # nosec B404 — driving git for upstream mirror operations
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -294,7 +294,7 @@ class GitGate:
 
             if not cache_dir.exists():
                 logger.info("Creating clone cache at %s", cache_dir)
-                subprocess.run(
+                subprocess.run(  # nosec B603 B607 — argv built from fixed verbs + repo-relative paths — binary PATH lookup is the cross-distro contract
                     ["git", "clone", gate_file_url, str(cache_dir)],
                     check=True,
                     capture_output=True,
@@ -302,13 +302,13 @@ class GitGate:
                 )
             else:
                 # Ensure origin points to current bare mirror
-                subprocess.run(
+                subprocess.run(  # nosec B603 B607 — argv built from fixed verbs + repo-relative paths — binary PATH lookup is the cross-distro contract
                     ["git", "-C", str(cache_dir), "remote", "set-url", "origin", gate_file_url],
                     check=True,
                     capture_output=True,
                     timeout=10,
                 )
-                subprocess.run(
+                subprocess.run(  # nosec B603 B607 — argv built from fixed verbs + repo-relative paths — binary PATH lookup is the cross-distro contract
                     ["git", "-C", str(cache_dir), "fetch", "--all", "--prune"],
                     check=True,
                     capture_output=True,
@@ -316,14 +316,14 @@ class GitGate:
                 )
                 # Update working tree to match fetched HEAD — the cache is
                 # copied as-is into task workspaces, so stale files matter.
-                subprocess.run(
+                subprocess.run(  # nosec B603 B607 — argv built from fixed verbs + repo-relative paths — binary PATH lookup is the cross-distro contract
                     ["git", "-C", str(cache_dir), "reset", "--hard", "origin/HEAD"],
                     check=True,
                     capture_output=True,
                     timeout=30,
                 )
                 # Remove untracked/ignored files so the cache stays pristine.
-                subprocess.run(
+                subprocess.run(  # nosec B603 B607 — argv built from fixed verbs + repo-relative paths — binary PATH lookup is the cross-distro contract
                     ["git", "-C", str(cache_dir), "clean", "-ffdx"],
                     check=True,
                     capture_output=True,
@@ -356,7 +356,7 @@ class GitGate:
 
         try:
             cmd = ["git", "-C", str(gate_dir), "remote", "update", "--prune"]
-            result = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=120)
+            result = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=120)  # nosec B603 — argv is a fixed list controlled by this module
 
             if result.returncode != 0:
                 errors.append(f"remote update failed: {result.stderr}")
@@ -481,10 +481,10 @@ class GitGate:
                 "--date=iso",
             ]
 
-            result = subprocess.run(cmd, capture_output=True, text=True, env=env)
+            result = subprocess.run(cmd, capture_output=True, text=True, env=env)  # nosec B603 — argv is a fixed list controlled by this module
             if result.returncode != 0 and self._default_branch:
                 cmd[5] = "HEAD"
-                result = subprocess.run(cmd, capture_output=True, text=True, env=env)
+                result = subprocess.run(cmd, capture_output=True, text=True, env=env)  # nosec B603 — argv is a fixed list controlled by this module
             if result.returncode != 0:
                 return None
 
@@ -543,7 +543,7 @@ _SOCKET_BIND_WAIT_SECONDS = 4.0
 """Client-side tolerance for the daemon's reconciler to bind a fresh scope socket.
 
 Roughly two of the reconciler's own poll ticks
-(`terok_sandbox.vault.scope_sockets._POLL_INTERVAL_SECONDS`) — enough to
+(`terok_sandbox.vault.ssh.scope_sockets._POLL_INTERVAL_SECONDS`) — enough to
 absorb one full miss plus the next bind attempt.
 """
 
@@ -657,7 +657,7 @@ def _clone_gate_mirror(upstream_url: str, gate_dir: Path, env: dict) -> None:
     """Clone the upstream repository as a bare mirror into *gate_dir*."""
     cmd = ["git", "clone", "--mirror", upstream_url, str(gate_dir)]
     try:
-        subprocess.run(cmd, check=True, env=env)
+        subprocess.run(cmd, check=True, env=env)  # nosec B603 — argv is a fixed list controlled by this module
     except FileNotFoundError:
         raise SystemExit("git not found on host; please install git")
     except subprocess.CalledProcessError as e:
@@ -673,7 +673,7 @@ def _init_remoteless_gate(gate_dir: Path) -> None:
     """
     gate_dir.mkdir(parents=True, exist_ok=True)
     try:
-        subprocess.run(
+        subprocess.run(  # nosec B603 B607 — argv built from fixed verbs + repo-relative paths — binary PATH lookup is the cross-distro contract
             ["git", "init", "--bare", str(gate_dir)],
             check=True,
             capture_output=True,
@@ -695,7 +695,7 @@ def _get_upstream_head(upstream_url: str, branch: str, env: dict) -> dict | None
     """
     try:
         cmd = ["git", "ls-remote", upstream_url, f"refs/heads/{branch}"]
-        result = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=30)
+        result = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=30)  # nosec B603 — argv is a fixed list controlled by this module
 
         if result.returncode != 0:
             return None
@@ -733,7 +733,7 @@ def _get_gate_branch_head(gate_dir: Path, branch: str, env: dict) -> str | None:
             return None
 
         cmd = ["git", "-C", str(gate_dir), "rev-parse", f"refs/heads/{branch}"]
-        result = subprocess.run(cmd, capture_output=True, text=True, env=env)
+        result = subprocess.run(cmd, capture_output=True, text=True, env=env)  # nosec B603 — argv is a fixed list controlled by this module
 
         if result.returncode == 0:
             return result.stdout.strip()
@@ -763,7 +763,7 @@ def _count_commits_range(gate_dir: Path, from_ref: str, to_ref: str, env: dict) 
             "--count",
             f"{from_ref}..{to_ref}",
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True, env=env)
+        result = subprocess.run(cmd, capture_output=True, text=True, env=env)  # nosec B603 — argv is a fixed list controlled by this module
         if result.returncode == 0:
             return int(result.stdout.strip())
         return None

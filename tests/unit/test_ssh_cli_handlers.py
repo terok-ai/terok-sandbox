@@ -24,8 +24,8 @@ from terok_sandbox.commands import (
     _handle_ssh_remove,
     _handle_ssh_rename,
 )
-from terok_sandbox.credentials.db import CredentialDB
-from terok_sandbox.credentials.ssh_keypair import generate_keypair, openssh_pem_of
+from terok_sandbox.vault.ssh.keypair import generate_keypair, openssh_pem_of
+from terok_sandbox.vault.store.db import CredentialDB
 
 
 @pytest.fixture()
@@ -709,15 +709,15 @@ class TestCoverageGaps:
         self, tmp_path: Path, mock_cfg: MagicMock, patched_open_db
     ) -> None:
         """Encrypted private keys are rejected up front with a ``ssh-keygen -p`` hint."""
-        from terok_sandbox.credentials import ssh_keypair
+        from terok_sandbox.vault.ssh import keypair
 
         priv = tmp_path / "priv"
         priv.write_text("dummy")  # contents don't matter — the loader is patched.
         with (
             patch.object(
-                ssh_keypair,
+                keypair,
                 "import_ssh_keypair",
-                side_effect=ssh_keypair.PasswordProtectedKeyError("encrypted"),
+                side_effect=keypair.PasswordProtectedKeyError("encrypted"),
             ),
             pytest.raises(SystemExit, match="ssh-keygen -p -f"),
         ):

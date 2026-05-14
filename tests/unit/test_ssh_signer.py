@@ -17,9 +17,8 @@ from pathlib import Path
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from terok_sandbox.credentials.db import CredentialDB
-from terok_sandbox.credentials.ssh_keypair import generate_keypair
-from terok_sandbox.vault.ssh_signer import (
+from terok_sandbox.vault.ssh.keypair import generate_keypair
+from terok_sandbox.vault.ssh.signer import (
     SSH_AGENT_FAILURE,
     SSH_AGENT_IDENTITIES_ANSWER,
     SSH_AGENT_SIGN_RESPONSE,
@@ -30,6 +29,7 @@ from terok_sandbox.vault.ssh_signer import (
     _unpack_string,
     start_ssh_signer,
 )
+from terok_sandbox.vault.store.db import CredentialDB
 
 # ── Fixtures ────────────────────────────────────────────────────────────
 
@@ -125,7 +125,7 @@ class TestSign:
         """RSA sign with SSH_AGENT_RSA_SHA2_512 flag emits rsa-sha2-512."""
         from cryptography.hazmat.primitives.asymmetric.rsa import generate_private_key
 
-        from terok_sandbox.vault.ssh_signer import SSH_AGENT_RSA_SHA2_512
+        from terok_sandbox.vault.ssh.signer import SSH_AGENT_RSA_SHA2_512
 
         key = generate_private_key(public_exponent=65537, key_size=2048)
         sig_blob = _sign(key, b"payload", SSH_AGENT_RSA_SHA2_512)
@@ -164,8 +164,8 @@ class TestDecodeRecord:
             PrivateFormat,
         )
 
-        from terok_sandbox.credentials.db import SSHKeyRecord
-        from terok_sandbox.vault.ssh_signer import _decode_record
+        from terok_sandbox.vault.ssh.signer import _decode_record
+        from terok_sandbox.vault.store.db import SSHKeyRecord
 
         ec_key = generate_private_key(SECP256R1())
         der = ec_key.private_bytes(
@@ -191,7 +191,7 @@ class TestResolveScopeFromToken:
     @pytest.mark.asyncio
     async def test_missing_handshake_returns_none(self) -> None:
         """A stream with no handshake bytes returns None (the warning log fires)."""
-        from terok_sandbox.vault.ssh_signer import _resolve_scope_from_token
+        from terok_sandbox.vault.ssh.signer import _resolve_scope_from_token
 
         reader = asyncio.StreamReader()
         reader.feed_eof()
@@ -205,7 +205,7 @@ class TestPeerLabel:
 
     def test_tcp_tuple_peername(self) -> None:
         """A TCP ``(host, port)`` peername round-trips into a ``host:port`` label."""
-        from terok_sandbox.vault.ssh_signer import _peer_label
+        from terok_sandbox.vault.ssh.signer import _peer_label
 
         class _Writer:
             def get_extra_info(self, key: str):
@@ -220,7 +220,7 @@ class TestPeerLabel:
         import os
         import socket as _socket
 
-        from terok_sandbox.vault.ssh_signer import _peer_label
+        from terok_sandbox.vault.ssh.signer import _peer_label
 
         # A real socket pair gives us a live AF_UNIX peer with our own
         # pid+uid+gid in SO_PEERCRED — the cheapest way to exercise the
@@ -245,7 +245,7 @@ class TestPeerLabel:
 
     def test_empty_peer_falls_back_to_unknown(self) -> None:
         """No usable info → ``<unknown>``; the helper never raises on a bare connection."""
-        from terok_sandbox.vault.ssh_signer import _peer_label
+        from terok_sandbox.vault.ssh.signer import _peer_label
 
         class _Writer:
             def get_extra_info(self, _key: str):
@@ -257,7 +257,7 @@ class TestPeerLabel:
         """``/proc/<pid>/comm`` read failure is swallowed; pid/uid/gid still surface."""
         import socket as _socket
 
-        from terok_sandbox.vault.ssh_signer import _peer_label
+        from terok_sandbox.vault.ssh.signer import _peer_label
 
         a, b = _socket.socketpair(_socket.AF_UNIX, _socket.SOCK_STREAM)
         try:
@@ -287,7 +287,7 @@ class TestPeerLabel:
 
     def test_outer_exception_returns_unknown(self) -> None:
         """A writer that throws on ``get_extra_info`` falls all the way through to ``<unknown>``."""
-        from terok_sandbox.vault.ssh_signer import _peer_label
+        from terok_sandbox.vault.ssh.signer import _peer_label
 
         class _Writer:
             def get_extra_info(self, _key: str):
@@ -318,7 +318,7 @@ class TestServeAgentSessionErrors:
     @pytest.mark.asyncio
     async def test_malformed_sign_request_returns_failure(self, tmp_path: Path) -> None:
         """A sign payload shorter than the declared strings triggers SSH_AGENT_FAILURE."""
-        from terok_sandbox.vault.ssh_signer import (
+        from terok_sandbox.vault.ssh.signer import (
             SSH_AGENT_FAILURE,
             SSH_AGENTC_SIGN_REQUEST,
             _DBKeyCache,
@@ -366,7 +366,7 @@ class TestConnectionHandlerCleanup:
         """A session crash is logged and the writer is still closed."""
         import unittest.mock as mock
 
-        from terok_sandbox.vault import ssh_signer as sig
+        from terok_sandbox.vault.ssh import signer as sig
 
         reader = asyncio.StreamReader()
         reader.feed_eof()
@@ -383,7 +383,7 @@ class TestConnectionHandlerCleanup:
         """A failure in ``writer.wait_closed()`` during cleanup is swallowed."""
         import unittest.mock as mock
 
-        from terok_sandbox.vault import ssh_signer as sig
+        from terok_sandbox.vault.ssh import signer as sig
 
         reader = asyncio.StreamReader()
         reader.feed_eof()
@@ -398,7 +398,7 @@ class TestConnectionHandlerCleanup:
         """The container path also logs+recovers when the session raises."""
         import unittest.mock as mock
 
-        from terok_sandbox.vault import ssh_signer as sig
+        from terok_sandbox.vault.ssh import signer as sig
 
         reader = asyncio.StreamReader()
         reader.feed_eof()
@@ -420,7 +420,7 @@ class TestServeAgentSessionMissingFlags:
     @pytest.mark.asyncio
     async def test_missing_flags_field_returns_failure(self, tmp_path: Path) -> None:
         """A sign request with two strings but no trailing flags field is malformed."""
-        from terok_sandbox.vault.ssh_signer import (
+        from terok_sandbox.vault.ssh.signer import (
             SSH_AGENT_FAILURE,
             SSH_AGENTC_SIGN_REQUEST,
             _DBKeyCache,
@@ -462,7 +462,7 @@ class TestReadMsg:
     @pytest.mark.asyncio
     async def test_zero_length_rejected(self) -> None:
         """A length-prefix of zero can't contain even a message-type byte."""
-        from terok_sandbox.vault.ssh_signer import _read_msg
+        from terok_sandbox.vault.ssh.signer import _read_msg
 
         reader = asyncio.StreamReader()
         reader.feed_data(struct.pack(">I", 0))
@@ -473,7 +473,7 @@ class TestReadMsg:
     @pytest.mark.asyncio
     async def test_oversized_length_rejected(self) -> None:
         """A 1 MiB message exceeds the 256 KiB cap."""
-        from terok_sandbox.vault.ssh_signer import _read_msg
+        from terok_sandbox.vault.ssh.signer import _read_msg
 
         reader = asyncio.StreamReader()
         reader.feed_data(struct.pack(">I", 1024 * 1024))
@@ -488,7 +488,7 @@ class TestReadHandshake:
     @pytest.mark.asyncio
     async def test_short_stream_returns_none(self) -> None:
         """A stream that EOFs before the 4-byte length prefix returns None."""
-        from terok_sandbox.vault.ssh_signer import _read_handshake
+        from terok_sandbox.vault.ssh.signer import _read_handshake
 
         reader = asyncio.StreamReader()
         reader.feed_data(b"\x00\x00")  # only 2 of 4 bytes
@@ -498,7 +498,7 @@ class TestReadHandshake:
     @pytest.mark.asyncio
     async def test_zero_length_prefix_returns_none(self) -> None:
         """A token of length 0 is not a legitimate value."""
-        from terok_sandbox.vault.ssh_signer import _read_handshake
+        from terok_sandbox.vault.ssh.signer import _read_handshake
 
         reader = asyncio.StreamReader()
         reader.feed_data(struct.pack(">I", 0))
@@ -508,7 +508,7 @@ class TestReadHandshake:
     @pytest.mark.asyncio
     async def test_oversized_length_prefix_returns_none(self) -> None:
         """A length prefix beyond 1024 bytes is rejected without reading further."""
-        from terok_sandbox.vault.ssh_signer import _read_handshake
+        from terok_sandbox.vault.ssh.signer import _read_handshake
 
         reader = asyncio.StreamReader()
         reader.feed_data(struct.pack(">I", 2048))
@@ -518,7 +518,7 @@ class TestReadHandshake:
     @pytest.mark.asyncio
     async def test_token_body_truncated_returns_none(self) -> None:
         """Declared length > bytes available in stream → None (IncompleteReadError path)."""
-        from terok_sandbox.vault.ssh_signer import _read_handshake
+        from terok_sandbox.vault.ssh.signer import _read_handshake
 
         reader = asyncio.StreamReader()
         reader.feed_data(struct.pack(">I", 20) + b"short")
@@ -535,7 +535,7 @@ class TestKeyCacheErrorRecovery:
         """One corrupt key in a scope doesn't poison the others."""
         import logging
 
-        from terok_sandbox.vault.ssh_signer import _DBKeyCache
+        from terok_sandbox.vault.ssh.signer import _DBKeyCache
 
         db_path = tmp_path / "vault.db"
         db = CredentialDB(db_path, passphrase="test")
@@ -567,7 +567,7 @@ class TestDBKeyCache:
 
     def test_second_call_same_version_hits_cache(self, tmp_path: Path) -> None:
         """When ``ssh_keys_version`` is unchanged, the cache returns the prior slot."""
-        from terok_sandbox.vault.ssh_signer import _DBKeyCache
+        from terok_sandbox.vault.ssh.signer import _DBKeyCache
 
         db_path = tmp_path / "vault.db"
         db = CredentialDB(db_path, passphrase="test")
@@ -581,7 +581,7 @@ class TestDBKeyCache:
 
     def test_version_bump_reloads(self, tmp_path: Path) -> None:
         """A new ``assign_ssh_key`` bumps the version and invalidates the cached slot."""
-        from terok_sandbox.vault.ssh_signer import _DBKeyCache
+        from terok_sandbox.vault.ssh.signer import _DBKeyCache
 
         db_path = tmp_path / "vault.db"
         db = CredentialDB(db_path, passphrase="test")

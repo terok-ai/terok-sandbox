@@ -156,7 +156,7 @@ class TestVaultUnlockedCheck:
 
     def test_ok_when_resolution_chain_yields(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Any tier returning a passphrase → ok verdict."""
-        from terok_sandbox.credentials import encryption as enc
+        from terok_sandbox.vault.store import encryption as enc
 
         monkeypatch.setattr(enc, "resolve_passphrase", lambda **_kw: "found-it")
         check = _make_vault_unlocked_check()
@@ -166,7 +166,7 @@ class TestVaultUnlockedCheck:
 
     def test_error_when_chain_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Every tier empty → actionable error verdict with the unlock hint."""
-        from terok_sandbox.credentials import encryption as enc
+        from terok_sandbox.vault.store import encryption as enc
 
         monkeypatch.setattr(enc, "resolve_passphrase", lambda **_kw: None)
         check = _make_vault_unlocked_check()

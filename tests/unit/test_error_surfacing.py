@@ -403,7 +403,7 @@ class TestVaultStatusDbFailure:
     def test_decrypt_failure_marks_vault_locked(self, tmp_path: Path) -> None:
         """A file that fails to decrypt surfaces as ``locked`` — the actionable signal."""
         from terok_sandbox import SandboxConfig
-        from terok_sandbox.vault.lifecycle import VaultManager
+        from terok_sandbox.vault.daemon.lifecycle import VaultManager
 
         cfg = SandboxConfig(state_dir=tmp_path)
         # Bytes that aren't a SQLCipher-encrypted DB: HMAC check fails ⇒

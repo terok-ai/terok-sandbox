@@ -15,8 +15,7 @@ import pytest
 from aiohttp import WSMsgType, web
 from multidict import CIMultiDict
 
-from terok_sandbox.credentials.db import CredentialDB
-from terok_sandbox.vault.token_broker import (
+from terok_sandbox.vault.daemon.token_broker import (
     _KEY_CLIENT,
     _KEY_ROUTES,
     _KEY_TOKEN_DB,
@@ -34,6 +33,7 @@ from terok_sandbox.vault.token_broker import (
     _run_multi,
     _TokenDB,
 )
+from terok_sandbox.vault.store.db import CredentialDB
 
 # ── Health endpoint ──────────────────────────────────────────────────────
 
@@ -436,7 +436,7 @@ class TestStaticPhantomMarker:
         """Static marker resolves to Claude credential (returns 502 since upstream is down)."""
         from aiohttp.test_utils import TestClient, TestServer
 
-        from terok_sandbox.vault.constants import PHANTOM_CREDENTIALS_MARKER
+        from terok_sandbox.vault.daemon.constants import PHANTOM_CREDENTIALS_MARKER
 
         app = _static_marker_env
         async with TestClient(TestServer(app)) as client:
@@ -451,7 +451,7 @@ class TestStaticPhantomMarker:
         """Codex shared auth.json marker resolves to the Codex credential."""
         from aiohttp.test_utils import TestClient, TestServer
 
-        from terok_sandbox.vault.constants import CODEX_SHARED_OAUTH_MARKER
+        from terok_sandbox.vault.daemon.constants import CODEX_SHARED_OAUTH_MARKER
 
         app = _static_marker_env
         async with TestClient(TestServer(app)) as client:
@@ -465,7 +465,7 @@ class TestStaticPhantomMarker:
         """Static marker returns 502 (no credential) when Claude has no stored credentials."""
         from aiohttp.test_utils import TestClient, TestServer
 
-        from terok_sandbox.vault.constants import PHANTOM_CREDENTIALS_MARKER
+        from terok_sandbox.vault.daemon.constants import PHANTOM_CREDENTIALS_MARKER
 
         db = CredentialDB(tmp_path / "test.db", passphrase="test")
         db.close()  # empty DB
@@ -1011,7 +1011,7 @@ class TestWebsocketProxy:
                 return TestWebsocketProxy._WebSocketContext(upstream_ws)
 
         monkeypatch.setattr(
-            "terok_sandbox.vault.token_broker.web.WebSocketResponse",
+            "terok_sandbox.vault.daemon.token_broker.web.WebSocketResponse",
             lambda **kwargs: response_kwargs.update(kwargs) or client_ws,
         )
 
@@ -1053,7 +1053,7 @@ class TestWebsocketProxy:
                 return TestWebsocketProxy._WebSocketContext(upstream_ws)
 
         monkeypatch.setattr(
-            "terok_sandbox.vault.token_broker.web.WebSocketResponse",
+            "terok_sandbox.vault.daemon.token_broker.web.WebSocketResponse",
             lambda **_kwargs: client_ws,
         )
 
@@ -1113,7 +1113,7 @@ class TestWebsocketProxy:
                 return TestWebsocketProxy._WebSocketContext(upstream_ws)
 
         monkeypatch.setattr(
-            "terok_sandbox.vault.token_broker.web.WebSocketResponse",
+            "terok_sandbox.vault.daemon.token_broker.web.WebSocketResponse",
             lambda **_kwargs: client_ws,
         )
 
@@ -1565,7 +1565,7 @@ class TestRunMultiSiteSelection:
 
         with (
             patch(
-                "terok_sandbox.vault.token_broker._systemd_sockets",
+                "terok_sandbox.vault.daemon.token_broker._systemd_sockets",
                 return_value=(mock_unix, mock_tcp),
             ),
             patch("aiohttp.web_runner.SockSite", _TrackingSockSite),
@@ -1609,7 +1609,7 @@ class TestRunMultiSiteSelection:
 
         with (
             patch(
-                "terok_sandbox.vault.token_broker._systemd_sockets",
+                "terok_sandbox.vault.daemon.token_broker._systemd_sockets",
                 return_value=(None, None),
             ),
             patch("aiohttp.web_runner.SockSite", _TrackingSockSite),

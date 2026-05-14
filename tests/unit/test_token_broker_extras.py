@@ -18,8 +18,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from terok_sandbox.credentials.db import CredentialDB
-from terok_sandbox.vault.token_broker import (
+from terok_sandbox.vault.daemon.token_broker import (
     _KEY_CLIENT,
     _KEY_REFRESH_TASK,  # noqa: PLC2701
     _build_app,  # noqa: PLC2701
@@ -29,6 +28,7 @@ from terok_sandbox.vault.token_broker import (
     _TokenDB,  # noqa: PLC2701
     main,
 )
+from terok_sandbox.vault.store.db import CredentialDB
 
 # ---------------------------------------------------------------------------
 # _TokenDB.__del__ exception swallow
@@ -147,7 +147,9 @@ class TestRefreshLoop:
     async def test_cancellation_propagates(self, tmp_path: Path) -> None:
         # Build a minimal app with a short refresh interval; cancel after one iteration.
         app = web.Application()
-        with patch("terok_sandbox.vault.token_broker._refresh_all", side_effect=asyncio.sleep):
+        with patch(
+            "terok_sandbox.vault.daemon.token_broker._refresh_all", side_effect=asyncio.sleep
+        ):
             task = asyncio.create_task(_refresh_loop(app))
             await asyncio.sleep(0.01)  # let it start
             task.cancel()
@@ -165,8 +167,8 @@ class TestRefreshLoop:
             raise RuntimeError("simulated failure")
 
         with (
-            patch("terok_sandbox.vault.token_broker._refresh_all", side_effect=faulty),
-            patch("terok_sandbox.vault.token_broker._REFRESH_INTERVAL", 0.01),
+            patch("terok_sandbox.vault.daemon.token_broker._refresh_all", side_effect=faulty),
+            patch("terok_sandbox.vault.daemon.token_broker._REFRESH_INTERVAL", 0.01),
         ):
             task = asyncio.create_task(_refresh_loop(app))
             await asyncio.sleep(0.05)  # a few iterations should attempt
@@ -245,7 +247,7 @@ class TestMainCli:
     def test_dispatches_to_run_multi(self, tmp_path: Path) -> None:
         with (
             patch("sys.argv", _argv_basics(tmp_path)),
-            patch("terok_sandbox.vault.token_broker.asyncio.run") as run,
+            patch("terok_sandbox.vault.daemon.token_broker.asyncio.run") as run,
         ):
             main()
         run.assert_called_once()
@@ -255,7 +257,7 @@ class TestMainCli:
         argv = _argv_basics(tmp_path) + [f"--pid-file={pidfile}"]
         with (
             patch("sys.argv", argv),
-            patch("terok_sandbox.vault.token_broker.asyncio.run"),
+            patch("terok_sandbox.vault.daemon.token_broker.asyncio.run"),
         ):
             main()
         import os
@@ -267,8 +269,8 @@ class TestMainCli:
         argv = _argv_basics(tmp_path) + [f"--log-file={log}", "--log-level=DEBUG"]
         with (
             patch("sys.argv", argv),
-            patch("terok_sandbox.vault.token_broker.asyncio.run"),
-            patch("terok_sandbox.vault.token_broker.logging.basicConfig") as basic_config,
+            patch("terok_sandbox.vault.daemon.token_broker.asyncio.run"),
+            patch("terok_sandbox.vault.daemon.token_broker.logging.basicConfig") as basic_config,
         ):
             main()
         kwargs = basic_config.call_args.kwargs
@@ -305,8 +307,8 @@ class TestMainCli:
         """
         import logging
 
-        from terok_sandbox.credentials.db import CredentialDB
-        from terok_sandbox.vault.token_broker import _TokenDB
+        from terok_sandbox.vault.daemon.token_broker import _TokenDB
+        from terok_sandbox.vault.store.db import CredentialDB
 
         passphrase = "tok-db-pw"
         db_path = tmp_path / "creds.db"
@@ -314,7 +316,7 @@ class TestMainCli:
 
         caplog.set_level(logging.INFO, logger="terok-vault")
         with patch(
-            "terok_sandbox.credentials.encryption.resolve_passphrase_with_source",
+            "terok_sandbox.vault.store.encryption.resolve_passphrase_with_source",
             lambda **_kw: (passphrase, "systemd-creds"),
         ):
             db = _TokenDB(str(db_path))
@@ -331,12 +333,12 @@ class TestMainCli:
         """An empty chain logs the no-tier line and then raises NoPassphraseError."""
         import logging
 
-        from terok_sandbox.credentials.encryption import NoPassphraseError
-        from terok_sandbox.vault.token_broker import _TokenDB
+        from terok_sandbox.vault.daemon.token_broker import _TokenDB
+        from terok_sandbox.vault.store.encryption import NoPassphraseError
 
         caplog.set_level(logging.INFO, logger="terok-vault")
         with patch(
-            "terok_sandbox.credentials.encryption.resolve_passphrase_with_source",
+            "terok_sandbox.vault.store.encryption.resolve_passphrase_with_source",
             lambda **_kw: (None, None),
         ):
             with pytest.raises(NoPassphraseError):
@@ -348,8 +350,8 @@ class TestMainCli:
         argv = _argv_basics(tmp_path) + ["--log-level=NOTALEVEL"]
         with (
             patch("sys.argv", argv),
-            patch("terok_sandbox.vault.token_broker.asyncio.run"),
-            patch("terok_sandbox.vault.token_broker.logging.basicConfig") as basic_config,
+            patch("terok_sandbox.vault.daemon.token_broker.asyncio.run"),
+            patch("terok_sandbox.vault.daemon.token_broker.logging.basicConfig") as basic_config,
         ):
             main()
         import logging
@@ -359,14 +361,16 @@ class TestMainCli:
     def test_keyboard_interrupt_caught_silently(self, tmp_path: Path) -> None:
         with (
             patch("sys.argv", _argv_basics(tmp_path)),
-            patch("terok_sandbox.vault.token_broker.asyncio.run", side_effect=KeyboardInterrupt),
+            patch(
+                "terok_sandbox.vault.daemon.token_broker.asyncio.run", side_effect=KeyboardInterrupt
+            ),
         ):
             main()  # must not raise
 
     def test_systemexit_caught_silently(self, tmp_path: Path) -> None:
         with (
             patch("sys.argv", _argv_basics(tmp_path)),
-            patch("terok_sandbox.vault.token_broker.asyncio.run", side_effect=SystemExit(0)),
+            patch("terok_sandbox.vault.daemon.token_broker.asyncio.run", side_effect=SystemExit(0)),
         ):
             main()  # must not raise
 

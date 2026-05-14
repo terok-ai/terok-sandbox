@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for [`terok_sandbox.credentials.ssh_keypair`][terok_sandbox.credentials.ssh_keypair] — generate, import, export."""
+"""Tests for [`terok_sandbox.vault.ssh.keypair`][terok_sandbox.vault.ssh.keypair] — generate, import, export."""
 
 from __future__ import annotations
 
@@ -11,8 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from terok_sandbox.credentials.db import CredentialDB, UnsafeCommentError
-from terok_sandbox.credentials.ssh_keypair import (
+from terok_sandbox.vault.ssh.keypair import (
     KeypairMismatchError,
     PasswordProtectedKeyError,
     export_ssh_keypair,
@@ -21,6 +20,7 @@ from terok_sandbox.credentials.ssh_keypair import (
     openssh_pem_of,
     parse_openssh_keypair,
 )
+from terok_sandbox.vault.store.db import CredentialDB, UnsafeCommentError
 
 
 @pytest.fixture()
@@ -188,7 +188,7 @@ class TestPasswordProtected:
         priv.write_bytes(b"dummy-encrypted-bytes")
         with (
             patch(
-                "terok_sandbox.credentials.ssh_keypair.load_ssh_private_key",
+                "terok_sandbox.vault.ssh.keypair.load_ssh_private_key",
                 side_effect=TypeError("Password was not given but private key is encrypted"),
             ),
             pytest.raises(PasswordProtectedKeyError) as excinfo,
@@ -270,7 +270,7 @@ class TestExport:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """If the .pub write fails, the private file must not linger on disk."""
-        from terok_sandbox.credentials import ssh_keypair as mod
+        from terok_sandbox.vault.ssh import keypair as mod
 
         priv, pub = disk_keypair
         import_ssh_keypair(db, "proj", priv, pub_path=pub)
@@ -342,7 +342,7 @@ class TestWriteExclusive:
         """``os.write`` short-writes of 1 byte at a time still produce the full file."""
         import os
 
-        from terok_sandbox.credentials import ssh_keypair as mod
+        from terok_sandbox.vault.ssh import keypair as mod
 
         real_write = os.write
 
@@ -359,7 +359,7 @@ class TestWriteExclusive:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A failure after bytes landed still rolls back — no truncated-mode leftover."""
-        from terok_sandbox.credentials import ssh_keypair as mod
+        from terok_sandbox.vault.ssh import keypair as mod
 
         def _chmod_boom(_path, _mode):
             raise OSError("synthetic chmod failure")
@@ -419,7 +419,7 @@ class TestPublicLine:
 
     def test_ed25519_line_format(self) -> None:
         """Line starts with ``ssh-ed25519`` and ends with the comment."""
-        from terok_sandbox.credentials.ssh_keypair import public_line_of
+        from terok_sandbox.vault.ssh.keypair import public_line_of
 
         kp = generate_keypair("ed25519", comment="hi")
         rec = _record_from(kp, id=1)
@@ -429,7 +429,7 @@ class TestPublicLine:
 
     def test_rsa_line_format(self) -> None:
         """RSA records render as ``ssh-rsa <b64> <comment>``."""
-        from terok_sandbox.credentials.ssh_keypair import public_line_of
+        from terok_sandbox.vault.ssh.keypair import public_line_of
 
         kp = generate_keypair("rsa", comment="rsa-c")
         rec = _record_from(kp, id=1)
@@ -439,8 +439,8 @@ class TestPublicLine:
 
     def test_unknown_algo_rejected(self) -> None:
         """Corrupt DB with an unexpected key_type surfaces as ValueError."""
-        from terok_sandbox.credentials.db import SSHKeyRecord
-        from terok_sandbox.credentials.ssh_keypair import public_line_of
+        from terok_sandbox.vault.ssh.keypair import public_line_of
+        from terok_sandbox.vault.store.db import SSHKeyRecord
 
         rec = SSHKeyRecord(
             id=1,
@@ -456,7 +456,7 @@ class TestPublicLine:
 
 def _record_from(kp, *, id: int):
     """Build an [`SSHKeyRecord`][terok_sandbox.SSHKeyRecord] from a [`GeneratedKeypair`][terok_sandbox.GeneratedKeypair]."""
-    from terok_sandbox.credentials.db import SSHKeyRecord
+    from terok_sandbox.vault.store.db import SSHKeyRecord
 
     return SSHKeyRecord(
         id=id,

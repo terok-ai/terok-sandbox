@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from terok_sandbox.credentials.db import CredentialDB
+from terok_sandbox.vault.store.db import CredentialDB
 
 
 @pytest.fixture()
@@ -157,7 +157,7 @@ def _seed_legacy_v0_db(db_path: Path) -> bytes:
         PublicFormat,
     )
 
-    from terok_sandbox.credentials.encryption import open_sqlcipher
+    from terok_sandbox.vault.store.encryption import open_sqlcipher
 
     priv = ed25519.Ed25519PrivateKey.generate()
     pem = priv.private_bytes(Encoding.PEM, PrivateFormat.OpenSSH, NoEncryption())
@@ -217,7 +217,7 @@ class TestSchemaMigration:
         from cryptography.hazmat.primitives.asymmetric import ed25519
         from cryptography.hazmat.primitives.serialization import load_der_private_key
 
-        from terok_sandbox.credentials.migrations import SCHEMA_VERSION
+        from terok_sandbox.vault.store.migrations import SCHEMA_VERSION
 
         db_path = tmp_path / "legacy.db"
         _seed_legacy_v0_db(db_path)
@@ -255,8 +255,8 @@ class TestSchemaMigration:
         ``CredentialDB``.  Without this path the daemon would crash on
         its first key lookup with "no such column: private_der".
         """
-        from terok_sandbox.credentials.migrations import SCHEMA_VERSION
-        from terok_sandbox.vault.token_broker import _TokenDB
+        from terok_sandbox.vault.daemon.token_broker import _TokenDB
+        from terok_sandbox.vault.store.migrations import SCHEMA_VERSION
 
         db_path = tmp_path / "legacy.db"
         pub_blob = _seed_legacy_v0_db(db_path)
@@ -279,8 +279,8 @@ class TestSchemaMigration:
         the column was always opaque to the sandbox; the new name makes
         that contract explicit at the schema level.
         """
-        from terok_sandbox.credentials.encryption import open_sqlcipher
-        from terok_sandbox.credentials.migrations import SCHEMA_VERSION
+        from terok_sandbox.vault.store.encryption import open_sqlcipher
+        from terok_sandbox.vault.store.migrations import SCHEMA_VERSION
 
         db_path = tmp_path / "v1.db"
         # Hand-built v1 schema inside an encrypted DB: proxy_tokens still uses
@@ -345,7 +345,7 @@ class TestSchemaMigration:
         ``OperationalError: no such table`` and the systemd unit dies
         on startup.
         """
-        from terok_sandbox.vault.token_broker import _TokenDB
+        from terok_sandbox.vault.daemon.token_broker import _TokenDB
 
         db_path = tmp_path / "fresh.db"
         # Path doesn't exist yet — sqlite3.connect() creates an empty file.
@@ -362,7 +362,7 @@ class TestSchemaMigration:
         """Calling the bootstrap helper twice on the same connection is harmless."""
         import sqlite3
 
-        from terok_sandbox.credentials.db import ensure_credentials_schema
+        from terok_sandbox.vault.store.db import ensure_credentials_schema
 
         conn = sqlite3.connect(str(tmp_path / "twice.db"))
         try:
