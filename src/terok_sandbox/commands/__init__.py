@@ -83,11 +83,11 @@ from .vault import (
     _handle_vault_start,
     _handle_vault_status,
     _handle_vault_stop,
-    _handle_vault_to_keyring,
     _handle_vault_uninstall,
     _handle_vault_unlock,
     _print_plaintext_passphrase_warning,
     handle_vault_seal,
+    handle_vault_to_keyring,
 )
 
 #: Sandbox's top-level command forest — a [`CommandTree`][terok_sandbox.commands.CommandTree]
@@ -165,7 +165,7 @@ __all__ = [
     "_handle_vault_start",
     "_handle_vault_status",
     "_handle_vault_stop",
-    "_handle_vault_to_keyring",
+    "handle_vault_to_keyring",
     "_handle_vault_uninstall",
     "_handle_vault_unlock",
     "_key_id_from_row",

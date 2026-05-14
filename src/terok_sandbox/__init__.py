@@ -68,6 +68,7 @@ from .commands import (
     _handle_sandbox_setup as sandbox_setup,
     _handle_sandbox_uninstall as sandbox_uninstall,
     handle_vault_seal,
+    handle_vault_to_keyring,
 )
 from .config import CONTAINER_RUNTIME_DIR, SandboxConfig
 from .config_schema import (
@@ -464,6 +465,7 @@ __all__ = [
     "SHIELD_COMMANDS",
     "SSH_COMMANDS",
     "handle_vault_seal",
+    "handle_vault_to_keyring",
     # Aggregator entry points — one-call install/teardown of the
     # full shield+vault+gate+clearance stack.
     "sandbox_setup",

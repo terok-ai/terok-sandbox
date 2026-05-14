@@ -307,7 +307,7 @@ def handle_vault_seal(*, cfg: SandboxConfig | None = None, key: str = "auto") ->
     print("  the resolution chain will pick this up on the next daemon start; no restart required")
 
 
-def _handle_vault_to_keyring(*, cfg: SandboxConfig | None = None) -> None:
+def handle_vault_to_keyring(*, cfg: SandboxConfig | None = None) -> None:
     """Move the current passphrase from its current tier into the OS keyring.
 
     Resolves the passphrase via the chain (or prompts as a last resort),
@@ -421,7 +421,7 @@ _PASSPHRASE_GROUP = CommandDef(
         CommandDef(
             name="to-keyring",
             help="Move the current passphrase from its current tier into the OS keyring",
-            handler=_handle_vault_to_keyring,
+            handler=handle_vault_to_keyring,
         ),
         CommandDef(
             name="destroy",

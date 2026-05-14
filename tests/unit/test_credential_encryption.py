@@ -1913,7 +1913,7 @@ class TestVaultToKeyring:
         from unittest.mock import MagicMock
 
         from terok_sandbox import config as _config
-        from terok_sandbox.commands import _handle_vault_to_keyring
+        from terok_sandbox.commands import handle_vault_to_keyring
 
         cfg = _make_cfg(tmp_path)
         cfg.vault_passphrase_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1939,7 +1939,7 @@ class TestVaultToKeyring:
         mgr.is_daemon_running.return_value = False
         monkeypatch.setattr("terok_sandbox.vault.daemon.lifecycle.VaultManager", lambda _cfg: mgr)
 
-        _handle_vault_to_keyring(cfg=cfg)
+        handle_vault_to_keyring(cfg=cfg)
 
         store.assert_called_once_with("current-pw")
         assert not cfg.vault_passphrase_file.exists()
@@ -1951,7 +1951,7 @@ class TestVaultToKeyring:
         """If the chain already hits keyring, the verb is idempotent — no write, no restart."""
         from unittest.mock import MagicMock
 
-        from terok_sandbox.commands import _handle_vault_to_keyring
+        from terok_sandbox.commands import handle_vault_to_keyring
 
         cfg = _make_cfg(tmp_path, use_keyring=True)
         monkeypatch.setattr(
@@ -1963,7 +1963,7 @@ class TestVaultToKeyring:
             "terok_sandbox.vault.store.encryption.store_passphrase_in_keyring", store
         )
 
-        _handle_vault_to_keyring(cfg=cfg)
+        handle_vault_to_keyring(cfg=cfg)
 
         store.assert_not_called()
 
@@ -1971,7 +1971,7 @@ class TestVaultToKeyring:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """No tier hits and no TTY → fail loudly rather than write nothing silently."""
-        from terok_sandbox.commands import _handle_vault_to_keyring
+        from terok_sandbox.commands import handle_vault_to_keyring
 
         # ``use_keyring=False`` blocks the autouse keyring stub from
         # claiming the chain; file tier is already blanked by autouse.
@@ -1979,7 +1979,7 @@ class TestVaultToKeyring:
         monkeypatch.setattr("sys.stdin.isatty", lambda: False)
 
         with pytest.raises(SystemExit, match="no current passphrase"):
-            _handle_vault_to_keyring(cfg=cfg)
+            handle_vault_to_keyring(cfg=cfg)
 
     def test_aborts_when_keyring_write_fails(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1987,7 +1987,7 @@ class TestVaultToKeyring:
         """A keyring backend rejection leaves the source tier untouched."""
         from unittest.mock import MagicMock
 
-        from terok_sandbox.commands import _handle_vault_to_keyring
+        from terok_sandbox.commands import handle_vault_to_keyring
 
         cfg = _make_cfg(tmp_path)
         cfg.vault_passphrase_file.parent.mkdir(parents=True, exist_ok=True)
@@ -2002,7 +2002,7 @@ class TestVaultToKeyring:
         )
 
         with pytest.raises(SystemExit, match="OS keyring is unreachable"):
-            _handle_vault_to_keyring(cfg=cfg)
+            handle_vault_to_keyring(cfg=cfg)
         # Source tier is preserved on failure — no half-done migration.
         assert cfg.vault_passphrase_file.read_text() == "current-pw\n"
 
@@ -2012,7 +2012,7 @@ class TestVaultToKeyring:
         """A running daemon is stopped + restarted so it picks up the new tier on this boot."""
         from unittest.mock import MagicMock
 
-        from terok_sandbox.commands import _handle_vault_to_keyring
+        from terok_sandbox.commands import handle_vault_to_keyring
 
         cfg = _make_cfg(tmp_path)
         cfg.vault_passphrase_file.parent.mkdir(parents=True, exist_ok=True)
@@ -2034,7 +2034,7 @@ class TestVaultToKeyring:
         mgr.is_daemon_running.return_value = True
         monkeypatch.setattr("terok_sandbox.vault.daemon.lifecycle.VaultManager", lambda _cfg: mgr)
 
-        _handle_vault_to_keyring(cfg=cfg)
+        handle_vault_to_keyring(cfg=cfg)
 
         mgr.stop_daemon.assert_called_once()
         mgr.start_daemon.assert_called_once()
@@ -2043,7 +2043,7 @@ class TestVaultToKeyring:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A fail-closed resolver error (e.g. broken sealed credential) surfaces as a CLI-friendly SystemExit."""
-        from terok_sandbox.commands import _handle_vault_to_keyring
+        from terok_sandbox.commands import handle_vault_to_keyring
         from terok_sandbox.vault.store.encryption import WrongPassphraseError
 
         cfg = _make_cfg(tmp_path)
@@ -2056,11 +2056,11 @@ class TestVaultToKeyring:
         )
 
         with pytest.raises(SystemExit, match="cannot move to keyring: sealed credential"):
-            _handle_vault_to_keyring(cfg=cfg)
+            handle_vault_to_keyring(cfg=cfg)
 
     def test_default_cfg_branch(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """``cfg=None`` constructs a default ``SandboxConfig``; the no-passphrase exit path is reached."""
-        from terok_sandbox.commands import _handle_vault_to_keyring
+        from terok_sandbox.commands import handle_vault_to_keyring
 
         # No passphrase resolvable + no TTY ⇒ deterministic SystemExit.
         # The autouse fixtures stub the keyring tier to return "test"
@@ -2075,7 +2075,7 @@ class TestVaultToKeyring:
         )
 
         with pytest.raises(SystemExit, match="no current passphrase"):
-            _handle_vault_to_keyring()
+            handle_vault_to_keyring()
 
 
 class TestVaultDestroyPassphrase:
