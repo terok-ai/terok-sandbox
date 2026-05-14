@@ -4,13 +4,13 @@
 """Credential-DB schema bootstrap + forward migrations.
 
 Two functions, both idempotent, both called by every opener of the
-sqlite3 file ([`CredentialDB`][terok_sandbox.credentials.db.CredentialDB]
+sqlite3 file ([`CredentialDB`][terok_sandbox.vault.store.db.CredentialDB]
 for writers, the vault daemon's read-only ``_TokenDB`` for readers):
 
-* [`ensure_credentials_schema`][terok_sandbox.credentials.migrations.ensure_credentials_schema]
+* [`ensure_credentials_schema`][terok_sandbox.vault.store.migrations.ensure_credentials_schema]
   declares the *current* shape via ``CREATE TABLE IF NOT EXISTS`` so
   fresh installs land at the latest schema in one shot.
-* [`migrate_credential_db_schema`][terok_sandbox.credentials.migrations.migrate_credential_db_schema]
+* [`migrate_credential_db_schema`][terok_sandbox.vault.store.migrations.migrate_credential_db_schema]
   walks legacy DBs forward step by step, gated by ``PRAGMA user_version``
   so already-upgraded files are a no-op.
 
@@ -25,7 +25,7 @@ import sqlite3
 
 #: Current credential-DB schema version.  Bump when the on-disk shape
 #: changes; add a matching ``current < N`` block in
-#: [`migrate_credential_db_schema`][terok_sandbox.credentials.migrations.migrate_credential_db_schema].
+#: [`migrate_credential_db_schema`][terok_sandbox.vault.store.migrations.migrate_credential_db_schema].
 #:
 #: Version history:
 #:
@@ -94,7 +94,7 @@ def migrate_credential_db_schema(conn: sqlite3.Connection) -> None:
     whole upgrade in one go.
 
     Exposed at module level so every opener of the DB file
-    ([`CredentialDB`][terok_sandbox.credentials.db.CredentialDB] for
+    ([`CredentialDB`][terok_sandbox.vault.store.db.CredentialDB] for
     writers, ``_TokenDB`` in the vault daemon for readers) runs it
     before issuing queries — otherwise a daemon that restarts before any
     CLI command has touched the DB would hit "no such column: …" on a

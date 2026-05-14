@@ -82,7 +82,7 @@ def open_sqlcipher_via_chain(
 ) -> Any:
     """Resolve the passphrase through the runtime chain and open *db_path*.
 
-    Raises [`NoPassphraseError`][terok_sandbox.credentials.encryption.NoPassphraseError]
+    Raises [`NoPassphraseError`][terok_sandbox.vault.store.encryption.NoPassphraseError]
     when the chain yields nothing.  *prompt_on_tty* turns on the
     interactive fallback for CLI consumers; daemons leave it ``False``.
     """
@@ -111,7 +111,7 @@ def resolve_passphrase_with_source(
     """Walk the runtime resolution chain; return ``(passphrase, source)``.
 
     Single source of truth for the resolution order — see
-    [`resolve_passphrase`][terok_sandbox.credentials.encryption.resolve_passphrase]
+    [`resolve_passphrase`][terok_sandbox.vault.store.encryption.resolve_passphrase]
     for the tier semantics.  Both elements of the tuple are ``None``
     when no tier had a passphrase.
 
@@ -177,7 +177,7 @@ def resolve_passphrase(
     2. *systemd_creds_file* — sealed credential decrypted via
        ``systemd-creds(1)``.  Machine-bound (TPM2 or host key), survives
        reboot, no OS keyring required.  See
-       [`terok_sandbox.credentials.systemd_creds`][terok_sandbox.credentials.systemd_creds].
+       [`terok_sandbox.vault.store.systemd_creds`][terok_sandbox.vault.store.systemd_creds].
     3. OS keyring — only when *use_keyring* is true; off by default because
        Linux Secret Service grants access per-collection, not per-item.
     4. *passphrase_command* — operator-supplied shell command
@@ -266,8 +266,8 @@ def load_passphrase_from_command(
 ) -> str | None:
     """Run *command*, return its stdout with the trailing newline removed, or ``None`` on any failure.
 
-    Same shape as the other tier primitives ([`load_passphrase_from_file`][terok_sandbox.credentials.encryption.load_passphrase_from_file],
-    [`load_passphrase_from_keyring`][terok_sandbox.credentials.encryption.load_passphrase_from_keyring]):
+    Same shape as the other tier primitives ([`load_passphrase_from_file`][terok_sandbox.vault.store.encryption.load_passphrase_from_file],
+    [`load_passphrase_from_keyring`][terok_sandbox.vault.store.encryption.load_passphrase_from_keyring]):
     silent on every failure path so the resolver can decide whether
     ``None`` means "skip this tier" or "fail closed".  Diagnostic
     detail (parse error, exec failure, non-zero exit, helper stderr,

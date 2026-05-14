@@ -23,13 +23,13 @@ reads it.  sqlite3 in WAL mode gives lock-free concurrent reads across multiple
 terok processes (CLI commands, vault daemon, task runners).
 
 Schema declarations and forward migrations live in
-[`terok_sandbox.credentials.migrations`][terok_sandbox.credentials.migrations]
+[`terok_sandbox.vault.store.migrations`][terok_sandbox.vault.store.migrations]
 — this module is the data-access layer only.
 
 The on-disk file is always SQLCipher-encrypted; the passphrase
 resolution chain (keyring → ``credentials.passphrase`` config field)
 and the SQLCipher open helpers live in
-[`terok_sandbox.credentials.encryption`][terok_sandbox.credentials.encryption].
+[`terok_sandbox.vault.store.encryption`][terok_sandbox.vault.store.encryption].
 """
 
 from __future__ import annotations
@@ -184,8 +184,8 @@ class CredentialDB:
     The on-disk file is always SQLCipher-encrypted.  Callers either
     supply *passphrase* explicitly or leave it ``None`` to walk the
     runtime resolution chain (keyring → ``credentials.passphrase``).
-    A missing passphrase raises [`NoPassphraseError`][terok_sandbox.credentials.db.NoPassphraseError];
-    a stale plaintext file raises [`PlaintextDBFoundError`][terok_sandbox.credentials.db.PlaintextDBFoundError]
+    A missing passphrase raises [`NoPassphraseError`][terok_sandbox.vault.store.db.NoPassphraseError];
+    a stale plaintext file raises [`PlaintextDBFoundError`][terok_sandbox.vault.store.db.PlaintextDBFoundError]
     — both are diagnostic-only.  Operator-facing remediation (which CLI
     verb to run, which doc page to read) is the caller's job: library
     code shouldn't bake one frontend's verbs into its exception text.
@@ -294,7 +294,7 @@ class CredentialDB:
         is unknown.  The comment is validated by the same safety helper
         that gates ``import_ssh_keypair`` — control characters and
         overlong strings raise
-        [`UnsafeCommentError`][terok_sandbox.credentials.db.UnsafeCommentError]
+        [`UnsafeCommentError`][terok_sandbox.vault.store.db.UnsafeCommentError]
         so the storage-entry-point invariant holds for this path too.
 
         Bumps ``ssh_keys_version`` on success so the scope-socket
@@ -315,7 +315,7 @@ class CredentialDB:
     def assign_ssh_key(self, scope: str, key_id: int) -> None:
         """Grant *scope* access to *key_id* (idempotent).
 
-        Rejects unsafe scope names with [`InvalidScopeName`][terok_sandbox.credentials.db.InvalidScopeName] — the
+        Rejects unsafe scope names with [`InvalidScopeName`][terok_sandbox.vault.store.db.InvalidScopeName] — the
         value is later embedded in per-scope Unix-socket paths, so
         traversal-like strings (``../``, ``/``) must not be persisted.
         """
@@ -503,7 +503,7 @@ class CredentialDB:
         Returns the number of rows removed.  The sandbox makes no claim
         about what ``subject`` identifies; callers (the orchestrator) pass
         whatever opaque label they used at
-        [`create_token`][terok_sandbox.credentials.db.CredentialDB.create_token]
+        [`create_token`][terok_sandbox.vault.store.db.CredentialDB.create_token]
         time.
         """
         cur = self._conn.execute(
@@ -540,7 +540,7 @@ def _open_connection(db_path: Path, passphrase: str) -> Any:
 def _looks_like_plaintext_db(db_path: Path) -> bool:
     """Best-effort post-failure check used to translate sqlcipher errors.
 
-    Only called from the [`CredentialDB`][terok_sandbox.credentials.db.CredentialDB]
+    Only called from the [`CredentialDB`][terok_sandbox.vault.store.db.CredentialDB]
     error path when a SQLCipher open fails — never on the success
     path.  Delegates to the setup-time probe.
     """
@@ -559,7 +559,7 @@ def open_credential_db_with_source(
     config_fallback: str | None = None,
     prompt_on_tty: bool = False,
 ) -> tuple[CredentialDB, PassphraseSource]:
-    """Same as [`open_credential_db`][terok_sandbox.credentials.db.open_credential_db]
+    """Same as [`open_credential_db`][terok_sandbox.vault.store.db.open_credential_db]
     but also returns which tier the passphrase came from.
 
     Used by [`VaultStatus`][terok_sandbox.VaultStatus] so the TUI status

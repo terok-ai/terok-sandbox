@@ -5,16 +5,6 @@ exclude = [
     "dist",
     ".venv",
     "docs",
-    # Back-compat shims at the pre-vault-unification import paths.
-    # Each is a one-line star re-export from the new ``vault.{store,ssh,daemon}.*``
-    # home; removed once cross-repo consumers (terok, terok-executor) update.
-    "src/terok_sandbox/credentials",
-    "src/terok_sandbox/vault/lifecycle.py",
-    "src/terok_sandbox/vault/token_broker.py",
-    "src/terok_sandbox/vault/audit.py",
-    "src/terok_sandbox/vault/constants.py",
-    "src/terok_sandbox/vault/ssh_signer.py",
-    "src/terok_sandbox/vault/scope_sockets.py",
 ]
 
 source_roots = ["src"]

@@ -3,7 +3,7 @@
 
 """SSH keypair generation for a project scope.
 
-[`SSHManager`][terok_sandbox.credentials.ssh.SSHManager] generates an SSH keypair in memory, stores the private
+[`SSHManager`][terok_sandbox.vault.ssh.manager.SSHManager] generates an SSH keypair in memory, stores the private
 material in the credential DB, and assigns it to a project scope.  The
 generated key never touches the filesystem — the signer serves it over the
 per-scope agent socket managed by the vault.
@@ -49,10 +49,10 @@ class SSHManager:
     - ``SSHManager(scope=..., db=...)`` binds the manager to a
       caller-owned [`CredentialDB`][terok_sandbox.CredentialDB].  The manager uses it and
       never closes it.  Right shape for tests and pooled connections.
-    - [`SSHManager.open_for_config`][terok_sandbox.credentials.ssh.SSHManager.open_for_config]
+    - [`SSHManager.open_for_config`][terok_sandbox.vault.ssh.manager.SSHManager.open_for_config]
       opens its own DB via the supplied config's chain seam
       (``cfg.open_credential_db``) and closes it on
-      [`close`][terok_sandbox.credentials.ssh.SSHManager.close] /
+      [`close`][terok_sandbox.vault.ssh.manager.SSHManager.close] /
       context exit / garbage collection.  Right shape for one-shot
       CLI commands.  Pass ``db_path`` when the caller already holds a
       runtime path (typically ``VaultStatus.db_path``) so the open

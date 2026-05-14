@@ -120,7 +120,7 @@ class _TokenDB:
 
     Kept deliberately thin — only the SELECTs the vault daemon needs at
     request-handling time.  Writers go through
-    [`terok_sandbox.credentials.db.CredentialDB`][terok_sandbox.credentials.db.CredentialDB].
+    [`terok_sandbox.vault.store.db.CredentialDB`][terok_sandbox.vault.store.db.CredentialDB].
     """
 
     def __init__(self, db_path: str) -> None:
@@ -737,7 +737,7 @@ def _build_app(db_path: str, routes_path: str, audit_path: Path | None = None) -
     *audit_path* — when supplied, every credential-bearing request lands
     one JSONL line at this path.  ``None`` disables auditing (used by
     smoke tests that don't care about the side-channel); production
-    callers point at [`credential_audit_log_path`][terok_sandbox.vault.audit.credential_audit_log_path].
+    callers point at [`credential_audit_log_path`][terok_sandbox.vault.daemon.audit.credential_audit_log_path].
     """
     app = web.Application()
     app[_KEY_ROUTES] = _RouteTable(routes_path)

@@ -99,7 +99,7 @@ class VaultManager:
         ``systemctl --user start`` and then probes the configured transport
         — Unix socket in socket mode, ``/-/health`` + raw TCP in TCP mode.
 
-        Raises [`VaultUnreachableError`][terok_sandbox.vault.lifecycle.VaultUnreachableError] if the vault is unreachable.
+        Raises [`VaultUnreachableError`][terok_sandbox.vault.daemon.lifecycle.VaultUnreachableError] if the vault is unreachable.
         Called before task creation when vault is enabled.
         """
         if not self.is_socket_active() and not self.is_daemon_running():
@@ -268,7 +268,7 @@ class VaultManager:
         """Check whether the vault daemon itself is running.
 
         Checks both TCP-mode service and socket-mode service units.
-        Unlike [`is_socket_active`][terok_sandbox.vault.lifecycle.VaultManager.is_socket_active], this tells whether the vault
+        Unlike [`is_socket_active`][terok_sandbox.vault.daemon.lifecycle.VaultManager.is_socket_active], this tells whether the vault
         daemon itself is bound (TCP ports bound), not just whether the
         socket is listening.  Does not trigger socket activation.
         """

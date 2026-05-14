@@ -24,7 +24,7 @@ no ``tss`` group, no ``sudo``.
 This requires systemd ≥ 257 (PR systemd/systemd#35536, merged
 2024-12-20).  Earlier releases lack the Varlink endpoint and the
 ``--user`` decrypt path fails for non-root with ``Failed to determine
-local credential key: Permission denied``.  [`is_available`][terok_sandbox.credentials.systemd_creds.is_available]
+local credential key: Permission denied``.  [`is_available`][terok_sandbox.vault.store.systemd_creds.is_available]
 gates on the version so the tier reports as unavailable rather than
 failing at runtime.
 
