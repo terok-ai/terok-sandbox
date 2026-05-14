@@ -342,6 +342,35 @@ class TestSharedIdentityAcrossShortcuts:
         assert tree.find_at(("vault", "passphrase", "seal")).handler is new_seal
 
 
+class TestDuckTypedCommandDef:
+    """Wire layer accepts foreign CommandDef shapes (terok-shield / clearance)."""
+
+    def test_wires_object_without_epilog_attribute(self) -> None:
+        """A registry CommandDef lacking ``epilog`` still wires — getattr defaults to ''."""
+        from dataclasses import dataclass
+
+        @dataclass(frozen=True)
+        class SlimDef:
+            name: str
+            help: str = ""
+            handler: object = None
+            args: tuple = ()
+            children: tuple = ()
+
+        called: list[int] = []
+
+        def handler() -> None:
+            called.append(1)
+
+        slim = SlimDef(name="v", help="v", handler=handler)
+        tree = CommandTree([slim])  # type: ignore[list-item]
+        parser = argparse.ArgumentParser()
+        tree.wire(parser)
+        args = parser.parse_args(["v"])
+        CommandTree.dispatch(args)
+        assert called == [1]
+
+
 class TestKeyRow:
     """Backward-compat smoke for the SSH key row."""
 

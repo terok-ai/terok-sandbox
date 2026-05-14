@@ -327,10 +327,19 @@ def _walk_node(
 
 
 def _wire_command(sub: argparse._SubParsersAction, cmd: CommandDef) -> None:
-    """Add *cmd* to *sub*; recurse for groups, set leaf dispatch defaults."""
+    """Add *cmd* to *sub*; recurse for groups, set leaf dispatch defaults.
+
+    Reads attributes via ``getattr`` with defaults so command sources
+    with a slimmer CommandDef shape (terok-shield, terok-clearance —
+    both define their own dataclasses without ``epilog``) wire through
+    the same path as sandbox's first-class CommandDefs.  The Protocol-
+    style duck typing keeps the unification cheap; the leaves don't
+    need to depend on sandbox to share the wire layer.
+    """
     parser_kwargs: dict[str, Any] = {"help": cmd.help}
-    if cmd.epilog:
-        parser_kwargs["epilog"] = cmd.epilog
+    epilog = getattr(cmd, "epilog", "")
+    if epilog:
+        parser_kwargs["epilog"] = epilog
         parser_kwargs["formatter_class"] = argparse.RawDescriptionHelpFormatter
     parser = sub.add_parser(cmd.name, **parser_kwargs)
     for arg in cmd.args:
