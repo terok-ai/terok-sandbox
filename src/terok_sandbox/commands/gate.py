@@ -91,40 +91,51 @@ def _handle_gate_status(*, cfg: SandboxConfig | None = None) -> None:
         print("Run 'terok-sandbox gate start' to update.", file=sys.stderr)
 
 
+#: The gate command group exposed at sandbox's top level.
 GATE_COMMANDS: tuple[CommandDef, ...] = (
     CommandDef(
-        name="install",
-        help="Install systemd socket activation for the gate server",
-        handler=_handle_gate_install,
-        group="gate",
-    ),
-    CommandDef(
-        name="uninstall",
-        help="Remove gate server systemd units",
-        handler=_handle_gate_uninstall,
-        group="gate",
-    ),
-    CommandDef(
-        name="start",
-        help="Start the gate server",
-        handler=_handle_gate_start,
-        group="gate",
-        args=(
-            ArgDef(name="--port", type=int, default=None, help="Override port (default: 9418)"),
-            ArgDef(name="--daemon", action="store_true", help="Force daemon mode (skip systemd)"),
+        name="gate",
+        help="Git gate server management",
+        children=(
+            CommandDef(
+                name="install",
+                help="Install systemd socket activation for the gate server",
+                handler=_handle_gate_install,
+            ),
+            CommandDef(
+                name="uninstall",
+                help="Remove gate server systemd units",
+                handler=_handle_gate_uninstall,
+            ),
+            CommandDef(
+                name="start",
+                help="Start the gate server",
+                handler=_handle_gate_start,
+                args=(
+                    ArgDef(
+                        name="--port",
+                        type=int,
+                        default=None,
+                        help="Override port (default: 9418)",
+                    ),
+                    ArgDef(
+                        name="--daemon",
+                        action="store_true",
+                        help="Force daemon mode (skip systemd)",
+                    ),
+                ),
+            ),
+            CommandDef(
+                name="stop",
+                help="Stop the gate server",
+                handler=_handle_gate_stop,
+            ),
+            CommandDef(
+                name="status",
+                help="Show gate server status",
+                handler=_handle_gate_status,
+            ),
         ),
-    ),
-    CommandDef(
-        name="stop",
-        help="Stop the gate server",
-        handler=_handle_gate_stop,
-        group="gate",
-    ),
-    CommandDef(
-        name="status",
-        help="Show gate server status",
-        handler=_handle_gate_status,
-        group="gate",
     ),
 )
 

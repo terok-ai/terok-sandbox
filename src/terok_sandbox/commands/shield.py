@@ -59,32 +59,52 @@ def _handle_shield_status() -> None:
         print(f"\n{env.setup_hint}", file=sys.stderr)
 
 
+#: The shield command group exposed at sandbox's top level.
 SHIELD_COMMANDS: tuple[CommandDef, ...] = (
     CommandDef(
-        name="install-hooks",
-        help="Install OCI hooks for the shield firewall",
-        handler=_handle_shield_setup,
-        group="shield",
-        args=(
-            ArgDef(name="--root", action="store_true", help="Install system-wide (requires sudo)"),
-            ArgDef(name="--user", action="store_true", help="Install to user hooks directory"),
+        name="shield",
+        help="Egress firewall management",
+        children=(
+            CommandDef(
+                name="install-hooks",
+                help="Install OCI hooks for the shield firewall",
+                handler=_handle_shield_setup,
+                args=(
+                    ArgDef(
+                        name="--root",
+                        action="store_true",
+                        help="Install system-wide (requires sudo)",
+                    ),
+                    ArgDef(
+                        name="--user",
+                        action="store_true",
+                        help="Install to user hooks directory",
+                    ),
+                ),
+            ),
+            CommandDef(
+                name="uninstall-hooks",
+                help="Remove OCI hooks previously installed by install-hooks",
+                handler=_handle_shield_uninstall,
+                args=(
+                    ArgDef(
+                        name="--root",
+                        action="store_true",
+                        help="Remove system-wide (requires sudo)",
+                    ),
+                    ArgDef(
+                        name="--user",
+                        action="store_true",
+                        help="Remove from user hooks directory",
+                    ),
+                ),
+            ),
+            CommandDef(
+                name="status",
+                help="Show shield status",
+                handler=_handle_shield_status,
+            ),
         ),
-    ),
-    CommandDef(
-        name="uninstall-hooks",
-        help="Remove OCI hooks previously installed by install-hooks",
-        handler=_handle_shield_uninstall,
-        group="shield",
-        args=(
-            ArgDef(name="--root", action="store_true", help="Remove system-wide (requires sudo)"),
-            ArgDef(name="--user", action="store_true", help="Remove from user hooks directory"),
-        ),
-    ),
-    CommandDef(
-        name="status",
-        help="Show shield status",
-        handler=_handle_shield_status,
-        group="shield",
     ),
 )
 

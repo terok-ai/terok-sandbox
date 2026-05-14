@@ -394,86 +394,98 @@ def _handle_vault_destroy_passphrase(*, cfg: SandboxConfig | None = None) -> Non
     _handle_vault_lock(cfg=cfg, forget=True)
 
 
-VAULT_COMMANDS: tuple[CommandDef, ...] = (
-    CommandDef(
-        name="start",
-        help="Start the vault daemon",
-        handler=_handle_vault_start,
-        group="vault",
-    ),
-    CommandDef(
-        name="stop",
-        help="Stop the vault daemon",
-        handler=_handle_vault_stop,
-        group="vault",
-    ),
-    CommandDef(
-        name="status",
-        help="Show vault status",
-        handler=_handle_vault_status,
-        group="vault",
-    ),
-    CommandDef(
-        name="install",
-        help="Install systemd socket activation",
-        handler=_handle_vault_install,
-        group="vault",
-    ),
-    CommandDef(
-        name="uninstall",
-        help="Remove systemd units",
-        handler=_handle_vault_uninstall,
-        group="vault",
-    ),
-    CommandDef(
-        name="unlock",
-        help="Provision the credentials-DB passphrase for this session (tmpfs file)",
-        handler=_handle_vault_unlock,
-        group="vault",
-    ),
-    CommandDef(
-        name="lock",
-        help="Remove the session-unlock tmpfs file and stop the vault daemon",
-        handler=_handle_vault_lock,
-        group="vault",
-    ),
-)
-
-
-VAULT_PASSPHRASE_COMMANDS: tuple[CommandDef, ...] = (
-    CommandDef(
-        name="seal",
-        help="Seal the current passphrase into a systemd-creds credential",
-        handler=_handle_vault_seal,
-        group="vault-passphrase",
-        args=(
-            ArgDef(
-                name="--key",
-                default="auto",
-                help=(
-                    "Sealing key: 'auto' (host+TPM2 if a TPM is present,"
-                    " host alone otherwise), 'tpm' (require TPM2),"
-                    " 'host' (host key only), 'tpm+host' (pin both)"
+#: Subverbs of ``vault passphrase``.  Live inside the vault group as a
+#: nested [`CommandDef`][terok_sandbox.commands.CommandDef] so the
+#: passphrase verbs reach the CLI exclusively via the vault subparser —
+#: no separate top-level tuple to keep in sync.
+_PASSPHRASE_GROUP = CommandDef(
+    name="passphrase",
+    help="Manage where the vault passphrase lives",
+    children=(
+        CommandDef(
+            name="seal",
+            help="Seal the current passphrase into a systemd-creds credential",
+            handler=_handle_vault_seal,
+            args=(
+                ArgDef(
+                    name="--key",
+                    default="auto",
+                    help=(
+                        "Sealing key: 'auto' (host+TPM2 if a TPM is present,"
+                        " host alone otherwise), 'tpm' (require TPM2),"
+                        " 'host' (host key only), 'tpm+host' (pin both)"
+                    ),
                 ),
             ),
         ),
-    ),
-    CommandDef(
-        name="to-keyring",
-        help="Move the current passphrase from its current tier into the OS keyring",
-        handler=_handle_vault_to_keyring,
-        group="vault-passphrase",
-    ),
-    CommandDef(
-        name="destroy",
-        help=(
-            "Clear every persistent passphrase tier — the vault becomes"
-            " unrecoverable without an external copy"
+        CommandDef(
+            name="to-keyring",
+            help="Move the current passphrase from its current tier into the OS keyring",
+            handler=_handle_vault_to_keyring,
         ),
-        handler=_handle_vault_destroy_passphrase,
-        group="vault-passphrase",
+        CommandDef(
+            name="destroy",
+            help=(
+                "Clear every persistent passphrase tier — the vault becomes"
+                " unrecoverable without an external copy"
+            ),
+            handler=_handle_vault_destroy_passphrase,
+        ),
     ),
 )
 
 
-__all__ = ["VAULT_COMMANDS", "VAULT_PASSPHRASE_COMMANDS"]
+#: The vault command group exposed at the package's top level — a
+#: single [`CommandDef`][terok_sandbox.commands.CommandDef] whose
+#: ``children`` are the daemon-lifecycle verbs plus the nested
+#: ``passphrase`` group.  Consumers wire the whole subtree via
+#: [`CommandTree`][terok_sandbox.commands.CommandTree]; the structural
+#: nesting is what makes ``vault passphrase X`` work without manual
+#: subparser plumbing.
+VAULT_COMMANDS: tuple[CommandDef, ...] = (
+    CommandDef(
+        name="vault",
+        help="Vault management",
+        children=(
+            CommandDef(
+                name="start",
+                help="Start the vault daemon",
+                handler=_handle_vault_start,
+            ),
+            CommandDef(
+                name="stop",
+                help="Stop the vault daemon",
+                handler=_handle_vault_stop,
+            ),
+            CommandDef(
+                name="status",
+                help="Show vault status",
+                handler=_handle_vault_status,
+            ),
+            CommandDef(
+                name="install",
+                help="Install systemd socket activation",
+                handler=_handle_vault_install,
+            ),
+            CommandDef(
+                name="uninstall",
+                help="Remove systemd units",
+                handler=_handle_vault_uninstall,
+            ),
+            CommandDef(
+                name="unlock",
+                help="Provision the credentials-DB passphrase for this session (tmpfs file)",
+                handler=_handle_vault_unlock,
+            ),
+            CommandDef(
+                name="lock",
+                help="Remove the session-unlock tmpfs file and stop the vault daemon",
+                handler=_handle_vault_lock,
+            ),
+            _PASSPHRASE_GROUP,
+        ),
+    ),
+)
+
+
+__all__ = ["VAULT_COMMANDS"]
