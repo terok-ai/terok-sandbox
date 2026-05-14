@@ -77,13 +77,16 @@ from .ssh import (
 )
 from .vault import (
     VAULT_COMMANDS,
+    VAULT_PASSPHRASE_COMMANDS,
     _forget_config_tier_updates,
+    _handle_vault_destroy_passphrase,
     _handle_vault_install,
     _handle_vault_lock,
     _handle_vault_seal,
     _handle_vault_start,
     _handle_vault_status,
     _handle_vault_stop,
+    _handle_vault_to_keyring,
     _handle_vault_uninstall,
     _handle_vault_unlock,
     _print_plaintext_passphrase_warning,
@@ -100,6 +103,7 @@ COMMANDS: tuple[CommandDef, ...] = (
     + GATE_COMMANDS
     + SHIELD_COMMANDS
     + VAULT_COMMANDS
+    + VAULT_PASSPHRASE_COMMANDS
     + SSH_COMMANDS
     + DOCTOR_COMMANDS
     + LAUNCH_COMMANDS
@@ -121,6 +125,7 @@ __all__ = [
     "SHIELD_COMMANDS",
     "SSH_COMMANDS",
     "VAULT_COMMANDS",
+    "VAULT_PASSPHRASE_COMMANDS",
     # Handlers re-exported for testing and out-of-tree consumers (terok
     # frontends sometimes call them directly).  The underscore prefix
     # marks them as "registry-only" — the registry is the public entry
@@ -153,12 +158,14 @@ __all__ = [
     "_handle_ssh_pub",
     "_handle_ssh_remove",
     "_handle_ssh_rename",
+    "_handle_vault_destroy_passphrase",
     "_handle_vault_install",
     "_handle_vault_lock",
     "_handle_vault_seal",
     "_handle_vault_start",
     "_handle_vault_status",
     "_handle_vault_stop",
+    "_handle_vault_to_keyring",
     "_handle_vault_uninstall",
     "_handle_vault_unlock",
     "_key_id_from_row",

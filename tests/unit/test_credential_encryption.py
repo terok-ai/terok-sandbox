@@ -1378,6 +1378,31 @@ class TestAutoSystemdCredsBranch:
         assert sealed_passphrase not in out.out
         assert sealed_passphrase not in out.err
 
+    def test_echo_passphrase_also_writes_to_stdout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """``echo_passphrase=True`` puts the recovery key on stdout for non-interactive bootstraps."""
+        from terok_sandbox.commands import _handle_credentials_encrypt_db
+
+        cfg = _make_cfg(tmp_path)
+        sealed: list[str] = []
+
+        def _fake_seal(passphrase: str, _path: Path, *, key_mode: str = "auto") -> None:  # noqa: ARG001
+            sealed.append(passphrase)
+
+        _patch_dev_tty(monkeypatch)
+        monkeypatch.setattr("terok_sandbox.vault.store.systemd_creds.is_available", lambda: True)
+        monkeypatch.setattr("terok_sandbox.vault.store.systemd_creds.seal", _fake_seal)
+
+        _handle_credentials_encrypt_db(cfg=cfg, echo_passphrase=True)
+
+        assert sealed
+        out = capsys.readouterr().out
+        # The opt-in surfaces the value to stdout so an Ansible / CI driver
+        # can capture it; without the flag the secret would only reach
+        # /dev/tty and a no-TTY run would drop it silently.
+        assert sealed[0] in out
+
 
 class TestVaultUnlockLock:
     """``terok-sandbox vault unlock`` / ``vault lock`` CLI handlers."""
@@ -1487,7 +1512,7 @@ class TestVaultUnlockLock:
         assert "keyring" in err
         assert "passphrase_command" in err
         assert "config.yml" in err
-        assert "--forget" in err
+        assert "vault passphrase destroy" in err
 
     def test_lock_forget_clears_keyring_and_config(
         self,
@@ -1878,6 +1903,110 @@ class TestVaultSeal:
         return sc, seal
 
 
+class TestVaultToKeyring:
+    """``terok-sandbox vault passphrase to-keyring`` — relocate the passphrase to the OS keyring."""
+
+    def test_writes_to_keyring_and_flips_config(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A session-tier passphrase moves into the keyring, config flips on, session file removed."""
+        from unittest.mock import MagicMock
+
+        from terok_sandbox import config as _config
+        from terok_sandbox.commands import _handle_vault_to_keyring
+
+        cfg = _make_cfg(tmp_path)
+        cfg.vault_passphrase_file.parent.mkdir(parents=True, exist_ok=True)
+        cfg.vault_passphrase_file.write_text("current-pw\n")
+        # Undo the autouse blank of the session-file tier so this test
+        # actually exercises a session → keyring relocation.
+        monkeypatch.setattr(
+            "terok_sandbox.vault.store.encryption.load_passphrase_from_file",
+            load_passphrase_from_file,
+        )
+        user_config = tmp_path / "config.yml"
+        user_config.write_text("credentials: {}\n")
+        monkeypatch.setattr(
+            "terok_sandbox.paths._config_file_paths", lambda: [("user", user_config)]
+        )
+        _config._credentials_section.cache_clear()
+
+        store = MagicMock(return_value=True)
+        monkeypatch.setattr(
+            "terok_sandbox.vault.store.encryption.store_passphrase_in_keyring", store
+        )
+        mgr = MagicMock()
+        mgr.is_daemon_running.return_value = False
+        monkeypatch.setattr("terok_sandbox.vault.daemon.lifecycle.VaultManager", lambda _cfg: mgr)
+
+        _handle_vault_to_keyring(cfg=cfg)
+
+        store.assert_called_once_with("current-pw")
+        assert not cfg.vault_passphrase_file.exists()
+        assert "use_keyring: true" in user_config.read_text()
+
+    def test_noop_when_already_in_keyring(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If the chain already hits keyring, the verb is idempotent — no write, no restart."""
+        from unittest.mock import MagicMock
+
+        from terok_sandbox.commands import _handle_vault_to_keyring
+
+        cfg = _make_cfg(tmp_path, use_keyring=True)
+        monkeypatch.setattr(
+            "terok_sandbox.vault.store.encryption.load_passphrase_from_keyring",
+            lambda: "current-pw",
+        )
+        store = MagicMock()
+        monkeypatch.setattr(
+            "terok_sandbox.vault.store.encryption.store_passphrase_in_keyring", store
+        )
+
+        _handle_vault_to_keyring(cfg=cfg)
+
+        store.assert_not_called()
+
+    def test_refuses_when_no_passphrase_resolvable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No tier hits and no TTY → fail loudly rather than write nothing silently."""
+        from terok_sandbox.commands import _handle_vault_to_keyring
+
+        # ``use_keyring=False`` blocks the autouse keyring stub from
+        # claiming the chain; file tier is already blanked by autouse.
+        cfg = _make_cfg(tmp_path)
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+
+        with pytest.raises(SystemExit, match="no current passphrase"):
+            _handle_vault_to_keyring(cfg=cfg)
+
+    def test_aborts_when_keyring_write_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A keyring backend rejection leaves the source tier untouched."""
+        from unittest.mock import MagicMock
+
+        from terok_sandbox.commands import _handle_vault_to_keyring
+
+        cfg = _make_cfg(tmp_path)
+        cfg.vault_passphrase_file.parent.mkdir(parents=True, exist_ok=True)
+        cfg.vault_passphrase_file.write_text("current-pw\n")
+        monkeypatch.setattr(
+            "terok_sandbox.vault.store.encryption.load_passphrase_from_file",
+            load_passphrase_from_file,
+        )
+        monkeypatch.setattr(
+            "terok_sandbox.vault.store.encryption.store_passphrase_in_keyring",
+            MagicMock(return_value=False),
+        )
+
+        with pytest.raises(SystemExit, match="OS keyring is unreachable"):
+            _handle_vault_to_keyring(cfg=cfg)
+        # Source tier is preserved on failure — no half-done migration.
+        assert cfg.vault_passphrase_file.read_text() == "current-pw\n"
+
+
 class TestCredentialsSetupPhaseDaemonHandling:
     """The credentials phase must stop a live daemon so migration doesn't race."""
 
@@ -2101,7 +2230,7 @@ class TestCredentialsCommandCoverageGaps:
         monkeypatch.setattr(
             cred_cmds,
             "_provision_systemd_creds_tier",
-            lambda _cfg: ("pw", "systemd-creds"),
+            lambda _cfg, **_: ("pw", "systemd-creds"),
         )
         _handle_credentials_encrypt_db()  # cfg= omitted — exercises the default-factory line
 

@@ -38,6 +38,7 @@ def _handle_sandbox_setup(
     no_vault: bool = False,
     no_gate: bool = False,
     no_clearance: bool = False,
+    echo_passphrase: bool = False,
     cfg: SandboxConfig | None = None,
 ) -> None:
     """Install shield + vault + gate + clearance in one idempotent bootstrap.
@@ -62,6 +63,13 @@ def _handle_sandbox_setup(
         no_vault: Skip the vault install phase.
         no_gate: Skip the gate install phase.
         no_clearance: Skip the clearance (hub + verdict + notifier) phase.
+        echo_passphrase: Print any auto-generated vault passphrase to
+            stdout in addition to ``/dev/tty``.  Required for
+            non-interactive bootstraps (CI, Ansible) that need to
+            capture the passphrase into their own secret manager —
+            without it, the recovery key only reaches the controlling
+            terminal and a no-TTY run drops it silently.  Off by
+            default so a routine ``setup > install.log`` can't leak it.
         cfg: Optional [`SandboxConfig`][terok_sandbox.config.SandboxConfig]
             override.  Defaults to the layered config — passed through
             so terok's config stays the single source of truth for paths.
@@ -85,7 +93,7 @@ def _handle_sandbox_setup(
     # any non-default paths the caller (e.g. terok-executor) constructed
     # the config with.
     if not no_vault:
-        failed |= not _run_credentials_setup_phase(cfg)
+        failed |= not _run_credentials_setup_phase(cfg, echo_passphrase=echo_passphrase)
         cfg = dataclasses.replace(
             cfg,
             credentials_passphrase=credentials_passphrase(),
@@ -166,6 +174,15 @@ SETUP_COMMANDS: tuple[CommandDef, ...] = (
                 name="--no-clearance",
                 action="store_true",
                 help="Skip clearance hub/verdict/notifier install",
+            ),
+            ArgDef(
+                name="--echo-passphrase",
+                action="store_true",
+                help=(
+                    "Also print any auto-generated vault passphrase to stdout"
+                    " (default off — the value otherwise only reaches /dev/tty,"
+                    " so non-interactive bootstraps must opt in to capture it)"
+                ),
             ),
         ),
     ),

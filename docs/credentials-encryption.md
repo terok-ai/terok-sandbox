@@ -17,7 +17,7 @@ stops at the first hit:
    what most hosts hit; the path matches `vault status`'s `DB:` line
    directory).  Decrypted via `systemd-creds(1)`.  Machine-bound
    (TPM2 or host key), survives reboot, no keyring needed.  Written
-   by `vault seal`.  Requires systemd ≥ 257.
+   by `vault passphrase seal`.  Requires systemd ≥ 257.
 3. **OS keyring** — `(service=terok-sandbox, username=credentials-db)`,
    used only when `credentials.use_keyring: true` is set in `config.yml`.
 4. **passphrase_command** — operator-supplied shell command set as
@@ -115,11 +115,37 @@ hosts.
 ## Changing tiers (move the passphrase to a different backend)
 
 The passphrase is one secret; the tier is just *where* it lives.
-Moving it is always three steps — **retrieve, lock, reseed** — so the
-ordering is the same whether you go session → keyring, keyring →
-systemd-creds, or anything else.
 
-### 1. Retrieve from the current tier
+### Upgrade to keyring or systemd-creds (first-class commands)
+
+For the two most common upgrade paths — moving off the session-file
+or plaintext-config tiers onto the OS keyring or a machine-bound
+sealed credential — one verb does the whole swap:
+
+```bash
+# Move the passphrase from its current tier into the OS keyring.
+terok-sandbox vault passphrase to-keyring
+
+# Move it into a machine-bound systemd-creds credential.
+# (Land it as session first if not already auto-resolvable, then seal.)
+echo -n "<passphrase>" | terok-sandbox vault unlock
+terok-sandbox vault passphrase seal --key=auto
+terok-sandbox vault passphrase destroy   # clear lower-tier copies
+```
+
+`to-keyring` resolves the passphrase from whichever tier currently
+holds it, validates it, writes to the keyring, flips
+`credentials.use_keyring: true` in `config.yml`, drops any plaintext
+fallbacks, removes the session/sealed copies, and restarts the
+daemon.  No retrieve-then-reseed by hand.
+
+### Manual three-step (for anything not on the upgrade path)
+
+For other transitions (keyring → systemd-creds, anything →
+`passphrase_command`, downgrades) the swap is still **retrieve →
+destroy → reseed**:
+
+#### 1. Retrieve from the current tier
 
 ```bash
 # session-file:
@@ -142,21 +168,21 @@ yq '.credentials.passphrase' ~/.config/terok/config.yml
 Keep the value somewhere safe for the duration of the swap — a
 password manager, or a `mktemp`d file you delete after step 3.
 
-### 2. Lock the vault
+#### 2. Destroy the stored passphrase
 
 ```bash
-terok-sandbox vault lock --forget
+terok-sandbox vault passphrase destroy
 ```
 
-`--forget` clears every persistent tier in one go (session file
-*plus* keyring, sealed systemd-creds, `credentials.passphrase`, and
-`credentials.passphrase_command`).  The underlying secret stays put in
-whichever store the helper points at (`pass`, 1Password, Vault, …) —
-only the resolver wiring is removed.  Without `--forget`, the daemon
-may auto-unlock from a leftover tier on next socket activation,
-defeating the swap.
+Clears every persistent tier in one go (session file *plus* keyring,
+sealed systemd-creds, `credentials.passphrase`, and
+`credentials.passphrase_command`).  The underlying secret stays put
+in whichever store the helper points at (`pass`, 1Password, Vault,
+…) — only the resolver wiring is removed.  Without this step, the
+daemon may auto-unlock from a leftover tier on next socket
+activation, defeating the swap.
 
-### 3. Provision in the new tier
+#### 3. Provision in the new tier
 
 ```bash
 # → session-file (default; ephemeral, cleared on reboot):
@@ -164,11 +190,11 @@ echo -n "<passphrase>" | terok-sandbox vault unlock
 
 # → systemd-creds (machine-bound, persistent):
 echo -n "<passphrase>" | terok-sandbox vault unlock   # land it as session first
-terok-sandbox vault seal --key=auto                   # then seal from session
+terok-sandbox vault passphrase seal --key=auto        # then seal from session
 terok-sandbox vault lock                              # remove the session file
 
 # → OS keyring:
-terok-sandbox setup     # chooser → [k]; reads + stores the passphrase
+terok-sandbox vault passphrase to-keyring             # one verb, no chooser
 
 # → passphrase_command (headless; helper points at pass / bw / op / cloud CLI):
 pass insert -m terok-sandbox/vault-passphrase         # or your helper's
@@ -183,6 +209,48 @@ terok-sandbox setup     # chooser → [c] → type "yes" to accept the trust bou
 Run `terok-sandbox vault status` afterwards to confirm
 `Passphrase: resolved via <new-tier>` — and to verify no stale
 plaintext WARNING is still pointing at `config.yml`.
+
+## Recovering from a lost passphrase
+
+There is **no recovery key, no backdoor, no master key**.  The
+passphrase is the only thing that unlocks the credentials DB; if every
+tier loses it (you forget it, the keyring resets, the sealed
+systemd-creds blob is gone with the host), the contents are
+irrecoverable.
+
+What you lose:
+
+- Every SSH private key registered in the vault (the ones `ssh add`
+  imported or generated).
+- Every AI-provider credential set the agents use.
+- The phantom tokens minted for in-flight container scopes.
+
+What to do — accepting that the encrypted data is gone:
+
+```bash
+# 1. Clear any tier wiring that points at the lost passphrase.
+terok-sandbox vault passphrase destroy
+
+# 2. Delete the encrypted DB and any leftover backup tarballs.
+rm "${XDG_DATA_HOME:-$HOME/.local/share}/terok/vault/credentials.db"
+rm "${XDG_DATA_HOME:-$HOME/.local/share}/terok/vault/credentials.db.plaintext-backup-"*.tar.gz 2>/dev/null
+
+# 3. Re-run setup; it mints a fresh passphrase and creates a clean DB.
+terok-sandbox setup
+```
+
+After step 3 you have an empty vault — re-import your SSH keys, re-add
+provider credentials.
+
+**The mitigation is to back the passphrase up *before* you lose it.**
+On every fresh install, `terok-sandbox setup` prints the
+auto-generated passphrase once on `/dev/tty` with the line *"Write
+this down — it's your recovery key for rebuilds and other hosts."*
+Capture that into your password manager the moment you see it.  For
+non-interactive bootstraps where no TTY is present, pass
+`--echo-passphrase` to `setup` so the value also reaches stdout for
+the calling automation to store — **only** use that flag when stdout
+is going somewhere private.
 
 ## Migrating a legacy plaintext DB
 
