@@ -53,6 +53,7 @@ from ._util._selinux import (
     missing_policy_tools as missing_selinux_policy_tools,
     policy_source_path as selinux_policy_source,
 )
+from ._yaml import update_section as yaml_update_section
 from .commands import (
     COMMANDS as SANDBOX_COMMANDS,
     DOCTOR_COMMANDS,
@@ -337,6 +338,7 @@ __all__ = [
     "BestEffortLogger",
     "EXIT_MANUAL_STEP_NEEDED",
     "sanitize_tty",
+    "yaml_update_section",
     # Config
     "CONTAINER_RUNTIME_DIR",
     "ConfigScope",
