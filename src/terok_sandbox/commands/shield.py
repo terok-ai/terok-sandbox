@@ -5,7 +5,7 @@
 
 Composes sandbox's own ``install-hooks`` / ``uninstall-hooks`` admin
 verbs with every non-standalone-only entry from
-[`terok_shield.COMMANDS`][terok_shield.COMMANDS].  ``standalone_only=True``
+[`terok_shield.cli.registry.COMMANDS`][terok_shield.cli.registry.COMMANDS].  ``standalone_only=True``
 on shield's CommandDefs is the explicit "skip me when consumed
 downstream" marker; we honour it (filters ``setup``, ``prepare``,
 ``run``, ``resolve``).

@@ -150,8 +150,14 @@ class TestExtendAt:
 
     def test_unknown_path_raises(self) -> None:
         tree = CommandTree([_leaf("a")])
-        with pytest.raises(KeyError, match="no verb at path 'bogus'"):
+        with pytest.raises(KeyError, match="bogus"):
             tree.extend_at(("bogus",), [_leaf("x")])
+
+    def test_refuses_to_extend_a_leaf(self) -> None:
+        """Extending a leaf would produce a handler+children hybrid argparse can't model."""
+        tree = CommandTree([_leaf("a")])
+        with pytest.raises(TypeError, match="cannot extend leaf 'a'"):
+            tree.extend_at(("a",), [_leaf("b")])
 
 
 class TestForestMechanics:
@@ -232,6 +238,26 @@ class TestWireAndDispatch:
             args = parser.parse_args(argv)
             CommandTree.dispatch(args)
             assert captured == {"timeout": 42}
+
+    def test_slash_separated_names_derive_dest_from_longest_form(self) -> None:
+        """Without explicit ``dest=``, slash-names pick the long form — matches argparse's convention."""
+        captured: dict[str, int] = {}
+
+        def handler(*, timeout: int = -1) -> None:
+            captured["timeout"] = timeout
+
+        cmd = CommandDef(
+            name="v",
+            help="v",
+            handler=handler,
+            args=(ArgDef(name="-t/--timeout", type=int, default=-1),),
+        )
+        tree = CommandTree([cmd])
+        parser = argparse.ArgumentParser()
+        tree.wire(parser)
+        args = parser.parse_args(["v", "--timeout", "42"])
+        CommandTree.dispatch(args)
+        assert captured == {"timeout": 42}
 
     def test_dispatch_passes_arg_kwargs(self) -> None:
         captured: dict[str, str] = {}

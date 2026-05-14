@@ -172,13 +172,22 @@ class CommandTree:
         """Return a new tree with *additions* appended at the path's children.
 
         Empty path extends the top-level forest.  Otherwise the
-        [`CommandDef`][terok_sandbox.commands.CommandDef] at *path* must
-        be a group; its ``children`` get *additions* appended in
-        declaration order.
+        [`CommandDef`][terok_sandbox.commands.CommandDef] at *path*
+        must be a **group** — a leaf (one with ``handler`` set and no
+        ``children``) cannot be extended; trying to do so would produce
+        a hybrid node argparse can't represent (handler + subparsers
+        on the same parser).  Raises ``TypeError`` rather than
+        silently inventing such a node.
         """
         addition_tuple = tuple(additions)
         if not path:
             return CommandTree(self._roots + addition_tuple)
+        target = self.find_at(path)
+        if target.handler is not None and not target.children:
+            raise TypeError(
+                f"cannot extend leaf {'.'.join(path)!r}: extend_at requires a group "
+                f"(handler=None with children), but the target has a handler set"
+            )
         return CommandTree(_extend_forest(self._roots, tuple(path), addition_tuple, ()))
 
     def walk(self) -> Iterator[tuple[tuple[str, ...], CommandDef]]:
@@ -189,12 +198,15 @@ class CommandTree:
     def wire(self, target: argparse.ArgumentParser | argparse._SubParsersAction) -> None:
         """Wire this tree's verbs as subparsers under *target*, recursively.
 
-        *target* may be either an :class:`argparse.ArgumentParser`
-        (a fresh ``add_subparsers()`` action is created) or an existing
-        :class:`argparse._SubParsersAction` (the tree mounts straight
-        under it).  The second form lets a consumer mix legacy
-        register-style subparsers with structural ``CommandTree`` ones
-        under the same root parser without colliding on argparse's
+        *target* may be either an
+        [`ArgumentParser`][argparse.ArgumentParser] (a fresh
+        ``add_subparsers()`` action is created) or an existing
+        ``argparse._SubParsersAction`` (the tree mounts straight under
+        it; the private name has no public docs target).  The second
+        form lets a consumer mix legacy register-style subparsers
+        with structural
+        [`CommandTree`][terok_sandbox.commands.CommandTree] ones under
+        the same root parser without colliding on argparse's
         one-subparsers-per-parser rule.
 
         The same [`CommandDef`][terok_sandbox.commands.CommandDef]
@@ -239,8 +251,19 @@ class CommandTree:
 
 
 def _arg_dest(arg: ArgDef) -> str:
-    """Resolve the argparse ``dest`` for an [`ArgDef`][terok_sandbox.commands.ArgDef]."""
-    return arg.dest or arg.name.lstrip("-").replace("-", "_")
+    """Resolve the argparse ``dest`` for an [`ArgDef`][terok_sandbox.commands.ArgDef].
+
+    Slash-separated names (e.g. ``"-t/--timeout"``) pick the longest
+    form before stripping leading dashes — argparse derives its own
+    ``dest`` from the first long option in that case, so picking the
+    longer name matches the convention.  ``arg.dest`` (when set)
+    overrides everything.
+    """
+    if arg.dest:
+        return arg.dest
+    names = arg.name.split("/")
+    canonical = max(names, key=len)
+    return canonical.lstrip("-").replace("-", "_")
 
 
 def _descend(node: CommandDef, rest: tuple[str, ...]) -> CommandDef:
