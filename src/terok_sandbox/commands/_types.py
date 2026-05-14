@@ -186,9 +186,7 @@ class CommandTree:
         for root in self._roots:
             yield from _walk_node(root, ())
 
-    def wire(
-        self, target: argparse.ArgumentParser | argparse._SubParsersAction
-    ) -> None:
+    def wire(self, target: argparse.ArgumentParser | argparse._SubParsersAction) -> None:
         """Wire this tree's verbs as subparsers under *target*, recursively.
 
         *target* may be either an :class:`argparse.ArgumentParser`
