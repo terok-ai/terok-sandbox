@@ -30,6 +30,7 @@ import shutil
 from collections.abc import Callable, Iterable
 from typing import Any
 
+from ._exit_codes import EXIT_MANUAL_STEP_NEEDED
 from ._stage import stage_line as _stage_line
 from ._util import _systemctl
 from ._util._selinux import (
@@ -38,6 +39,10 @@ from ._util._selinux import (
     check_status as check_selinux_status,
     install_command as selinux_install_command,
 )
+
+# Re-export so existing callers ``from ._setup import EXIT_MANUAL_STEP_NEEDED``
+# keep working without reaching for the new foundation module.
+__all__ = ["EXIT_MANUAL_STEP_NEEDED"]
 from .config import SandboxConfig
 
 _HOST_BINARIES: tuple[str, ...] = ("podman", "git", "ssh-keygen")
@@ -111,13 +116,6 @@ def _report_selinux(cfg: SandboxConfig) -> SelinuxCheckResult:
             case SelinuxStatus.LIBSELINUX_MISSING:
                 s.missing("libselinux.so.1 not loadable")
     return result
-
-
-#: Exit code for "manual host configuration is required" — distinct
-#: from the generic ``1`` (phase failure) so callers (TUI, scripts)
-#: can offer the specific fix.  Currently fires for missing SELinux
-#: policy on a socket-mode host; future manual-step needs slot here.
-EXIT_MANUAL_STEP_NEEDED = 5
 
 
 def print_selinux_install_hint(result: SelinuxCheckResult) -> None:

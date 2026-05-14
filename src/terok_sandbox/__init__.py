@@ -24,6 +24,7 @@ from importlib.metadata import PackageNotFoundError, version as _meta_version
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ._exit_codes import EXIT_MANUAL_STEP_NEEDED
 from ._stage import (
     STAGE_WIDTH,
     Marker,
@@ -37,7 +38,6 @@ from ._stage import (
     supports_color,
     yellow,
 )
-from ._setup import EXIT_MANUAL_STEP_NEEDED
 from ._util import BestEffortLogger, sanitize_tty
 from ._util._selinux import (
     SELINUX_SOCKET_TYPE,
