@@ -349,7 +349,11 @@ def _wire_command(sub: argparse._SubParsersAction, cmd: CommandDef) -> None:
             kwargs["nargs"] = arg.nargs
         if arg.required and arg.name.startswith("-"):
             kwargs["required"] = True
-        parser.add_argument(arg.name, **kwargs)
+        # Slash-separated names (e.g. ``-t/--timeout``) expand to argparse's
+        # multi-name form so a downstream registry (clearance) can declare
+        # short + long flags in one ArgDef without splitting at every consumer.
+        names = arg.name.split("/")
+        parser.add_argument(*names, **kwargs)
     if cmd.children:
         child_sub = parser.add_subparsers()
         for child in cmd.children:

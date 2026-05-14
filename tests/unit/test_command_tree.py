@@ -211,6 +211,28 @@ class TestWireAndDispatch:
         CommandTree.dispatch(args)
         assert called == [1]
 
+    def test_slash_separated_arg_names_expand_to_short_plus_long(self) -> None:
+        """``ArgDef(name="-t/--timeout", ...)`` registers both flags under one dest."""
+        captured: dict[str, int] = {}
+
+        def handler(*, timeout: int = -1) -> None:
+            captured["timeout"] = timeout
+
+        cmd = CommandDef(
+            name="v",
+            help="v",
+            handler=handler,
+            args=(ArgDef(name="-t/--timeout", dest="timeout", type=int, default=-1),),
+        )
+        tree = CommandTree([cmd])
+        parser = argparse.ArgumentParser()
+        tree.wire(parser)
+        # Both the short and long form parse to the same ``dest``.
+        for argv in (["v", "-t", "42"], ["v", "--timeout", "42"]):
+            args = parser.parse_args(argv)
+            CommandTree.dispatch(args)
+            assert captured == {"timeout": 42}
+
     def test_dispatch_passes_arg_kwargs(self) -> None:
         captured: dict[str, str] = {}
 
