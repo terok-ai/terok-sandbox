@@ -37,6 +37,7 @@ from ._stage import (
     supports_color,
     yellow,
 )
+from ._setup import EXIT_MANUAL_STEP_NEEDED
 from ._util import BestEffortLogger, sanitize_tty
 from ._util._selinux import (
     SELINUX_SOCKET_TYPE,
@@ -322,6 +323,7 @@ def stop_vault(cfg: SandboxConfig | None = None) -> None:
 __all__ = [
     # Cross-package utilities
     "BestEffortLogger",
+    "EXIT_MANUAL_STEP_NEEDED",
     "sanitize_tty",
     # Config
     "CONTAINER_RUNTIME_DIR",
