@@ -5,6 +5,15 @@ also the "Changelog" link in PyPI metadata.
 
 [rel]: https://github.com/terok-ai/terok-sandbox/releases
 
+## v0.0.122 — The State of the Shields
+
+## What's Changed
+* feat!: rename shield.block adapter to shield.quarantine in https://github.com/terok-ai/terok-sandbox/pull/299
+* chore(deps): drop stale clearance branch-pin comment by @sliwowitz in https://github.com/terok-ai/terok-sandbox/pull/297
+
+
+**Full Changelog**: https://github.com/terok-ai/terok-sandbox/compare/v0.0.121...v0.0.122
+
 ## v0.0.121 — The Tree of Command
 
 ## What's Changed

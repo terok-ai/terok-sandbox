@@ -4,7 +4,7 @@ build-backend = "poetry_dynamic_versioning.backend"
 
 [tool.poetry]
 name = "terok-sandbox"
-version = "0.0.121"
+version = "0.0.122"
 description = "Hardened Podman container runner with gate server and shield integration"
 readme = "README.md"
 license = "Apache-2.0"
@@ -33,8 +33,8 @@ documentation = "https://terok-ai.github.io/terok-sandbox/"
 
 [tool.poetry.dependencies]
 python = ">=3.12,<4.0"
-terok-shield = {git = "https://github.com/sliwowitz/terok-shield.git", branch = "feat/shield-rename-disengaged"}
-terok-clearance = {git = "https://github.com/sliwowitz/terok-clearance.git", branch = "feat/shield-rename-disengaged"}
+terok-shield = {url = "https://github.com/terok-ai/terok-shield/releases/download/v0.6.41/terok_shield-0.6.41-py3-none-any.whl"}
+terok-clearance = {url = "https://github.com/terok-ai/terok-clearance/releases/download/v0.6.13/terok_clearance-0.6.13-py3-none-any.whl"}
 platformdirs = ">=4.9.6"
 aiohttp = ">=3.9"
 cryptography = ">=46.0.7"
