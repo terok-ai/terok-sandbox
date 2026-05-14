@@ -126,10 +126,18 @@ class _TokenDB:
         # check_same_thread=False is safe: this is a read-only accessor and
         # aiohttp runs handlers in a single event loop thread.
         from ..config import SandboxConfig
+        from ..credentials.encryption import NoPassphraseError, open_sqlcipher
 
-        self._conn = SandboxConfig().open_sqlcipher_connection(
-            Path(db_path), check_same_thread=False
-        )
+        cfg = SandboxConfig()
+        # Walk the chain once and log the resolved tier — a separate
+        # diagnostic resolve would re-spawn ``passphrase_command``
+        # helpers (cloud CLIs, ``pass``, …) twice per daemon start.
+        passphrase, source = cfg.resolve_passphrase_with_source()
+        if passphrase is None:
+            _logger.info("Vault passphrase: no tier resolved")
+            raise NoPassphraseError(f"no SQLCipher passphrase available for {db_path}")
+        _logger.info("Vault passphrase resolved via %s tier", source)
+        self._conn = open_sqlcipher(db_path, passphrase, check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
         # Bootstrap + migrate schema here too so the vault daemon can open
         # an empty DB on a fresh install (no CLI write has touched the file
@@ -742,40 +750,6 @@ def _build_app(db_path: str, routes_path: str, audit_path: Path | None = None) -
     return app
 
 
-def _log_resolved_passphrase_tier() -> None:
-    """Log which resolver tier yields the SQLCipher passphrase at daemon startup.
-
-    Single INFO line so the journal carries a record of the unlock
-    posture — operators don't have to run ``vault status`` separately
-    to find out where the running daemon's passphrase came from, and
-    incident reviewers can map an outage window to "was the daemon
-    using session-file vs systemd-creds at the time".
-
-    Best-effort: any failure inside this helper is logged as a debug
-    line and swallowed.  The next call (``_TokenDB(db_path)``) will
-    raise [`NoPassphraseError`][terok_sandbox.credentials.encryption.NoPassphraseError]
-    with the real error message if the chain actually fails to
-    resolve, so silencing this diagnostic doesn't hide bugs.
-    """
-    try:
-        from ..config import SandboxConfig
-        from ..credentials.encryption import resolve_passphrase_with_source
-
-        cfg = SandboxConfig()
-        _passphrase, source = resolve_passphrase_with_source(
-            passphrase_file=cfg.vault_passphrase_file,
-            systemd_creds_file=cfg.vault_systemd_creds_file,
-            use_keyring=cfg.credentials_use_keyring,
-            config_fallback=cfg.credentials_passphrase,
-        )
-        if source is None:
-            _logger.info("Vault passphrase: no tier resolved (DB open will fail)")
-        else:
-            _logger.info("Vault passphrase resolved via %s tier", source)
-    except Exception as exc:  # noqa: BLE001 — startup diagnostic must never crash
-        _logger.debug("Could not pre-resolve passphrase tier for startup log: %s", exc)
-
-
 def _systemd_sockets() -> tuple[socket.socket | None, socket.socket | None]:
     """Return ``(unix_sock, tcp_sock)`` inherited from systemd, or ``(None, None)``.
 
@@ -993,8 +967,6 @@ def main() -> None:
             os.write(fd, str(os.getpid()).encode("utf-8"))
         finally:
             os.close(fd)
-
-    _log_resolved_passphrase_tier()
 
     audit_path = Path(args.audit_log) if args.audit_log else None
     app = _build_app(args.db_path, args.routes_file, audit_path=audit_path)

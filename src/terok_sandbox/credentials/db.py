@@ -555,6 +555,7 @@ def open_credential_db_with_source(
     passphrase_file: Path | None = None,
     systemd_creds_file: Path | None = None,
     use_keyring: bool = False,
+    passphrase_command: str | None = None,
     config_fallback: str | None = None,
     prompt_on_tty: bool = False,
 ) -> tuple[CredentialDB, PassphraseSource]:
@@ -571,6 +572,7 @@ def open_credential_db_with_source(
         passphrase_file=passphrase_file,
         systemd_creds_file=systemd_creds_file,
         use_keyring=use_keyring,
+        passphrase_command=passphrase_command,
         config_fallback=config_fallback,
         prompt_on_tty=prompt_on_tty,
     )
@@ -585,6 +587,7 @@ def open_credential_db(
     passphrase_file: Path | None = None,
     systemd_creds_file: Path | None = None,
     use_keyring: bool = False,
+    passphrase_command: str | None = None,
     config_fallback: str | None = None,
     prompt_on_tty: bool = False,
 ) -> CredentialDB:
@@ -592,16 +595,18 @@ def open_credential_db(
 
     Walks: *passphrase_file* (tmpfs session-unlock) → *systemd_creds_file*
     (sealed credential decrypted via ``systemd-creds(1)``) → OS keyring
-    (when *use_keyring*) → *config_fallback* → (when *prompt_on_tty* and a
-    TTY is attached) interactive prompt.  CLI consumers pass
-    ``prompt_on_tty=True``; daemons leave it ``False`` so they fail
-    fast instead of blocking on stdin.
+    (when *use_keyring*) → *passphrase_command* (operator-supplied
+    helper, e.g. ``pass show …`` / ``op read …``) → *config_fallback*
+    → (when *prompt_on_tty* and a TTY is attached) interactive prompt.
+    CLI consumers pass ``prompt_on_tty=True``; daemons leave it
+    ``False`` so they fail fast instead of blocking on stdin.
     """
     db, _source = open_credential_db_with_source(
         db_path,
         passphrase_file=passphrase_file,
         systemd_creds_file=systemd_creds_file,
         use_keyring=use_keyring,
+        passphrase_command=passphrase_command,
         config_fallback=config_fallback,
         prompt_on_tty=prompt_on_tty,
     )

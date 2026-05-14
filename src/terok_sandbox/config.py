@@ -99,6 +99,11 @@ def credentials_use_keyring() -> bool:
     return _credentials_section().use_keyring
 
 
+def credentials_passphrase_command() -> str | None:
+    """Resolve the ``credentials.passphrase_command`` shell-helper recipe through the schema."""
+    return _credentials_section().passphrase_command
+
+
 def _default_credentials_passphrase() -> str | None:
     """Default-factory indirection so tests can patch ``credentials_passphrase``."""
     return credentials_passphrase()
@@ -107,6 +112,11 @@ def _default_credentials_passphrase() -> str | None:
 def _default_credentials_use_keyring() -> bool:
     """Default-factory indirection so tests can patch ``credentials_use_keyring``."""
     return credentials_use_keyring()
+
+
+def _default_credentials_passphrase_command() -> str | None:
+    """Default-factory indirection so tests can patch ``credentials_passphrase_command``."""
+    return credentials_passphrase_command()
 
 
 @dataclass(frozen=True)
@@ -168,6 +178,19 @@ class SandboxConfig:
     per-item) ACLs, so authorising terok against the default collection
     grants read access to every other secret stored there.  Operators
     opt in via ``terok setup`` after weighing that trade-off.
+    """
+
+    credentials_passphrase_command: str | None = field(
+        default_factory=_default_credentials_passphrase_command
+    )
+    """Operator-supplied shell command that prints the SQLCipher passphrase on stdout.
+
+    Resolver tier slotted between ``keyring`` and ``config``.  Canonical
+    headless option for hosts without systemd ≥ 257 — same shape as
+    ``git config credential.helper`` or ``BORG_PASSCOMMAND``.  Read
+    from ``credentials.passphrase_command`` in ``config.yml`` at
+    construct time; ``None`` (the default) means "no helper configured"
+    and the resolver skips this tier.
     """
 
     services_mode: ServicesMode = field(default_factory=_default_services_mode)
@@ -283,10 +306,9 @@ class SandboxConfig:
         """Open the credentials DB with this config's resolution-chain knobs.
 
         Single seam over [`open_credential_db`][terok_sandbox.credentials.db.open_credential_db]
-        so call sites never have to thread the tier-selection kwargs
-        (``passphrase_file``, ``systemd_creds_file``, ``use_keyring``,
-        ``config_fallback``) by hand — adding a new tier means
-        editing *this* method only, no cross-package fan-out.
+        so call sites never plumb tier-selection kwargs by hand — adding
+        a new tier is one entry in the private ``_chain_kwargs`` helper,
+        no cross-package fan-out.
 
         *db_path* defaults to ``self.db_path``; callers that already
         hold a path (typically ``VaultStatus.db_path`` for the running
@@ -299,11 +321,7 @@ class SandboxConfig:
 
         return open_credential_db(
             db_path if db_path is not None else self.db_path,
-            passphrase_file=self.vault_passphrase_file,
-            systemd_creds_file=self.vault_systemd_creds_file,
-            use_keyring=self.credentials_use_keyring,
-            config_fallback=self.credentials_passphrase,
-            prompt_on_tty=prompt_on_tty,
+            **self._chain_kwargs(prompt_on_tty=prompt_on_tty),
         )
 
     def open_credential_db_with_source(
@@ -322,11 +340,7 @@ class SandboxConfig:
 
         return open_credential_db_with_source(
             db_path if db_path is not None else self.db_path,
-            passphrase_file=self.vault_passphrase_file,
-            systemd_creds_file=self.vault_systemd_creds_file,
-            use_keyring=self.credentials_use_keyring,
-            config_fallback=self.credentials_passphrase,
-            prompt_on_tty=prompt_on_tty,
+            **self._chain_kwargs(prompt_on_tty=prompt_on_tty),
         )
 
     def open_sqlcipher_connection(self, db_path: Path | None = None, **connect_kwargs: Any) -> Any:
@@ -335,12 +349,52 @@ class SandboxConfig:
 
         return open_sqlcipher_via_chain(
             db_path or self.db_path,
-            passphrase_file=self.vault_passphrase_file,
-            systemd_creds_file=self.vault_systemd_creds_file,
-            use_keyring=self.credentials_use_keyring,
-            config_fallback=self.credentials_passphrase,
+            **self._chain_kwargs(prompt_on_tty=False),
             **connect_kwargs,
         )
+
+    def resolve_passphrase(self, *, prompt_on_tty: bool = False) -> str | None:
+        """Walk the resolution chain with this config's knobs; return the passphrase or ``None``.
+
+        Diagnostic seam — never opens the DB.  Used by host-side
+        doctor / sickbay and by ``vault seal`` to reuse whatever tier
+        currently has the key.  Same chain order as
+        [`open_credential_db`][terok_sandbox.SandboxConfig.open_credential_db]
+        because both delegate here.
+        """
+        from .credentials.encryption import resolve_passphrase  # noqa: PLC0415
+
+        return resolve_passphrase(**self._chain_kwargs(prompt_on_tty=prompt_on_tty))
+
+    def resolve_passphrase_with_source(
+        self, *, prompt_on_tty: bool = False
+    ) -> tuple[str | None, PassphraseSource | None]:
+        """Walk the resolution chain with this config's knobs; return ``(passphrase, source)``.
+
+        Diagnostic counterpart to
+        [`resolve_passphrase`][terok_sandbox.SandboxConfig.resolve_passphrase]
+        — feeds the daemon startup log so the operator sees *which*
+        tier unlocked the vault on this boot.
+        """
+        from .credentials.encryption import resolve_passphrase_with_source  # noqa: PLC0415
+
+        return resolve_passphrase_with_source(**self._chain_kwargs(prompt_on_tty=prompt_on_tty))
+
+    def _chain_kwargs(self, *, prompt_on_tty: bool) -> dict[str, Any]:
+        """Return the shared resolver kwargs every chain entry point threads through.
+
+        Adding a new tier is one extra entry here rather than a fan-out
+        across the five resolver entry points and their downstream call
+        sites — the authoritative list of tier knobs lives here.
+        """
+        return {
+            "passphrase_file": self.vault_passphrase_file,
+            "systemd_creds_file": self.vault_systemd_creds_file,
+            "use_keyring": self.credentials_use_keyring,
+            "passphrase_command": self.credentials_passphrase_command,
+            "config_fallback": self.credentials_passphrase,
+            "prompt_on_tty": prompt_on_tty,
+        }
 
     @property
     def routes_path(self) -> Path:

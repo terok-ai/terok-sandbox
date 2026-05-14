@@ -23,6 +23,7 @@ from terok_sandbox.credentials.encryption import (
     forget_passphrase_in_keyring,
     generate_passphrase,
     is_plaintext_sqlite,
+    load_passphrase_from_command,
     load_passphrase_from_file,
     load_passphrase_from_keyring,
     open_sqlcipher,
@@ -104,7 +105,13 @@ def _patch_dev_tty(monkeypatch: pytest.MonkeyPatch) -> _TtyCapture:
     return capture
 
 
-def _make_cfg(tmp_path: Path, *, use_keyring: bool = False, passphrase: str | None = None):
+def _make_cfg(
+    tmp_path: Path,
+    *,
+    use_keyring: bool = False,
+    passphrase: str | None = None,
+    passphrase_command: str | None = None,
+):
     """Return a SandboxConfig rooted under tmp_path with deterministic credential knobs."""
     from terok_sandbox.config import SandboxConfig
 
@@ -116,6 +123,7 @@ def _make_cfg(tmp_path: Path, *, use_keyring: bool = False, passphrase: str | No
         services_mode="socket",
         credentials_passphrase=passphrase,
         credentials_use_keyring=use_keyring,
+        credentials_passphrase_command=passphrase_command,
     )
 
 
@@ -176,7 +184,7 @@ class TestLoadPassphraseFromFile:
 
 
 class TestResolvePassphrase:
-    """Walk the resolution chain: file → keyring (opt-in) → config fallback → prompt."""
+    """Walk the resolution chain: file → systemd-creds → keyring → passphrase_command → config → prompt."""
 
     def test_file_tier_wins(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """A session-unlock file pre-empts every other tier."""
@@ -347,6 +355,55 @@ class TestResolvePassphraseWithSource:
         monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda: "ring-pw")
         assert resolve_passphrase_with_source(use_keyring=True) == ("ring-pw", "keyring")
 
+    def test_passphrase_command_source(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A helper command sits between keyring and config in the chain."""
+        from terok_sandbox.credentials import encryption as enc
+
+        monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda: None)
+        # Both helper and config would resolve; helper wins because it sits above.
+        result = resolve_passphrase_with_source(
+            passphrase_command="/bin/echo helper-pw",
+            config_fallback="cfg-pw",
+        )
+        assert result == ("helper-pw", "passphrase-command")
+
+    def test_keyring_pre_empts_passphrase_command(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Keyring outranks the helper — explicit OS-level storage wins over delegation."""
+        from unittest.mock import MagicMock
+
+        from terok_sandbox.credentials import encryption as enc
+
+        monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda: "ring-pw")
+        spy = MagicMock()
+        monkeypatch.setattr(enc, "load_passphrase_from_command", spy)
+        result = resolve_passphrase_with_source(
+            use_keyring=True,
+            passphrase_command="/bin/echo never-runs",
+        )
+        assert result == ("ring-pw", "keyring")
+        spy.assert_not_called()
+
+    def test_passphrase_command_broken_fails_closed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A configured-but-empty helper raises rather than silently downgrading to config."""
+        from terok_sandbox.credentials import encryption as enc
+
+        monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda: None)
+        with pytest.raises(WrongPassphraseError, match="passphrase_command produced no passphrase"):
+            resolve_passphrase_with_source(
+                passphrase_command="/bin/false",
+                config_fallback="should-not-be-used",
+            )
+
+    def test_empty_passphrase_command_falls_through(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An unset / empty-string command is "tier not configured" — fall through cleanly."""
+        from terok_sandbox.credentials import encryption as enc
+
+        monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda: None)
+        assert resolve_passphrase_with_source(
+            passphrase_command="",
+            config_fallback="cfg-pw",
+        ) == ("cfg-pw", "config")
+
     def test_config_source(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from terok_sandbox.credentials import encryption as enc
 
@@ -366,6 +423,53 @@ class TestResolvePassphraseWithSource:
 
         monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda: None)
         assert resolve_passphrase_with_source() == (None, None)
+
+
+class TestLoadPassphraseFromCommand:
+    """The `passphrase_command` tier delegates retrieval to an operator-supplied helper.
+
+    Mirrors the silent-on-failure shape of the other tier primitives
+    so the resolver can decide whether ``None`` means "skip this tier"
+    or "fail closed".
+    """
+
+    def test_stdout_is_returned_stripped(self) -> None:
+        """Trailing newline from ``echo`` (and any helper) is trimmed."""
+        assert load_passphrase_from_command("/bin/echo hunter2") == "hunter2"
+
+    def test_quoted_argv_is_shlex_split(self) -> None:
+        """``shlex`` handles quoted arguments so YAML strings need no special escaping."""
+        # /bin/sh -c 'printf "a b"' — one quoted arg through shell, no trailing newline
+        assert load_passphrase_from_command('/bin/sh -c "printf abc"') == "abc"
+
+    def test_non_zero_exit_returns_none(self, caplog: pytest.LogCaptureFixture) -> None:
+        """A failed helper logs the exit code + stderr at WARNING and returns ``None``."""
+        with caplog.at_level("WARNING", logger="terok_sandbox.credentials.encryption"):
+            assert load_passphrase_from_command("/bin/false") is None
+        assert "exited 1" in caplog.text
+
+    def test_missing_binary_returns_none(self, caplog: pytest.LogCaptureFixture) -> None:
+        """ENOENT (helper not installed) is silent-with-WARNING, not a crash."""
+        with caplog.at_level("WARNING", logger="terok_sandbox.credentials.encryption"):
+            assert load_passphrase_from_command("/nonexistent/binary") is None
+        assert "failed to spawn" in caplog.text
+
+    def test_empty_stdout_returns_none(self) -> None:
+        """A helper that exits 0 with no output is treated as "nothing to give"."""
+        assert load_passphrase_from_command("/bin/true") is None
+
+    def test_unbalanced_quotes_return_none(self, caplog: pytest.LogCaptureFixture) -> None:
+        """``shlex.split`` rejects unbalanced quotes — log + None, no exception bubbles."""
+        with caplog.at_level("WARNING", logger="terok_sandbox.credentials.encryption"):
+            assert load_passphrase_from_command('pass "show terok') is None
+        assert "shlex parse failed" in caplog.text
+
+    def test_timeout_returns_none(self, caplog: pytest.LogCaptureFixture) -> None:
+        """A wedged helper hits the budget and falls through with a WARNING."""
+        # Sub-second timeout so the test stays fast.
+        with caplog.at_level("WARNING", logger="terok_sandbox.credentials.encryption"):
+            assert load_passphrase_from_command("/bin/sleep 5", timeout=0.1) is None
+        assert "timed out" in caplog.text
 
 
 class TestEncryptInPlace:
@@ -1361,12 +1465,17 @@ class TestVaultUnlockLock:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        """Plain ``lock`` with keyring/config tiers warns about silent auto-unlock."""
+        """Plain ``lock`` with keyring / passphrase_command / config tiers warns about silent auto-unlock."""
         from unittest.mock import MagicMock
 
         from terok_sandbox.commands import _handle_vault_lock
 
-        cfg = _make_cfg(tmp_path, use_keyring=True, passphrase="from-config")
+        cfg = _make_cfg(
+            tmp_path,
+            use_keyring=True,
+            passphrase="from-config",
+            passphrase_command="pass show terok-sandbox/vault",
+        )
         mgr = MagicMock()
         mgr.is_daemon_running.return_value = False
         monkeypatch.setattr("terok_sandbox.vault.lifecycle.VaultManager", lambda _cfg: mgr)
@@ -1376,6 +1485,7 @@ class TestVaultUnlockLock:
         err = capsys.readouterr().err
         assert "non-session passphrase tiers still active" in err
         assert "keyring" in err
+        assert "passphrase_command" in err
         assert "config.yml" in err
         assert "--forget" in err
 
@@ -1416,6 +1526,37 @@ class TestVaultUnlockLock:
 
         assert forget_calls["n"] == 1
         assert "passphrase: from-config" not in user_config.read_text()
+
+    def test_lock_forget_clears_passphrase_command(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``lock --forget`` removes ``credentials.passphrase_command`` so the next start can't auto-resolve via the helper."""
+        from unittest.mock import MagicMock
+
+        from terok_sandbox import config as _config
+        from terok_sandbox.commands import _handle_vault_lock
+
+        cfg = _make_cfg(tmp_path, passphrase_command="pass show terok-sandbox/vault")
+        mgr = MagicMock()
+        mgr.is_daemon_running.return_value = False
+        monkeypatch.setattr("terok_sandbox.vault.lifecycle.VaultManager", lambda _cfg: mgr)
+
+        user_config = tmp_path / "config.yml"
+        user_config.write_text(
+            "credentials:\n  passphrase_command: pass show terok-sandbox/vault\n"
+        )
+        monkeypatch.setattr(
+            "terok_sandbox.paths._config_file_paths", lambda: [("user", user_config)]
+        )
+        _config._credentials_section.cache_clear()
+
+        _handle_vault_lock(cfg=cfg, forget=True)
+
+        # Key may remain with a null value depending on YAML serializer behaviour;
+        # the recipe string itself must be gone so the next start can't auto-resolve.
+        assert "pass show terok-sandbox/vault" not in user_config.read_text()
 
     def test_lock_forget_treats_absent_keyring_entry_as_idempotent(
         self,
@@ -1657,6 +1798,25 @@ class TestVaultSeal:
         )
 
         with pytest.raises(SystemExit, match="no current passphrase"):
+            _handle_vault_seal(cfg=cfg)
+
+    def test_seal_converts_broken_tier_to_systemexit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A fail-closed resolver error (e.g. broken `passphrase_command`) surfaces as a clean CLI exit, not a traceback."""
+        from terok_sandbox.commands import _handle_vault_seal
+        from terok_sandbox.credentials import systemd_creds as sc
+
+        cfg = _make_cfg(tmp_path, passphrase_command="/bin/false")
+        monkeypatch.setattr(sc, "is_available", lambda: True)
+        monkeypatch.setattr(
+            "terok_sandbox.credentials.encryption.load_passphrase_from_keyring",
+            lambda: None,
+        )
+
+        with pytest.raises(
+            SystemExit, match="cannot seal: passphrase_command produced no passphrase"
+        ):
             _handle_vault_seal(cfg=cfg)
 
     def test_seal_never_prompts_for_passphrase(

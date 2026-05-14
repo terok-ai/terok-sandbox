@@ -128,15 +128,13 @@ def _make_vault_unlocked_check() -> DoctorCheck:
 
     def _eval(_rc: int, _stdout: str, _stderr: str) -> CheckVerdict:
         """Walk the resolution chain locally; report the verdict."""
-        from .config import SandboxConfig, credentials_passphrase, credentials_use_keyring
-        from .credentials.encryption import resolve_passphrase
+        from .config import SandboxConfig
+        from .credentials.encryption import WrongPassphraseError
 
-        cfg = SandboxConfig()
-        passphrase = resolve_passphrase(
-            passphrase_file=cfg.vault_passphrase_file,
-            use_keyring=credentials_use_keyring(),
-            config_fallback=credentials_passphrase(),
-        )
+        try:
+            passphrase = SandboxConfig().resolve_passphrase()
+        except WrongPassphraseError as exc:
+            return CheckVerdict("error", f"vault tier broken — {exc}")
         if passphrase is not None:
             return CheckVerdict("ok", "credentials-DB passphrase available")
         return CheckVerdict(

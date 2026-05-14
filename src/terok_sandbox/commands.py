@@ -594,6 +594,20 @@ def _handle_vault_unlock(*, cfg: SandboxConfig | None = None) -> None:
         print("→ vault daemon is not running; start it with `terok-sandbox vault start`")
 
 
+def _forget_config_tier_updates(cfg: SandboxConfig) -> dict[str, object | None]:
+    """Return the config-section patch ``vault lock --forget`` should apply.
+
+    Both fields are auto-resolution wirings — leaving either would let
+    the daemon re-unlock on next socket activation and defeat the lock.
+    """
+    updates: dict[str, object | None] = {}
+    if cfg.credentials_passphrase:
+        updates["passphrase"] = None
+    if cfg.credentials_passphrase_command:
+        updates["passphrase_command"] = None
+    return updates
+
+
 def _handle_vault_lock(*, cfg: SandboxConfig | None = None, forget: bool = False) -> None:
     """Delete the session-unlock tmpfs file and stop the vault daemon.
 
@@ -636,7 +650,8 @@ def _handle_vault_lock(*, cfg: SandboxConfig | None = None, forget: bool = False
                 raise SystemExit(
                     "failed to clear keyring entry; daemon may still auto-unlock from keyring"
                 )
-        if cfg.credentials_passphrase:
+        config_updates = _forget_config_tier_updates(cfg)
+        if config_updates:
             from . import config as _config
             from .paths import _config_file_paths
 
@@ -645,10 +660,11 @@ def _handle_vault_lock(*, cfg: SandboxConfig | None = None, forget: bool = False
                 _yaml_update_section(
                     user_config,
                     "credentials",
-                    {"passphrase": None},  # nosec: B105 — clearing a config key
+                    config_updates,
                 )
                 _config._credentials_section.cache_clear()
-                print("→ cleared credentials.passphrase from config.yml")
+                for key in config_updates:
+                    print(f"→ cleared credentials.{key} from config.yml")
         if sealed_cred.exists():
             try:
                 sealed_cred.unlink()
@@ -661,6 +677,8 @@ def _handle_vault_lock(*, cfg: SandboxConfig | None = None, forget: bool = False
         active = []
         if cfg.credentials_use_keyring:
             active.append("keyring")
+        if cfg.credentials_passphrase_command:
+            active.append("passphrase_command")
         if cfg.credentials_passphrase:
             active.append("config.yml")
         if sealed_cred.is_file():
@@ -712,7 +730,6 @@ def _handle_vault_seal(*, cfg: SandboxConfig | None = None, key: str = "auto") -
     walk.
     """
     from .credentials import systemd_creds
-    from .credentials.encryption import resolve_passphrase
 
     if cfg is None:
         cfg = SandboxConfig()
@@ -735,13 +752,12 @@ def _handle_vault_seal(*, cfg: SandboxConfig | None = None, key: str = "auto") -
     # ``--key=`` mode on a headless host (where systemd-creds may be
     # the only resolvable source) is idempotent: the resolver returns
     # the same passphrase regardless of which tier it came from.
-    passphrase = resolve_passphrase(
-        passphrase_file=cfg.vault_passphrase_file,
-        systemd_creds_file=cfg.vault_systemd_creds_file,
-        use_keyring=cfg.credentials_use_keyring,
-        config_fallback=cfg.credentials_passphrase,
-        prompt_on_tty=False,
-    )
+    from .credentials.encryption import WrongPassphraseError
+
+    try:
+        passphrase = cfg.resolve_passphrase()
+    except WrongPassphraseError as exc:
+        raise SystemExit(f"cannot seal: {exc}") from exc
     if passphrase is None:
         raise SystemExit("no current passphrase to seal — run `terok-sandbox vault unlock` first")
 
