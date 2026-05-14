@@ -37,11 +37,15 @@ def install_spies():
     runner's PATH.
     """
     with (
-        patch("terok_sandbox.commands.run_prereq_report") as prereq,
-        patch("terok_sandbox.commands.run_shield_install_phase", return_value=True) as shield,
-        patch("terok_sandbox.commands.run_vault_install_phase", return_value=True) as vault,
-        patch("terok_sandbox.commands.run_gate_install_phase", return_value=True) as gate,
-        patch("terok_sandbox.commands.run_clearance_install_phase", return_value=True) as clearance,
+        patch("terok_sandbox.commands.sandbox.run_prereq_report") as prereq,
+        patch(
+            "terok_sandbox.commands.sandbox.run_shield_install_phase", return_value=True
+        ) as shield,
+        patch("terok_sandbox.commands.sandbox.run_vault_install_phase", return_value=True) as vault,
+        patch("terok_sandbox.commands.sandbox.run_gate_install_phase", return_value=True) as gate,
+        patch(
+            "terok_sandbox.commands.sandbox.run_clearance_install_phase", return_value=True
+        ) as clearance,
     ):
         yield {
             "prereq": prereq,
@@ -63,16 +67,16 @@ def uninstall_spies():
     """
     with (
         patch(
-            "terok_sandbox.commands.run_shield_uninstall_phase", return_value=True
+            "terok_sandbox.commands.sandbox.run_shield_uninstall_phase", return_value=True
         ) as shield_uninstall,
         patch(
-            "terok_sandbox.commands.run_vault_uninstall_phase", return_value=True
+            "terok_sandbox.commands.sandbox.run_vault_uninstall_phase", return_value=True
         ) as vault_uninstall,
         patch(
-            "terok_sandbox.commands.run_gate_uninstall_phase", return_value=True
+            "terok_sandbox.commands.sandbox.run_gate_uninstall_phase", return_value=True
         ) as gate_uninstall,
         patch(
-            "terok_sandbox.commands.run_clearance_uninstall_phase", return_value=True
+            "terok_sandbox.commands.sandbox.run_clearance_uninstall_phase", return_value=True
         ) as clearance_uninstall,
     ):
         yield {

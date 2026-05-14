@@ -3,10 +3,16 @@
 
 """Passphrase plumbing and SQLCipher helpers for at-rest credential encryption.
 
-Owns the runtime passphrase resolution chain (tmpfs session-unlock
-file → OS keyring → ``credentials.passphrase`` config-file fallback →
-interactive prompt) and the one-shot setup migration from legacy
-plaintext sqlite files.
+Walks the six-tier resolution chain — session-unlock file →
+systemd-creds → OS keyring → ``passphrase_command`` helper →
+plaintext config fallback → interactive prompt — and exposes the
+SQLCipher open / migrate primitives the rest of the package builds on.
+``resolve_passphrase`` documents the chain order; ``open_sqlcipher``
+is the only entry point that ever calls ``sqlcipher3.connect``.
+
+The setup-time plaintext→SQLCipher migration (deprecated in 0.9.0,
+removed in 0.10.0) lives at the bottom of the file; nothing in the
+runtime chain touches it.
 """
 
 from __future__ import annotations
@@ -39,9 +45,9 @@ _PASSPHRASE_COMMAND_TIMEOUT_S = 30.0
 
 _logger = logging.getLogger(__name__)
 
-#: Where in the chain a passphrase came from — domain vocabulary so callers can
-#: dispatch on a closed set instead of stringly-typed branches.  ``"prompt"``
-#: covers both the runtime-prompt fallback and the setup-time chooser path.
+#: Closed set of tier labels — feeds [`VaultStatus.passphrase_source`][terok_sandbox.VaultStatus]
+#: and the setup-chooser's
+#: [`SetupTier`][terok_sandbox.commands.credentials.SetupTier] subset.
 PassphraseSource = Literal[
     "session-file",
     "systemd-creds",
@@ -124,12 +130,9 @@ def resolve_passphrase_with_source(
         sealed_pw = _systemd_creds.unseal(systemd_creds_file)
         if sealed_pw:
             return sealed_pw, "systemd-creds"
-        # Fail closed: a present-but-unsealable credential is a
-        # downgrade vector — silent fall-through to keyring / config
-        # would change the security posture (machine-bound → keyring
-        # or plaintext-on-disk) without the operator's knowledge.
-        # Surface as ``locked`` so the caller sees the broken state
-        # instead of a working-but-weaker vault.
+        # Fail closed: silently falling through would demote a
+        # machine-bound tier to keyring / plaintext-on-disk without
+        # the operator's knowledge.
         raise WrongPassphraseError(
             f"sealed systemd-creds credential present at {systemd_creds_file}"
             " but could not be unsealed"
@@ -142,11 +145,10 @@ def resolve_passphrase_with_source(
         cmd_pw = load_passphrase_from_command(passphrase_command)
         if cmd_pw:
             return cmd_pw, "passphrase-command"
-        # The command string itself is not echoed: operators sometimes
-        # inline tokens, AWS ARNs, or vault paths there, and this
-        # exception flows into doctor output and journals.  The helper
-        # already logged its own diagnostic (argv[0] + stderr) at WARNING
-        # via load_passphrase_from_command.
+        # Fail closed for the same reason as systemd-creds above; the
+        # command string itself is omitted because operators sometimes
+        # inline AWS ARNs / vault paths there and this exception reaches
+        # doctor output and journals.
         raise WrongPassphraseError(
             "passphrase_command produced no passphrase; run it manually to diagnose"
             " (see WARNING in the vault journal)"
@@ -528,9 +530,9 @@ def encrypt_in_place(db_path: Path, passphrase: str) -> None:
         raise
 
     tmp_path.replace(db_path)
-    # Now that the encrypted file is canonical at db_path, clean up
-    # any plaintext sidecars left behind by the legacy connection plus
-    # any encrypted-side sidecars under the tmp name.
+    # Sidecars under both names: plaintext leftovers from the legacy
+    # connection (now next to the encrypted file) and any encrypted-side
+    # sidecars that briefly accompanied the temp file.
     _unlink_sidecars(db_path)
     _unlink_sidecars(tmp_path)
 

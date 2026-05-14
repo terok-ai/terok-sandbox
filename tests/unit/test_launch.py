@@ -536,11 +536,11 @@ class TestEdgeCases:
 
     def test_handlers_construct_default_cfg(self, tmp_path: Path) -> None:
         """Handlers fall back to `SandboxConfig()` when *cfg* is omitted."""
-        from terok_sandbox import commands as cmd_mod
+        from terok_sandbox.commands import launch as launch_cmds
 
         fake_cfg = _make_cfg(tmp_path)
         with (
-            patch.object(cmd_mod, "SandboxConfig", return_value=fake_cfg),
+            patch.object(launch_cmds, "SandboxConfig", return_value=fake_cfg),
             patch("terok_sandbox.shield.pre_start", return_value=[]),
             patch("terok_sandbox.launch.shutil.which", return_value="/usr/bin/podman"),
             patch("terok_sandbox.launch.Path.resolve", return_value=Path("/usr/bin/podman")),

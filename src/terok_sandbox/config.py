@@ -196,28 +196,21 @@ class SandboxConfig:
     services_mode: ServicesMode = field(default_factory=_default_services_mode)
     """Transport for host↔container IPC, resolved once at construction.
 
-    The default factory validates the layered ``config.yml`` through
-    [`RawServicesSection`][terok_sandbox.config_schema.RawServicesSection] — the same
-    schema that terok's ``RawGlobalConfig`` composes, so the standalone
-    and embedded paths can't disagree on a mode value.
-
-    Downstream sandbox operations (vault / gate install, SELinux checks)
-    read this field exclusively.  Making it an instance attribute rather
-    than a free-function call per site means the control flow can't
-    bypass config resolution: you can't construct a manager without a
-    ``SandboxConfig``, and every ``SandboxConfig`` carries a resolved
-    mode.
+    Validated through the same
+    [`RawServicesSection`][terok_sandbox.config_schema.RawServicesSection]
+    schema terok's ``RawGlobalConfig`` composes, so standalone and
+    embedded paths agree on the value.  Lives as an instance attribute
+    rather than a free-function call per site so downstream code can't
+    bypass config resolution — no manager without a ``SandboxConfig``,
+    every ``SandboxConfig`` carries a resolved mode.
     """
 
     def __post_init__(self) -> None:
         """Auto-resolve ``None`` ports via the shared port registry.
 
-        Skipped entirely when ``services.mode`` is ``socket`` — in that
-        transport the gate, vault token-broker, and vault SSH-signer all
-        listen on Unix sockets, so TCP port claims would be wasted work
-        (and, historically, a source of spurious collision errors when
-        multiple ``SandboxConfig()`` constructions raced from TUI worker
-        threads).
+        Skipped in socket mode — gate, broker, and SSH signer all listen
+        on Unix sockets there, so TCP claims would be wasted work (and a
+        historical source of TUI-thread port-collision errors).
         """
         if self.services_mode == "socket":
             return

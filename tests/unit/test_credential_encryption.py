@@ -955,7 +955,7 @@ class TestProvisionPassphrase:
         # as ``vault unlock`` against a fresh DB.
         _patch_dev_tty(monkeypatch)
         _scripted_tty_prompt(monkeypatch, "")
-        pw, source = _provision_passphrase(cfg, mode="session")
+        pw, source = _provision_passphrase(cfg, mode="session-file")
         assert source == "session-file"
         assert cfg.vault_passphrase_file.read_text().rstrip("\n") == pw
         # Mode 0600 enforced — same protection as the encrypted DB itself.
@@ -974,7 +974,7 @@ class TestProvisionPassphrase:
         cfg = _make_cfg(tmp_path)
         cfg.vault_passphrase_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         cfg.vault_passphrase_file.write_text(_PASSPHRASE + "\n")
-        pw, source = _provision_passphrase(cfg, mode="session")
+        pw, source = _provision_passphrase(cfg, mode="session-file")
         assert pw == _PASSPHRASE
         assert source == "session-file"
 
@@ -1267,14 +1267,14 @@ class TestAskPassphraseMode:
         from terok_sandbox.commands import _ask_passphrase_mode
 
         monkeypatch.setattr("sys.stdin.isatty", lambda: False)
-        assert _ask_passphrase_mode() == "session"
+        assert _ask_passphrase_mode() == "session-file"
 
     def test_session_keyring_pass_through(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """``s`` / ``k`` choices skip the config-tier confirmation entirely."""
         from terok_sandbox.commands import _ask_passphrase_mode
 
         monkeypatch.setattr("sys.stdin.isatty", lambda: True)
-        for letter, expected in (("s", "session"), ("k", "keyring")):
+        for letter, expected in (("s", "session-file"), ("k", "keyring")):
             monkeypatch.setattr("sys.stdin.readline", lambda _letter=letter: _letter + "\n")
             assert _ask_passphrase_mode() == expected
 
@@ -1301,7 +1301,7 @@ class TestAskPassphraseMode:
         responses = iter(["c\n", "no\n", "s\n"])
         monkeypatch.setattr("sys.stdin.isatty", lambda: True)
         monkeypatch.setattr("sys.stdin.readline", lambda: next(responses))
-        assert _ask_passphrase_mode() == "session"
+        assert _ask_passphrase_mode() == "session-file"
 
     def test_empty_choice_defaults_to_keyring(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Pressing Enter at the chooser takes the recommended default (keyring)."""
@@ -1923,7 +1923,7 @@ class TestCredentialsSetupPhaseDaemonHandling:
         """Socket-activation respawn race → uninstall units + retry → success."""
         from unittest.mock import MagicMock
 
-        from terok_sandbox import commands
+        from terok_sandbox.commands import credentials as commands
 
         cfg = _make_cfg(tmp_path)
         attempts = {"n": 0}
@@ -1952,7 +1952,7 @@ class TestCredentialsSetupPhaseDaemonHandling:
         """If the lock persists after uninstall, surface the ``fuser`` diagnostic."""
         from unittest.mock import MagicMock
 
-        from terok_sandbox import commands
+        from terok_sandbox.commands import credentials as commands
 
         def _always_locked(**_kw: object) -> None:
             raise RuntimeError("database is locked")
@@ -1975,7 +1975,7 @@ class TestCredentialsSetupPhaseDaemonHandling:
         """Unrelated migration errors must NOT trigger auto-uninstall."""
         from unittest.mock import MagicMock
 
-        from terok_sandbox import commands
+        from terok_sandbox.commands import credentials as commands
 
         def _boom(**_kw: object) -> None:
             raise RuntimeError("disk is on fire")
@@ -2036,7 +2036,7 @@ class TestPersistModeChoice:
         monkeypatch.setattr(
             "terok_sandbox.paths._config_file_paths", lambda: [("user", user_config)]
         )
-        _persist_mode_choice("session", "irrelevant")
+        _persist_mode_choice("session-file", "irrelevant")
         assert not user_config.exists()
 
 
@@ -2062,10 +2062,74 @@ class TestCredentialsSetupPhase:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Any exception → caller can mark ``failed`` and keep going through other phases."""
-        from terok_sandbox import commands
+        from terok_sandbox.commands import credentials as commands
 
         def _boom(**_kw: object) -> None:
             raise RuntimeError("simulated failure")
 
         monkeypatch.setattr(commands, "_handle_credentials_encrypt_db", _boom)
         assert commands._run_credentials_setup_phase(_make_cfg(tmp_path)) is False
+
+
+class TestCredentialsCommandCoverageGaps:
+    """Branches the main credential-encryption tests don't reach."""
+
+    def test_encrypt_db_defaults_cfg(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``credentials encrypt-db`` without ``cfg=`` constructs a default SandboxConfig.
+
+        Short-circuits as soon as the DB existence check sees the path
+        is absent — that's enough to cover the default-cfg branch.
+        """
+        from terok_sandbox.commands import _handle_credentials_encrypt_db, credentials as cred_cmds
+
+        def _fake_sandbox_config():
+            from terok_sandbox.config import SandboxConfig
+
+            return SandboxConfig(
+                state_dir=tmp_path / "state",
+                runtime_dir=tmp_path / "rt",
+                config_dir=tmp_path / "cfg",
+                vault_dir=tmp_path / "vault-absent",
+                services_mode="socket",
+            )
+
+        monkeypatch.setattr(cred_cmds, "SandboxConfig", _fake_sandbox_config)
+        # systemd-creds path is the fast-track that needs least mocking.
+        monkeypatch.setattr("terok_sandbox.credentials.systemd_creds.is_available", lambda: True)
+        monkeypatch.setattr(
+            cred_cmds,
+            "_provision_systemd_creds_tier",
+            lambda _cfg: ("pw", "systemd-creds"),
+        )
+        _handle_credentials_encrypt_db()  # cfg= omitted — exercises the default-factory line
+
+    def test_back_up_plaintext_db_unlinks_on_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A mid-tar exception removes the half-written tarball before re-raising.
+
+        Streaming the tar into an O_EXCL fd means a crash would otherwise
+        leave a partial tarball containing partial cleartext, which is
+        worse than no backup at all.
+        """
+        from terok_sandbox.commands import _back_up_plaintext_db
+
+        db_path = tmp_path / "vault" / "credentials.db"
+        db_path.parent.mkdir(parents=True)
+        db_path.write_bytes(b"plain")
+
+        import tarfile
+
+        real_open = tarfile.open
+
+        def _boom(*args, **kwargs):  # noqa: ANN002, ANN003
+            real = real_open(*args, **kwargs)
+            real.close()  # so the fd doesn't leak
+            raise RuntimeError("simulated mid-tar failure")
+
+        monkeypatch.setattr(tarfile, "open", _boom)
+        with pytest.raises(RuntimeError, match="simulated mid-tar failure"):
+            _back_up_plaintext_db(db_path)
+        # The cleanup branch must have unlinked the partial tarball.
+        backups = list(db_path.parent.glob("*.plaintext-backup-*.tar.gz"))
+        assert backups == []

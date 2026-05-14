@@ -54,7 +54,7 @@ def patched_open_db(db_path: Path):
     def _factory(_cfg):
         return CredentialDB(db_path, passphrase="test")
 
-    with patch("terok_sandbox.commands._open_db", side_effect=_factory):
+    with patch("terok_sandbox.commands.ssh._open_db", side_effect=_factory):
         yield
 
 
@@ -627,3 +627,218 @@ class TestRename:
             assert verify.list_ssh_keys_for_scope("proj")[0].comment == "defaulted"
         finally:
             verify.close()
+
+
+class TestCoverageGaps:
+    """Hit a handful of branches the main test classes don't exercise."""
+
+    def test_print_key_table_empty_says_so(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """No keys → friendly "No SSH keys registered." (early-return path)."""
+        from terok_sandbox.commands.ssh import _print_key_table
+
+        _print_key_table([])
+        assert capsys.readouterr().out.strip() == "No SSH keys registered."
+
+    def test_filter_by_comment_glob(self, db_path: Path) -> None:
+        """``_filter_key_rows`` accepts shell-style globs against the comment field."""
+        from terok_sandbox.commands.ssh import KeyRow, _filter_key_rows
+
+        rows = [
+            KeyRow("a", "deploy-prod", "ed25519", "fp1", "p1", "p1"),
+            KeyRow("a", "deploy-dev", "ed25519", "fp2", "p2", "p2"),
+            KeyRow("a", "personal", "ed25519", "fp3", "p3", "p3"),
+        ]
+        out = _filter_key_rows(rows, comment="deploy-*")
+        assert [r.comment for r in out] == ["deploy-prod", "deploy-dev"]
+
+    def test_ssh_pub_no_keys(self, db_path: Path, mock_cfg: MagicMock, patched_open_db) -> None:
+        """Empty scope → SystemExit instead of an IndexError on ``records[-1]``."""
+        CredentialDB(db_path, passphrase="test").close()
+        with pytest.raises(SystemExit, match="has no SSH keys assigned"):
+            _handle_ssh_pub(scope="empty", cfg=mock_cfg)
+
+    def test_ssh_pub_unknown_key_id(
+        self, db_path: Path, mock_cfg: MagicMock, patched_open_db
+    ) -> None:
+        """``--key-id`` pointing at a row that isn't assigned to *scope* exits cleanly."""
+        _seed(db_path, "proj")
+        with pytest.raises(SystemExit, match="not assigned to scope"):
+            _handle_ssh_pub(scope="proj", key_id=9999, cfg=mock_cfg)
+
+    def test_ssh_pub_specific_key_id(
+        self,
+        db_path: Path,
+        mock_cfg: MagicMock,
+        patched_open_db,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """``--key-id`` of an assigned key prints just that one line."""
+        key_id = _seed(db_path, "proj")
+        _handle_ssh_pub(scope="proj", key_id=key_id, cfg=mock_cfg)
+        out = capsys.readouterr().out.splitlines()
+        assert len(out) == 1
+        assert out[0].startswith("ssh-ed25519 ")
+
+    def test_ssh_import_missing_private_key(
+        self, tmp_path: Path, mock_cfg: MagicMock, patched_open_db
+    ) -> None:
+        """Non-existent private-key path → SystemExit before any DB work."""
+        with pytest.raises(SystemExit, match="Private key not found"):
+            _handle_ssh_import(
+                scope="proj",
+                private_key=str(tmp_path / "nowhere"),
+                cfg=mock_cfg,
+            )
+
+    def test_ssh_import_missing_public_key(
+        self, tmp_path: Path, mock_cfg: MagicMock, patched_open_db
+    ) -> None:
+        """Private key present but the ``--public-key`` path is missing."""
+        kp = generate_keypair("ed25519", comment="x")
+        priv = tmp_path / "priv"
+        priv.write_bytes(openssh_pem_of(kp.private_der))
+        with pytest.raises(SystemExit, match="Public key not found"):
+            _handle_ssh_import(
+                scope="proj",
+                private_key=str(priv),
+                public_key=str(tmp_path / "nowhere.pub"),
+                cfg=mock_cfg,
+            )
+
+    def test_ssh_import_password_protected_key(
+        self, tmp_path: Path, mock_cfg: MagicMock, patched_open_db
+    ) -> None:
+        """Encrypted private keys are rejected up front with a ``ssh-keygen -p`` hint."""
+        from terok_sandbox.credentials import ssh_keypair
+
+        priv = tmp_path / "priv"
+        priv.write_text("dummy")  # contents don't matter — the loader is patched.
+        with (
+            patch.object(
+                ssh_keypair,
+                "import_ssh_keypair",
+                side_effect=ssh_keypair.PasswordProtectedKeyError("encrypted"),
+            ),
+            pytest.raises(SystemExit, match="ssh-keygen -p -f"),
+        ):
+            _handle_ssh_import(scope="proj", private_key=str(priv), cfg=mock_cfg)
+
+    def test_ssh_remove_interactive_empty_selection_aborts(
+        self,
+        db_path: Path,
+        mock_cfg: MagicMock,
+        patched_open_db,
+    ) -> None:
+        """Pressing Enter at the interactive selection prompt exits without changes."""
+        _seed(db_path, "proj")
+        with patch("builtins.input", return_value=""), pytest.raises(SystemExit, match="Aborted"):
+            _handle_ssh_remove(cfg=mock_cfg)
+
+    def test_ssh_remove_interactive_eof_aborts(
+        self,
+        db_path: Path,
+        mock_cfg: MagicMock,
+        patched_open_db,
+    ) -> None:
+        """Ctrl-D at the selection prompt aborts cleanly (no traceback)."""
+        _seed(db_path, "proj")
+        with (
+            patch("builtins.input", side_effect=EOFError),
+            pytest.raises(SystemExit, match="Aborted"),
+        ):
+            _handle_ssh_remove(cfg=mock_cfg)
+
+    def test_ssh_remove_confirmation_eof_aborts(
+        self,
+        db_path: Path,
+        mock_cfg: MagicMock,
+        patched_open_db,
+    ) -> None:
+        """Ctrl-D at the per-match confirmation prompt aborts cleanly."""
+        _seed(db_path, "proj")
+        with (
+            patch("builtins.input", side_effect=KeyboardInterrupt),
+            pytest.raises(SystemExit, match="Aborted"),
+        ):
+            _handle_ssh_remove(scope="proj", cfg=mock_cfg)
+
+    def test_ssh_remove_multi_match_listing(
+        self,
+        db_path: Path,
+        mock_cfg: MagicMock,
+        patched_open_db,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """``Multiple keys match (N):`` precedes the table when more than one match."""
+        _seed(db_path, "proj")
+        _seed(db_path, "proj")
+        with patch("builtins.input", return_value="no"), pytest.raises(SystemExit):
+            _handle_ssh_remove(scope="proj", cfg=mock_cfg)
+        assert "Multiple keys match (2)" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("handler", "kwargs"),
+    [
+        (_handle_ssh_list, {}),
+        (_handle_ssh_pub, {"scope": "absent"}),
+        (_handle_ssh_link, {"key_id": 9999, "scope": "absent"}),
+        (
+            _handle_ssh_import,
+            {"scope": "absent", "private_key": "/nowhere/priv"},
+        ),
+        (_handle_ssh_add, {"scope": "absent"}),
+        (_handle_ssh_export, {"scope": "absent", "out_dir": "/tmp/terok-testing/x"}),
+        (_handle_ssh_rename, {"fingerprint": "nope", "comment": "x"}),
+        (_handle_ssh_remove, {"scope": "absent"}),
+    ],
+)
+def test_each_ssh_handler_defaults_cfg(
+    handler,
+    kwargs,
+    db_path: Path,
+    patched_open_db,
+) -> None:
+    """Argparse calls every handler without ``cfg=`` — drives past the default-factory line.
+
+    The aim is coverage of ``if cfg is None: cfg = SandboxConfig()``;
+    whether the handler then succeeds, raises, or no-ops depends on the
+    DB state it sees, which is unrelated to the line under test.
+    """
+    CredentialDB(db_path, passphrase="test").close()
+    try:
+        handler(**kwargs)
+    except SystemExit:
+        pass  # handler-specific exit shape is exercised by its dedicated tests
+
+
+def test_open_db_threads_through_sandbox_config(tmp_path: Path) -> None:
+    """``_open_db`` delegates to ``cfg.open_credential_db(prompt_on_tty=True)``.
+
+    Exercised here because the handler-level tests patch ``_open_db``
+    out — that fixture trades coverage of this one-liner for not needing
+    a real SQLCipher DB per handler.  This test pays the cost once.
+    """
+    from terok_sandbox.commands.ssh import _open_db
+    from terok_sandbox.config import SandboxConfig
+
+    # All resolver tiers explicitly set so the host's layered config /
+    # keyring can't slip a different passphrase in ahead of ours.
+    cfg = SandboxConfig(
+        state_dir=tmp_path / "state",
+        runtime_dir=tmp_path / "rt",
+        config_dir=tmp_path / "cfg",
+        vault_dir=tmp_path / "vault",
+        services_mode="socket",
+        credentials_passphrase="test-pass",
+        credentials_use_keyring=False,
+        credentials_passphrase_command=None,
+    )
+    cfg.vault_dir.mkdir(parents=True, exist_ok=True)
+    CredentialDB(cfg.db_path, passphrase="test-pass").close()
+
+    db = _open_db(cfg)
+    try:
+        assert db.list_scopes_with_ssh_keys() == []
+    finally:
+        db.close()
