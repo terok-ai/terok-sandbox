@@ -130,6 +130,14 @@ class TestCLIBasics:
 class TestShieldCLI:
     """Verify shield subcommand dispatch."""
 
+    def test_install_hooks_user_delegates_to_run_setup(self) -> None:
+        """``shield install-hooks --user`` reaches ``shield.run_setup(user=True)``."""
+        from terok_sandbox.commands import _handle_shield_setup
+
+        with patch("terok_sandbox.shield.run_setup") as run_setup:
+            _handle_shield_setup(user=True)
+        run_setup.assert_called_once_with(root=False, user=True)
+
     def test_shield_status_runs(self) -> None:
         from terok_shield import EnvironmentCheck
 

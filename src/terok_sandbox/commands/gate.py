@@ -19,11 +19,11 @@ if TYPE_CHECKING:
     from ..config import SandboxConfig
 
 
-def _handle_gate_install() -> None:
+def _handle_gate_install(*, cfg: SandboxConfig | None = None) -> None:
     """Install gate server systemd units, refusing hosts without systemd-user."""
     from ..gate.lifecycle import GateServerManager
 
-    mgr = GateServerManager()
+    mgr = GateServerManager(cfg)
     if not mgr.is_systemd_available():
         print("Error: systemd user services are not available on this host.")
         raise SystemExit(1)
@@ -31,11 +31,11 @@ def _handle_gate_install() -> None:
     print("Gate server installed via systemd socket activation.")
 
 
-def _handle_gate_uninstall() -> None:
+def _handle_gate_uninstall(*, cfg: SandboxConfig | None = None) -> None:
     """Remove gate server systemd units, stopping any stray daemon first."""
     from ..gate.lifecycle import GateServerManager
 
-    mgr = GateServerManager()
+    mgr = GateServerManager(cfg)
     if mgr.get_status().mode == "daemon":
         mgr.stop_daemon()
     if mgr.is_systemd_available():
@@ -92,6 +92,18 @@ def _handle_gate_status(*, cfg: SandboxConfig | None = None) -> None:
 
 
 GATE_COMMANDS: tuple[CommandDef, ...] = (
+    CommandDef(
+        name="install",
+        help="Install systemd socket activation for the gate server",
+        handler=_handle_gate_install,
+        group="gate",
+    ),
+    CommandDef(
+        name="uninstall",
+        help="Remove gate server systemd units",
+        handler=_handle_gate_uninstall,
+        group="gate",
+    ),
     CommandDef(
         name="start",
         help="Start the gate server",

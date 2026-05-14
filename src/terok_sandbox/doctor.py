@@ -163,7 +163,7 @@ def _make_plaintext_passphrase_warning_check() -> DoctorCheck:
     supported chain tiers, but it's the *only* tier whose security
     boundary is "operator accepted plaintext on disk".  Surface that
     decision permanently — both in
-    [`terok_sandbox.commands.vault`][terok_sandbox.commands.vault]'s ``vault status`` handler
+    [`_handle_vault_status`][terok_sandbox.commands.vault._handle_vault_status]
     and here in doctor — so its visibility doesn't depend on the
     operator running a specific verb.
     """

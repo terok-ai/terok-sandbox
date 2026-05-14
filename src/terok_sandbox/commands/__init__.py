@@ -89,7 +89,12 @@ from .vault import (
     _print_plaintext_passphrase_warning,
 )
 
-#: All sandbox commands, grouped by subsystem.
+#: Top-level sandbox commands, grouped by subsystem.  ``CREDENTIALS_COMMANDS``
+#: is **deliberately** absent — credentials verbs sit under their own
+#: ``credentials`` subparser group, wired separately in
+#: [`terok_sandbox.cli`][terok_sandbox.cli], so they don't pollute the
+#: flat top-level namespace that out-of-tree frontends (terok TUI,
+#: terok-executor) consume from this tuple.
 COMMANDS: tuple[CommandDef, ...] = (
     SETUP_COMMANDS
     + GATE_COMMANDS
