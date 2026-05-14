@@ -186,8 +186,18 @@ class CommandTree:
         for root in self._roots:
             yield from _walk_node(root, ())
 
-    def wire(self, parser: argparse.ArgumentParser) -> None:
-        """Wire this tree's verbs as subparsers under *parser*, recursively.
+    def wire(
+        self, target: argparse.ArgumentParser | argparse._SubParsersAction
+    ) -> None:
+        """Wire this tree's verbs as subparsers under *target*, recursively.
+
+        *target* may be either an :class:`argparse.ArgumentParser`
+        (a fresh ``add_subparsers()`` action is created) or an existing
+        :class:`argparse._SubParsersAction` (the tree mounts straight
+        under it).  The second form lets a consumer mix legacy
+        register-style subparsers with structural ``CommandTree`` ones
+        under the same root parser without colliding on argparse's
+        one-subparsers-per-parser rule.
 
         The same [`CommandDef`][terok_sandbox.commands.CommandDef]
         wired at multiple positions (deep nesting + shortcuts) yields
@@ -196,7 +206,10 @@ class CommandTree:
         translations applied via ``overlay`` apply uniformly across
         every entry point that references the modified node.
         """
-        sub = parser.add_subparsers()
+        if isinstance(target, argparse._SubParsersAction):
+            sub = target
+        else:
+            sub = target.add_subparsers()
         for cmd in self._roots:
             _wire_command(sub, cmd)
 
