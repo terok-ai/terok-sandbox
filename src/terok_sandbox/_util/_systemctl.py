@@ -37,6 +37,17 @@ import subprocess  # nosec B404 — systemctl is a trusted host binary
 
 _TIMEOUT_SECONDS = 10
 
+# Resolve the ``systemctl`` binary once at module import so every later
+# invocation runs the same absolute path.  A second resolution from
+# ``subprocess.run("systemctl", …)`` would re-walk ``PATH`` on every
+# call, exposing every consumer to a PATH-hijack race
+# ([CWE-426](https://cwe.mitre.org/data/definitions/426.html)): if
+# ``PATH`` contains an attacker-writable directory before the real
+# ``/usr/bin``, the wrong binary runs under the user's identity.
+# Holding the resolved path freezes the lookup at the moment the
+# package is loaded and reused everywhere downstream.
+_SYSTEMCTL_PATH: str | None = shutil.which("systemctl")
+
 
 def run(verb: str, *args: str) -> None:
     """Run ``systemctl --user <verb> <args…>``; raise on failure with captured stderr.
@@ -53,7 +64,9 @@ def run(verb: str, *args: str) -> None:
     * ``FileNotFoundError`` — name the missing binary rather than leak
       a ``[Errno 2] No such file or directory: 'systemctl'`` line.
     """
-    argv = ["systemctl", "--user", verb, *args]
+    if _SYSTEMCTL_PATH is None:
+        raise SystemExit("systemctl: command not found on PATH")
+    argv = [_SYSTEMCTL_PATH, "--user", verb, *args]
     try:
         subprocess.run(argv, check=True, capture_output=True, timeout=_TIMEOUT_SECONDS)  # nosec B603
     except subprocess.CalledProcessError as exc:
@@ -65,6 +78,9 @@ def run(verb: str, *args: str) -> None:
         captured = _format_captured(exc.stdout, exc.stderr)
         raise SystemExit(f"{' '.join(argv)} timed out after {exc.timeout}s{captured}") from exc
     except FileNotFoundError as exc:
+        # The resolved path vanished under us between module load and
+        # call (e.g. a live pipx upgrade).  Preserve the existing exit
+        # shape so callers don't grow a separate branch for this.
         raise SystemExit(f"{argv[0]}: command not found on PATH") from exc
 
 
@@ -82,7 +98,9 @@ def query(verb: str, *args: str, timeout: float = 5.0) -> subprocess.CompletedPr
     never need their own try/except for the cross-platform "systemd
     absent" path.
     """
-    argv = ["systemctl", "--user", verb, *args]
+    if _SYSTEMCTL_PATH is None:
+        return subprocess.CompletedProcess(args=[], returncode=127, stdout="", stderr="")
+    argv = [_SYSTEMCTL_PATH, "--user", verb, *args]
     try:
         return subprocess.run(  # nosec B603 — argv is a fixed prefix + caller-controlled verb/args
             argv,
@@ -105,14 +123,14 @@ def run_best_effort(verb: str, *args: str) -> None:
     out against a wedged unit.  Suitable for stop / disable / reload
     passes where the absence of state is the expected shape.
     """
-    if not shutil.which("systemctl"):
+    if _SYSTEMCTL_PATH is None:
         return
-    argv = ["systemctl", "--user", verb, *args]
+    argv = [_SYSTEMCTL_PATH, "--user", verb, *args]
     try:
         subprocess.run(argv, check=False, capture_output=True, timeout=_TIMEOUT_SECONDS)  # nosec B603
     except (subprocess.TimeoutExpired, FileNotFoundError):
         # ``FileNotFoundError`` catches the TOCTOU window between the
-        # ``which`` probe above and ``subprocess.run`` — the binary
+        # module-load resolution above and this call — the binary
         # could theoretically vanish under us on a live pipx upgrade.
         pass
 
