@@ -35,7 +35,7 @@ Homepage = "https://terok.ai/"
 Repository = "https://github.com/terok-ai/terok-sandbox"
 Documentation = "https://terok-ai.github.io/terok-sandbox/"
 Issues = "https://github.com/terok-ai/terok-sandbox/issues"
-Changelog = "https://github.com/terok-ai/terok-sandbox/releases"
+Changelog = "https://github.com/terok-ai/terok-sandbox/blob/master/CHANGELOG.md"
 Security = "https://github.com/terok-ai/terok-sandbox/security/policy"
 
 [project.scripts]
