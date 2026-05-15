@@ -28,7 +28,13 @@ from .paths import (
 )
 
 if TYPE_CHECKING:
-    from .config_schema import RawCredentialsSection, RawShieldSection, ServicesMode
+    from .config_schema import (
+        RawCredentialsSection,
+        RawGateServerSection,
+        RawShieldSection,
+        RawVaultSection,
+        ServicesMode,
+    )
     from .vault.store.db import CredentialDB
     from .vault.store.encryption import PassphraseSource
 
@@ -137,6 +143,52 @@ def _default_shield_audit() -> bool:
     return shield_audit()
 
 
+@functools.lru_cache(maxsize=1)
+def _vault_section() -> RawVaultSection:
+    """Return a validated ``RawVaultSection`` from the layered config."""
+    from .config_schema import RawVaultSection
+
+    return _validate_section(RawVaultSection, "vault")
+
+
+@functools.lru_cache(maxsize=1)
+def _gate_server_section() -> RawGateServerSection:
+    """Return a validated ``RawGateServerSection`` from the layered config."""
+    from .config_schema import RawGateServerSection
+
+    return _validate_section(RawGateServerSection, "gate_server")
+
+
+def gate_server_port() -> int | None:
+    """Resolve ``gate_server.port`` through the schema; ``None`` = auto-allocate."""
+    return _gate_server_section().port
+
+
+def vault_token_broker_port() -> int | None:
+    """Resolve ``vault.port`` through the schema; ``None`` = auto-allocate."""
+    return _vault_section().port
+
+
+def vault_ssh_signer_port() -> int | None:
+    """Resolve ``vault.ssh_signer_port`` through the schema; ``None`` = auto-allocate."""
+    return _vault_section().ssh_signer_port
+
+
+def _default_gate_port() -> int | None:
+    """Default-factory indirection so tests can patch ``gate_server_port``."""
+    return gate_server_port()
+
+
+def _default_token_broker_port() -> int | None:
+    """Default-factory indirection so tests can patch ``vault_token_broker_port``."""
+    return vault_token_broker_port()
+
+
+def _default_ssh_signer_port() -> int | None:
+    """Default-factory indirection so tests can patch ``vault_ssh_signer_port``."""
+    return vault_ssh_signer_port()
+
+
 # Deliberately not exposing a ``shield_bypass()`` reader nor a
 # ``_default_shield_bypass`` factory.  ``shield.bypass_firewall_no_protection``
 # is in the pydantic schema (orchestrators can pass it through their
@@ -174,14 +226,25 @@ class SandboxConfig:
     vault_dir: Path = field(default_factory=_vault_root)
     """Shared vault directory (DB, routes, env mounts)."""
 
-    gate_port: int | None = None
-    """HTTP port for the gate server (``None`` = auto-allocate via registry)."""
+    gate_port: int | None = field(default_factory=_default_gate_port)
+    """HTTP port for the gate server (``None`` = auto-allocate via registry).
 
-    token_broker_port: int | None = None
-    """TCP port for the vault's token broker (``None`` = auto-allocate via registry)."""
+    Default-factory reads ``gate_server.port`` from config.yml; missing
+    or unset keys fall through to ``None`` so the port registry can
+    pick one.  Direct ``SandboxConfig(gate_port=…)`` always wins.
+    """
 
-    ssh_signer_port: int | None = None
-    """TCP port for the vault's SSH signer (``None`` = auto-allocate via registry)."""
+    token_broker_port: int | None = field(default_factory=_default_token_broker_port)
+    """TCP port for the vault's token broker (``None`` = auto-allocate via registry).
+
+    Default-factory reads ``vault.port`` from config.yml.
+    """
+
+    ssh_signer_port: int | None = field(default_factory=_default_ssh_signer_port)
+    """TCP port for the vault's SSH signer (``None`` = auto-allocate via registry).
+
+    Default-factory reads ``vault.ssh_signer_port`` from config.yml.
+    """
 
     shield_profiles: tuple[str, ...] = ("dev-standard",)
     """Shield egress firewall profile names."""
