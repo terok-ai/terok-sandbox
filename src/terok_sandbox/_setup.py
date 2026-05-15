@@ -408,7 +408,10 @@ def _start_managed_daemon(
     init path produced this service, without having to ``ps`` for it.
     """
     with _stage_line(label) as s:
-        with contextlib.suppress(Exception):
+        # SystemExit is BaseException-derived so a plain ``suppress(Exception)``
+        # wouldn't catch a ``_systemctl.run`` bubble-up out of a wedged stop;
+        # the contract here is "best-effort, never block start_daemon".
+        with contextlib.suppress(Exception, SystemExit):
             mgr.stop_daemon()
         try:
             mgr.start_daemon()
