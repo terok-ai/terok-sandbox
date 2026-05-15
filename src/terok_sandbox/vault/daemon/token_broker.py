@@ -854,7 +854,12 @@ async def _run_multi(
         if (
             ssh_signer_port is not None or ssh_signer_socket_path is not None
         ) and db_path is not None:
-            from .ssh_signer import start_ssh_signer
+            # Lazy import; the broker calls into the SSH signer here, but the
+            # signer also lazy-imports ``_TokenDB`` from this module — extracting
+            # ``_TokenDB`` to ``vault.store`` (its proper home) would break the
+            # cycle structurally.  Out of scope for this hotfix.
+            # tach-ignore
+            from ..ssh.signer import start_ssh_signer
 
             ssh_server = await start_ssh_signer(
                 db_path=db_path,
@@ -864,7 +869,10 @@ async def _run_multi(
             )
 
         if db_path is not None and scope_sockets_dir is not None:
-            from .scope_sockets import ScopeSocketReconciler
+            # Lazy import; same cycle as ``ssh.signer`` above (scope_sockets
+            # depends on signer, which depends on _TokenDB, which lives here).
+            # tach-ignore
+            from ..ssh.scope_sockets import ScopeSocketReconciler
 
             scope_reconciler = ScopeSocketReconciler(
                 db_path=db_path,
