@@ -1,39 +1,51 @@
-module terok_socket 1.0;
+module terok_socket 1.1;
 
-# Targeted SELinux policy for terok service sockets.
+# Legacy ``terok_socket_t`` socket type — kept for service-side
+# fallback only.
 #
-# Defines ``terok_socket_t`` — a custom type that terok host services
-# apply to their Unix sockets via ``setsockcreatecon()`` so that
-# rootless Podman containers (``container_t``) can connect *without*
-# granting container_t broad connectto on unconfined_t sockets.
+# Background.  Pre-hardening, all terok service sockets carried a
+# single shared type ``terok_socket_t`` and a single broad
+# ``container_t connectto terok_socket_t`` allow rule was the only
+# thing that let rootless Podman containers reach gate / vault /
+# ssh-agent.  The optional hardening modules (``terok_gate``,
+# ``terok_vault``) replaced that with **per-service socket types**
+# (``terok_gate_sock_t``, ``terok_vault_sock_t``,
+# ``terok_vault_ssh_sock_t``) — services apply them via
+# ``setsockcreatecon`` at bind time; container connectto is granted
+# per-type by the per-service modules' own allow rules.  In steady
+# state on a host with hardening installed, no socket carries
+# ``terok_socket_t`` and the broad allow rule was dead code.
 #
-# Two narrowly scoped rules:
+# The broad ``container_t connectto terok_socket_t`` rule that this
+# module used to ship was already inactive on hardened hosts (no
+# socket carries the type once services switch to per-service types
+# via ``setsockcreatecon()``).  Removing it makes the invariant
+# explicit: containers must go through per-service typing on
+# hardened hosts, full stop.  ``unconfined_t`` keeps full perms on
+# the type for the service-side fallback in
+# ``socket_selinux_context()`` — when per-service types aren't loaded
+# (e.g., terok_gate.te / terok_vault.te haven't been installed yet),
+# services fall back to ``terok_socket_t`` and need to be able to
+# create + bind + listen on it.  The container side, however, has no
+# legitimate path to a ``terok_socket_t`` socket on hardened hosts.
 #
-# 1. ``unconfined_t`` (the typical Fedora workstation user + their
-#    systemd --user services) may create/bind/listen/accept/IO on
-#    ``terok_socket_t`` sockets, and may ``connectto`` them as a host-
-#    side client (the ``terok`` CLI itself, ``terok sickbay``, auth
-#    tooling, etc.).  This covers the lean-mode target environment.
-#    Confined-user setups (``user_t``, ``staff_t``, ``sysadm_t``) are
-#    *not* covered and must add their own rules.
+# If you need the legacy container-connectto semantics back (e.g.,
+# only ``terok_socket`` is loaded and ``terok_gate`` / ``terok_vault``
+# are not), you can re-add the rule as a local module:
 #
-# 2. ``container_t`` (rootless Podman containers) may ``connectto`` —
-#    and only ``connectto`` — ``terok_socket_t`` sockets.  This is
-#    the exception we carve out of the default SELinux rule that
-#    blocks ``container_t → non-container-socket connectto``.
-#    Containers cannot create new ``terok_socket_t`` sockets, so a
-#    compromised container cannot set up a malicious listener that
-#    wears this label.
+#     allow container_t terok_socket_t:unix_stream_socket connectto;
+#
+# Or, more sensibly: install the full hardening module set via
+# ``terok hardening install``.
 #
 # Written in checkmodule-native module syntax (no refpolicy ``m4``
 # macros), so the build path is ``checkmodule -M -m`` →
 # ``semodule_package`` → ``semodule -i``.
 #
-# Install:  sudo bash install_policy.sh
-# Remove:   sudo semodule -r terok_socket
+# Install:  terok hardening install
+# Remove:   terok hardening install --remove
 
 require {
-    type container_t;
     type unconfined_t;
     class unix_stream_socket {
         create bind listen accept
@@ -49,5 +61,3 @@ allow unconfined_t terok_socket_t:unix_stream_socket {
     read write getattr getopt setopt shutdown
     connectto
 };
-
-allow container_t terok_socket_t:unix_stream_socket connectto;

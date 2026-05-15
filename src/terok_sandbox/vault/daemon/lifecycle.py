@@ -336,12 +336,18 @@ class VaultManager:
             templates = [_SOCKET_UNIT, _SERVICE_UNIT]
             enable_unit = _SOCKET_UNIT
 
+        from ..._util._systemd_caps import write_dropin as _write_strict_dropin
+
         for template_name in templates:
             template_path = resource_dir / template_name
             if not template_path.is_file():
                 raise SystemExit(f"Missing systemd template: {template_path}")
             content = render_template(template_path, variables)
             (unit_dir / template_name).write_text(content, encoding="utf-8")
+            # See matching block in gate/lifecycle.py: capability-modifying
+            # directives are dropped in only on hosts whose user manager
+            # has CAP_SETPCAP.
+            _write_strict_dropin(unit_dir, template_name)
 
         self._cfg.vault_socket_path.parent.mkdir(parents=True, exist_ok=True)
         # Capture the "Created symlink ..." notice systemd prints to stderr —
@@ -361,10 +367,13 @@ class VaultManager:
 
     def _remove_unit_files(self) -> None:
         """Stop active units, sweep orphans from prior versions, remove current ones."""
+        from ..._util._systemd_caps import remove_dropin as _remove_strict_dropin
+
         self._stop_all_units()
         self._sweep_orphan_units()
         unit_dir = self._systemd_unit_dir()
         for name in _ALL_UNIT_NAMES:
+            _remove_strict_dropin(unit_dir, name)
             unit_file = unit_dir / name
             if unit_file.is_file():
                 unit_file.unlink()
