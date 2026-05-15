@@ -2,20 +2,54 @@
 requires = ["poetry-core>=1.9.0", "poetry-dynamic-versioning>=1.0.0,<2.0.0"]
 build-backend = "poetry_dynamic_versioning.backend"
 
-[tool.poetry]
+[project]
 name = "terok-sandbox"
-version = "0.0.124a1"
 description = "Hardened Podman container runner with gate server and shield integration"
 readme = "README.md"
 license = "Apache-2.0"
-authors = ["Jiri Vyskocil <jiri@vyskocil.com>"]
+authors = [
+    {name = "Jiri Vyskocil", email = "jiri@vyskocil.com"},
+]
+maintainers = [
+    {name = "Jiri Vyskocil", email = "jiri@vyskocil.com"},
+]
 keywords = ["podman", "containers", "sandbox", "security", "isolation"]
+requires-python = ">=3.12,<4.0"
+dynamic = ["version", "classifiers"]
+dependencies = [
+    "terok-shield @ https://github.com/terok-ai/terok-shield/releases/download/v0.6.42a1/terok_shield-0.6.42a1-py3-none-any.whl",
+    "terok-clearance @ https://github.com/terok-ai/terok-clearance/releases/download/v0.6.14a1/terok_clearance-0.6.14a1-py3-none-any.whl",
+    "platformdirs>=4.9.6",
+    "aiohttp>=3.9",
+    "cryptography>=46.0.7",
+    "pydantic>=2.9",
+    "packaging>=24",
+    "sqlcipher3>=0.6.2",
+    "keyring>=25.0",
+    "ruamel.yaml>=0.18",
+    "prompt-toolkit>=3.0",
+]
+
+[project.urls]
+Homepage = "https://terok.ai/"
+Repository = "https://github.com/terok-ai/terok-sandbox"
+Documentation = "https://terok-ai.github.io/terok-sandbox/"
+Issues = "https://github.com/terok-ai/terok-sandbox/issues"
+Changelog = "https://github.com/terok-ai/terok-sandbox/releases"
+Security = "https://github.com/terok-ai/terok-sandbox/security/policy"
+
+[project.scripts]
+terok-sandbox = "terok_sandbox.cli:main"
+terok-gate = "terok_sandbox.gate.server:main"
+terok-vault = "terok_sandbox.vault.daemon.token_broker:main"
+
+[tool.poetry]
+version = "0.0.124a1"
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
     "Intended Audience :: Developers",
     "Intended Audience :: System Administrators",
-    "License :: OSI Approved :: Apache Software License",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python",
     "Topic :: Security",
@@ -26,28 +60,6 @@ classifiers = [
 packages = [
   { include = "terok_sandbox", from = "src" },
 ]
-maintainers = ["Jiri Vyskocil <jiri@vyskocil.com>"]
-homepage = "https://terok.ai/"
-repository = "https://github.com/terok-ai/terok-sandbox"
-documentation = "https://terok-ai.github.io/terok-sandbox/"
-
-[tool.poetry.dependencies]
-python = ">=3.12,<4.0"
-terok-shield = {url = "https://github.com/terok-ai/terok-shield/releases/download/v0.6.42a1/terok_shield-0.6.42a1-py3-none-any.whl"}
-terok-clearance = {url = "https://github.com/terok-ai/terok-clearance/releases/download/v0.6.14a1/terok_clearance-0.6.14a1-py3-none-any.whl"}
-platformdirs = ">=4.9.6"
-aiohttp = ">=3.9"
-cryptography = ">=46.0.7"
-pydantic = ">=2.9"
-# PEP 440 version comparison — used by setup_stamp to detect post-update /
-# post-downgrade verdicts.  String comparison would mis-order ``0.0.10`` vs
-# ``0.0.9`` (the textbook case), which is exactly the situation the stamp
-# primitive needs to flag.
-packaging = ">=24"
-sqlcipher3 = ">=0.6.2"
-keyring = ">=25.0"
-"ruamel.yaml" = ">=0.18"
-prompt-toolkit = ">=3.0"
 
 [tool.poetry.group.dev.dependencies]
 ruff = ">=0.15.10"
@@ -79,16 +91,6 @@ mkdocstrings = {extras = ["python"], version = ">=0.24"}
 mkdocs-literate-nav = ">=0.6"
 mkdocs-section-index = ">=0.3"
 mkdocs-terok = "^0.6"
-
-[tool.poetry.scripts]
-terok-sandbox = "terok_sandbox.cli:main"
-terok-gate = "terok_sandbox.gate.server:main"
-terok-vault = "terok_sandbox.vault.daemon.token_broker:main"
-
-[tool.poetry.urls]
-Issues = "https://github.com/terok-ai/terok-sandbox/issues"
-Changelog = "https://github.com/terok-ai/terok-sandbox/releases"
-Security = "https://github.com/terok-ai/terok-sandbox/security/policy"
 
 [tool.pytest.ini_options]
 testpaths = ["tests/unit", "tests/integration"]
