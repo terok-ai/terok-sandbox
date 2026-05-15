@@ -275,7 +275,11 @@ class TestStopDaemon:
 
         calls = [c for c in mock_run.call_args_list if "stop" in c.args[0]]
         assert len(calls) == 1
-        assert calls[0].args[0][:3] == ["systemctl", "--user", "stop"]
+        # argv[0] is the absolute path resolved at module load — match by
+        # basename so the assertion stays stable regardless of where
+        # systemctl lives on the host (``/usr/bin``, ``/bin``, …).
+        assert Path(calls[0].args[0][0]).name == "systemctl"
+        assert calls[0].args[0][1:3] == ["--user", "stop"]
         assert "terok-vault-socket.service" in calls[0].args[0]
 
     def test_wedged_systemctl_does_not_block_pidfile_cleanup(self, tmp_path: Path) -> None:
@@ -342,6 +346,190 @@ class TestIsDaemonRunning:
             patch("os.kill", side_effect=ProcessLookupError),
         ):
             assert mgr.is_daemon_running() is False
+
+    def test_pidfile_symlink_is_refused(self, tmp_path: Path) -> None:
+        """A symlink in place of the pidfile is refused, not followed (CWE-59).
+
+        The runtime dir is normally a 0700 ``$XDG_RUNTIME_DIR`` owned by
+        the same UID, but ``TEROK_SANDBOX_RUNTIME_DIR`` could point
+        elsewhere and an attacker who can write that directory could
+        swap a regular pidfile for a symlink to an unrelated file.  The
+        ``O_NOFOLLOW`` open guards against following it; this test
+        proves the refusal by setting up exactly that swap.
+        """
+        mgr = _make_mgr(tmp_path)
+        pidfile = mgr._cfg.vault_pid_path
+        pidfile.parent.mkdir(parents=True, exist_ok=True)
+        target = tmp_path / "innocent-target"
+        target.write_text("42")  # not even a PID context — must not be read as one
+        pidfile.symlink_to(target)
+        assert pidfile.is_symlink()
+
+        # Even with a "valid" managed-vault stub, the symlink must short-circuit
+        # to False before the os.kill ever fires.
+        with (
+            patch.object(VaultManager, "_is_managed_vault", return_value=True),
+            patch("os.kill") as mock_kill,
+        ):
+            assert mgr.is_daemon_running() is False
+        mock_kill.assert_not_called()
+
+    def test_pidfile_non_regular_is_refused(self, tmp_path: Path) -> None:
+        """A directory in place of the pidfile is refused as non-regular."""
+        mgr = _make_mgr(tmp_path)
+        pidfile = mgr._cfg.vault_pid_path
+        pidfile.parent.mkdir(parents=True, exist_ok=True)
+        pidfile.mkdir()  # someone replaced the pidfile path with a directory
+        assert pidfile.is_dir()
+
+        assert mgr.is_daemon_running() is False
+
+
+class TestReadPidfileSafely:
+    """`_read_pidfile_safely` covers the failure-path branches that ``stop_daemon`` doesn't.
+
+    The integration tests against ``stop_daemon`` and ``is_daemon_running``
+    exercise the happy path and the symlink/non-regular refusal; these
+    direct tests pin the remaining branches (invalid contents, the
+    underlying OSError cases) so a regression in the helper would
+    surface at the helper itself, not three call-frames up.
+    """
+
+    def test_invalid_pid_content_returns_none(self, tmp_path: Path) -> None:
+        """A pidfile that doesn't parse to an int returns ``None`` rather than crashing."""
+        from terok_sandbox.vault.daemon.lifecycle import _read_pidfile_safely
+
+        pidfile = tmp_path / "vault.pid"
+        pidfile.write_text("not-a-pid\n")
+        assert _read_pidfile_safely(pidfile) is None
+
+    def test_missing_file_returns_none(self, tmp_path: Path) -> None:
+        """A missing pidfile path returns ``None`` (the common idle-state case)."""
+        from terok_sandbox.vault.daemon.lifecycle import _read_pidfile_safely
+
+        assert _read_pidfile_safely(tmp_path / "does-not-exist.pid") is None
+
+    def test_oserror_on_open_returns_none(self, tmp_path: Path) -> None:
+        """Any other OSError on open (e.g. permission denied, ELOOP via O_NOFOLLOW)."""
+        from terok_sandbox.vault.daemon.lifecycle import _read_pidfile_safely
+
+        pidfile = tmp_path / "vault.pid"
+        with patch("os.open", side_effect=PermissionError("denied")):
+            assert _read_pidfile_safely(pidfile) is None
+
+    def test_valid_pid_returns_int(self, tmp_path: Path) -> None:
+        """The happy path: a regular file with an integer content returns the int."""
+        from terok_sandbox.vault.daemon.lifecycle import _read_pidfile_safely
+
+        pidfile = tmp_path / "vault.pid"
+        pidfile.write_text("12345\n")
+        assert _read_pidfile_safely(pidfile) == 12345
+
+
+class TestUnlinkPidfileSafely:
+    """`_unlink_pidfile_safely` covers the failure-path branches directly."""
+
+    def test_regular_file_is_unlinked(self, tmp_path: Path) -> None:
+        """The happy path: a regular file is removed."""
+        from terok_sandbox.vault.daemon.lifecycle import _unlink_pidfile_safely
+
+        pidfile = tmp_path / "vault.pid"
+        pidfile.write_text("42")
+        _unlink_pidfile_safely(pidfile)
+        assert not pidfile.exists()
+
+    def test_missing_file_is_no_op(self, tmp_path: Path) -> None:
+        """A missing pidfile is silently accepted (no crash) — this is cleanup, not a critical path."""
+        from terok_sandbox.vault.daemon.lifecycle import _unlink_pidfile_safely
+
+        _unlink_pidfile_safely(tmp_path / "does-not-exist.pid")  # must not raise
+
+    def test_lstat_oserror_is_no_op(self, tmp_path: Path) -> None:
+        """An OSError from lstat (e.g. permission on the parent dir) is silently accepted."""
+        from terok_sandbox.vault.daemon.lifecycle import _unlink_pidfile_safely
+
+        pidfile = tmp_path / "vault.pid"
+        pidfile.write_text("42")
+        with patch("os.lstat", side_effect=PermissionError("denied")):
+            _unlink_pidfile_safely(pidfile)  # must not raise
+        # The file still exists because the lstat check short-circuited.
+        assert pidfile.exists()
+
+    def test_symlink_is_refused_directly(self, tmp_path: Path) -> None:
+        """Direct test: a symlinked pidfile is left untouched (CWE-59 guard)."""
+        from terok_sandbox.vault.daemon.lifecycle import _unlink_pidfile_safely
+
+        target = tmp_path / "innocent"
+        target.write_text("payload")
+        pidfile = tmp_path / "vault.pid"
+        pidfile.symlink_to(target)
+
+        _unlink_pidfile_safely(pidfile)
+        assert pidfile.is_symlink()
+        assert target.exists()
+
+    def test_non_regular_file_is_refused(self, tmp_path: Path) -> None:
+        """A directory (or other non-regular) at the pidfile path is refused."""
+        from terok_sandbox.vault.daemon.lifecycle import _unlink_pidfile_safely
+
+        pidfile = tmp_path / "vault.pid"
+        pidfile.mkdir()
+        _unlink_pidfile_safely(pidfile)  # must not raise (or rmdir!)
+        assert pidfile.is_dir()
+
+    def test_toctou_unlink_failure_is_swallowed(self, tmp_path: Path) -> None:
+        """The file vanishes (or denies unlink) between lstat and unlink — accepted silently."""
+        from terok_sandbox.vault.daemon.lifecycle import _unlink_pidfile_safely
+
+        pidfile = tmp_path / "vault.pid"
+        pidfile.write_text("42")
+        with patch("os.unlink", side_effect=FileNotFoundError):
+            _unlink_pidfile_safely(pidfile)  # must not raise
+
+    def test_unlink_oserror_is_swallowed(self, tmp_path: Path) -> None:
+        """A non-FileNotFoundError OSError on unlink (e.g. EBUSY) is also swallowed."""
+        from terok_sandbox.vault.daemon.lifecycle import _unlink_pidfile_safely
+
+        pidfile = tmp_path / "vault.pid"
+        pidfile.write_text("42")
+        with patch("os.unlink", side_effect=OSError(16, "Device or resource busy")):
+            _unlink_pidfile_safely(pidfile)  # must not raise
+
+
+class TestPidfileSafeUnlink:
+    """`_unlink_pidfile_safely` refuses symlinks; `stop_daemon` inherits that property."""
+
+    def test_stop_daemon_does_not_unlink_symlink(self, tmp_path: Path) -> None:
+        """A symlinked pidfile must NOT be unlinked — that would clobber the target.
+
+        Combined with the read-side guard, this closes the
+        CWE-59 file-clobber vector on the stop path.  The target file
+        contains a parseable PID ("42") so a regression that followed
+        the symlink would both read it AND signal it — the
+        ``mock_kill.assert_not_called()`` below pins the other half of
+        the contract: no signal is sent when the pidfile is a symlink.
+        """
+        mgr = _make_mgr(tmp_path)
+        pidfile = mgr._cfg.vault_pid_path
+        pidfile.parent.mkdir(parents=True, exist_ok=True)
+        target = tmp_path / "innocent-target"
+        target.write_text("42")
+        pidfile.symlink_to(target)
+
+        with (
+            patch.object(VaultManager, "_is_unit_active", return_value=False),
+            patch("os.kill") as mock_kill,
+        ):
+            mgr.stop_daemon()
+
+        # The symlink itself remains (we refused to unlink it), and crucially
+        # the *target* file is untouched.
+        assert pidfile.is_symlink()
+        assert target.exists()
+        assert target.read_text() == "42"
+        # And no signal escaped: the read-side guard short-circuited
+        # before ``os.kill`` could ever fire on the symlink's target PID.
+        mock_kill.assert_not_called()
 
 
 _LIFECYCLE = "terok_sandbox.vault.daemon.lifecycle"
@@ -980,9 +1168,12 @@ class TestInstallSystemdUnits:
         # Service template should reference python -m, not a standalone binary
         svc = (unit_dir / "terok-vault.service").read_text()
         assert "-m terok_sandbox.vault" in svc
-        # Verify systemctl was called
+        # Verify systemctl was called.  argv[0] is the absolute path
+        # resolved at module load (CWE-426 hardening) — match by suffix.
         calls = [c.args[0] for c in mock_run.call_args_list]
-        assert ["systemctl", "--user", "daemon-reload"] in calls
+        assert any(
+            Path(c[0]).name == "systemctl" and c[1:] == ["--user", "daemon-reload"] for c in calls
+        )
         assert any("enable" in c and "--now" in c for c in calls)
         assert any("restart" in c for c in calls)
 
@@ -1039,9 +1230,12 @@ class TestUninstallSystemdUnits:
             VaultManager().uninstall_systemd_units()
         assert not (unit_dir / "terok-vault.socket").exists()
         assert not (unit_dir / "terok-vault.service").exists()
-        # Verify daemon-reload was called
+        # Verify daemon-reload was called.  argv[0] is the absolute path
+        # resolved at module load (CWE-426 hardening) — match by suffix.
         calls = [c.args[0] for c in mock_run.call_args_list]
-        assert ["systemctl", "--user", "daemon-reload"] in calls
+        assert any(
+            Path(c[0]).name == "systemctl" and c[1:] == ["--user", "daemon-reload"] for c in calls
+        )
 
 
 class TestOrphanUnitSweep:

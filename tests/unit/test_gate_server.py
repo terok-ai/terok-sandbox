@@ -406,7 +406,10 @@ class TestDaemon:
 
         calls = [c for c in mock_run.call_args_list if "stop" in c.args[0]]
         assert len(calls) == 1
-        assert calls[0].args[0][:3] == ["systemctl", "--user", "stop"]
+        # argv[0] is the absolute path resolved at module load (CWE-426
+        # hardening) — match by basename so the assertion stays stable.
+        assert Path(calls[0].args[0][0]).name == "systemctl"
+        assert calls[0].args[0][1:3] == ["--user", "stop"]
         assert "terok-gate-socket.service" in calls[0].args[0]
 
     def test_stop_daemon_wedged_systemctl_does_not_block_pidfile_cleanup(self) -> None:

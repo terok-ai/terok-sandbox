@@ -19,6 +19,7 @@ from terok_sandbox._setup import (
     SelinuxStatus,
     _enable_and_restart_user_unit,
     _reinstall_systemd_service,
+    _start_managed_daemon,
     _stop_and_uninstall,
     run_clearance_install_phase,
     run_clearance_uninstall_phase,
@@ -305,6 +306,49 @@ class TestReinstallSystemdService:
         assert _reinstall_systemd_service(label="Vault", mgr=mgr) is True
 
 
+class TestStartManagedDaemon:
+    """Stop → start → verify cycle for the no-systemd code path."""
+
+    def test_happy_path_starts_and_verifies(self, capsys: pytest.CaptureFixture[str]) -> None:
+        mgr = MagicMock()
+        mgr.get_status.return_value = MagicMock(mode="daemon", transport="socket")
+        assert _start_managed_daemon(label="Vault", mgr=mgr) is True
+        mgr.stop_daemon.assert_called_once()
+        mgr.start_daemon.assert_called_once()
+        mgr.ensure_reachable.assert_called_once()
+        out = capsys.readouterr().out
+        assert "reachable" in out
+        assert "no systemd" in out
+
+    def test_start_systemexit_reports_fail(self, capsys: pytest.CaptureFixture[str]) -> None:
+        mgr = MagicMock()
+        mgr.start_daemon.side_effect = SystemExit("port busy")
+        assert _start_managed_daemon(label="Vault", mgr=mgr) is False
+        assert "port busy" in capsys.readouterr().out
+
+    def test_start_generic_exception_reports_fail(self, capsys: pytest.CaptureFixture[str]) -> None:
+        mgr = MagicMock()
+        mgr.start_daemon.side_effect = RuntimeError("crashed")
+        assert _start_managed_daemon(label="Vault", mgr=mgr) is False
+        assert "daemon start" in capsys.readouterr().out
+
+    def test_verify_failure_reports_started_but_unreachable(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        mgr = MagicMock()
+        mgr.ensure_reachable.side_effect = SystemExit("socket silent")
+        assert _start_managed_daemon(label="Vault", mgr=mgr) is False
+        assert "started but NOT reachable" in capsys.readouterr().out
+
+    def test_stop_exception_soft_fail(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """A failed stop on a stale daemon doesn't prevent a fresh start."""
+        mgr = MagicMock()
+        mgr.stop_daemon.side_effect = RuntimeError("no pid")
+        mgr.get_status.return_value = MagicMock(mode="daemon", transport="tcp")
+        assert _start_managed_daemon(label="Vault", mgr=mgr) is True
+        mgr.start_daemon.assert_called_once()
+
+
 # ── Vault / gate install phase adapters ──────────────────────────────
 
 
@@ -318,6 +362,7 @@ class TestVaultInstallPhase:
 
         status = MagicMock(mode="systemd", transport="tcp")
         with (
+            patch.object(VaultManager, "is_systemd_available", return_value=True),
             patch.object(VaultManager, "stop_daemon") as stop,
             patch.object(VaultManager, "uninstall_systemd_units") as uninstall,
             patch.object(VaultManager, "install_systemd_units") as install,
@@ -343,6 +388,7 @@ class TestVaultInstallPhase:
             socket_path=Path("/tmp/vault.sock"), db_path=Path("/tmp/vault.db")
         )
         with (
+            patch.object(VaultManager, "is_systemd_available", return_value=True),
             patch.object(VaultManager, "stop_daemon"),
             patch.object(VaultManager, "uninstall_systemd_units"),
             patch.object(VaultManager, "install_systemd_units"),
@@ -351,6 +397,46 @@ class TestVaultInstallPhase:
             assert run_vault_install_phase(bare_cfg) is False
         assert "NOT reachable" in capsys.readouterr().out
 
+    def test_no_systemd_starts_managed_daemon(
+        self, bare_cfg: SandboxConfig, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """On a host without user systemd, the vault is started as a managed daemon."""
+        from terok_sandbox.vault.daemon.lifecycle import VaultManager
+
+        status = MagicMock(mode="daemon", transport="socket")
+        with (
+            patch.object(VaultManager, "is_systemd_available", return_value=False),
+            patch.object(VaultManager, "stop_daemon") as stop,
+            patch.object(VaultManager, "install_systemd_units") as install,
+            patch.object(VaultManager, "start_daemon") as start,
+            patch.object(VaultManager, "ensure_reachable") as verify,
+            patch.object(VaultManager, "get_status", return_value=status),
+        ):
+            assert run_vault_install_phase(bare_cfg) is True
+        # Daemon path: ``start_daemon`` runs, ``install_systemd_units`` does not.
+        start.assert_called_once()
+        install.assert_not_called()
+        # ``stop_daemon`` still runs to clear any stale daemon.
+        stop.assert_called_once()
+        verify.assert_called_once()
+        out = capsys.readouterr().out
+        assert "no systemd" in out
+        assert "daemon" in out
+
+    def test_no_systemd_daemon_start_failure_reports_fail(
+        self, bare_cfg: SandboxConfig, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Daemon-start failures land on the same FAIL row as systemd-install failures."""
+        from terok_sandbox.vault.daemon.lifecycle import VaultManager
+
+        with (
+            patch.object(VaultManager, "is_systemd_available", return_value=False),
+            patch.object(VaultManager, "stop_daemon"),
+            patch.object(VaultManager, "start_daemon", side_effect=SystemExit("vault exit 1")),
+        ):
+            assert run_vault_install_phase(bare_cfg) is False
+        assert "vault exit 1" in capsys.readouterr().out
+
 
 class TestGateInstallPhase:
     """Gate's entry-point adds the systemd-availability preflight."""
@@ -358,12 +444,22 @@ class TestGateInstallPhase:
     def test_systemd_unavailable_is_warning_not_failure(
         self, bare_cfg: SandboxConfig, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """Hosts without user systemd (CI containers) skip the phase cleanly."""
+        """Hosts without user systemd warn-skip the phase — gate has no daemon fallback.
+
+        The skip is intentional: the gate's inetd-style architecture has no
+        managed-daemon counterpart yet, so callers (sickbay, preflight) are
+        expected to detect ``mode="none"`` and degrade gracefully.  The
+        message names the consequence so the operator isn't left guessing
+        why a feature went missing.
+        """
         from terok_sandbox.gate.lifecycle import GateServerManager
 
         with patch.object(GateServerManager, "is_systemd_available", return_value=False):
             assert run_gate_install_phase(bare_cfg) is True
-        assert "WARN" in capsys.readouterr().out
+        out = capsys.readouterr().out
+        assert "WARN" in out
+        # Consequence is named, not just "skipping".
+        assert "git push channel" in out
 
     def test_clean_reinstall_invokes_full_lifecycle(
         self, bare_cfg: SandboxConfig, capsys: pytest.CaptureFixture[str]

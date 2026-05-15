@@ -175,24 +175,53 @@ def run_shield_install_phase(*, root: bool) -> bool:
 
 
 def run_vault_install_phase(cfg: SandboxConfig) -> bool:
-    """Clean reinstall of the vault systemd units; verify reachability."""
+    """Install the vault — systemd units when available, managed daemon otherwise.
+
+    On a systemd host this is the full stop → uninstall → install → verify
+    cycle.  On a host without ``systemctl --user`` (containers, OpenRC,
+    sysvinit) the same vault binary is started as a managed daemon — same
+    code, same transport, just a PID file instead of a unit.  The fallback
+    works because [`VaultManager.ensure_reachable`][terok_sandbox.vault.daemon.lifecycle.VaultManager.ensure_reachable] already accepts
+    ``mode="daemon"`` as a healthy state.
+    """
     from .vault.daemon.lifecycle import VaultManager, VaultUnreachableError
 
-    return _reinstall_systemd_service(
+    mgr = VaultManager(cfg)
+    if mgr.is_systemd_available():
+        return _reinstall_systemd_service(
+            label="Vault",
+            mgr=mgr,
+            reachable_exc=(VaultUnreachableError, SystemExit),
+        )
+    return _start_managed_daemon(
         label="Vault",
-        mgr=VaultManager(cfg),
+        mgr=mgr,
         reachable_exc=(VaultUnreachableError, SystemExit),
     )
 
 
 def run_gate_install_phase(cfg: SandboxConfig) -> bool:
-    """Clean reinstall of the gate systemd units; verify reachability."""
+    """Install the gate's systemd units; warn-skip on hosts without user systemd.
+
+    Unlike vault, the gate's inetd-style architecture has no managed-daemon
+    fallback — the systemd socket unit accepts each connection and spawns
+    a fresh process; without systemd the same role would need an inetd
+    shim or a permanent listen-loop that doesn't yet exist.  The skip is
+    therefore intentional: callers (`terok-executor.preflight`,
+    `terok sickbay`) check
+    [`GateServerManager.get_status`][terok_sandbox.gate.lifecycle.GateServerManager.get_status] and degrade gracefully —
+    a container without a gate is just a container without the git push
+    channel, which is exactly as secure as one with the gate.
+    """
     from .gate.lifecycle import GateServerManager
 
     mgr = GateServerManager(cfg)
     if not mgr.is_systemd_available():
         with _stage_line("Gate server") as s:
-            s.warn("systemd unavailable, skipping")
+            s.warn(
+                "systemd unavailable — git gate disabled; "
+                "containers will run without the git push channel"
+            )
         return True
     return _reinstall_systemd_service(label="Gate server", mgr=mgr)
 
@@ -361,6 +390,44 @@ def _reinstall_systemd_service(
             return False
         status = mgr.get_status()
         s.ok(f"{status.mode or 'systemd'}, {status.transport or 'tcp'}, reachable")
+        return True
+
+
+def _start_managed_daemon(
+    *,
+    label: str,
+    mgr: Any,  # duck-typed manager exposing stop_daemon / start_daemon / ensure_reachable
+    reachable_exc: tuple[type[BaseException], ...] = (SystemExit,),
+) -> bool:
+    """Stop any existing daemon, start a fresh one, then verify reachability.
+
+    The no-systemd counterpart of [`_reinstall_systemd_service`][terok_sandbox._setup._reinstall_systemd_service].  Same contract
+    minus the unit-file phase: ``stop_daemon`` (best-effort), then a hard
+    ``start_daemon()`` and ``ensure_reachable()`` verify.  Status line
+    ends with "(no systemd)" so the operator can tell at a glance which
+    init path produced this service, without having to ``ps`` for it.
+    """
+    with _stage_line(label) as s:
+        # SystemExit is BaseException-derived so a plain ``suppress(Exception)``
+        # wouldn't catch a ``_systemctl.run`` bubble-up out of a wedged stop;
+        # the contract here is "best-effort, never block start_daemon".
+        with contextlib.suppress(Exception, SystemExit):
+            mgr.stop_daemon()
+        try:
+            mgr.start_daemon()
+        except SystemExit as exc:
+            s.fail(str(exc))
+            return False
+        except Exception as exc:  # noqa: BLE001
+            s.fail(f"daemon start: {exc}")
+            return False
+        try:
+            mgr.ensure_reachable()
+        except reachable_exc as exc:
+            s.fail(f"started but NOT reachable: {exc}")
+            return False
+        status = mgr.get_status()
+        s.ok(f"{status.mode}, {status.transport or 'tcp'}, reachable (no systemd)")
         return True
 
 

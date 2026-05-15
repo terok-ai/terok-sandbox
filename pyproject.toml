@@ -17,8 +17,8 @@ keywords = ["podman", "containers", "sandbox", "security", "isolation"]
 requires-python = ">=3.12,<4.0"
 dynamic = ["version", "classifiers"]
 dependencies = [
-    "terok-shield @ https://github.com/terok-ai/terok-shield/releases/download/v0.6.42a2/terok_shield-0.6.42a2-py3-none-any.whl",
-    "terok-clearance @ https://github.com/terok-ai/terok-clearance/releases/download/v0.6.14a2/terok_clearance-0.6.14a2-py3-none-any.whl",
+    "terok-shield @ https://github.com/terok-ai/terok-shield/releases/download/v0.6.42a3/terok_shield-0.6.42a3-py3-none-any.whl",
+    "terok-clearance @ https://github.com/terok-ai/terok-clearance/releases/download/v0.6.14a3/terok_clearance-0.6.14a3-py3-none-any.whl",
     "platformdirs>=4.9.6",
     "aiohttp>=3.9",
     "cryptography>=46.0.7",
@@ -44,7 +44,7 @@ terok-gate = "terok_sandbox.gate.server:main"
 terok-vault = "terok_sandbox.vault.daemon.token_broker:main"
 
 [tool.poetry]
-version = "0.0.124a3"
+version = "0.0.124a4"
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",

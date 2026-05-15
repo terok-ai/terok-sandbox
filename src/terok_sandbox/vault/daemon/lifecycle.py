@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 import shlex
 import signal
+import stat
 import subprocess  # nosec B404 — vault daemon Popen + systemctl helpers — vault daemon Popen + systemctl helpers
 import time
 from pathlib import Path
@@ -72,6 +73,72 @@ The orphan sweep uses this as the ownership check: only files whose
 first line begins with this string were written by this package and
 are safe to remove when their names no longer match the current set.
 """
+
+
+# ---------- PID-file safety helpers ----------
+
+
+def _read_pidfile_safely(pidfile: Path) -> int | None:
+    """Read a PID from *pidfile* without following symlinks.
+
+    Returns the integer PID on success, or ``None`` on any failure path
+    (missing file, symlink, non-regular file, invalid contents).
+
+    The runtime dir is normally a 0700 ``$XDG_RUNTIME_DIR`` and only
+    writable by the same UID — but the vault may also run with
+    ``TEROK_SANDBOX_RUNTIME_DIR`` pointed elsewhere, or under elevated
+    privileges in pathological setups.  Opening with ``O_NOFOLLOW``
+    plus a regular-file ``fstat`` check refuses to follow a
+    swapped-in symlink, closing the
+    [CWE-59](https://cwe.mitre.org/data/definitions/59.html) race the
+    naive ``Path.read_text`` had.
+    """
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(pidfile, os.O_RDONLY | nofollow)
+    except OSError:
+        # ``FileNotFoundError`` is an ``OSError`` subclass — one clause
+        # covers both ENOENT and ELOOP/EACCES/etc.
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return None
+        # 64 bytes is generous for any sane PID; cap so a hostile pidfile
+        # can't make us read megabytes before the int parse fails anyway.
+        raw = os.read(fd, 64).decode("utf-8", errors="replace").strip()
+    finally:
+        os.close(fd)
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def _unlink_pidfile_safely(pidfile: Path) -> None:
+    """Unlink *pidfile* only if it's a regular file (refusing symlinks).
+
+    The ``lstat`` check is what makes the difference: a plain
+    ``Path.unlink()`` happily removes a symlink target, which is the
+    file-clobber vector ([CWE-59](https://cwe.mitre.org/data/definitions/59.html))
+    the safe-handling guidance calls out.  Any failure is silently
+    ignored — this is cleanup, not a critical path.
+    """
+    try:
+        st = os.lstat(pidfile)
+    except OSError:
+        # ``FileNotFoundError`` is an ``OSError`` subclass — one clause
+        # covers both the "already gone" common case and pathological
+        # ``EACCES`` / parent-dir failures.
+        return
+    if not stat.S_ISREG(st.st_mode):
+        return
+    try:
+        os.unlink(pidfile)
+    except OSError:
+        # Same subclass-relationship as above; one clause swallows the
+        # full TOCTOU + EBUSY range.
+        pass
 
 
 # ---------- Manager ----------
@@ -540,30 +607,28 @@ class VaultManager:
             if self._is_unit_active(unit):
                 _systemctl.run_best_effort("stop", unit)
         pidfile = self._cfg.vault_pid_path
-        if not pidfile.is_file():
+        pid = _read_pidfile_safely(pidfile)
+        if pid is None:
             return
         try:
-            pid = int(pidfile.read_text().strip())
             if self._is_managed_vault(pid):
                 os.kill(pid, signal.SIGTERM)
-        except (ValueError, ProcessLookupError, PermissionError):
+        except (ProcessLookupError, PermissionError):
             pass
         finally:
-            if pidfile.is_file():
-                pidfile.unlink()
+            _unlink_pidfile_safely(pidfile)
 
     def is_daemon_running(self) -> bool:
         """Check whether the managed vault daemon is alive via its PID file."""
-        pidfile = self._cfg.vault_pid_path
-        if not pidfile.is_file():
+        pid = _read_pidfile_safely(self._cfg.vault_pid_path)
+        if pid is None:
+            return False
+        if not self._is_managed_vault(pid):
             return False
         try:
-            pid = int(pidfile.read_text().strip())
-            if not self._is_managed_vault(pid):
-                return False
             os.kill(pid, 0)  # signal 0 = existence check
             return True
-        except (ValueError, ProcessLookupError, PermissionError):
+        except (ProcessLookupError, PermissionError):
             return False
 
     # -- Private helpers -----------------------------------------------------
