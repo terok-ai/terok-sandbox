@@ -3,7 +3,7 @@
 
 """Allow ``python -m terok_sandbox.vault`` to start the vault daemon."""
 
-from .token_broker import main
+from .daemon.token_broker import main
 
 if __name__ == "__main__":
     main()
