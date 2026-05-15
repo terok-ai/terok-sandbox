@@ -28,7 +28,7 @@ from .paths import (
 )
 
 if TYPE_CHECKING:
-    from .config_schema import RawCredentialsSection, ServicesMode
+    from .config_schema import RawCredentialsSection, RawShieldSection, ServicesMode
     from .vault.store.db import CredentialDB
     from .vault.store.encryption import PassphraseSource
 
@@ -119,6 +119,38 @@ def _default_credentials_passphrase_command() -> str | None:
     return credentials_passphrase_command()
 
 
+@functools.lru_cache(maxsize=1)
+def _shield_section() -> RawShieldSection:
+    """Return a validated ``RawShieldSection`` from the layered config.
+
+    Cached so the two field readers below share one pydantic pass per
+    process — same rationale as ``_credentials_section``.
+    """
+    from .config_schema import RawShieldSection
+
+    return _validate_section(RawShieldSection, "shield")
+
+
+def shield_audit() -> bool:
+    """Resolve the ``shield.audit`` setting through the schema."""
+    return _shield_section().audit
+
+
+def shield_bypass() -> bool:
+    """Resolve the ``shield.bypass_firewall_no_protection`` setting through the schema."""
+    return _shield_section().bypass_firewall_no_protection
+
+
+def _default_shield_audit() -> bool:
+    """Default-factory indirection so tests can patch ``shield_audit``."""
+    return shield_audit()
+
+
+def _default_shield_bypass() -> bool:
+    """Default-factory indirection so tests can patch ``shield_bypass``."""
+    return shield_bypass()
+
+
 @dataclass(frozen=True)
 class SandboxConfig:
     """Immutable configuration for the sandbox layer.
@@ -157,11 +189,21 @@ class SandboxConfig:
     shield_profiles: tuple[str, ...] = ("dev-standard",)
     """Shield egress firewall profile names."""
 
-    shield_audit: bool = True
-    """Whether shield audit logging is enabled."""
+    shield_audit: bool = field(default_factory=_default_shield_audit)
+    """Whether shield audit logging is enabled.
 
-    shield_bypass: bool = False
-    """DANGEROUS: when True, the egress firewall is completely disabled."""
+    Default-factory reads ``shield.audit`` from the layered config.yml
+    via the [`RawShieldSection`][terok_sandbox.config_schema.RawShieldSection]
+    schema; missing/typo'd keys fall back to the schema's ``True``
+    default.  Direct ``SandboxConfig(shield_audit=…)`` always wins.
+    """
+
+    shield_bypass: bool = field(default_factory=_default_shield_bypass)
+    """DANGEROUS: when True, the egress firewall is completely disabled.
+
+    Default-factory reads ``shield.bypass_firewall_no_protection``
+    from config.yml; missing/typo'd keys fall back to ``False``.
+    """
 
     credentials_passphrase: str | None = field(default_factory=_default_credentials_passphrase)
     """Headless-no-keyring fallback for the SQLCipher passphrase.
