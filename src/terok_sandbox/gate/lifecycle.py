@@ -240,11 +240,9 @@ class GateServerManager:
         Transport resolution happens once at ``SandboxConfig`` construction
         — callers can't smuggle a divergent mode past the config layer.
         """
-        import shlex
-
         import terok_sandbox.gate
 
-        from .._util import render_template
+        from .._util import render_template, systemd_exec_argv
         from .tokens import TokenStore
 
         transport = self._cfg.services_mode
@@ -269,7 +267,7 @@ class GateServerManager:
             "GATE_BASE_PATH": str(self._cfg.gate_base_path),
             "TOKEN_FILE": str(TokenStore(self._cfg).file_path),
             "UNIT_VERSION": str(_UNIT_VERSION),
-            "TEROK_GATE_BIN": shlex.join(self._gate_exec_prefix()),
+            "TEROK_GATE_BIN": systemd_exec_argv(self._gate_exec_prefix()),
         }
 
         # Remove units from the *other* transport mode before installing.

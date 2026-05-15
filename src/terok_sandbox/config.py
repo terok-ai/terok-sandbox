@@ -121,11 +121,7 @@ def _default_credentials_passphrase_command() -> str | None:
 
 @functools.lru_cache(maxsize=1)
 def _shield_section() -> RawShieldSection:
-    """Return a validated ``RawShieldSection`` from the layered config.
-
-    Cached so the two field readers below share one pydantic pass per
-    process — same rationale as ``_credentials_section``.
-    """
+    """Return a validated ``RawShieldSection`` from the layered config."""
     from .config_schema import RawShieldSection
 
     return _validate_section(RawShieldSection, "shield")
@@ -136,19 +132,20 @@ def shield_audit() -> bool:
     return _shield_section().audit
 
 
-def shield_bypass() -> bool:
-    """Resolve the ``shield.bypass_firewall_no_protection`` setting through the schema."""
-    return _shield_section().bypass_firewall_no_protection
-
-
 def _default_shield_audit() -> bool:
     """Default-factory indirection so tests can patch ``shield_audit``."""
     return shield_audit()
 
 
-def _default_shield_bypass() -> bool:
-    """Default-factory indirection so tests can patch ``shield_bypass``."""
-    return shield_bypass()
+# Deliberately not exposing a ``shield_bypass()`` reader nor a
+# ``_default_shield_bypass`` factory.  ``shield.bypass_firewall_no_protection``
+# is in the pydantic schema (orchestrators can pass it through their
+# own resolution chain) but ``SandboxConfig.shield_bypass`` stays
+# hardcoded ``False``: enabling bypass via a user-writable config
+# scope (``~/.config/terok/config.yml``) or via ``TEROK_CONFIG_FILE``
+# would let anything that can drop a file under ``$HOME`` silently
+# disable the egress firewall.  Higher-layer orchestrators are
+# trusted to acknowledge the risk explicitly when they set the field.
 
 
 @dataclass(frozen=True)
@@ -198,11 +195,17 @@ class SandboxConfig:
     default.  Direct ``SandboxConfig(shield_audit=…)`` always wins.
     """
 
-    shield_bypass: bool = field(default_factory=_default_shield_bypass)
+    shield_bypass: bool = False
     """DANGEROUS: when True, the egress firewall is completely disabled.
 
-    Default-factory reads ``shield.bypass_firewall_no_protection``
-    from config.yml; missing/typo'd keys fall back to ``False``.
+    Hardcoded ``False`` here — sandbox refuses to read this field
+    from ``config.yml`` because the layered chain includes a
+    user-writable scope (``~/.config/terok/config.yml``) and an
+    ``$ENV``-controllable override (``TEROK_CONFIG_FILE``), so anything
+    that drops a file in ``$HOME`` could silently disable the egress
+    firewall.  Orchestrators that want bypass must pass it explicitly
+    to ``SandboxConfig(shield_bypass=True)`` after resolving from
+    their own trusted source.
     """
 
     credentials_passphrase: str | None = field(default_factory=_default_credentials_passphrase)
