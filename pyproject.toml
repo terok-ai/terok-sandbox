@@ -160,7 +160,7 @@ disallow_incomplete_defs = true
 # ``ignore_missing_imports`` already maps such imports to ``Any``, so the
 # extra "stubs missing" diagnostic is just noise.
 disable_error_code = ["import-untyped"]
-pretty = false
+pretty = true
 show_error_codes = true
 
 [tool.poetry-dynamic-versioning]
