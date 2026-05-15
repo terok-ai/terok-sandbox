@@ -240,11 +240,9 @@ class GateServerManager:
         Transport resolution happens once at ``SandboxConfig`` construction
         — callers can't smuggle a divergent mode past the config layer.
         """
-        import shutil
-
         import terok_sandbox.gate
 
-        from .._util import render_template
+        from .._util import render_template, systemd_exec_argv
         from .tokens import TokenStore
 
         transport = self._cfg.services_mode
@@ -259,13 +257,6 @@ class GateServerManager:
                 "or pin ``gate_server.port`` explicitly in config.yml."
             )
 
-        gate_bin = shutil.which("terok-gate")
-        if not gate_bin:
-            raise SystemExit(
-                "Cannot find 'terok-gate' on PATH.\n"
-                "Ensure terok-sandbox is installed (pip/pipx/poetry) and the binary is accessible."
-            )
-
         unit_dir = self._systemd_unit_dir()
         unit_dir.mkdir(parents=True, exist_ok=True)
 
@@ -276,7 +267,7 @@ class GateServerManager:
             "GATE_BASE_PATH": str(self._cfg.gate_base_path),
             "TOKEN_FILE": str(TokenStore(self._cfg).file_path),
             "UNIT_VERSION": str(_UNIT_VERSION),
-            "TEROK_GATE_BIN": gate_bin,
+            "TEROK_GATE_BIN": systemd_exec_argv(self._gate_exec_prefix()),
         }
 
         # Remove units from the *other* transport mode before installing.
@@ -451,6 +442,22 @@ class GateServerManager:
         from .._util import systemd_user_unit_dir
 
         return systemd_user_unit_dir()
+
+    @staticmethod
+    def _gate_exec_prefix() -> list[str]:
+        """Return the command prefix for launching the gate server.
+
+        Uses ``sys.executable -m terok_sandbox.gate`` so the server runs under
+        the same Python that owns the installed package — robust under
+        venv-isolated installs (pipx, poetry-managed environments of higher-
+        layer orchestrators) where the ``terok-gate`` console script may not
+        be on PATH.  Mirrors the
+        [`_vault_exec_prefix`][terok_sandbox.vault.daemon.lifecycle.VaultManager._vault_exec_prefix]
+        pattern used for the vault daemon.
+        """
+        import sys as _sys
+
+        return [_sys.executable, "-m", "terok_sandbox.gate"]
 
     def _installed_unit_version(self) -> int | None:
         """Return the version stamp from the installed unit files, or ``None``.

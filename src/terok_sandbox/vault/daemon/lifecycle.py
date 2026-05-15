@@ -18,14 +18,13 @@ working.
 from __future__ import annotations
 
 import os
-import shlex
 import signal
 import stat
 import subprocess  # nosec B404 — vault daemon Popen + systemctl helpers — vault daemon Popen + systemctl helpers
 import time
 from pathlib import Path
 
-from terok_sandbox._util import _systemctl
+from terok_sandbox._util import _systemctl, systemd_exec_argv
 from terok_sandbox._util._logging import log_warning
 from terok_sandbox._util._subprocess_env import child_process_env
 from terok_sandbox.config import SandboxConfig
@@ -389,7 +388,7 @@ class VaultManager:
             "AUDIT_LOG_PATH": str(self._cfg.credential_audit_log_path),
             "PORT": str(self._cfg.token_broker_port),
             "SSH_SIGNER_PORT": str(self._cfg.ssh_signer_port),
-            "BIN": shlex.join(self._vault_exec_prefix()),
+            "BIN": systemd_exec_argv(self._vault_exec_prefix()),
             "UNIT_VERSION": str(_UNIT_VERSION),
         }
 

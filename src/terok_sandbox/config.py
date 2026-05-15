@@ -28,7 +28,7 @@ from .paths import (
 )
 
 if TYPE_CHECKING:
-    from .config_schema import RawCredentialsSection, ServicesMode
+    from .config_schema import RawCredentialsSection, RawShieldSection, ServicesMode
     from .vault.store.db import CredentialDB
     from .vault.store.encryption import PassphraseSource
 
@@ -119,6 +119,35 @@ def _default_credentials_passphrase_command() -> str | None:
     return credentials_passphrase_command()
 
 
+@functools.lru_cache(maxsize=1)
+def _shield_section() -> RawShieldSection:
+    """Return a validated ``RawShieldSection`` from the layered config."""
+    from .config_schema import RawShieldSection
+
+    return _validate_section(RawShieldSection, "shield")
+
+
+def shield_audit() -> bool:
+    """Resolve the ``shield.audit`` setting through the schema."""
+    return _shield_section().audit
+
+
+def _default_shield_audit() -> bool:
+    """Default-factory indirection so tests can patch ``shield_audit``."""
+    return shield_audit()
+
+
+# Deliberately not exposing a ``shield_bypass()`` reader nor a
+# ``_default_shield_bypass`` factory.  ``shield.bypass_firewall_no_protection``
+# is in the pydantic schema (orchestrators can pass it through their
+# own resolution chain) but ``SandboxConfig.shield_bypass`` stays
+# hardcoded ``False``: enabling bypass via a user-writable config
+# scope (``~/.config/terok/config.yml``) or via ``TEROK_CONFIG_FILE``
+# would let anything that can drop a file under ``$HOME`` silently
+# disable the egress firewall.  Higher-layer orchestrators are
+# trusted to acknowledge the risk explicitly when they set the field.
+
+
 @dataclass(frozen=True)
 class SandboxConfig:
     """Immutable configuration for the sandbox layer.
@@ -157,11 +186,27 @@ class SandboxConfig:
     shield_profiles: tuple[str, ...] = ("dev-standard",)
     """Shield egress firewall profile names."""
 
-    shield_audit: bool = True
-    """Whether shield audit logging is enabled."""
+    shield_audit: bool = field(default_factory=_default_shield_audit)
+    """Whether shield audit logging is enabled.
+
+    Default-factory reads ``shield.audit`` from the layered config.yml
+    via the [`RawShieldSection`][terok_sandbox.config_schema.RawShieldSection]
+    schema; missing/typo'd keys fall back to the schema's ``True``
+    default.  Direct ``SandboxConfig(shield_audit=…)`` always wins.
+    """
 
     shield_bypass: bool = False
-    """DANGEROUS: when True, the egress firewall is completely disabled."""
+    """DANGEROUS: when True, the egress firewall is completely disabled.
+
+    Hardcoded ``False`` here — sandbox refuses to read this field
+    from ``config.yml`` because the layered chain includes a
+    user-writable scope (``~/.config/terok/config.yml``) and an
+    ``$ENV``-controllable override (``TEROK_CONFIG_FILE``), so anything
+    that drops a file in ``$HOME`` could silently disable the egress
+    firewall.  Orchestrators that want bypass must pass it explicitly
+    to ``SandboxConfig(shield_bypass=True)`` after resolving from
+    their own trusted source.
+    """
 
     credentials_passphrase: str | None = field(default_factory=_default_credentials_passphrase)
     """Headless-no-keyring fallback for the SQLCipher passphrase.

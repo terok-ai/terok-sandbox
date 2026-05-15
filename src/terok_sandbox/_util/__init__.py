@@ -7,7 +7,7 @@ from ._fs import ensure_dir, ensure_dir_writable, systemd_user_unit_dir, write_s
 from ._logging import BestEffortLogger, log_debug, log_warning, warn_user
 from ._naming import effective_ssh_key_name
 from ._sanitize import sanitize_tty
-from ._templates import render_template
+from ._templates import render_template, systemd_escape, systemd_exec_argv
 
 __all__ = [
     "BestEffortLogger",
@@ -18,6 +18,8 @@ __all__ = [
     "log_warning",
     "render_template",
     "sanitize_tty",
+    "systemd_escape",
+    "systemd_exec_argv",
     "systemd_user_unit_dir",
     "warn_user",
     "write_sensitive_file",
