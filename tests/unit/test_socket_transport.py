@@ -551,21 +551,27 @@ class TestInstallSystemdPortGuards:
             with pytest.raises(SystemExit, match="no gate port is set"):
                 mgr.install_systemd_units()
 
-    def test_gate_socket_install_without_port_is_fine(self) -> None:
+    def test_gate_socket_install_without_port_is_fine(self, tmp_path: Path) -> None:
         """cfg.services_mode='socket' skips the port guard — ``None`` must pass."""
         mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
         mock_cfg.services_mode = "socket"
         mock_cfg.gate_port = None
-        with unittest.mock.patch.object(
-            GateServerManager, "__init__", lambda self, cfg=None: setattr(self, "_cfg", mock_cfg)
+        mock_cfg.gate_socket_path = tmp_path / "gate.sock"
+        mock_cfg.gate_base_path = tmp_path / "base"
+        with (
+            unittest.mock.patch.object(
+                GateServerManager,
+                "__init__",
+                lambda self, cfg=None: setattr(self, "_cfg", mock_cfg),
+            ),
+            unittest.mock.patch.object(
+                GateServerManager, "_systemd_unit_dir", return_value=tmp_path / "units"
+            ),
+            unittest.mock.patch("terok_sandbox._util._systemctl.run"),
         ):
-            mgr = GateServerManager()
-            # shutil.which returning None triggers the *next* SystemExit
-            # (missing binary) — reaching that proves the port guard did
-            # not fire for socket-mode installs.
-            with unittest.mock.patch("shutil.which", return_value=None):
-                with pytest.raises(SystemExit, match="terok-gate"):
-                    mgr.install_systemd_units()
+            # Reaching the end of install_systemd_units without SystemExit
+            # proves the port guard did not fire for socket-mode installs.
+            GateServerManager().install_systemd_units()
 
     def test_vault_tcp_install_without_port_raises(self) -> None:
         """cfg.services_mode='tcp' + token_broker_port=None → refuses to render."""
@@ -637,21 +643,27 @@ class TestServicesModeSSOT:
         mock_mode.assert_not_called()
         assert cfg.services_mode == "socket"
 
-    def test_manager_reads_services_mode_from_cfg(self) -> None:
+    def test_manager_reads_services_mode_from_cfg(self, tmp_path: Path) -> None:
         """``GateServerManager`` reads transport from the cfg it was handed."""
         mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
         mock_cfg.services_mode = "socket"
         mock_cfg.gate_port = None  # deliberately unset — socket mode should not care
-        with unittest.mock.patch.object(
-            GateServerManager, "__init__", lambda self, cfg=None: setattr(self, "_cfg", mock_cfg)
+        mock_cfg.gate_socket_path = tmp_path / "gate.sock"
+        mock_cfg.gate_base_path = tmp_path / "base"
+        with (
+            unittest.mock.patch.object(
+                GateServerManager,
+                "__init__",
+                lambda self, cfg=None: setattr(self, "_cfg", mock_cfg),
+            ),
+            unittest.mock.patch.object(
+                GateServerManager, "_systemd_unit_dir", return_value=tmp_path / "units"
+            ),
+            unittest.mock.patch("terok_sandbox._util._systemctl.run"),
         ):
-            mgr = GateServerManager()
-            # Short-circuit past the TCP port guard and into the next
-            # branch — reaching shutil.which proves the mode was read
-            # from the cfg, not from a hard-coded default.
-            with unittest.mock.patch("shutil.which", return_value=None):
-                with pytest.raises(SystemExit, match="terok-gate"):
-                    mgr.install_systemd_units()
+            # Install completes (no port-guard SystemExit) → mode was read
+            # from the cfg the manager was handed, not from a hard-coded default.
+            GateServerManager().install_systemd_units()
 
 
 class TestGateOrphanUnitSweep:
