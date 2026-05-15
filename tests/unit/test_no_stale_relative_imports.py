@@ -79,8 +79,14 @@ def _collect_relative_imports(path: Path) -> list[tuple[int, str]]:
             out.append((node.lineno, target))
             continue
         # ``from . import a, b`` — each alias is a candidate submodule.
+        # ``from . import *`` is a separate beast: it doesn't name any
+        # submodule, just star-imports the package's ``__all__``.  The
+        # candidate to validate there is the package itself.
         for alias in node.names:
-            target = _resolve_relative(node.level, alias.name, package)
+            if alias.name == "*":
+                target = _resolve_relative(node.level, None, package)
+            else:
+                target = _resolve_relative(node.level, alias.name, package)
             if target is None:
                 out.append((node.lineno, f"<underflow: level={node.level} name={alias.name}>"))
                 continue
@@ -105,8 +111,12 @@ def _resolves_statically(target: str) -> bool:
     import side effects (no parent ``__init__`` evaluation, no
     ``sys.modules`` writes).  Names outside ``terok_sandbox.*`` are
     treated as resolving (third-party + stdlib are not our concern
-    here).
+    here).  Underflow sentinels emitted by the collector — strings
+    starting with ``<underflow:`` — are non-modules and must surface
+    as failures rather than getting swept up by the early return.
     """
+    if target.startswith("<underflow:"):
+        return False
     if not target.startswith("terok_sandbox"):
         return True
     parent_dotted, _, _ = target.rpartition(".")
