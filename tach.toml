@@ -112,7 +112,10 @@ depends_on = [
 [[modules]]
 path = "terok_sandbox.vault"
 layer = "foundation"
-depends_on = []
+# The ``__main__`` shim (``python -m terok_sandbox.vault``) re-exports
+# the daemon entry point.  This dep declaration covers that single
+# import; nothing else under ``vault/`` should reach into the daemon.
+depends_on = ["terok_sandbox.vault.daemon.token_broker"]
 
 # Vault.store — at-rest data layer.
 [[modules]]
