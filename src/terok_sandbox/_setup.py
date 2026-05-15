@@ -457,10 +457,20 @@ def _install_clearance_unit_pair(
 
 
 def _stop_and_uninstall(stop: Callable[[], None], uninstall: Callable[[], None]) -> None:
-    """Best-effort stop + uninstall; lets ``install_systemd_units`` start fresh."""
-    with contextlib.suppress(Exception):
+    """Best-effort stop + uninstall; lets ``install_systemd_units`` start fresh.
+
+    ``SystemExit`` is ``BaseException``-derived, so a plain
+    ``suppress(Exception)`` wouldn't catch a stop-time ``_systemctl.run``
+    bubble-up out of a wedged unit.  The contract here is "best-effort,
+    never block the install that follows" — extending the suppression
+    to also catch ``SystemExit`` matches that intent and the parallel
+    fix in
+    [`_start_managed_daemon`][terok_sandbox._setup._start_managed_daemon]
+    from PR #308.  Filed as #310; this is the resolution.
+    """
+    with contextlib.suppress(Exception, SystemExit):
         stop()
-    with contextlib.suppress(Exception):
+    with contextlib.suppress(Exception, SystemExit):
         uninstall()
 
 

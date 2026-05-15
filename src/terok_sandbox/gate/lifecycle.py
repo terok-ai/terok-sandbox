@@ -34,7 +34,7 @@ import subprocess  # nosec B404 — spawning the gate server daemon — spawning
 from dataclasses import dataclass
 from pathlib import Path
 
-from .._util import _systemctl
+from .._util import _systemctl, read_pidfile_safely, unlink_pidfile_safely
 from ..config import SandboxConfig
 
 # ---------- Constants ----------
@@ -401,6 +401,14 @@ class GateServerManager:
         and have no PID file, while a manually-started daemon has a PID
         file but no active unit.  Running both paths also sweeps stray
         daemons that outlived their systemd unit.
+
+        PID-file handling goes through
+        [`read_pidfile_safely`][terok_sandbox._util._pidfile.read_pidfile_safely]
+        and
+        [`unlink_pidfile_safely`][terok_sandbox._util._pidfile.unlink_pidfile_safely]
+        so a swapped-in symlink can't redirect ``os.kill`` to a foreign
+        PID or cause the symlink's target to be deleted on cleanup
+        (CWE-59).
         """
         # ``_systemctl.run_best_effort`` swallows ``TimeoutExpired`` so a
         # wedged unit can't block the PID-file path below.
@@ -408,30 +416,28 @@ class GateServerManager:
             if self._is_unit_active(unit):
                 _systemctl.run_best_effort("stop", unit)
         pidfile = self._cfg.pid_file_path
-        if not pidfile.is_file():
+        pid = read_pidfile_safely(pidfile)
+        if pid is None:
             return
         try:
-            pid = int(pidfile.read_text().strip())
             if self._is_managed_server(pid):
                 os.kill(pid, signal.SIGTERM)
-        except (ValueError, ProcessLookupError, PermissionError):
+        except (ProcessLookupError, PermissionError):
             pass
         finally:
-            if pidfile.is_file():
-                pidfile.unlink()
+            unlink_pidfile_safely(pidfile)
 
     def is_daemon_running(self) -> bool:
         """Check whether the managed daemon process is alive via its PID file."""
-        pidfile = self._cfg.pid_file_path
-        if not pidfile.is_file():
+        pid = read_pidfile_safely(self._cfg.pid_file_path)
+        if pid is None:
+            return False
+        if not self._is_managed_server(pid):
             return False
         try:
-            pid = int(pidfile.read_text().strip())
-            if not self._is_managed_server(pid):
-                return False
             os.kill(pid, 0)  # signal 0 = existence check
             return True
-        except (ValueError, ProcessLookupError, PermissionError):
+        except (ProcessLookupError, PermissionError):
             return False
 
     # -- Private helpers -----------------------------------------------------
