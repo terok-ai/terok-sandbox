@@ -575,6 +575,30 @@ class TestStopAndUninstall:
         uninstall = MagicMock(side_effect=RuntimeError("no units"))
         _stop_and_uninstall(stop, uninstall)  # must not raise
 
+    def test_systemexit_from_stop_is_swallowed(self) -> None:
+        """``SystemExit`` is BaseException-derived — must be caught too (issue #310).
+
+        Before this fix, a ``_systemctl.run`` raising ``SystemExit`` out
+        of ``stop`` would escape the ``suppress(Exception)`` guard and
+        block the subsequent ``install_systemd_units`` call, defeating
+        the "best-effort, never block the install that follows"
+        contract.
+        """
+        stop = MagicMock(side_effect=SystemExit("wedged unit"))
+        uninstall = MagicMock()
+        _stop_and_uninstall(stop, uninstall)  # must not raise
+        # ``uninstall`` still runs — that's the whole point: the install
+        # that follows expects a clean unit-file slate, and a wedged
+        # stop must not prevent the uninstall sweep.
+        uninstall.assert_called_once()
+
+    def test_systemexit_from_uninstall_is_swallowed(self) -> None:
+        """Symmetric coverage on the uninstall leg."""
+        stop = MagicMock()
+        uninstall = MagicMock(side_effect=SystemExit("wedged unit-file remove"))
+        _stop_and_uninstall(stop, uninstall)  # must not raise
+        stop.assert_called_once()
+
 
 class TestEnableAndRestartUserUnit:
     """``_enable_and_restart_user_unit`` — enable + restart, no daemon-reload."""

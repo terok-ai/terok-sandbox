@@ -423,6 +423,73 @@ class TestDaemon:
             assert not pid_file.exists()
 
 
+class TestPidfileSymlinkRefusal:
+    """Regression guards: gate's stop / is_daemon paths must not follow pidfile symlinks.
+
+    Mirrors the vault-side coverage from PR #308 now that gate goes
+    through the same shared helpers (``read_pidfile_safely`` /
+    ``unlink_pidfile_safely``).  Without these regression tests, a
+    revert of the helpers to a naive ``Path.read_text`` /
+    ``Path.unlink`` pattern would silently re-open the CWE-59 vector
+    on the gate side.
+    """
+
+    def test_stop_daemon_does_not_unlink_symlink(self) -> None:
+        """A symlinked pidfile must NOT be unlinked — that would clobber the target.
+
+        The target file contains a parseable PID ("42") so a regression
+        that followed the symlink would both read and signal it — the
+        ``mock_kill.assert_not_called()`` below pins that half too.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            target = base / "innocent-target"
+            target.write_text("42")
+            pid_file = base / "gate-server.pid"
+            pid_file.symlink_to(target)
+
+            from terok_sandbox.config import SandboxConfig
+
+            mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
+            mock_cfg.pid_file_path = pid_file
+
+            with (
+                unittest.mock.patch.object(
+                    GateServerManager, "_is_unit_active", return_value=False
+                ),
+                unittest.mock.patch("os.kill") as mock_kill,
+            ):
+                GateServerManager(mock_cfg).stop_daemon()
+
+            assert pid_file.is_symlink()
+            assert target.exists()
+            assert target.read_text() == "42"
+            mock_kill.assert_not_called()
+
+    def test_is_daemon_running_refuses_symlink(self) -> None:
+        """A symlinked pidfile makes ``is_daemon_running`` short-circuit to ``False``."""
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            target = base / "innocent-target"
+            target.write_text(f"{os.getpid()}")  # the *real* PID would test-pass without the guard
+            pid_file = base / "gate-server.pid"
+            pid_file.symlink_to(target)
+
+            from terok_sandbox.config import SandboxConfig
+
+            mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
+            mock_cfg.pid_file_path = pid_file
+
+            with (
+                unittest.mock.patch.object(
+                    GateServerManager, "_is_managed_server", return_value=True
+                ),
+                unittest.mock.patch("os.kill") as mock_kill,
+            ):
+                assert GateServerManager(mock_cfg).is_daemon_running() is False
+            mock_kill.assert_not_called()
+
+
 class TestIsDaemonRunning:
     """Tests for is_daemon_running."""
 
