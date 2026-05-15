@@ -12,19 +12,21 @@ _FORBIDDEN_CHARS = frozenset("\n\r\0")
 def systemd_escape(arg: str) -> str:
     """Escape *arg* for a systemd unit-file value position (e.g. ``ExecStart=``).
 
-    Two systemd-parser hazards a POSIX-style quoter (``shlex.join``)
+    Three systemd-parser hazards a POSIX-style quoter (``shlex.join``)
     handles wrong:
 
     - ``%`` introduces specifier expansion — escaped as ``%%``.
-    - Whitespace separates ``ExecStart=`` tokens — escaped as
-      ``\\x20`` so a path containing spaces stays one argv element.
+    - Whitespace separates ``ExecStart=`` tokens.  Systemd treats both
+      space and tab as separators (per ``systemd.syntax(7)``); escape
+      both as ``\\x20`` / ``\\x09`` so a path containing either stays
+      one argv element.
 
     Common Python paths (``/usr/bin/python3.12``) round-trip unchanged.
     Atypical paths (pipx-on-macOS framework prefixes, multi-Python
-    rootfs layouts with ``%`` in directory names) survive instead of
-    silently mis-parsing.
+    rootfs layouts with ``%`` in directory names, custom build trees
+    with tabs in names) survive instead of silently mis-parsing.
     """
-    return arg.replace("%", "%%").replace(" ", "\\x20")
+    return arg.replace("%", "%%").replace(" ", "\\x20").replace("\t", "\\x09")
 
 
 def systemd_exec_argv(prefix: Iterable[str]) -> str:
