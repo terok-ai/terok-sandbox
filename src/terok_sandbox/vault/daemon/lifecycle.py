@@ -96,7 +96,9 @@ def _read_pidfile_safely(pidfile: Path) -> int | None:
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     try:
         fd = os.open(pidfile, os.O_RDONLY | nofollow)
-    except (FileNotFoundError, OSError):
+    except OSError:
+        # ``FileNotFoundError`` is an ``OSError`` subclass — one clause
+        # covers both ENOENT and ELOOP/EACCES/etc.
         return None
     try:
         st = os.fstat(fd)
@@ -124,15 +126,18 @@ def _unlink_pidfile_safely(pidfile: Path) -> None:
     """
     try:
         st = os.lstat(pidfile)
-    except FileNotFoundError:
-        return
     except OSError:
+        # ``FileNotFoundError`` is an ``OSError`` subclass — one clause
+        # covers both the "already gone" common case and pathological
+        # ``EACCES`` / parent-dir failures.
         return
     if not stat.S_ISREG(st.st_mode):
         return
     try:
         os.unlink(pidfile)
-    except (FileNotFoundError, OSError):
+    except OSError:
+        # Same subclass-relationship as above; one clause swallows the
+        # full TOCTOU + EBUSY range.
         pass
 
 

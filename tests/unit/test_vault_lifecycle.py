@@ -503,7 +503,11 @@ class TestPidfileSafeUnlink:
         """A symlinked pidfile must NOT be unlinked — that would clobber the target.
 
         Combined with the read-side guard, this closes the
-        CWE-59 file-clobber vector on the stop path.
+        CWE-59 file-clobber vector on the stop path.  The target file
+        contains a parseable PID ("42") so a regression that followed
+        the symlink would both read it AND signal it — the
+        ``mock_kill.assert_not_called()`` below pins the other half of
+        the contract: no signal is sent when the pidfile is a symlink.
         """
         mgr = _make_mgr(tmp_path)
         pidfile = mgr._cfg.vault_pid_path
@@ -514,7 +518,7 @@ class TestPidfileSafeUnlink:
 
         with (
             patch.object(VaultManager, "_is_unit_active", return_value=False),
-            patch("os.kill"),
+            patch("os.kill") as mock_kill,
         ):
             mgr.stop_daemon()
 
@@ -523,6 +527,9 @@ class TestPidfileSafeUnlink:
         assert pidfile.is_symlink()
         assert target.exists()
         assert target.read_text() == "42"
+        # And no signal escaped: the read-side guard short-circuited
+        # before ``os.kill`` could ever fire on the symlink's target PID.
+        mock_kill.assert_not_called()
 
 
 _LIFECYCLE = "terok_sandbox.vault.daemon.lifecycle"
