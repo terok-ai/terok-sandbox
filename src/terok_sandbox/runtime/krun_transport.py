@@ -10,28 +10,38 @@ sshd handles auth, PTY allocation, signal forwarding, exit codes.
 
 Design choices and why:
 
-- **stock ssh CLI + socat**, not a paramiko + AF_VSOCK client.  Both
-  binaries are battle-tested for the edge cases (PTY allocation, signal
-  forwarding, EOF semantics) that we would otherwise reimplement.
-- **Pubkey-only**, authenticating with the ``%host`` keypair from the
-  credentials vault.  Host knows the private key; guest holds only the
-  public half (baked into ``authorized_keys.d/terok`` at image build).
+- **stock ssh CLI + socat** rather than a paramiko + ``AF_VSOCK``
+  client.  Both binaries are battle-tested for the edge cases (PTY
+  allocation, signal forwarding, EOF semantics) that we would
+  otherwise reimplement.
+- **Pubkey-only**, with ``IdentitiesOnly=yes`` so a stray host-side
+  ssh-agent can't offer unrelated identities.  The host holds the
+  private key; the guest holds only the public half (baked into
+  ``authorized_keys.d/terok`` at image build).
+- **Argv-quoted remote command**: ``ssh host -- a b c`` concatenates
+  the tokens and runs the result through the in-guest user's shell,
+  so the transport ``shlex.quote``s each token to preserve the
+  ``cmd: list[str]`` argv contract on the wire.
 - **No host-key persistence**: ``StrictHostKeyChecking=no`` plus
-  ``UserKnownHostsFile=/dev/null``.  The transport is structural — a
-  guest reachable only over our own vsock channel cannot be a different
-  guest pretending to be ours.
+  ``UserKnownHostsFile=/dev/null``.  Vsock is host-local and the
+  CID-to-guest binding is enforced by the orchestrator's allocator
+  plus [`VsockEndpoint`][terok_sandbox.runtime.krun_transport.VsockEndpoint]'s
+  range check, so wrong-endpoint connects are restricted to a host
+  with podman access (root-equivalent).  Full per-guest host-key
+  pinning would need orchestrator-side ``known_hosts`` plumbing and
+  is tracked as a follow-up.
 
 Endpoint discovery is pluggable via *endpoint_resolver* so unit tests
-can synthesise endpoints without an actual microVM.  A production
-factory ([`podman_annotation_resolver`][terok_sandbox.runtime.krun_transport.podman_annotation_resolver])
+can synthesise endpoints without an actual microVM.  The default
+production factory
+[`podman_annotation_resolver`][terok_sandbox.runtime.krun_transport.podman_annotation_resolver]
 reads the CID from a podman annotation set at task launch.
-
-Manual integration tests live alongside the package; podman-dependent
-tests do not run in CI per project rules.
 """
 
 from __future__ import annotations
 
+import re
+import shlex
 import subprocess  # nosec B404 — orchestrates the system ssh CLI
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -40,6 +50,16 @@ from typing import BinaryIO
 
 from .podman import _start_stdio_pumps
 from .protocol import Container, ExecResult
+
+# ``ssh host -- arg1 arg2`` does NOT preserve argv on the remote side —
+# sshd concatenates the tokens and runs the result through the user's
+# login shell.  Our public API contract is ``cmd: list[str]`` (argv
+# semantics), so every remote token gets ``shlex.quote``d before going
+# over the wire to keep that contract honest.  Env var *names* are
+# validated against this strict pattern because there is no portable
+# way to quote them — the remote ``env`` command expects bare
+# identifiers.
+_REMOTE_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 # Default annotation key the orchestrator sets at ``podman run`` time so
 # the host side can find the guest's vsock CID after the fact.  Read by
@@ -59,16 +79,81 @@ DEFAULT_VSOCK_SSHD_PORT = 22
 DEFAULT_SSH_USER = "dev"
 
 
+def _remote_command(cmd: list[str], *, env: Mapping[str, str] | None = None) -> str:
+    """Render *cmd* (and optional *env*) into a shell-safe remote string.
+
+    OpenSSH's ``ssh host -- a b c`` concatenates the post-``--`` tokens
+    and runs the result through the in-guest user's login shell, so the
+    transport must do the quoting itself to honour the ``cmd: list[str]``
+    argv contract on the wire.
+
+    Env var names are validated against ``[A-Za-z_][A-Za-z0-9_]*`` —
+    the remote ``env`` command expects bare identifiers and there's no
+    portable way to quote them.  Names that fail the pattern raise
+    ``ValueError`` rather than risk silently being misinterpreted.
+    """
+    if not cmd:
+        raise ValueError("remote cmd must not be empty")
+    tokens: list[str] = []
+    if env:
+        for key in env:
+            if not _REMOTE_ENV_NAME_RE.fullmatch(key):
+                raise ValueError(f"remote env var name {key!r}: must match [A-Za-z_][A-Za-z0-9_]*")
+        tokens.append("env")
+        tokens.extend(f"{k}={v}" for k, v in env.items())
+    tokens.extend(cmd)
+    return " ".join(shlex.quote(t) for t in tokens)
+
+
+_VSOCK_RESERVED_CIDS: frozenset[int] = frozenset({0, 1, 2})
+"""Vsock CIDs reserved by the spec (``VMADDR_CID_ANY``, ``..._HYPERVISOR``,
+``..._HOST``).  A guest is never one of these, and the transport must
+not be coaxed into connecting to them."""
+
+_VSOCK_MAX_CID = 0xFFFFFFFF  # u32
+_VSOCK_MAX_PORT = 0xFFFFFFFF  # u32
+
+
 @dataclass(frozen=True)
 class VsockEndpoint:
     """A vsock endpoint reachable from the host.
 
     *cid* is a libkrun-assigned context ID (32-bit integer); *port* is
     the vsock port the in-guest service is listening on.
+
+    Both fields are int-coerced and range-checked in ``__post_init__``
+    — the transport interpolates them into the ``ProxyCommand`` string
+    that OpenSSH hands to a shell, so a string-shaped value carrying
+    shell metacharacters would otherwise be a command-injection
+    primitive.  Catching it here means a bad ``endpoint_resolver``
+    fails loudly at construction rather than silently building a
+    hostile ``socat`` invocation.
     """
 
     cid: int
     port: int = DEFAULT_VSOCK_SSHD_PORT
+
+    def __post_init__(self) -> None:
+        """Coerce + bound-check both fields so the ProxyCommand stays safe."""
+        try:
+            cid = int(self.cid)
+            port = int(self.port)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"VsockEndpoint: cid and port must be int-convertible, "
+                f"got cid={self.cid!r}, port={self.port!r}"
+            ) from exc
+        if cid in _VSOCK_RESERVED_CIDS:
+            raise ValueError(
+                f"VsockEndpoint: cid {cid} is reserved by the vsock spec "
+                "(0=ANY, 1=HYPERVISOR, 2=HOST) — refusing to connect"
+            )
+        if not 0 <= cid <= _VSOCK_MAX_CID:
+            raise ValueError(f"VsockEndpoint: cid {cid} outside u32 range")
+        if not 1 <= port <= _VSOCK_MAX_PORT:
+            raise ValueError(f"VsockEndpoint: port {port} outside (0, u32] range")
+        object.__setattr__(self, "cid", cid)
+        object.__setattr__(self, "port", port)
 
 
 class VsockSSHTransport:
@@ -102,10 +187,19 @@ class VsockSSHTransport:
             self._ssh,
             "-i",
             str(self._identity_file),
+            # Only the identity we explicitly passed is offered; a stray
+            # ssh-agent running in the host environment can't slip in
+            # additional keys that happen to be accepted by the guest.
+            "-o",
+            "IdentitiesOnly=yes",
             "-o",
             f"ProxyCommand=socat - VSOCK-CONNECT:{endpoint.cid}:{endpoint.port}",
-            # The transport is reachable only over our own vsock channel;
-            # there is no opportunity for a host-key spoof to occur.
+            # Vsock is host-local and the CID-to-guest binding is enforced
+            # by the orchestrator's allocator + ``VsockEndpoint`` range
+            # check, so a wrong-endpoint connect is structurally
+            # restricted to a host with podman access (already root-
+            # equivalent).  Full host-key pinning would need orchestrator-
+            # side known_hosts plumbing and is tracked as a follow-up.
             "-o",
             "StrictHostKeyChecking=no",
             "-o",
@@ -130,9 +224,16 @@ class VsockSSHTransport:
         *,
         timeout: float | None = None,
     ) -> ExecResult:
-        """Run *cmd* in the guest and return its outcome."""
+        """Run *cmd* in the guest and return its outcome.
+
+        Each *cmd* token is ``shlex.quote``d into a single remote
+        command string so the in-guest shell treats embedded
+        metacharacters as literal data — argv semantics are preserved
+        across the inherently-shell-parsed ssh wire format.
+        """
         endpoint = self._resolver(container)
-        argv = [*self._ssh_argv(endpoint), "--", *cmd]
+        remote_str = _remote_command(cmd)
+        argv = [*self._ssh_argv(endpoint), "--", remote_str]
         proc = subprocess.run(  # nosec B603 — argv built from fixed verbs + caller-controlled scope/container names
             argv,
             capture_output=True,
@@ -161,14 +262,15 @@ class VsockSSHTransport:
 
         Environment variables are propagated via a remote ``env`` prefix
         rather than ``SendEnv`` so the transport doesn't depend on the
-        guest's ``AcceptEnv`` whitelist.
+        guest's ``AcceptEnv`` whitelist.  Env var **names** are
+        validated against ``[A-Za-z_][A-Za-z0-9_]*`` because the remote
+        ``env`` command expects bare identifiers; values and *cmd*
+        tokens are ``shlex.quote``d so embedded shell metacharacters
+        cross the wire as literal data.
         """
         endpoint = self._resolver(container)
-        remote_cmd: list[str] = []
-        if env:
-            remote_cmd += ["env", *(f"{k}={v}" for k, v in env.items())]
-        remote_cmd += cmd
-        argv = [*self._ssh_argv(endpoint), "--", *remote_cmd]
+        remote_str = _remote_command(cmd, env=env)
+        argv = [*self._ssh_argv(endpoint), "--", remote_str]
 
         proc = subprocess.Popen(  # noqa: S603 — argv built above  # nosec B603 — argv is built from fixed verbs + caller-controlled scope/container names
             argv,
@@ -207,11 +309,14 @@ def podman_annotation_resolver(
     """
 
     def _resolve(container: Container) -> VsockEndpoint:
+        # ``--`` ends podman's own option parsing, so a container handle
+        # carrying a leading-dash name can't be reinterpreted as a flag.
         argv = [
             "podman",
             "inspect",
             "--format",
             '{{ index .Config.Annotations "' + annotation_key + '" }}',
+            "--",
             container.name,
         ]
         try:
@@ -234,6 +339,15 @@ def podman_annotation_resolver(
             raise RuntimeError(
                 f"container {container.name!r} has non-integer {annotation_key} annotation: {out!r}"
             ) from exc
-        return VsockEndpoint(cid=cid, port=port)
+        # ``VsockEndpoint.__post_init__`` does the range + reserved-CID
+        # check; raising ``RuntimeError`` here keeps the resolver's
+        # exception type uniform across "annotation missing" and
+        # "annotation invalid".
+        try:
+            return VsockEndpoint(cid=cid, port=port)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"container {container.name!r} has invalid {annotation_key} annotation: {exc}"
+            ) from exc
 
     return _resolve

