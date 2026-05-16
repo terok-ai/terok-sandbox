@@ -234,6 +234,11 @@ class CredentialDB:
             raise NoPassphraseError(f"no SQLCipher passphrase available for {db_path}")
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = _open_connection(db_path, passphrase)
+        # Set by ``transaction()`` so write methods know whether to
+        # commit themselves or defer to the outer scope.  Bool is fine
+        # — ``BEGIN IMMEDIATE`` rejects nested calls, so the flag never
+        # needs to count.
+        self._in_outer_tx: bool = False
         try:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA foreign_keys=ON")
@@ -259,24 +264,20 @@ class CredentialDB:
         atomicity: most write methods on this class commit eagerly via
         ``self._conn.commit()`` at the end, which silently ends the
         outer scope mid-block.  This context manager takes the write
-        lock up front (``BEGIN IMMEDIATE``) and only commits/rolls
-        back on its own exit, so callers can compose read-then-write
-        sequences and trust the whole thing serialises against
-        concurrent writers.
-
-        Inner write methods that need to participate accept a
-        ``commit: bool = True`` opt-out (currently
-        [`store_ssh_key`][terok_sandbox.vault.store.db.CredentialDB.store_ssh_key]
-        and [`assign_ssh_key`][terok_sandbox.vault.store.db.CredentialDB.assign_ssh_key]);
-        pass ``commit=False`` for each call inside the ``transaction()``
-        scope so the outer block owns the commit.
+        lock up front (``BEGIN IMMEDIATE``) so callers can compose
+        read-then-write sequences and trust the whole thing serialises
+        against concurrent writers.  Inner write methods detect the
+        active outer transaction via ``self._in_outer_tx`` and skip
+        their per-call commit — no kwarg plumbing required at the
+        call site.
 
         On exit: ``COMMIT`` on clean exit, ``ROLLBACK`` on any
-        exception (including ``BaseException`` like
-        ``KeyboardInterrupt`` — leaving a half-written ``%scope``
-        keypair around would be worse than a re-mint on retry).
+        ``BaseException`` (``KeyboardInterrupt`` / ``SystemExit``
+        included — leaving a half-written ``%scope`` keypair around
+        would be worse than a re-mint on retry).
         """
         self._conn.execute("BEGIN IMMEDIATE")
+        self._in_outer_tx = True
         try:
             yield self._conn
         except BaseException:
@@ -284,6 +285,8 @@ class CredentialDB:
             raise
         else:
             self._conn.execute("COMMIT")
+        finally:
+            self._in_outer_tx = False
 
     # ── Provider credentials ────────────────────────────────────────────
 
@@ -328,8 +331,6 @@ class CredentialDB:
         public_blob: bytes,
         comment: str,
         fingerprint: str,
-        *,
-        commit: bool = True,
     ) -> int:
         """Register a keypair, dedup-by-fingerprint; return the ``ssh_keys.id``.
 
@@ -337,10 +338,9 @@ class CredentialDB:
         and comment are left untouched (the caller is re-asserting an
         already-known key, which is expected on repeat ``ssh-import``).
 
-        ``commit=False`` skips the per-call commit so the caller can
-        compose multiple writes inside a
+        Auto-commits unless called inside a
         [`transaction()`][terok_sandbox.vault.store.db.CredentialDB.transaction]
-        scope without each inner write ending the outer atomic block.
+        scope — in which case the outer block owns the commit.
         """
         cur = self._conn.execute(
             "INSERT OR IGNORE INTO ssh_keys"
@@ -350,7 +350,7 @@ class CredentialDB:
         )
         if cur.rowcount:
             self._bump_ssh_keys_version()
-        if commit:
+        if not self._in_outer_tx:
             self._conn.commit()
         row = self._conn.execute(
             "SELECT id FROM ssh_keys WHERE fingerprint = ?",
@@ -392,14 +392,7 @@ class CredentialDB:
         self._conn.commit()
         return bool(cur.rowcount)
 
-    def assign_ssh_key(
-        self,
-        scope: str,
-        key_id: int,
-        *,
-        allow_infra: bool = False,
-        commit: bool = True,
-    ) -> None:
+    def assign_ssh_key(self, scope: str, key_id: int, *, allow_infra: bool = False) -> None:
         """Grant *scope* access to *key_id* (idempotent).
 
         Rejects unsafe scope names with [`InvalidScopeName`][terok_sandbox.vault.store.db.InvalidScopeName] — the
@@ -412,10 +405,9 @@ class CredentialDB:
         ``%name`` slots).  Sandbox internals that legitimately provision
         infrastructure scopes pass ``allow_infra=True``.
 
-        ``commit=False`` skips the per-call commit so the caller can
-        compose multiple writes inside a
+        Auto-commits unless called inside a
         [`transaction()`][terok_sandbox.vault.store.db.CredentialDB.transaction]
-        scope without each inner write ending the outer atomic block.
+        scope — in which case the outer block owns the commit.
         """
         if allow_infra:
             _require_safe_scope(scope)
@@ -427,7 +419,7 @@ class CredentialDB:
         )
         if cur.rowcount:
             self._bump_ssh_keys_version()
-        if commit:
+        if not self._in_outer_tx:
             self._conn.commit()
 
     def unassign_ssh_key(self, scope: str, key_id: int, *, allow_infra: bool = False) -> None:

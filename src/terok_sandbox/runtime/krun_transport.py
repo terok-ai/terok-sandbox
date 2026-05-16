@@ -61,23 +61,26 @@ def _socat_path() -> str:
     The ``ProxyCommand`` ssh hands to a shell would otherwise resolve
     ``socat`` via ``PATH`` at every connection — a hostile ``PATH``
     (sudo wrapper, compromised service env, caller-modified env) could
-    substitute an attacker binary.  Resolving here at module-import
-    granularity pins the binary the operator's install paths point at
-    *now*, not the one a later environment poke might prefer.
+    substitute an attacker binary.  Resolution happens lazily on first
+    call (when ``_ssh_argv`` runs); the cache then pins the binary
+    against a later environment poke for the rest of the process.
 
-    Falls back to ``/usr/bin/socat`` so the failure mode is "socket
-    open fails" rather than "ssh-keygen-style PATH search" if
+    Falls back to ``/usr/bin/socat`` so the failure mode is "vsock
+    connect fails" rather than "silent PATH search" when
     ``shutil.which`` can't see it.
     """
     return shutil.which("socat") or "/usr/bin/socat"
 
 
-# Allowlist for ``podman_annotation_resolver``'s key parameter.  The
-# value is concatenated into a ``--format`` Go-template literal that
-# podman parses, so any ``"`` / ``}`` / ``{`` would break out of the
-# intended string slot and execute attacker-chosen template
-# expressions.  OCI annotation keys are already restricted (RFC 6648
-# / OCI conformance) to ``[A-Za-z0-9./_-]``; we mirror that.
+# Charset shape check for ``podman_annotation_resolver``'s key
+# parameter — the value is concatenated into a ``--format`` Go-template
+# literal that podman parses, so any ``"`` / ``}`` / ``{`` would break
+# out of the intended string slot and execute attacker-chosen template
+# expressions.  Mirrors the OCI annotation charset.
+#
+# Note: this is the *reader-side* shape check (operator-supplied key
+# name).  The *writer-side* allowlist of values terok actually emits
+# lives at ``terok_sandbox.sandbox.SAFE_ANNOTATION_KEYS``.
 _ANNOTATION_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
 
 # ``ssh host -- arg1 arg2`` does NOT preserve argv on the remote side —
@@ -221,10 +224,6 @@ class VsockSSHTransport:
             # additional keys that happen to be accepted by the guest.
             "-o",
             "IdentitiesOnly=yes",
-            # Absolute path to ``socat`` — ssh hands the ProxyCommand
-            # string to a shell that resolves bare names via PATH.  A
-            # hostile PATH would otherwise execute an attacker binary
-            # in place of the real socat.
             "-o",
             f"ProxyCommand={_socat_path()} - VSOCK-CONNECT:{endpoint.cid}:{endpoint.port}",
             # Vsock is host-local and the CID-to-guest binding is enforced

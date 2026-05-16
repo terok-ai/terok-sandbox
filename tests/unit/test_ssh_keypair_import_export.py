@@ -649,25 +649,26 @@ class TestEnsureInfraKeypair:
         finally:
             db.close()
 
-    def test_inner_methods_skip_commit_when_asked(self, db: CredentialDB) -> None:
-        """``store_ssh_key(commit=False)`` and ``assign_ssh_key(commit=False)``
-        leave the data uncommitted so a manual ``rollback`` can wipe it."""
+    def test_inner_writes_defer_commit_inside_transaction(self, db: CredentialDB) -> None:
+        """Inside ``transaction()`` the inner writes skip their own commit.
+
+        ``store_ssh_key`` and ``assign_ssh_key`` detect the active outer
+        scope via ``self._in_outer_tx`` and leave the commit to the
+        wrapper, so the whole sequence rolls back together on a
+        mid-block exception.
+        """
         kp = generate_keypair("ed25519", comment="test")
-        # No outer transaction — inner methods are the only writers.
-        key_id = db.store_ssh_key(
-            key_type=kp.key_type,
-            private_der=kp.private_der,
-            public_blob=kp.public_blob,
-            comment=kp.comment,
-            fingerprint=kp.fingerprint,
-            commit=False,
-        )
-        db.assign_ssh_key("%host", key_id, allow_infra=True, commit=False)
-        # The writes are visible to the same connection (sqlite read-
-        # your-own-writes inside a transaction), but a rollback
-        # discards them entirely.
-        assert len(db.list_ssh_keys_for_scope("%host")) == 1
-        db._conn.rollback()  # type: ignore[attr-defined]
+        with pytest.raises(RuntimeError, match="abort"), db.transaction():
+            key_id = db.store_ssh_key(
+                key_type=kp.key_type,
+                private_der=kp.private_der,
+                public_blob=kp.public_blob,
+                comment=kp.comment,
+                fingerprint=kp.fingerprint,
+            )
+            db.assign_ssh_key("%host", key_id, allow_infra=True)
+            raise RuntimeError("abort")
+        # Both writes rolled back — no orphans in either table.
         assert db.list_ssh_keys_for_scope("%host") == []
         assert db.count_ssh_keys() == 0
 
