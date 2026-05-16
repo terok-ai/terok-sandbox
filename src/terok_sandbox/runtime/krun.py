@@ -73,14 +73,20 @@ class KrunRuntime:
 
     # -- Handle factories --------------------------------------------------
 
-    def container(self, name: str) -> Container:
+    def container(self, name: str) -> KrunContainer:
         """Return a [`KrunContainer`][terok_sandbox.runtime.krun.KrunContainer]
         handle wrapping the podman container — same lifecycle, krun-aware
         ``login_command``.
+
+        Narrower-than-protocol return type: ``KrunContainer`` is a
+        ``Container`` (covariant on return), so structural typing still
+        accepts this where a ``Container`` is required, while callers
+        that hold a ``KrunRuntime`` reference get to see the concrete
+        type without an explicit cast.
         """
         return KrunContainer(name, runtime=self._podman, transport=self._transport)
 
-    def containers_with_prefix(self, prefix: str) -> list[Container]:
+    def containers_with_prefix(self, prefix: str) -> list[KrunContainer]:
         """Same prefix lookup as podman; rewrap each handle as a
         [`KrunContainer`][terok_sandbox.runtime.krun.KrunContainer] so its
         ``login_command`` routes through the vsock transport.
