@@ -93,7 +93,14 @@ class InvalidScopeName(ValueError):
 
 
 def _require_safe_scope(scope: str) -> None:
-    """Reject scope names that would be unsafe as a filename fragment."""
+    """Reject scope names that would be unsafe as a filename fragment.
+
+    Structural-only — accepts both the user form
+    (``[A-Za-z0-9][A-Za-z0-9._-]*``) and the infrastructure form
+    (``%[a-z]+``).  Use [`_require_user_scope`][terok_sandbox.vault.store.db._require_user_scope]
+    on any write path driven by caller-supplied input so a non-CLI bypass
+    can't persist or modify a sandbox-reserved ``%name`` scope.
+    """
     if not isinstance(scope, str) or not scope:
         raise InvalidScopeName("scope must be a non-empty string")
     if len(scope) > _MAX_SCOPE_LEN:
@@ -102,6 +109,29 @@ def _require_safe_scope(scope: str) -> None:
         raise InvalidScopeName(
             f"invalid scope {scope!r}: must match either user form "
             "[A-Za-z0-9][A-Za-z0-9._-]* or infrastructure form %[a-z]+"
+        )
+
+
+def _require_user_scope(scope: str) -> None:
+    """Reject scopes that are unsafe **or** reserved for infrastructure use.
+
+    Layered on top of [`_require_safe_scope`][terok_sandbox.vault.store.db._require_safe_scope]:
+    same structural checks, plus a refusal of the ``%``-prefixed
+    infrastructure form.  Use this on any write-path API that takes a
+    caller-controlled scope so a non-CLI bypass (library import,
+    automation, future plugin) can't persist to ``%host`` and collide
+    with sandbox-reserved credentials.
+
+    Callers that legitimately need to write an infrastructure scope —
+    sandbox internals provisioning ``%host`` for the krun host-side
+    keypair, future ``%name`` slots — pass ``allow_infra=True`` to the
+    underlying DB write method instead.
+    """
+    _require_safe_scope(scope)
+    if scope.startswith("%"):
+        raise InvalidScopeName(
+            f"scope {scope!r}: '%' prefix is reserved for sandbox "
+            "infrastructure scopes and not allowed for caller-driven writes"
         )
 
 
@@ -318,14 +348,23 @@ class CredentialDB:
         self._conn.commit()
         return bool(cur.rowcount)
 
-    def assign_ssh_key(self, scope: str, key_id: int) -> None:
+    def assign_ssh_key(self, scope: str, key_id: int, *, allow_infra: bool = False) -> None:
         """Grant *scope* access to *key_id* (idempotent).
 
         Rejects unsafe scope names with [`InvalidScopeName`][terok_sandbox.vault.store.db.InvalidScopeName] — the
         value is later embedded in per-scope Unix-socket paths, so
         traversal-like strings (``../``, ``/``) must not be persisted.
+
+        By default also rejects ``%``-prefixed infrastructure scopes so
+        callers driven by user input can't write to sandbox-reserved
+        names (``%host`` for the krun host-side keypair, future
+        ``%name`` slots).  Sandbox internals that legitimately provision
+        infrastructure scopes pass ``allow_infra=True``.
         """
-        _require_safe_scope(scope)
+        if allow_infra:
+            _require_safe_scope(scope)
+        else:
+            _require_user_scope(scope)
         cur = self._conn.execute(
             "INSERT OR IGNORE INTO ssh_key_assignments (scope, key_id) VALUES (?, ?)",
             (scope, key_id),
@@ -334,8 +373,17 @@ class CredentialDB:
             self._bump_ssh_keys_version()
         self._conn.commit()
 
-    def unassign_ssh_key(self, scope: str, key_id: int) -> None:
-        """Revoke *scope*'s access to *key_id*; drop the key row if orphaned."""
+    def unassign_ssh_key(self, scope: str, key_id: int, *, allow_infra: bool = False) -> None:
+        """Revoke *scope*'s access to *key_id*; drop the key row if orphaned.
+
+        Refuses ``%``-prefixed infrastructure scopes by default — pair
+        with ``allow_infra=True`` for sandbox internals that need to
+        decommission a reserved scope.
+        """
+        if allow_infra:
+            _require_safe_scope(scope)
+        else:
+            _require_user_scope(scope)
         cur = self._conn.execute(
             "DELETE FROM ssh_key_assignments WHERE scope = ? AND key_id = ?",
             (scope, key_id),
@@ -350,7 +398,9 @@ class CredentialDB:
             self._bump_ssh_keys_version()
         self._conn.commit()
 
-    def replace_ssh_keys_for_scope(self, scope: str, *, keep_key_id: int) -> None:
+    def replace_ssh_keys_for_scope(
+        self, scope: str, *, keep_key_id: int, allow_infra: bool = False
+    ) -> None:
         """Atomically make *keep_key_id* the scope's sole assigned key.
 
         Wraps the "assign new + revoke every other" sequence in a single
@@ -359,8 +409,14 @@ class CredentialDB:
         commits last wins the scope, and exactly one primary survives.
         Orphaned ``ssh_keys`` rows for revoked keys are cleaned up in the
         same step via ``unassign_ssh_key`` semantics.
+
+        Refuses ``%``-prefixed infrastructure scopes by default; sandbox
+        internals provisioning infra keys pass ``allow_infra=True``.
         """
-        _require_safe_scope(scope)
+        if allow_infra:
+            _require_safe_scope(scope)
+        else:
+            _require_user_scope(scope)
         with self._conn:
             self._conn.execute(
                 "INSERT OR IGNORE INTO ssh_key_assignments (scope, key_id) VALUES (?, ?)",
@@ -392,8 +448,16 @@ class CredentialDB:
                 )
             self._bump_ssh_keys_version()
 
-    def unassign_all_ssh_keys(self, scope: str) -> int:
-        """Revoke every key currently assigned to *scope*.  Returns count removed."""
+    def unassign_all_ssh_keys(self, scope: str, *, allow_infra: bool = False) -> int:
+        """Revoke every key currently assigned to *scope*.  Returns count removed.
+
+        Refuses ``%``-prefixed infrastructure scopes by default — pair
+        with ``allow_infra=True`` for sandbox internals.
+        """
+        if allow_infra:
+            _require_safe_scope(scope)
+        else:
+            _require_user_scope(scope)
         key_ids = [
             r[0]
             for r in self._conn.execute(
@@ -402,7 +466,7 @@ class CredentialDB:
             ).fetchall()
         ]
         for kid in key_ids:
-            self.unassign_ssh_key(scope, kid)
+            self.unassign_ssh_key(scope, kid, allow_infra=allow_infra)
         return len(key_ids)
 
     def list_ssh_keys_for_scope(self, scope: str) -> list[SSHKeyRow]:

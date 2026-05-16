@@ -252,3 +252,40 @@ class TestScopeNameGuard:
         key_id = _store_key(db, "fp-x")
         with pytest.raises(InvalidScopeName):
             db.assign_ssh_key("../evil", key_id)
+
+    def test_assign_rejects_infra_scope_by_default(self, db: CredentialDB) -> None:
+        """Caller-driven writes can't target the ``%`` infrastructure space.
+
+        The DB-layer validator is structurally permissive (both forms
+        round-trip through it), so a separate user-vs-infra guard at the
+        write entry point is what keeps a non-CLI bypass from creating
+        keys under ``%host`` or any future reserved name.
+        """
+        key_id = _store_key(db, "fp-infra")
+        with pytest.raises(InvalidScopeName, match="reserved for sandbox"):
+            db.assign_ssh_key("%host", key_id)
+
+    def test_assign_accepts_infra_scope_with_explicit_flag(self, db: CredentialDB) -> None:
+        """Sandbox internals provisioning ``%host`` opt in explicitly."""
+        key_id = _store_key(db, "fp-infra-ok")
+        db.assign_ssh_key("%host", key_id, allow_infra=True)  # no raise
+        rows = db.list_ssh_keys_for_scope("%host")
+        assert len(rows) == 1
+
+    def test_unassign_rejects_infra_scope_by_default(self, db: CredentialDB) -> None:
+        """User-facing remove paths can't decommission infra-reserved keys."""
+        key_id = _store_key(db, "fp-infra-2")
+        db.assign_ssh_key("%host", key_id, allow_infra=True)
+        with pytest.raises(InvalidScopeName, match="reserved for sandbox"):
+            db.unassign_ssh_key("%host", key_id)
+
+    def test_replace_rejects_infra_scope_by_default(self, db: CredentialDB) -> None:
+        """``replace_ssh_keys_for_scope`` is gated the same as assign."""
+        key_id = _store_key(db, "fp-infra-3")
+        with pytest.raises(InvalidScopeName, match="reserved for sandbox"):
+            db.replace_ssh_keys_for_scope("%host", keep_key_id=key_id)
+
+    def test_unassign_all_rejects_infra_scope_by_default(self, db: CredentialDB) -> None:
+        """``unassign_all_ssh_keys`` is gated the same as the single-key form."""
+        with pytest.raises(InvalidScopeName, match="reserved for sandbox"):
+            db.unassign_all_ssh_keys("%host")
