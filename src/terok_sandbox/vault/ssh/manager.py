@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: 2025 Jiri Vyskocil
+# SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
 """SSH keypair generation for a project scope.
@@ -18,7 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict
 
 from ..store.db import CredentialDB, _require_safe_scope
-from .keypair import DEFAULT_RSA_BITS, GeneratedKeypair, generate_keypair
+from .keypair import DEFAULT_RSA_BITS, GeneratedKeypair, generate_keypair, public_line_of
 
 if TYPE_CHECKING:
     from terok_sandbox.config import SandboxConfig
@@ -38,11 +39,16 @@ class SSHManager:
     """Mints SSH keypairs for a scope and stores them in the vault.
 
     Each scope may hold multiple keys (e.g. GitHub + GitLab), each with a
-    distinct fingerprint.  ``init`` is **additive** by default: every call
-    generates a new keypair and assigns it alongside any existing keys.
-    ``force=True`` **rotates** atomically — the new key takes the scope
-    in a single transaction that also revokes every prior assignment, so
-    concurrent rotations converge on exactly one primary key.
+    distinct fingerprint.  ``init`` is **idempotent** for the default
+    invocation: re-running ``ssh-init`` on a scope that already has a
+    ``tk-main:`` key returns that key without minting a new one — the
+    operator sees the same public line they registered upstream rather
+    than a fresh side key they'd have to re-register.  ``force=True``
+    **rotates** atomically (new key takes the scope in a single
+    transaction that revokes prior assignments), and a custom
+    ``comment`` opts back into the additive path so multi-deploy-key
+    setups (GitHub + GitLab on one scope) still work — but only when
+    asked for explicitly.
 
     Two constructors for two ownership stories:
 
@@ -117,10 +123,12 @@ class SSHManager:
 
         Args:
             key_type: ``"ed25519"`` (default) or ``"rsa"``.
-            comment: Comment to embed in the public key.  Defaults to
-                ``tk-main:<scope>`` for the first key, ``tk-side:<scope>:<n>``
-                for additional keys (so the signer's ``tk-main:`` promotion
-                still picks the primary deploy key).
+            comment: Comment to embed in the public key.  When ``None``,
+                falls back to ``tk-main:<scope>`` on first init and to
+                idempotent reuse on subsequent inits.  A non-``None``
+                value (including ``""``) opts back into additive
+                generation — the value lands verbatim and the call
+                always mints a new key.
             force: When ``True``, rotate — the new key takes the scope in
                 a single transaction that drops every prior assignment.
 
@@ -134,6 +142,23 @@ class SSHManager:
                 call leaves no orphaned row in ``ssh_keys``.
         """
         _require_safe_scope(self._scope)
+
+        # Idempotent default path: a bare ``ssh-init`` on a scope that
+        # already carries a primary key returns the existing one rather
+        # than minting a side key the user would have to re-register
+        # upstream.  An explicit ``comment`` or ``force`` is treated as
+        # the operator opting back into "make a new key": ``comment``
+        # for additive multi-deploy-key setups, ``force`` for rotation.
+        if not force and comment is None:
+            for record in self._db.load_ssh_keys_for_scope(self._scope):
+                if record.comment.startswith("tk-main:"):
+                    return SSHInitResult(
+                        key_id=record.id,
+                        key_type=record.key_type,
+                        fingerprint=record.fingerprint,
+                        comment=record.comment,
+                        public_line=public_line_of(record),
+                    )
 
         existing = self._db.list_ssh_keys_for_scope(self._scope)
         # After a force-rotation the new key is the scope's only key, so it

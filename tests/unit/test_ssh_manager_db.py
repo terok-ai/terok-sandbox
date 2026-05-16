@@ -42,20 +42,30 @@ class TestInit:
         result = SSHManager(scope="myproj", db=db).init(comment="custom")
         assert result["comment"] == "custom"
 
-    def test_additive_without_force(self, db: CredentialDB) -> None:
-        """force=False is additive: each init adds a new key alongside existing ones."""
+    def test_idempotent_without_force_or_comment(self, db: CredentialDB) -> None:
+        """Bare re-``init`` on a scope with a primary returns the same key — no fresh mint.
+
+        The operator's mental model is "show me the key for this
+        project"; minting a side key on every re-run forced a second
+        upstream-registration step that surprised users.  Force and an
+        explicit comment still opt back into additive behaviour.
+        """
         first = SSHManager(scope="proj", db=db).init()
         second = SSHManager(scope="proj", db=db).init()
-        assert first["key_id"] != second["key_id"]
+        assert first["key_id"] == second["key_id"]
+        assert first["public_line"] == second["public_line"]
         rows = db.list_ssh_keys_for_scope("proj")
-        assert {r.id for r in rows} == {first["key_id"], second["key_id"]}
+        assert [r.id for r in rows] == [first["key_id"]]
 
-    def test_second_key_gets_tk_side_comment(self, db: CredentialDB) -> None:
-        """Additional keys use ``tk-side:`` so only one ``tk-main:`` leads the agent."""
+    def test_explicit_comment_still_mints_side_key(self, db: CredentialDB) -> None:
+        """Passing ``comment`` is the explicit signal for "make another key" (e.g. GitHub + GitLab)."""
         first = SSHManager(scope="proj", db=db).init()
         assert first["comment"].startswith("tk-main:")
-        second = SSHManager(scope="proj", db=db).init()
-        assert second["comment"].startswith("tk-side:")
+        second = SSHManager(scope="proj", db=db).init(comment="gitlab-deploy")
+        assert second["key_id"] != first["key_id"]
+        assert second["comment"] == "gitlab-deploy"
+        rows = db.list_ssh_keys_for_scope("proj")
+        assert {r.id for r in rows} == {first["key_id"], second["key_id"]}
 
     def test_force_rotates_after_new_key_assigned(self, db: CredentialDB) -> None:
         """force=True assigns the new key *before* revoking the old ones."""

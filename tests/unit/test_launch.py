@@ -359,6 +359,38 @@ class TestRegistration:
         prep = next(c for c in LAUNCH_COMMANDS if c.name == "prepare")
         assert "Build-time" in prep.epilog and "Runtime" in prep.epilog
 
+    def test_profiles_flag_takes_comma_separated_value(self) -> None:
+        """``--profiles base,extra myc`` parses without eating the container.
+
+        Regression for #606 — argparse's greedy ``nargs="+"`` used to
+        slurp the following positional, so ``--profiles base extra myc``
+        bound ``profiles=["base","extra","myc"]`` and errored
+        "container required".  The fix swaps to a single comma-separated
+        value (matches podman's ``--cap-add=A,B``), split by a small
+        ``_csv_list`` helper so the parsed shape stays ``list[str]``
+        for downstream consumers.
+        """
+        import argparse
+
+        from terok_sandbox.commands._types import CommandTree
+
+        parser = argparse.ArgumentParser()
+        CommandTree(LAUNCH_COMMANDS).wire(parser)
+
+        # New comma-separated form parses cleanly.
+        args = parser.parse_args(["prepare", "--profiles", "base,extra", "myc"])
+        assert args.profiles == ["base", "extra"]
+        assert args.container == "myc"
+
+        # Whitespace around items is tolerated.
+        args = parser.parse_args(["prepare", "--profiles", "base, extra", "myc"])
+        assert args.profiles == ["base", "extra"]
+
+        # Old greedy form is now a hard parse error rather than a
+        # silent positional hijack.
+        with pytest.raises(SystemExit):
+            parser.parse_args(["prepare", "--profiles", "base", "extra", "myc"])
+
 
 # ---------------------------------------------------------------------------
 # Handler integration — prepare prints args, cleanup tears down
