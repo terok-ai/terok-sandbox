@@ -36,13 +36,10 @@ import subprocess  # nosec B404 — orchestrates the system ssh CLI
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path  # noqa: TC003 — used in dataclass field type
-from typing import TYPE_CHECKING, BinaryIO
+from typing import BinaryIO
 
 from .podman import _start_stdio_pumps
 from .protocol import Container, ExecResult
-
-if TYPE_CHECKING:
-    pass
 
 # Default annotation key the orchestrator sets at ``podman run`` time so
 # the host side can find the guest's vsock CID after the fact.  Read by
