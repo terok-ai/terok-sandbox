@@ -16,8 +16,9 @@ import io
 import shlex
 import subprocess  # nosec B404 — container exec for ready-marker probing — container exec for ready-marker probing
 import tarfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
+from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from .config import SandboxConfig
@@ -31,7 +32,7 @@ from .runtime.podman import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
     from .gate.lifecycle import GateServerStatus
     from .runtime import ContainerRemoveResult
@@ -43,6 +44,43 @@ if TYPE_CHECKING:
 
 READY_MARKER = ">> init complete"
 """Default log line emitted by init-ssh-and-repo.sh when the container is ready."""
+
+
+SAFE_RUNTIMES: frozenset[str] = frozenset({"crun", "krun"})
+"""OCI runtimes the sandbox will pass to ``podman --runtime``.
+
+Allowlist enforced at command-assembly time.  Podman's ``--runtime``
+accepts either a runtime name (``crun``, ``krun``) **or a path to a
+binary** — passing a path would let a caller who controls
+[`RunSpec.runtime`][terok_sandbox.sandbox.RunSpec] make podman execute
+an arbitrary host binary as part of container creation.  By rejecting
+anything outside this set (and anything that looks path-shaped) we
+keep the runtime selection a known-isolation choice rather than an
+arbitrary-code-execution surface.
+"""
+
+
+SAFE_ANNOTATION_KEYS: frozenset[str] = frozenset(
+    {
+        # krun microVM sizing (Phase 3)
+        "run.oci.krun.cpus",
+        "run.oci.krun.ram_mib",
+        # crun#1913 — passt networking selector for krun port publishing
+        "krun.use_passt",
+    }
+)
+"""OCI annotations the sandbox will forward through ``podman --annotation``.
+
+Annotations are a runtime control plane — krun reads them to size the
+microVM, switch the networking backend, etc. — so they're privileged
+configuration, not arbitrary key/value pairs.  Locking the set down
+means a caller-controlled
+[`RunSpec`][terok_sandbox.sandbox.RunSpec] can't flip an isolation knob
+or feed an unrecognised key to whatever runtime is in use.
+"""
+
+_ANNOTATION_CTRL_CHARS = "\n\r\0"
+"""Characters that would split or truncate the ``--annotation k=v`` arg."""
 
 
 @dataclass(frozen=True)
@@ -183,6 +221,100 @@ class RunSpec:
     the rule when parsing the flag.
     """
 
+    runtime: str | None = None
+    """OCI runtime to use (podman ``--runtime``).
+
+    ``None`` (default) lets podman pick — its built-in default is
+    ``crun``.  Set to ``"krun"`` to launch the task inside a KVM
+    microVM (Phase 3 KrunRuntime).  Backend-neutral here; the runtime
+    string is passed through verbatim and any compatibility decisions
+    live higher up (e.g. orchestrator config validation).
+    """
+
+    annotations: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
+    """OCI annotations forwarded as ``podman --annotation k=v`` entries.
+
+    Used to carry runtime-specific tuning that podman itself doesn't
+    have a dedicated flag for — e.g. ``run.oci.krun.cpus`` /
+    ``run.oci.krun.ram_mib`` (krun microVM sizing) or ``krun.use_passt``
+    (port-publishing path).  Declared as ``Mapping`` so callers can pass
+    plain ``dict``s naturally; ``__post_init__`` snapshots the value into
+    a ``MappingProxyType`` so the frozen-dataclass guarantee still holds
+    against caller-side mutation.
+    """
+
+    def __post_init__(self) -> None:
+        """Snapshot ``annotations`` so a caller-owned dict can't mutate the spec.
+
+        Callers may legitimately pass a plain ``dict`` (Pydantic, JSON-load,
+        tests) — we'd lose the frozen guarantee if we kept the live
+        reference.  Take a copy, wrap it in a ``MappingProxyType``, and
+        write it back through ``object.__setattr__`` since the dataclass
+        itself is ``frozen=True``.
+        """
+        object.__setattr__(self, "annotations", MappingProxyType(dict(self.annotations)))
+
+
+# ---------------------------------------------------------------------------
+# Runtime / annotation validation (security boundary for podman argv)
+# ---------------------------------------------------------------------------
+
+
+def _validate_runtime(runtime: str) -> str:
+    """Return *runtime* if it's a known-safe OCI runtime name.
+
+    Rejects path-shaped inputs (anything containing ``/`` or ``\\``),
+    whitespace-padded strings, and any name not on the
+    [`SAFE_RUNTIMES`][terok_sandbox.sandbox.SAFE_RUNTIMES] allowlist.
+    Refused values become [`ValueError`][ValueError] so a caller-controlled
+    [`RunSpec.runtime`][terok_sandbox.sandbox.RunSpec] can never escalate
+    into "podman, please run this arbitrary binary".
+    """
+    if not isinstance(runtime, str):
+        raise ValueError(f"runtime must be a string, got {type(runtime).__name__}")
+    if "/" in runtime or "\\" in runtime or runtime != runtime.strip():
+        raise ValueError(f"runtime {runtime!r}: paths and whitespace-padded names are rejected")
+    if runtime not in SAFE_RUNTIMES:
+        raise ValueError(
+            f"runtime {runtime!r}: not in allowlist {sorted(SAFE_RUNTIMES)} — "
+            "extend SAFE_RUNTIMES to enable a new backend"
+        )
+    return runtime
+
+
+def _validate_annotations(annotations: Mapping[str, str]) -> Mapping[str, str]:
+    """Return *annotations* if every key is on the allowlist and every value safe.
+
+    Annotations are a runtime control plane (krun reads them to size the
+    microVM, switch the networking backend, …) — treating them as
+    privileged config means a caller-controlled
+    [`RunSpec.annotations`][terok_sandbox.sandbox.RunSpec] can't flip an
+    isolation knob or feed an unrecognised key to whatever runtime is
+    in use.
+
+    Rejects any key not on
+    [`SAFE_ANNOTATION_KEYS`][terok_sandbox.sandbox.SAFE_ANNOTATION_KEYS]
+    and any value containing control characters that would split the
+    ``--annotation k=v`` argv element (``\\n``, ``\\r``, ``\\0``).
+    """
+    for key, value in annotations.items():
+        if key not in SAFE_ANNOTATION_KEYS:
+            raise ValueError(
+                f"OCI annotation {key!r}: not in allowlist "
+                f"{sorted(SAFE_ANNOTATION_KEYS)} — extend SAFE_ANNOTATION_KEYS "
+                "to expose a new runtime knob"
+            )
+        if not isinstance(value, str):
+            raise ValueError(
+                f"OCI annotation {key!r}: value must be a string, got {type(value).__name__}"
+            )
+        if any(c in value for c in _ANNOTATION_CTRL_CHARS):
+            raise ValueError(
+                f"OCI annotation {key!r}: value contains a control character "
+                "that would split the --annotation flag"
+            )
+    return annotations
+
 
 # ---------------------------------------------------------------------------
 # Facade
@@ -282,6 +414,17 @@ class Sandbox:
         """
         cmd: list[str] = ["podman", verb] + (["-d"] if verb == "run" else [])
         cmd += podman_userns_args()
+
+        # ``--runtime`` must come before the image to be honoured; emit
+        # it right after the verb to keep the rest of the assembly order
+        # unchanged.  ``None`` (default) lets podman pick crun itself.
+        if spec.runtime is not None:
+            cmd += ["--runtime", _validate_runtime(spec.runtime)]
+
+        # OCI annotations carry runtime-tuning knobs that have no
+        # dedicated podman flag — e.g. krun microVM sizing.
+        for k, v in _validate_annotations(spec.annotations).items():
+            cmd += ["--annotation", f"{k}={v}"]
 
         if not spec.unrestricted:
             cmd += ["--security-opt", "no-new-privileges"]

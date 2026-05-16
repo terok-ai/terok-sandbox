@@ -71,6 +71,45 @@ class TestRunSpec:
         assert spec.memory_limit == "4g"
         assert spec.cpu_limit == "2.0"
 
+    def test_runtime_defaults_none(self) -> None:
+        """``runtime`` defaults to None (podman picks crun)."""
+        assert _make_spec().runtime is None
+
+    def test_runtime_carries_through(self) -> None:
+        """Explicit runtime survives the frozen dataclass round-trip."""
+        assert _make_spec(runtime="krun").runtime == "krun"
+
+    def test_annotations_default_empty(self) -> None:
+        """``annotations`` defaults to an empty mapping."""
+        assert dict(_make_spec().annotations) == {}
+
+    def test_annotations_carry_through(self) -> None:
+        """Explicit annotations survive the frozen dataclass round-trip."""
+        from types import MappingProxyType
+
+        spec = _make_spec(
+            annotations=MappingProxyType({"run.oci.krun.cpus": "2", "krun.use_passt": "true"})
+        )
+        assert spec.annotations["run.oci.krun.cpus"] == "2"
+        assert spec.annotations["krun.use_passt"] == "true"
+
+    def test_annotations_mutable_input_is_detached(self) -> None:
+        """A caller's mutable dict can't mutate the spec after construction.
+
+        ``MappingProxyType`` is the public type but callers may legitimately
+        pass a plain dict (Pydantic / JSON-load / tests).  The post-init
+        snapshot keeps the frozen guarantee intact.
+        """
+        from types import MappingProxyType
+
+        live: dict[str, str] = {"k": "v1"}
+        spec = _make_spec(annotations=live)  # plain dict accepted
+        live["k"] = "v2"  # caller-side mutation
+        live["new"] = "x"
+        assert spec.annotations["k"] == "v1"
+        assert "new" not in spec.annotations
+        assert isinstance(spec.annotations, MappingProxyType)
+
 
 class TestReadyMarker:
     """Verify READY_MARKER constant."""
@@ -201,6 +240,154 @@ class TestSandbox:
         cmd = mock_run.call_args[0][0]
         assert "--hostname" in cmd
         assert cmd[cmd.index("--hostname") + 1] == "myproj-cli-k3v8h"
+
+    def test_run_omits_runtime_flag_by_default(self) -> None:
+        """Without spec.runtime, --runtime is absent (podman picks crun)."""
+        with (
+            patch("subprocess.run") as mock_run,
+            patch("builtins.print"),
+            patch("terok_sandbox.shield.pre_start", return_value=[]),
+        ):
+            Sandbox().run(_make_spec())
+
+        assert "--runtime" not in mock_run.call_args[0][0]
+
+    def test_run_emits_runtime_flag(self) -> None:
+        """spec.runtime='krun' flows through as --runtime krun."""
+        with (
+            patch("subprocess.run") as mock_run,
+            patch("builtins.print"),
+            patch("terok_sandbox.shield.pre_start", return_value=[]),
+        ):
+            Sandbox().run(_make_spec(runtime="krun"))
+
+        cmd = mock_run.call_args[0][0]
+        assert "--runtime" in cmd
+        assert cmd[cmd.index("--runtime") + 1] == "krun"
+
+    def test_run_emits_annotations(self) -> None:
+        """spec.annotations flow through as --annotation k=v entries."""
+        from types import MappingProxyType
+
+        annotations = MappingProxyType(
+            {"run.oci.krun.cpus": "2", "krun.use_passt": "true"},
+        )
+        with (
+            patch("subprocess.run") as mock_run,
+            patch("builtins.print"),
+            patch("terok_sandbox.shield.pre_start", return_value=[]),
+        ):
+            Sandbox().run(_make_spec(annotations=annotations))
+
+        cmd = mock_run.call_args[0][0]
+        # Each annotation produces a "--annotation k=v" pair.
+        emitted = [cmd[i + 1] for i, t in enumerate(cmd) if t == "--annotation"]
+        assert "run.oci.krun.cpus=2" in emitted
+        assert "krun.use_passt=true" in emitted
+
+    def test_run_rejects_unknown_runtime(self) -> None:
+        """A runtime outside the allowlist never reaches the podman argv.
+
+        Podman's ``--runtime`` accepts a path to a binary — a caller
+        who controls [`RunSpec.runtime`][terok_sandbox.sandbox.RunSpec]
+        with no allowlist could make podman execute an arbitrary host
+        binary as part of container creation.  Refused names raise
+        before ``podman`` is invoked.
+        """
+        from unittest.mock import patch
+
+        with (
+            patch("subprocess.run") as mock_run,
+            patch("builtins.print"),
+            patch("terok_sandbox.shield.pre_start", return_value=[]),
+            pytest.raises(ValueError, match="not in allowlist"),
+        ):
+            Sandbox().run(_make_spec(runtime="evil"))
+        mock_run.assert_not_called()
+
+    def test_run_rejects_path_shaped_runtime(self) -> None:
+        """A path-shaped ``--runtime`` value is the prime escalation vector."""
+        from unittest.mock import patch
+
+        with (
+            patch("subprocess.run") as mock_run,
+            patch("builtins.print"),
+            patch("terok_sandbox.shield.pre_start", return_value=[]),
+            pytest.raises(ValueError, match="paths and whitespace"),
+        ):
+            Sandbox().run(_make_spec(runtime="/tmp/evil-runtime"))  # noqa: S108
+        mock_run.assert_not_called()
+
+    def test_run_rejects_unknown_annotation_key(self) -> None:
+        """Annotations are runtime control plane — unrecognised keys are rejected."""
+        from types import MappingProxyType
+        from unittest.mock import patch
+
+        with (
+            patch("subprocess.run") as mock_run,
+            patch("builtins.print"),
+            patch("terok_sandbox.shield.pre_start", return_value=[]),
+            pytest.raises(ValueError, match="not in allowlist"),
+        ):
+            Sandbox().run(_make_spec(annotations=MappingProxyType({"evil.toggle": "1"})))
+        mock_run.assert_not_called()
+
+    def test_validate_runtime_rejects_non_string(self) -> None:
+        """Defensive guard: the validator demands a real ``str``.
+
+        Callers that bypass type-checked construction (Pydantic load
+        with a bad schema, JSON hydration, future plugin) could pass
+        ``None`` or an int.  Direct unit test on the validator so the
+        defensive branch is covered without going through ``Sandbox.run``.
+        """
+        from terok_sandbox.sandbox import _validate_runtime
+
+        with pytest.raises(ValueError, match="must be a string"):
+            _validate_runtime(42)  # type: ignore[arg-type]
+
+    def test_validate_runtime_rejects_whitespace_padded(self) -> None:
+        """``\" krun \"`` is not a runtime name even though ``krun`` is.
+
+        Separate from the path-shaped check so the whitespace branch is
+        exercised independently of the ``/``/``\\`` rejection.
+        """
+        from terok_sandbox.sandbox import _validate_runtime
+
+        with pytest.raises(ValueError, match="paths and whitespace"):
+            _validate_runtime(" krun")
+        with pytest.raises(ValueError, match="paths and whitespace"):
+            _validate_runtime("krun\t")
+
+    def test_validate_annotations_rejects_non_string_value(self) -> None:
+        """Defensive guard: annotation values must be ``str``.
+
+        Same rationale as ``_validate_runtime`` — non-CLI construction
+        paths shouldn't be able to slip an int or ``None`` through.
+        """
+        from terok_sandbox.sandbox import _validate_annotations
+
+        with pytest.raises(ValueError, match="must be a string"):
+            _validate_annotations({"run.oci.krun.cpus": 2})  # type: ignore[dict-item]
+
+    def test_run_rejects_annotation_value_with_control_chars(self) -> None:
+        """Control chars in an annotation value would split the --annotation argv."""
+        from types import MappingProxyType
+        from unittest.mock import patch
+
+        with (
+            patch("subprocess.run") as mock_run,
+            patch("builtins.print"),
+            patch("terok_sandbox.shield.pre_start", return_value=[]),
+            pytest.raises(ValueError, match="control character"),
+        ):
+            Sandbox().run(
+                _make_spec(
+                    annotations=MappingProxyType(
+                        {"run.oci.krun.cpus": "2\nrun.oci.krun.ram_mib=99999"}
+                    )
+                )
+            )
+        mock_run.assert_not_called()
 
     def test_run_restricted_adds_no_new_privileges(self) -> None:
         """Restricted spec adds --security-opt no-new-privileges."""
