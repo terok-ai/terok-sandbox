@@ -90,11 +90,34 @@ class TestVsockSSHTransportArgv:
         assert isinstance(_make_transport(), KrunTransport)
 
     def test_argv_contains_proxycommand_for_vsock(self) -> None:
-        """The ProxyCommand encodes the CID + port for socat to bridge."""
+        """The ProxyCommand encodes the CID + port for socat to bridge.
+
+        The socat binary is interpolated by absolute path (resolved
+        once at import time) so a hostile PATH can't substitute an
+        attacker binary when ssh hands the ProxyCommand to a shell.
+        """
         argv = _make_transport(cid=7, port=22)._ssh_argv(VsockEndpoint(cid=7, port=22))
-        proxy_idx = argv.index("ProxyCommand=socat - VSOCK-CONNECT:7:22")
-        # Confirm it's actually a value of an `-o` flag, not loose.
-        assert argv[proxy_idx - 1] == "-o"
+        proxy_opts = [argv[i + 1] for i, t in enumerate(argv) if t == "-o"]
+        proxy = next(o for o in proxy_opts if o.startswith("ProxyCommand="))
+        # The expected shape: ``ProxyCommand=/abs/path/socat - VSOCK-CONNECT:7:22``.
+        assert proxy.endswith(" - VSOCK-CONNECT:7:22")
+        # Sanity: bare ``socat`` (no slash) would be the PATH-hijack regression.
+        assert "ProxyCommand=socat " not in proxy
+
+    def test_proxycommand_uses_absolute_socat_path(self) -> None:
+        """``socat`` is pinned to an absolute path resolved at import time."""
+        from terok_sandbox.runtime.krun_transport import _socat_path
+
+        argv = _make_transport()._ssh_argv(VsockEndpoint(cid=3))
+        proxy = next(
+            argv[i + 1]
+            for i, t in enumerate(argv)
+            if t == "-o" and argv[i + 1].startswith("ProxyCommand=")
+        )
+        assert _socat_path() in proxy
+        # Either ``shutil.which`` found it (absolute), or the
+        # ``/usr/bin/socat`` fallback fired — both are absolute paths.
+        assert _socat_path().startswith("/")
 
     def test_argv_uses_batch_and_disables_host_key_check(self) -> None:
         """No prompts; vsock channel obviates host-key persistence."""
@@ -408,3 +431,27 @@ class TestPodmanAnnotationResolver:
         with patch("subprocess.check_output", return_value="99999999999\n"):
             with pytest.raises(RuntimeError, match="invalid .* annotation"):
                 resolver(_StubContainer("ctr"))
+
+    @pytest.mark.parametrize(
+        "bad_key",
+        [
+            'evil"}}{{ .Id ',  # template breakout via "}}
+            "key with space",
+            "key\nwithnewline",
+            "key\twithtab",
+            "-leading-dash",  # OCI annotation keys start with alnum
+            "",
+        ],
+    )
+    def test_rejects_malformed_annotation_key_at_construction(self, bad_key: str) -> None:
+        """``annotation_key`` is concatenated into a Go-template literal.
+
+        Anything outside the OCI annotation charset
+        (``[A-Za-z0-9][A-Za-z0-9._/-]*``) could break out of the
+        ``{{ index .Config.Annotations "<key>" }}`` string slot and
+        execute attacker-chosen template expressions against the
+        container's full inspect output.  Refuse at resolver
+        construction time so the bad key never reaches podman.
+        """
+        with pytest.raises(ValueError, match="OCI annotation charset"):
+            podman_annotation_resolver(bad_key)

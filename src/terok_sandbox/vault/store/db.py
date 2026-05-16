@@ -249,6 +249,22 @@ class CredentialDB:
                 " created with a different key"
             ) from exc
 
+    def transaction(self) -> Any:
+        """Return a context manager that runs the body in a SQLite transaction.
+
+        Sibling modules (e.g.
+        [`ensure_infra_keypair`][terok_sandbox.vault.ssh.keypair.ensure_infra_keypair])
+        need to wrap a read-then-write sequence in a single atomic
+        scope so concurrent callers can't both observe "empty" and
+        both proceed to mint.  Exposing the connection's context-
+        manager protocol keeps that pattern within the DB layer's
+        contract instead of forcing callers to reach into ``_conn``.
+
+        On exit: commits on no exception, rolls back on any exception
+        — standard ``sqlite3.Connection`` semantics.
+        """
+        return self._conn
+
     # ── Provider credentials ────────────────────────────────────────────
 
     def store_credential(self, credential_set: str, provider: str, data: dict) -> None:

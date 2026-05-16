@@ -583,6 +583,33 @@ class TestEnsureInfraKeypair:
         assert result.fingerprint == seeded.fingerprint
         assert result.created is False
 
+    def test_load_or_mint_runs_inside_a_transaction(
+        self, db: CredentialDB, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The check + mint + assign sequence is atomic via ``db.transaction()``.
+
+        Verify the transaction context manager is actually entered —
+        otherwise a concurrent caller could observe "empty" between
+        our load and our assign, then race us to mint a second key
+        for the same scope.
+        """
+        from contextlib import contextmanager
+
+        entered = {"count": 0}
+        exited = {"count": 0}
+
+        @contextmanager
+        def _spy():
+            entered["count"] += 1
+            yield db._conn  # type: ignore[attr-defined]
+            exited["count"] += 1
+
+        monkeypatch.setattr(db, "transaction", _spy)
+        ensure_infra_keypair("%host", db=db)
+
+        assert entered["count"] == 1
+        assert exited["count"] == 1
+
     def test_multi_assigned_scope_returns_newest_not_oldest(self, db: CredentialDB) -> None:
         """If the scope has multiple assigned keys, pick the newest.
 

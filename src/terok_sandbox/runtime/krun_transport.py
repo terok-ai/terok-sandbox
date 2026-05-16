@@ -42,14 +42,43 @@ from __future__ import annotations
 
 import re
 import shlex
+import shutil
 import subprocess  # nosec B404 — orchestrates the system ssh CLI
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from functools import cache
 from pathlib import Path  # noqa: TC003 — used in dataclass field type
 from typing import BinaryIO
 
 from .podman import _start_stdio_pumps
 from .protocol import Container, ExecResult
+
+
+@cache
+def _socat_path() -> str:
+    """Resolve ``socat`` to an absolute path once per process.
+
+    The ``ProxyCommand`` ssh hands to a shell would otherwise resolve
+    ``socat`` via ``PATH`` at every connection — a hostile ``PATH``
+    (sudo wrapper, compromised service env, caller-modified env) could
+    substitute an attacker binary.  Resolving here at module-import
+    granularity pins the binary the operator's install paths point at
+    *now*, not the one a later environment poke might prefer.
+
+    Falls back to ``/usr/bin/socat`` so the failure mode is "socket
+    open fails" rather than "ssh-keygen-style PATH search" if
+    ``shutil.which`` can't see it.
+    """
+    return shutil.which("socat") or "/usr/bin/socat"
+
+
+# Allowlist for ``podman_annotation_resolver``'s key parameter.  The
+# value is concatenated into a ``--format`` Go-template literal that
+# podman parses, so any ``"`` / ``}`` / ``{`` would break out of the
+# intended string slot and execute attacker-chosen template
+# expressions.  OCI annotation keys are already restricted (RFC 6648
+# / OCI conformance) to ``[A-Za-z0-9./_-]``; we mirror that.
+_ANNOTATION_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
 
 # ``ssh host -- arg1 arg2`` does NOT preserve argv on the remote side —
 # sshd concatenates the tokens and runs the result through the user's
@@ -192,8 +221,12 @@ class VsockSSHTransport:
             # additional keys that happen to be accepted by the guest.
             "-o",
             "IdentitiesOnly=yes",
+            # Absolute path to ``socat`` — ssh hands the ProxyCommand
+            # string to a shell that resolves bare names via PATH.  A
+            # hostile PATH would otherwise execute an attacker binary
+            # in place of the real socat.
             "-o",
-            f"ProxyCommand=socat - VSOCK-CONNECT:{endpoint.cid}:{endpoint.port}",
+            f"ProxyCommand={_socat_path()} - VSOCK-CONNECT:{endpoint.cid}:{endpoint.port}",
             # Vsock is host-local and the CID-to-guest binding is enforced
             # by the orchestrator's allocator + ``VsockEndpoint`` range
             # check, so a wrong-endpoint connect is structurally
@@ -306,7 +339,19 @@ def podman_annotation_resolver(
     reads it back at exec time via ``podman inspect``.  Decouples
     transport from the allocator: whatever allocates a free CID per
     task just needs to write it into the agreed annotation.
+
+    *annotation_key* is validated against the OCI annotation charset
+    ``[A-Za-z0-9][A-Za-z0-9._/-]*`` at construction time — the value
+    is interpolated into a podman ``--format`` Go-template literal,
+    so a ``"`` / ``}}`` in the key would break out of the string slot
+    and let attacker-chosen template expressions execute against the
+    container's full inspect output.
     """
+    if not _ANNOTATION_KEY_RE.fullmatch(annotation_key):
+        raise ValueError(
+            f"podman_annotation_resolver: annotation_key {annotation_key!r} must "
+            "match [A-Za-z0-9][A-Za-z0-9._/-]* (OCI annotation charset)"
+        )
 
     def _resolve(container: Container) -> VsockEndpoint:
         # ``--`` ends podman's own option parsing, so a container handle
