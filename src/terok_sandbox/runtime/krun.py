@@ -116,6 +116,9 @@ class FakeKrunTransport:
         timeout: float | None = None,
     ) -> ExecResult:
         """Return a pre-registered result, or empty success."""
+        # ``timeout`` is part of the protocol shape; the fake doesn't
+        # block on anything, so there is nothing to time out on.
+        del timeout
         key = (container.name, tuple(cmd))
         self.exec_calls.append(key)
         return self._results.get(key, ExecResult(exit_code=0, stdout="", stderr=""))
@@ -132,6 +135,10 @@ class FakeKrunTransport:
         timeout: float | None = None,
     ) -> int:
         """Record the call and return exit code 0 (no I/O is moved)."""
+        # Stream + timeout params are part of the protocol shape; the
+        # fake intentionally doesn't move bytes — tests that need stdio
+        # behaviour write a custom transport.
+        del stdin, stdout, stderr, timeout
         self.exec_stdio_calls.append((container.name, tuple(cmd), dict(env or {})))
         return 0
 
