@@ -120,6 +120,44 @@ class TestTokens:
         assert db.revoke_tokens("nonexistent", "subject") == 0
 
 
+class TestTransactionAtomicity:
+    """`db.transaction()` atomic-wraps composed writes across every mutating method.
+
+    The contract: writes inside ``with db.transaction(): ...`` either all
+    land or all roll back, regardless of which subset of write methods
+    the body touches.  Previously only ``store_ssh_key`` /
+    ``assign_ssh_key`` honoured the outer scope; this fixture pins the
+    expectation for credential + token writes that were silently
+    auto-committing mid-block.
+    """
+
+    def test_store_credential_rolls_back_on_exception(self, db: CredentialDB) -> None:
+        """A raise inside the outer scope undoes a `store_credential` call.
+
+        Without the ``_in_outer_tx`` guard the inner ``commit()`` would
+        persist the row before the exception ever surfaced, so the
+        assertion would find ``cred`` populated instead of ``None``.
+        """
+        with pytest.raises(RuntimeError, match="bail"), db.transaction():
+            db.store_credential("default", "claude", {"type": "oauth", "access_token": "abc"})
+            raise RuntimeError("bail")
+        assert db.load_credential("default", "claude") is None
+
+    def test_revoke_tokens_rolls_back_on_exception(self, db: CredentialDB) -> None:
+        """A raise inside the outer scope undoes a `revoke_tokens` call too.
+
+        Mints a token, opens an outer transaction, revokes it, then
+        raises — the token must still be queryable after rollback.
+        """
+        token = db.create_token("scope-x", "task-1", "default", "claude")
+        with pytest.raises(RuntimeError, match="bail"), db.transaction():
+            removed = db.revoke_tokens("scope-x", "task-1")
+            assert removed == 1
+            raise RuntimeError("bail")
+        # The revoke was rolled back together with the outer scope.
+        assert db.lookup_token(token) is not None
+
+
 class TestDBLifecycle:
     """Verify database creation and cleanup."""
 

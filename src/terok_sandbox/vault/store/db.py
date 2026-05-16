@@ -260,16 +260,14 @@ class CredentialDB:
     def transaction(self) -> Iterator[Any]:
         """Run the body in an explicit ``BEGIN IMMEDIATE`` transaction.
 
-        The bare ``with self._conn`` form is no good for caller-driven
-        atomicity: most write methods on this class commit eagerly via
-        ``self._conn.commit()`` at the end, which silently ends the
-        outer scope mid-block.  This context manager takes the write
-        lock up front (``BEGIN IMMEDIATE``) so callers can compose
+        Take the write lock up front so callers can compose
         read-then-write sequences and trust the whole thing serialises
-        against concurrent writers.  Inner write methods detect the
-        active outer transaction via ``self._in_outer_tx`` and skip
-        their per-call commit — no kwarg plumbing required at the
-        call site.
+        against concurrent writers.  Every mutating method on this
+        class (credentials, SSH keys, phantom tokens) consults the
+        ``self._in_outer_tx`` flag this context manager sets and skips
+        its own per-call commit — so the API contract is "any
+        composition of write methods inside ``with db.transaction():``
+        is atomic", with no kwarg plumbing at the call site.
 
         On exit: ``COMMIT`` on clean exit, ``ROLLBACK`` on any
         ``BaseException`` (``KeyboardInterrupt`` / ``SystemExit``
@@ -296,7 +294,8 @@ class CredentialDB:
             "INSERT OR REPLACE INTO credentials (credential_set, provider, data) VALUES (?, ?, ?)",
             (credential_set, provider, json.dumps(data)),
         )
-        self._conn.commit()
+        if not self._in_outer_tx:
+            self._conn.commit()
 
     def load_credential(self, credential_set: str, provider: str) -> dict | None:
         """Return the credential dict, or ``None`` if not found."""
@@ -320,7 +319,8 @@ class CredentialDB:
             "DELETE FROM credentials WHERE credential_set = ? AND provider = ?",
             (credential_set, provider),
         )
-        self._conn.commit()
+        if not self._in_outer_tx:
+            self._conn.commit()
 
     # ── SSH keys ────────────────────────────────────────────────────────
 
@@ -389,7 +389,8 @@ class CredentialDB:
         )
         if cur.rowcount:
             self._bump_ssh_keys_version()
-        self._conn.commit()
+        if not self._in_outer_tx:
+            self._conn.commit()
         return bool(cur.rowcount)
 
     def assign_ssh_key(self, scope: str, key_id: int, *, allow_infra: bool = False) -> None:
@@ -445,7 +446,8 @@ class CredentialDB:
                 (key_id, key_id),
             )
             self._bump_ssh_keys_version()
-        self._conn.commit()
+        if not self._in_outer_tx:
+            self._conn.commit()
 
     def replace_ssh_keys_for_scope(
         self, scope: str, *, keep_key_id: int, allow_infra: bool = False
@@ -598,7 +600,8 @@ class CredentialDB:
             " VALUES (?, ?, ?, ?, ?)",
             (token, scope, subject, credential_set, provider),
         )
-        self._conn.commit()
+        if not self._in_outer_tx:
+            self._conn.commit()
         return token
 
     def lookup_token(self, token: str) -> dict | None:
@@ -629,7 +632,8 @@ class CredentialDB:
             "DELETE FROM proxy_tokens WHERE scope = ? AND subject = ?",
             (scope, subject),
         )
-        self._conn.commit()
+        if not self._in_outer_tx:
+            self._conn.commit()
         return cur.rowcount
 
     # ── Lifecycle ───────────────────────────────────────────────────────

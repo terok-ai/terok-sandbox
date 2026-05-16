@@ -261,8 +261,18 @@ class VsockSSHTransport:
             # additional keys that happen to be accepted by the guest.
             "-o",
             "IdentitiesOnly=yes",
+            # OpenSSH parses ``ProxyCommand`` through ``sh -c``, so the
+            # resolved ``socat`` path crosses that shell parse as
+            # ordinary text.  ``shlex.quote`` keeps shell metacharacters
+            # in the path (spaces, ``;``, backticks, ``$()``) from being
+            # interpreted — relevant when ``shutil.which("socat")`` lands
+            # on a non-standard directory whose name a hostile ``PATH``
+            # could control.  The CID/port pair is already int-coerced
+            # in ``VsockEndpoint.__post_init__`` so it can't carry
+            # metacharacters of its own.
             "-o",
-            f"ProxyCommand={_socat_path()} - VSOCK-CONNECT:{endpoint.cid}:{endpoint.port}",
+            f"ProxyCommand={shlex.quote(_socat_path())} - "
+            f"VSOCK-CONNECT:{endpoint.cid}:{endpoint.port}",
             # Vsock is host-local and the CID-to-guest binding is enforced
             # by the orchestrator's allocator + ``VsockEndpoint`` range
             # check, so a wrong-endpoint connect is structurally
