@@ -231,22 +231,24 @@ class RunSpec:
     live higher up (e.g. orchestrator config validation).
     """
 
-    annotations: MappingProxyType[str, str] = field(default_factory=lambda: MappingProxyType({}))
+    annotations: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
     """OCI annotations forwarded as ``podman --annotation k=v`` entries.
 
     Used to carry runtime-specific tuning that podman itself doesn't
     have a dedicated flag for — e.g. ``run.oci.krun.cpus`` /
     ``run.oci.krun.ram_mib`` (krun microVM sizing) or ``krun.use_passt``
-    (port-publishing path).  Wrapped in ``MappingProxyType`` to keep the
-    dataclass immutable in spirit even with a dict-valued field.
+    (port-publishing path).  Declared as ``Mapping`` so callers can pass
+    plain ``dict``s naturally; ``__post_init__`` snapshots the value into
+    a ``MappingProxyType`` so the frozen-dataclass guarantee still holds
+    against caller-side mutation.
     """
 
     def __post_init__(self) -> None:
         """Snapshot ``annotations`` so a caller-owned dict can't mutate the spec.
 
-        ``MappingProxyType`` is the public type, but callers may legitimately
-        pass a plain dict (Pydantic, JSON-load, tests) — we'd lose the frozen
-        guarantee if we kept the live reference.  Take a copy, wrap it, and
+        Callers may legitimately pass a plain ``dict`` (Pydantic, JSON-load,
+        tests) — we'd lose the frozen guarantee if we kept the live
+        reference.  Take a copy, wrap it in a ``MappingProxyType``, and
         write it back through ``object.__setattr__`` since the dataclass
         itself is ``frozen=True``.
         """
