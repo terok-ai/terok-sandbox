@@ -204,6 +204,17 @@ class RunSpec:
     dataclass immutable in spirit even with a dict-valued field.
     """
 
+    def __post_init__(self) -> None:
+        """Snapshot ``annotations`` so a caller-owned dict can't mutate the spec.
+
+        ``MappingProxyType`` is the public type, but callers may legitimately
+        pass a plain dict (Pydantic, JSON-load, tests) — we'd lose the frozen
+        guarantee if we kept the live reference.  Take a copy, wrap it, and
+        write it back through ``object.__setattr__`` since the dataclass
+        itself is ``frozen=True``.
+        """
+        object.__setattr__(self, "annotations", MappingProxyType(dict(self.annotations)))
+
 
 # ---------------------------------------------------------------------------
 # Facade

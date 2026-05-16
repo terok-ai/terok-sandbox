@@ -93,6 +93,23 @@ class TestRunSpec:
         assert spec.annotations["run.oci.krun.cpus"] == "2"
         assert spec.annotations["krun.use_passt"] == "true"
 
+    def test_annotations_mutable_input_is_detached(self) -> None:
+        """A caller's mutable dict can't mutate the spec after construction.
+
+        ``MappingProxyType`` is the public type but callers may legitimately
+        pass a plain dict (Pydantic / JSON-load / tests).  The post-init
+        snapshot keeps the frozen guarantee intact.
+        """
+        from types import MappingProxyType
+
+        live: dict[str, str] = {"k": "v1"}
+        spec = _make_spec(annotations=live)  # plain dict accepted
+        live["k"] = "v2"  # caller-side mutation
+        live["new"] = "x"
+        assert spec.annotations["k"] == "v1"
+        assert "new" not in spec.annotations
+        assert isinstance(spec.annotations, MappingProxyType)
+
 
 class TestReadyMarker:
     """Verify READY_MARKER constant."""
