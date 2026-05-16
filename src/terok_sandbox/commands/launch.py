@@ -19,6 +19,19 @@ from __future__ import annotations
 from ..config import SandboxConfig
 from ._types import ArgDef, CommandDef
 
+
+def _csv_list(value: str) -> list[str]:
+    """Split a comma-separated CLI value into a list, stripping whitespace.
+
+    Used as ``ArgDef.type`` for multi-value optional flags so they don't
+    rely on argparse's greedy ``nargs="+"`` (which silently slurps the
+    following positional, turning ``--profiles a b mycontainer`` into
+    ``profiles=["a","b","mycontainer"]``).  Comma-separated single-value
+    matches podman's convention (``--cap-add=A,B,C``).
+    """
+    return [p.strip() for p in value.split(",") if p.strip()]
+
+
 _BRIDGES_EPILOG = """\
 Container-side contract:
   The image must have `socat` installed and source the bridge script in
@@ -165,8 +178,8 @@ LAUNCH_COMMANDS: tuple[CommandDef, ...] = (
             ),
             ArgDef(
                 name="--profiles",
-                nargs="+",
-                help="Override shield profiles for this container",
+                type=_csv_list,
+                help="Override shield profiles for this container (comma-separated, e.g. 'dev,pypi')",
             ),
             ArgDef(
                 name="--json",
@@ -207,8 +220,8 @@ LAUNCH_COMMANDS: tuple[CommandDef, ...] = (
             ),
             ArgDef(
                 name="--profiles",
-                nargs="+",
-                help="Override shield profiles for this container",
+                type=_csv_list,
+                help="Override shield profiles for this container (comma-separated, e.g. 'dev,pypi')",
             ),
         ),
     ),
