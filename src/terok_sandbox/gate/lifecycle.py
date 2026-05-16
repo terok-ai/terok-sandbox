@@ -103,7 +103,11 @@ class GateServerManager:
     """
 
     def __init__(self, cfg: SandboxConfig | None = None) -> None:
-        self._cfg = cfg or SandboxConfig()
+        # GateServerManager always needs a real gate_port (TCP listener
+        # in tcp mode, ignored in socket mode).  Resolve here so every
+        # downstream method that reads ``self._cfg.gate_port`` sees an
+        # ``int`` (or ``None`` in socket mode, where it's not used).
+        self._cfg = (cfg or SandboxConfig()).with_resolved_ports()
 
     # -- Public API ----------------------------------------------------------
 

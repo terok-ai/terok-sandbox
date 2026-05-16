@@ -193,8 +193,7 @@ class TestGateHandlerCfgPassthrough:
 
     def test_gate_start_passes_cfg_to_systemd(self) -> None:
         """_handle_gate_start propagates cfg to install_systemd_units."""
-        from unittest.mock import sentinel
-
+        from terok_sandbox import SandboxConfig
         from terok_sandbox.commands import _handle_gate_start
         from terok_sandbox.gate.lifecycle import GateServerManager
 
@@ -202,13 +201,12 @@ class TestGateHandlerCfgPassthrough:
             patch.object(GateServerManager, "is_systemd_available", return_value=True),
             patch.object(GateServerManager, "install_systemd_units") as mock_install,
         ):
-            _handle_gate_start(cfg=sentinel.CFG)
+            _handle_gate_start(cfg=SandboxConfig(services_mode="socket"))
         mock_install.assert_called_once()
 
     def test_gate_start_daemon_passes_cfg(self) -> None:
         """_handle_gate_start propagates cfg to start_daemon in daemon mode."""
-        from unittest.mock import sentinel
-
+        from terok_sandbox import SandboxConfig
         from terok_sandbox.commands import _handle_gate_start
         from terok_sandbox.gate.lifecycle import GateServerManager
 
@@ -216,13 +214,12 @@ class TestGateHandlerCfgPassthrough:
             patch.object(GateServerManager, "is_systemd_available", return_value=False),
             patch.object(GateServerManager, "start_daemon") as mock_start,
         ):
-            _handle_gate_start(port=1234, cfg=sentinel.CFG)
+            _handle_gate_start(port=1234, cfg=SandboxConfig(services_mode="socket"))
         mock_start.assert_called_once_with(port=1234)
 
     def test_gate_stop_systemd_passes_cfg(self) -> None:
         """_handle_gate_stop propagates cfg through the systemd branch."""
-        from unittest.mock import sentinel
-
+        from terok_sandbox import SandboxConfig
         from terok_sandbox.commands import _handle_gate_stop
         from terok_sandbox.gate.lifecycle import GateServerManager, GateServerStatus
 
@@ -231,13 +228,12 @@ class TestGateHandlerCfgPassthrough:
             patch.object(GateServerManager, "get_status", return_value=mock_status),
             patch.object(GateServerManager, "uninstall_systemd_units") as m_uninstall,
         ):
-            _handle_gate_stop(cfg=sentinel.CFG)
+            _handle_gate_stop(cfg=SandboxConfig(services_mode="socket"))
         m_uninstall.assert_called_once()
 
     def test_gate_stop_daemon_passes_cfg(self) -> None:
         """_handle_gate_stop propagates cfg through the daemon branch."""
-        from unittest.mock import sentinel
-
+        from terok_sandbox import SandboxConfig
         from terok_sandbox.commands import _handle_gate_stop
         from terok_sandbox.gate.lifecycle import GateServerManager, GateServerStatus
 
@@ -246,13 +242,12 @@ class TestGateHandlerCfgPassthrough:
             patch.object(GateServerManager, "get_status", return_value=mock_status),
             patch.object(GateServerManager, "stop_daemon") as m_stop,
         ):
-            _handle_gate_stop(cfg=sentinel.CFG)
+            _handle_gate_stop(cfg=SandboxConfig(services_mode="socket"))
         m_stop.assert_called_once()
 
     def test_gate_status_passes_cfg(self) -> None:
         """_handle_gate_status propagates cfg to all downstream calls."""
-        from unittest.mock import sentinel
-
+        from terok_sandbox import SandboxConfig
         from terok_sandbox.commands import _handle_gate_status
         from terok_sandbox.gate.lifecycle import GateServerManager, GateServerStatus
 
@@ -266,7 +261,7 @@ class TestGateHandlerCfgPassthrough:
             ),
             patch.object(GateServerManager, "check_units_outdated", return_value=None),
         ):
-            _handle_gate_status(cfg=sentinel.CFG)
+            _handle_gate_status(cfg=SandboxConfig(services_mode="socket"))
 
     def test_gate_status_prints_hint_on_outdated(self) -> None:
         """_handle_gate_status appends CLI-specific remediation hint to stderr."""

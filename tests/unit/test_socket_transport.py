@@ -231,6 +231,7 @@ class TestGateSocketReachability:
     def test_socket_reachable_returns_daemon_running(self) -> None:
         """get_status reports daemon/running when Unix socket is reachable."""
         mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
+        mock_cfg.with_resolved_ports.return_value = mock_cfg
         mock_cfg.gate_port = 9418
         with unittest.mock.patch.object(
             GateServerManager, "__init__", lambda self, cfg=None: setattr(self, "_cfg", mock_cfg)
@@ -248,6 +249,7 @@ class TestGateSocketReachability:
     def test_systemd_installed_inactive_socket_reachable(self) -> None:
         """Foreground socket server detected even when systemd units are installed but inactive."""
         mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
+        mock_cfg.with_resolved_ports.return_value = mock_cfg
         mock_cfg.gate_port = 9418
         with unittest.mock.patch.object(
             GateServerManager, "__init__", lambda self, cfg=None: setattr(self, "_cfg", mock_cfg)
@@ -267,6 +269,7 @@ class TestGateSocketReachability:
     def test_socket_not_reachable_falls_through(self) -> None:
         """get_status falls through to daemon PID check when socket is not reachable."""
         mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
+        mock_cfg.with_resolved_ports.return_value = mock_cfg
         mock_cfg.gate_port = 9418
         with unittest.mock.patch.object(
             GateServerManager, "__init__", lambda self, cfg=None: setattr(self, "_cfg", mock_cfg)
@@ -542,6 +545,7 @@ class TestInstallSystemdPortGuards:
     def test_gate_tcp_install_without_port_raises(self) -> None:
         """cfg.services_mode='tcp' + gate_port=None → refuses to render."""
         mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
+        mock_cfg.with_resolved_ports.return_value = mock_cfg
         mock_cfg.services_mode = "tcp"
         mock_cfg.gate_port = None
         with unittest.mock.patch.object(
@@ -554,6 +558,7 @@ class TestInstallSystemdPortGuards:
     def test_gate_socket_install_without_port_is_fine(self, tmp_path: Path) -> None:
         """cfg.services_mode='socket' skips the port guard — ``None`` must pass."""
         mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
+        mock_cfg.with_resolved_ports.return_value = mock_cfg
         mock_cfg.services_mode = "socket"
         mock_cfg.gate_port = None
         mock_cfg.gate_socket_path = tmp_path / "gate.sock"
@@ -578,6 +583,8 @@ class TestInstallSystemdPortGuards:
         from terok_sandbox.vault.daemon.lifecycle import VaultManager
 
         mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
+
+        mock_cfg.with_resolved_ports.return_value = mock_cfg
         mock_cfg.services_mode = "tcp"
         mock_cfg.token_broker_port = None
         mock_cfg.ssh_signer_port = 18732
@@ -595,6 +602,8 @@ class TestInstallSystemdPortGuards:
         from terok_sandbox.vault.daemon.lifecycle import VaultManager
 
         mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
+
+        mock_cfg.with_resolved_ports.return_value = mock_cfg
         mock_cfg.services_mode = "tcp"
         mock_cfg.token_broker_port = 18731
         mock_cfg.ssh_signer_port = None
@@ -646,6 +655,7 @@ class TestServicesModeSSOT:
     def test_manager_reads_services_mode_from_cfg(self, tmp_path: Path) -> None:
         """``GateServerManager`` reads transport from the cfg it was handed."""
         mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
+        mock_cfg.with_resolved_ports.return_value = mock_cfg
         mock_cfg.services_mode = "socket"
         mock_cfg.gate_port = None  # deliberately unset — socket mode should not care
         mock_cfg.gate_socket_path = tmp_path / "gate.sock"

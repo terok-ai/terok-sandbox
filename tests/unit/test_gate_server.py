@@ -75,6 +75,8 @@ def patched_install_env(unit_dir: Path) -> Iterator[None]:
     from terok_sandbox.config import SandboxConfig
 
     mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
+
+    mock_cfg.with_resolved_ports.return_value = mock_cfg
     mock_cfg.services_mode = "tcp"
     mock_cfg.gate_port = GATE_PORT
     mock_cfg.gate_base_path = GATE_BASE_PATH
@@ -102,6 +104,7 @@ def patched_daemon_paths(base: Path) -> Iterator[Path]:
 
     pid_file = base / "gate-server.pid"
     mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
+    mock_cfg.with_resolved_ports.return_value = mock_cfg
     mock_cfg.gate_base_path = base / "gate"
     mock_cfg.gate_port = GATE_PORT
     mock_cfg.pid_file_path = pid_file
@@ -176,6 +179,7 @@ class TestBasePathDiverged:
 
         files = unit_file_contents(base_path=GATE_BASE_PATH)
         mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
+        mock_cfg.with_resolved_ports.return_value = mock_cfg
         mock_cfg.gate_base_path = GATE_BASE_PATH
         with patched_unit_dir(files):
             assert GateServerManager(mock_cfg)._base_path_diverged() is None
@@ -185,6 +189,7 @@ class TestBasePathDiverged:
 
         files = unit_file_contents(base_path=Path("/old/gate"))
         mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
+        mock_cfg.with_resolved_ports.return_value = mock_cfg
         mock_cfg.gate_base_path = Path("/new/gate")
         with patched_unit_dir(files):
             warning = GateServerManager(mock_cfg)._base_path_diverged()
@@ -342,6 +347,8 @@ class TestDaemon:
         from terok_sandbox.config import SandboxConfig
 
         mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
+
+        mock_cfg.with_resolved_ports.return_value = mock_cfg
         mock_cfg.pid_file_path = MISSING_PATH / "pid"
         GateServerManager(mock_cfg).stop_daemon()
 
@@ -357,6 +364,8 @@ class TestDaemon:
             from terok_sandbox.config import SandboxConfig
 
             mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
+
+            mock_cfg.with_resolved_ports.return_value = mock_cfg
             mock_cfg.pid_file_path = pid_file
             with (
                 unittest.mock.patch.object(
@@ -378,6 +387,8 @@ class TestDaemon:
         from terok_sandbox.config import SandboxConfig
 
         mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
+
+        mock_cfg.with_resolved_ports.return_value = mock_cfg
         mock_cfg.pid_file_path = MISSING_PATH / "pid"
 
         def _active(_self: GateServerManager, unit: str) -> bool:
@@ -404,6 +415,8 @@ class TestDaemon:
             from terok_sandbox.config import SandboxConfig
 
             mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
+
+            mock_cfg.with_resolved_ports.return_value = mock_cfg
             mock_cfg.pid_file_path = pid_file
 
             with (
@@ -451,6 +464,8 @@ class TestPidfileSymlinkRefusal:
             from terok_sandbox.config import SandboxConfig
 
             mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
+
+            mock_cfg.with_resolved_ports.return_value = mock_cfg
             mock_cfg.pid_file_path = pid_file
 
             with (
@@ -478,6 +493,8 @@ class TestPidfileSymlinkRefusal:
             from terok_sandbox.config import SandboxConfig
 
             mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
+
+            mock_cfg.with_resolved_ports.return_value = mock_cfg
             mock_cfg.pid_file_path = pid_file
 
             with (
@@ -497,6 +514,8 @@ class TestIsDaemonRunning:
         from terok_sandbox.config import SandboxConfig
 
         mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
+
+        mock_cfg.with_resolved_ports.return_value = mock_cfg
         mock_cfg.pid_file_path = MISSING_PATH / "pid"
         assert not GateServerManager(mock_cfg).is_daemon_running()
 
@@ -521,6 +540,8 @@ class TestIsDaemonRunning:
             from terok_sandbox.config import SandboxConfig
 
             mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
+
+            mock_cfg.with_resolved_ports.return_value = mock_cfg
             mock_cfg.pid_file_path = pid_file
             patches = [
                 unittest.mock.patch.object(
@@ -545,6 +566,8 @@ class TestIsManagedServer:
         from terok_sandbox.config import SandboxConfig
 
         mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
+
+        mock_cfg.with_resolved_ports.return_value = mock_cfg
         mock_cfg.pid_file_path = pid_file or MISSING_PATH / "pid"
         return GateServerManager(mock_cfg)
 
@@ -623,6 +646,8 @@ class TestGetServerStatus:
         from terok_sandbox.config import SandboxConfig
 
         mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
+
+        mock_cfg.with_resolved_ports.return_value = mock_cfg
         mock_cfg.gate_port = GATE_PORT
         with (
             unittest.mock.patch.object(
@@ -846,6 +871,8 @@ class TestPublicApi:
         from terok_sandbox.config import SandboxConfig
 
         mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
+
+        mock_cfg.with_resolved_ports.return_value = mock_cfg
         mock_cfg.gate_base_path = GATE_BASE_PATH
         assert GateServerManager(mock_cfg).gate_base_path == GATE_BASE_PATH
 
@@ -853,5 +880,7 @@ class TestPublicApi:
         from terok_sandbox.config import SandboxConfig
 
         mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
+
+        mock_cfg.with_resolved_ports.return_value = mock_cfg
         mock_cfg.gate_port = GATE_PORT
         assert GateServerManager(mock_cfg).server_port == GATE_PORT

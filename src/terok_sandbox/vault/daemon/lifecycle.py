@@ -91,7 +91,12 @@ class VaultManager:
     """
 
     def __init__(self, cfg: SandboxConfig | None = None) -> None:
-        self._cfg = cfg or SandboxConfig()
+        # VaultManager always needs the token-broker + ssh-signer ports
+        # in tcp mode (Unix sockets carry traffic in socket mode, where
+        # the port fields stay ``None``).  Resolve here so downstream
+        # status / install / probe code never has to defend against
+        # ``None`` when it expected an ``int``.
+        self._cfg = (cfg or SandboxConfig()).with_resolved_ports()
 
     # -- Public API ----------------------------------------------------------
 

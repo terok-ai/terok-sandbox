@@ -323,20 +323,26 @@ def test_auto_clamps_out_of_range_preferred() -> None:
     assert port in reg.PORT_RANGE
 
 
-def test_sandbox_config_auto_resolves(tmp_path: Path) -> None:
-    """SandboxConfig with default (None) ports auto-resolves and persists.
+def test_sandbox_config_with_resolved_ports_allocates_and_persists(tmp_path: Path) -> None:
+    """``with_resolved_ports`` is the explicit allocation hook.
 
     Port registry only runs in ``services_mode="tcp"``; socket mode
     leaves the ports unset on purpose (Unix sockets bypass the TCP
-    listener entirely).  The test opts in explicitly.
+    listener entirely).  Construction is side-effect-free
+    (sandbox #156); callers that need real ports opt in via
+    ``with_resolved_ports``.
     """
     from terok_sandbox import SandboxConfig
 
     state = tmp_path / "sandbox-state"
     state.mkdir()
     cfg = SandboxConfig(state_dir=state, services_mode="tcp")
-    assert isinstance(cfg.gate_port, int)
-    assert len({cfg.gate_port, cfg.token_broker_port, cfg.ssh_signer_port}) == 3
+    assert cfg.gate_port is None
+    assert not (state / reg._CLAIMS_FILENAME).exists()
+
+    resolved = cfg.with_resolved_ports()
+    assert isinstance(resolved.gate_port, int)
+    assert len({resolved.gate_port, resolved.token_broker_port, resolved.ssh_signer_port}) == 3
     assert (state / reg._CLAIMS_FILENAME).exists()
 
 

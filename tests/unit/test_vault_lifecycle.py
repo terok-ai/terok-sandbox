@@ -24,16 +24,19 @@ from terok_sandbox.vault.daemon.lifecycle import (
 def _make_cfg(tmp_path: Path, *, services_mode: str = "tcp") -> SandboxConfig:
     """Create a SandboxConfig rooted in tmp_path.
 
-    Defaults to tcp mode so port-allocating tests get int ports out of
-    ``__post_init__``; pass ``services_mode="socket"`` for tests that
-    verify the socket-transport code paths.
+    Defaults to tcp mode and pre-resolves the TCP ports so tests can
+    assert against ``cfg.token_broker_port`` etc. directly — the
+    manager's internal ``with_resolved_ports()`` call will then
+    short-circuit (all ports already set), yielding the same instance.
+    Pass ``services_mode="socket"`` for tests that verify the
+    socket-transport code paths (no allocation either way).
     """
     return SandboxConfig(
         state_dir=tmp_path / "state",
         runtime_dir=tmp_path / "run",
         vault_dir=tmp_path / "vault",
         services_mode=services_mode,  # type: ignore[arg-type]  # narrowed by runtime validation
-    )
+    ).with_resolved_ports()
 
 
 def _make_mgr(tmp_path: Path) -> VaultManager:
