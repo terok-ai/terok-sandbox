@@ -34,11 +34,13 @@ and the SQLCipher open helpers live in
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import json
 import re
 import secrets
 import sqlite3
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -232,6 +234,11 @@ class CredentialDB:
             raise NoPassphraseError(f"no SQLCipher passphrase available for {db_path}")
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = _open_connection(db_path, passphrase)
+        # Set by ``transaction()`` so write methods know whether to
+        # commit themselves or defer to the outer scope.  Bool is fine
+        # — ``BEGIN IMMEDIATE`` rejects nested calls, so the flag never
+        # needs to count.
+        self._in_outer_tx: bool = False
         try:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA foreign_keys=ON")
@@ -248,6 +255,38 @@ class CredentialDB:
                 f"could not decrypt {db_path} — wrong passphrase, or the DB was"
                 " created with a different key"
             ) from exc
+
+    @contextlib.contextmanager
+    def transaction(self) -> Iterator[Any]:
+        """Run the body in an explicit ``BEGIN IMMEDIATE`` transaction.
+
+        The bare ``with self._conn`` form is no good for caller-driven
+        atomicity: most write methods on this class commit eagerly via
+        ``self._conn.commit()`` at the end, which silently ends the
+        outer scope mid-block.  This context manager takes the write
+        lock up front (``BEGIN IMMEDIATE``) so callers can compose
+        read-then-write sequences and trust the whole thing serialises
+        against concurrent writers.  Inner write methods detect the
+        active outer transaction via ``self._in_outer_tx`` and skip
+        their per-call commit — no kwarg plumbing required at the
+        call site.
+
+        On exit: ``COMMIT`` on clean exit, ``ROLLBACK`` on any
+        ``BaseException`` (``KeyboardInterrupt`` / ``SystemExit``
+        included — leaving a half-written ``%scope`` keypair around
+        would be worse than a re-mint on retry).
+        """
+        self._conn.execute("BEGIN IMMEDIATE")
+        self._in_outer_tx = True
+        try:
+            yield self._conn
+        except BaseException:
+            self._conn.execute("ROLLBACK")
+            raise
+        else:
+            self._conn.execute("COMMIT")
+        finally:
+            self._in_outer_tx = False
 
     # ── Provider credentials ────────────────────────────────────────────
 
@@ -298,6 +337,10 @@ class CredentialDB:
         When a row with the same fingerprint already exists the stored bytes
         and comment are left untouched (the caller is re-asserting an
         already-known key, which is expected on repeat ``ssh-import``).
+
+        Auto-commits unless called inside a
+        [`transaction()`][terok_sandbox.vault.store.db.CredentialDB.transaction]
+        scope — in which case the outer block owns the commit.
         """
         cur = self._conn.execute(
             "INSERT OR IGNORE INTO ssh_keys"
@@ -307,7 +350,8 @@ class CredentialDB:
         )
         if cur.rowcount:
             self._bump_ssh_keys_version()
-        self._conn.commit()
+        if not self._in_outer_tx:
+            self._conn.commit()
         row = self._conn.execute(
             "SELECT id FROM ssh_keys WHERE fingerprint = ?",
             (fingerprint,),
@@ -360,6 +404,10 @@ class CredentialDB:
         names (``%host`` for the krun host-side keypair, future
         ``%name`` slots).  Sandbox internals that legitimately provision
         infrastructure scopes pass ``allow_infra=True``.
+
+        Auto-commits unless called inside a
+        [`transaction()`][terok_sandbox.vault.store.db.CredentialDB.transaction]
+        scope — in which case the outer block owns the commit.
         """
         if allow_infra:
             _require_safe_scope(scope)
@@ -371,7 +419,8 @@ class CredentialDB:
         )
         if cur.rowcount:
             self._bump_ssh_keys_version()
-        self._conn.commit()
+        if not self._in_outer_tx:
+            self._conn.commit()
 
     def unassign_ssh_key(self, scope: str, key_id: int, *, allow_infra: bool = False) -> None:
         """Revoke *scope*'s access to *key_id*; drop the key row if orphaned.
