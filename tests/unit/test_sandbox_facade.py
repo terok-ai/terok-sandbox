@@ -285,6 +285,73 @@ class TestSandbox:
         assert "run.oci.krun.cpus=2" in emitted
         assert "krun.use_passt=true" in emitted
 
+    def test_run_rejects_unknown_runtime(self) -> None:
+        """A runtime outside the allowlist never reaches the podman argv.
+
+        Podman's ``--runtime`` accepts a path to a binary — a caller
+        who controls [`RunSpec.runtime`][terok_sandbox.sandbox.RunSpec]
+        with no allowlist could make podman execute an arbitrary host
+        binary as part of container creation.  Refused names raise
+        before ``podman`` is invoked.
+        """
+        from unittest.mock import patch
+
+        with (
+            patch("subprocess.run") as mock_run,
+            patch("builtins.print"),
+            patch("terok_sandbox.shield.pre_start", return_value=[]),
+            pytest.raises(ValueError, match="not in allowlist"),
+        ):
+            Sandbox().run(_make_spec(runtime="evil"))
+        mock_run.assert_not_called()
+
+    def test_run_rejects_path_shaped_runtime(self) -> None:
+        """A path-shaped ``--runtime`` value is the prime escalation vector."""
+        from unittest.mock import patch
+
+        with (
+            patch("subprocess.run") as mock_run,
+            patch("builtins.print"),
+            patch("terok_sandbox.shield.pre_start", return_value=[]),
+            pytest.raises(ValueError, match="paths and whitespace"),
+        ):
+            Sandbox().run(_make_spec(runtime="/tmp/evil-runtime"))  # noqa: S108
+        mock_run.assert_not_called()
+
+    def test_run_rejects_unknown_annotation_key(self) -> None:
+        """Annotations are runtime control plane — unrecognised keys are rejected."""
+        from types import MappingProxyType
+        from unittest.mock import patch
+
+        with (
+            patch("subprocess.run") as mock_run,
+            patch("builtins.print"),
+            patch("terok_sandbox.shield.pre_start", return_value=[]),
+            pytest.raises(ValueError, match="not in allowlist"),
+        ):
+            Sandbox().run(_make_spec(annotations=MappingProxyType({"evil.toggle": "1"})))
+        mock_run.assert_not_called()
+
+    def test_run_rejects_annotation_value_with_control_chars(self) -> None:
+        """Control chars in an annotation value would split the --annotation argv."""
+        from types import MappingProxyType
+        from unittest.mock import patch
+
+        with (
+            patch("subprocess.run") as mock_run,
+            patch("builtins.print"),
+            patch("terok_sandbox.shield.pre_start", return_value=[]),
+            pytest.raises(ValueError, match="control character"),
+        ):
+            Sandbox().run(
+                _make_spec(
+                    annotations=MappingProxyType(
+                        {"run.oci.krun.cpus": "2\nrun.oci.krun.ram_mib=99999"}
+                    )
+                )
+            )
+        mock_run.assert_not_called()
+
     def test_run_restricted_adds_no_new_privileges(self) -> None:
         """Restricted spec adds --security-opt no-new-privileges."""
         with (
