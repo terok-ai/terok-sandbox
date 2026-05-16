@@ -332,6 +332,43 @@ class TestSandbox:
             Sandbox().run(_make_spec(annotations=MappingProxyType({"evil.toggle": "1"})))
         mock_run.assert_not_called()
 
+    def test_validate_runtime_rejects_non_string(self) -> None:
+        """Defensive guard: the validator demands a real ``str``.
+
+        Callers that bypass type-checked construction (Pydantic load
+        with a bad schema, JSON hydration, future plugin) could pass
+        ``None`` or an int.  Direct unit test on the validator so the
+        defensive branch is covered without going through ``Sandbox.run``.
+        """
+        from terok_sandbox.sandbox import _validate_runtime
+
+        with pytest.raises(ValueError, match="must be a string"):
+            _validate_runtime(42)  # type: ignore[arg-type]
+
+    def test_validate_runtime_rejects_whitespace_padded(self) -> None:
+        """``\" krun \"`` is not a runtime name even though ``krun`` is.
+
+        Separate from the path-shaped check so the whitespace branch is
+        exercised independently of the ``/``/``\\`` rejection.
+        """
+        from terok_sandbox.sandbox import _validate_runtime
+
+        with pytest.raises(ValueError, match="paths and whitespace"):
+            _validate_runtime(" krun")
+        with pytest.raises(ValueError, match="paths and whitespace"):
+            _validate_runtime("krun\t")
+
+    def test_validate_annotations_rejects_non_string_value(self) -> None:
+        """Defensive guard: annotation values must be ``str``.
+
+        Same rationale as ``_validate_runtime`` — non-CLI construction
+        paths shouldn't be able to slip an int or ``None`` through.
+        """
+        from terok_sandbox.sandbox import _validate_annotations
+
+        with pytest.raises(ValueError, match="must be a string"):
+            _validate_annotations({"run.oci.krun.cpus": 2})  # type: ignore[dict-item]
+
     def test_run_rejects_annotation_value_with_control_chars(self) -> None:
         """Control chars in an annotation value would split the --annotation argv."""
         from types import MappingProxyType
