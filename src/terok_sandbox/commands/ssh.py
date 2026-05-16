@@ -112,8 +112,8 @@ def _validate_scope_name(scope: str) -> None:
         raise SystemExit(str(exc)) from exc
     if scope.startswith("%"):
         raise SystemExit(
-            f"scope {scope!r}: the ``%`` prefix is reserved for sandbox "
-            "infrastructure scopes (e.g. ``%host``) and is not allowed for "
+            f"scope {scope!r}: the '%' prefix is reserved for sandbox "
+            "infrastructure scopes (e.g. '%host') and is not allowed for "
             "user-created scopes.  Pick a plain name instead."
         )
 
