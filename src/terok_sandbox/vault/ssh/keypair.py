@@ -109,6 +109,29 @@ class ExportResult:
     public_path: Path
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class InfraKeypair:
+    """A keypair backing a sandbox-reserved ``%scope`` infrastructure slot.
+
+    Returned by [`ensure_infra_keypair`][terok_sandbox.vault.ssh.keypair.ensure_infra_keypair].
+    Carries the OpenSSH-PEM-serialised private (ready to ``ssh -i``) and
+    the matching public-key line (ready to bake into an
+    ``authorized_keys`` file), so callers don't have to redo the
+    DER→PEM conversion or re-derive the public line from raw blobs.
+
+    ``created`` distinguishes "minted fresh in this call" from "loaded
+    from the existing assignment" — useful for surfacing first-use
+    diagnostics without a second DB roundtrip.
+    """
+
+    scope: str
+    private_pem: bytes
+    public_line: str
+    fingerprint: str
+    key_type: str
+    created: bool
+
+
 class PasswordProtectedKeyError(ValueError):
     """Raised when an imported private key is encrypted with a passphrase."""
 
@@ -149,6 +172,89 @@ def generate_keypair(key_type: str, *, comment: str) -> GeneratedKeypair:
         public_line=public_line,
         comment=comment,
         fingerprint=fingerprint_of(public_blob),
+    )
+
+
+def ensure_infra_keypair(
+    scope: str,
+    *,
+    db: CredentialDB,
+    comment: str | None = None,
+    key_type: str = "ed25519",
+) -> InfraKeypair:
+    """Load or generate the ``%scope`` infrastructure keypair.
+
+    The single place sandbox-internal callers go for the load-or-mint
+    dance:
+
+    1. If *scope* already has an assigned key, re-serialise it as
+       OpenSSH PEM + render the public line and return.
+    2. Otherwise mint a fresh keypair, persist it under *scope* with
+       ``assign_ssh_key(..., allow_infra=True)``, and return the same
+       shape.
+
+    Only accepts ``%``-prefixed scopes (the infrastructure form added
+    by [`_require_safe_scope`][terok_sandbox.vault.store.db._require_safe_scope]
+    — user scopes go through the normal ``ssh init`` /
+    ``import_ssh_keypair`` paths).  The keypair material is intended
+    for sandbox-owned services that need a stable host-side identity
+    (krun ``%host``, future infrastructure slots); user-controlled
+    code never goes through this helper.
+
+    Args:
+        scope: ``"%name"`` infrastructure scope.  Validated structurally
+            by the DB layer and refused here if it doesn't start with
+            ``%``.
+        db: Open [`CredentialDB`][terok_sandbox.vault.store.db.CredentialDB]
+            — caller manages the lifetime.
+        comment: Comment to embed in the public line on fresh
+            generation.  Ignored when the keypair already exists
+            (existing comment is preserved).  Defaults to
+            ``"terok-infra:<scope>"``.
+        key_type: ``"ed25519"`` (default) or ``"rsa"``.
+
+    Returns:
+        An [`InfraKeypair`][terok_sandbox.vault.ssh.keypair.InfraKeypair]
+        with the OpenSSH PEM private + public line.
+    """
+    if not scope.startswith("%"):
+        raise ValueError(
+            f"ensure_infra_keypair: scope {scope!r} must start with '%' "
+            "(infrastructure-reserved form); user scopes use ssh init or "
+            "import_ssh_keypair instead"
+        )
+
+    existing = db.load_ssh_keys_for_scope(scope)
+    if existing:
+        record = existing[0]
+        return InfraKeypair(
+            scope=scope,
+            private_pem=openssh_pem_of(record.private_der),
+            public_line=public_line_of(record),
+            fingerprint=record.fingerprint,
+            key_type=record.key_type,
+            created=False,
+        )
+
+    keypair = generate_keypair(
+        key_type,
+        comment=comment if comment is not None else f"terok-infra:{scope}",
+    )
+    key_id = db.store_ssh_key(
+        key_type=keypair.key_type,
+        private_der=keypair.private_der,
+        public_blob=keypair.public_blob,
+        comment=keypair.comment,
+        fingerprint=keypair.fingerprint,
+    )
+    db.assign_ssh_key(scope, key_id, allow_infra=True)
+    return InfraKeypair(
+        scope=scope,
+        private_pem=openssh_pem_of(keypair.private_der),
+        public_line=keypair.public_line,
+        fingerprint=keypair.fingerprint,
+        key_type=keypair.key_type,
+        created=True,
     )
 
 

@@ -12,8 +12,10 @@ from pathlib import Path
 import pytest
 
 from terok_sandbox.vault.ssh.keypair import (
+    InfraKeypair,
     KeypairMismatchError,
     PasswordProtectedKeyError,
+    ensure_infra_keypair,
     export_ssh_keypair,
     generate_keypair,
     import_ssh_keypair,
@@ -483,3 +485,100 @@ class TestParseErrors:
         """A garbage private key bubbles up as a plain ``ValueError``, not the passphrase one."""
         with pytest.raises(ValueError):
             parse_openssh_keypair(b"not-a-real-pem")
+
+
+class TestEnsureInfraKeypair:
+    """[`ensure_infra_keypair`][terok_sandbox.vault.ssh.keypair.ensure_infra_keypair]
+    is the load-or-mint single entry point for ``%scope`` slots."""
+
+    def test_first_call_generates_and_persists(self, db: CredentialDB) -> None:
+        """Empty DB → mint + store + assign, ``created=True``."""
+        result = ensure_infra_keypair("%host", db=db)
+        assert isinstance(result, InfraKeypair)
+        assert result.scope == "%host"
+        assert result.created is True
+        assert result.key_type == "ed25519"
+        assert result.private_pem.startswith(b"-----BEGIN OPENSSH PRIVATE KEY-----")
+        assert result.public_line.startswith("ssh-ed25519 ")
+        # Persisted under the infra scope.
+        assert len(db.list_ssh_keys_for_scope("%host")) == 1
+
+    def test_second_call_loads_without_rotating(self, db: CredentialDB) -> None:
+        """Subsequent calls return the same key with ``created=False``.
+
+        The OpenSSH PEM format embeds a random ``checkint`` that's fresh
+        on every serialisation, so the *bytes* differ across calls even
+        for the same underlying private key.  Fingerprint + public line
+        are the stable identity comparators.
+        """
+        first = ensure_infra_keypair("%host", db=db)
+        second = ensure_infra_keypair("%host", db=db)
+        assert second.fingerprint == first.fingerprint
+        assert second.public_line == first.public_line
+        assert second.created is False
+        # Still just one assignment — no duplicate keys.
+        assert len(db.list_ssh_keys_for_scope("%host")) == 1
+        # Both PEMs round-trip to the *same* private key material.
+        from cryptography.hazmat.primitives import serialization
+
+        k1 = serialization.load_ssh_private_key(first.private_pem, password=None)
+        k2 = serialization.load_ssh_private_key(second.private_pem, password=None)
+        assert k1.private_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PrivateFormat.Raw,
+            encryption_algorithm=serialization.NoEncryption(),
+        ) == k2.private_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PrivateFormat.Raw,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+
+    def test_rejects_non_infra_scope(self, db: CredentialDB) -> None:
+        """User scopes (no ``%`` prefix) go through ``import_ssh_keypair``."""
+        with pytest.raises(ValueError, match="must start with '%'"):
+            ensure_infra_keypair("myproject", db=db)
+
+    def test_uses_allow_infra_path(self, db: CredentialDB) -> None:
+        """The store/assign uses ``allow_infra=True`` so the
+        ``%``-prefix gate doesn't refuse the write.  Verified
+        indirectly: a successful generation must have called
+        ``assign_ssh_key`` with the gate satisfied; if it had hit the
+        user-scope guard, the call would have raised
+        ``InvalidScopeName``."""
+        ensure_infra_keypair("%host", db=db)  # no raise
+
+    def test_default_comment_names_the_scope(self, db: CredentialDB) -> None:
+        """Default comment reads ``terok-infra:%scope`` so operators
+        can tell the key apart from user-imported ones."""
+        result = ensure_infra_keypair("%host", db=db)
+        assert result.public_line.rstrip().endswith("terok-infra:%host")
+
+    def test_explicit_comment_overrides_default(self, db: CredentialDB) -> None:
+        """A caller can supply their own comment on first generation."""
+        result = ensure_infra_keypair("%host", db=db, comment="krun-host (terok)")
+        assert result.public_line.rstrip().endswith("krun-host (terok)")
+
+    def test_pem_round_trips_to_a_loadable_private_key(self, db: CredentialDB) -> None:
+        """The returned PEM is what ``ssh -i`` reads — load it back."""
+        from cryptography.hazmat.primitives import serialization
+
+        result = ensure_infra_keypair("%host", db=db)
+        # Parses without exception → valid OpenSSH PEM.
+        serialization.load_ssh_private_key(result.private_pem, password=None)
+
+    def test_existing_assignment_made_outside_helper_is_reused(self, db: CredentialDB) -> None:
+        """If sandbox internals seeded ``%host`` directly, the helper
+        re-serialises that key rather than minting a new one."""
+        seeded = generate_keypair("ed25519", comment="legacy")
+        key_id = db.store_ssh_key(
+            key_type=seeded.key_type,
+            private_der=seeded.private_der,
+            public_blob=seeded.public_blob,
+            comment=seeded.comment,
+            fingerprint=seeded.fingerprint,
+        )
+        db.assign_ssh_key("%host", key_id, allow_infra=True)
+
+        result = ensure_infra_keypair("%host", db=db)
+        assert result.fingerprint == seeded.fingerprint
+        assert result.created is False
