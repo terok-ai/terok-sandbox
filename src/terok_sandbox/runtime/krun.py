@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""Krun backend for `.protocol.ContainerRuntime` — microVM isolation peer of
-[`PodmanRuntime`][terok_sandbox.runtime.podman.PodmanRuntime].
+"""Krun backend for [`ContainerRuntime`][terok_sandbox.runtime.protocol.ContainerRuntime] —
+microVM isolation peer of [`PodmanRuntime`][terok_sandbox.runtime.podman.PodmanRuntime].
 
 Launches unmodified OCI images inside KVM microVMs via ``podman --runtime
 krun``.  Container lifecycle (state, logs, force-remove, image inspection)
