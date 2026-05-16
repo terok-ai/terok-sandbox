@@ -16,8 +16,9 @@ import io
 import shlex
 import subprocess  # nosec B404 — container exec for ready-marker probing — container exec for ready-marker probing
 import tarfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
+from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from .config import SandboxConfig
@@ -183,6 +184,26 @@ class RunSpec:
     the rule when parsing the flag.
     """
 
+    runtime: str | None = None
+    """OCI runtime to use (podman ``--runtime``).
+
+    ``None`` (default) lets podman pick — its built-in default is
+    ``crun``.  Set to ``"krun"`` to launch the task inside a KVM
+    microVM (Phase 3 KrunRuntime).  Backend-neutral here; the runtime
+    string is passed through verbatim and any compatibility decisions
+    live higher up (e.g. orchestrator config validation).
+    """
+
+    annotations: MappingProxyType[str, str] = field(default_factory=lambda: MappingProxyType({}))
+    """OCI annotations forwarded as ``podman --annotation k=v`` entries.
+
+    Used to carry runtime-specific tuning that podman itself doesn't
+    have a dedicated flag for — e.g. ``run.oci.krun.cpus`` /
+    ``run.oci.krun.ram_mib`` (krun microVM sizing) or ``krun.use_passt``
+    (port-publishing path).  Wrapped in ``MappingProxyType`` to keep the
+    dataclass immutable in spirit even with a dict-valued field.
+    """
+
 
 # ---------------------------------------------------------------------------
 # Facade
@@ -282,6 +303,17 @@ class Sandbox:
         """
         cmd: list[str] = ["podman", verb] + (["-d"] if verb == "run" else [])
         cmd += podman_userns_args()
+
+        # ``--runtime`` must come before the image to be honoured; emit
+        # it right after the verb to keep the rest of the assembly order
+        # unchanged.  ``None`` (default) lets podman pick crun itself.
+        if spec.runtime is not None:
+            cmd += ["--runtime", spec.runtime]
+
+        # OCI annotations carry runtime-tuning knobs that have no
+        # dedicated podman flag — e.g. krun microVM sizing.
+        for k, v in spec.annotations.items():
+            cmd += ["--annotation", f"{k}={v}"]
 
         if not spec.unrestricted:
             cmd += ["--security-opt", "no-new-privileges"]

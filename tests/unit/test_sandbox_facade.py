@@ -71,6 +71,28 @@ class TestRunSpec:
         assert spec.memory_limit == "4g"
         assert spec.cpu_limit == "2.0"
 
+    def test_runtime_defaults_none(self) -> None:
+        """``runtime`` defaults to None (podman picks crun)."""
+        assert _make_spec().runtime is None
+
+    def test_runtime_carries_through(self) -> None:
+        """Explicit runtime survives the frozen dataclass round-trip."""
+        assert _make_spec(runtime="krun").runtime == "krun"
+
+    def test_annotations_default_empty(self) -> None:
+        """``annotations`` defaults to an empty mapping."""
+        assert dict(_make_spec().annotations) == {}
+
+    def test_annotations_carry_through(self) -> None:
+        """Explicit annotations survive the frozen dataclass round-trip."""
+        from types import MappingProxyType
+
+        spec = _make_spec(
+            annotations=MappingProxyType({"run.oci.krun.cpus": "2", "krun.use_passt": "true"})
+        )
+        assert spec.annotations["run.oci.krun.cpus"] == "2"
+        assert spec.annotations["krun.use_passt"] == "true"
+
 
 class TestReadyMarker:
     """Verify READY_MARKER constant."""
@@ -201,6 +223,50 @@ class TestSandbox:
         cmd = mock_run.call_args[0][0]
         assert "--hostname" in cmd
         assert cmd[cmd.index("--hostname") + 1] == "myproj-cli-k3v8h"
+
+    def test_run_omits_runtime_flag_by_default(self) -> None:
+        """Without spec.runtime, --runtime is absent (podman picks crun)."""
+        with (
+            patch("subprocess.run") as mock_run,
+            patch("builtins.print"),
+            patch("terok_sandbox.shield.pre_start", return_value=[]),
+        ):
+            Sandbox().run(_make_spec())
+
+        assert "--runtime" not in mock_run.call_args[0][0]
+
+    def test_run_emits_runtime_flag(self) -> None:
+        """spec.runtime='krun' flows through as --runtime krun."""
+        with (
+            patch("subprocess.run") as mock_run,
+            patch("builtins.print"),
+            patch("terok_sandbox.shield.pre_start", return_value=[]),
+        ):
+            Sandbox().run(_make_spec(runtime="krun"))
+
+        cmd = mock_run.call_args[0][0]
+        assert "--runtime" in cmd
+        assert cmd[cmd.index("--runtime") + 1] == "krun"
+
+    def test_run_emits_annotations(self) -> None:
+        """spec.annotations flow through as --annotation k=v entries."""
+        from types import MappingProxyType
+
+        annotations = MappingProxyType(
+            {"run.oci.krun.cpus": "2", "krun.use_passt": "true"},
+        )
+        with (
+            patch("subprocess.run") as mock_run,
+            patch("builtins.print"),
+            patch("terok_sandbox.shield.pre_start", return_value=[]),
+        ):
+            Sandbox().run(_make_spec(annotations=annotations))
+
+        cmd = mock_run.call_args[0][0]
+        # Each annotation produces a "--annotation k=v" pair.
+        emitted = [cmd[i + 1] for i, t in enumerate(cmd) if t == "--annotation"]
+        assert "run.oci.krun.cpus=2" in emitted
+        assert "krun.use_passt=true" in emitted
 
     def test_run_restricted_adds_no_new_privileges(self) -> None:
         """Restricted spec adds --security-opt no-new-privileges."""
