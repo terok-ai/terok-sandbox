@@ -47,6 +47,7 @@ def bare_cfg() -> SandboxConfig:
     the registry.
     """
     mock = MagicMock(spec=SandboxConfig)
+    mock.with_resolved_ports.return_value = mock
     mock.services_mode = "socket"
     return mock
 

@@ -313,33 +313,56 @@ class SandboxConfig:
     every ``SandboxConfig`` carries a resolved mode.
     """
 
-    def __post_init__(self) -> None:
-        """Auto-resolve ``None`` ports via the shared port registry.
+    def with_resolved_ports(self) -> SandboxConfig:
+        """Return a copy with TCP ports allocated via the shared port registry.
 
-        Skipped in socket mode — gate, broker, and SSH signer all listen
-        on Unix sockets there, so TCP claims would be wasted work (and a
-        historical source of TUI-thread port-collision errors).
+        Idempotent — returns ``self`` (no copy) when there is nothing
+        to allocate: socket mode never needs TCP listeners, and
+        already-fully-resolved cfgs short-circuit.
+
+        **Side-effectful**: allocation hits the shared port registry,
+        bind-tests each candidate, and persists the claim to
+        ``state_dir/port-claims.json``.  Keep this call OUT of
+        construction paths that don't actually launch services
+        (sickbay checks, config inspection, tests) — that's why it's
+        opt-in rather than baked into ``__post_init__``.  The
+        consumers that *do* need real ports (``VaultManager``,
+        ``GateServerManager``, ``Sandbox``) wrap their stored cfg in
+        ``self._cfg = self._cfg.with_resolved_ports()`` at construction
+        time so downstream code never sees ``None`` for the port it
+        needs.
         """
         if self.services_mode == "socket":
-            return
-        if self.gate_port is None or self.token_broker_port is None or self.ssh_signer_port is None:
-            from .port_registry import resolve_service_ports
+            return self
+        if (
+            self.gate_port is not None
+            and self.token_broker_port is not None
+            and self.ssh_signer_port is not None
+        ):
+            return self
+        from dataclasses import replace
 
-            ports = resolve_service_ports(
-                self.gate_port,
-                self.token_broker_port,
-                self.ssh_signer_port,
-                gate_explicit=self.gate_port is not None,
-                proxy_explicit=self.token_broker_port is not None,
-                ssh_explicit=self.ssh_signer_port is not None,
-                state_dir=self.state_dir,
-            )
-            if self.gate_port is None:
-                object.__setattr__(self, "gate_port", ports.gate)
-            if self.token_broker_port is None:
-                object.__setattr__(self, "token_broker_port", ports.proxy)
-            if self.ssh_signer_port is None:
-                object.__setattr__(self, "ssh_signer_port", ports.ssh_agent)
+        from .port_registry import resolve_service_ports
+
+        ports = resolve_service_ports(
+            self.gate_port,
+            self.token_broker_port,
+            self.ssh_signer_port,
+            gate_explicit=self.gate_port is not None,
+            proxy_explicit=self.token_broker_port is not None,
+            ssh_explicit=self.ssh_signer_port is not None,
+            state_dir=self.state_dir,
+        )
+        return replace(
+            self,
+            gate_port=self.gate_port if self.gate_port is not None else ports.gate,
+            token_broker_port=(
+                self.token_broker_port if self.token_broker_port is not None else ports.proxy
+            ),
+            ssh_signer_port=(
+                self.ssh_signer_port if self.ssh_signer_port is not None else ports.ssh_agent
+            ),
+        )
 
     @property
     def gate_base_path(self) -> Path:

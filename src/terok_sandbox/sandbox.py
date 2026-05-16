@@ -206,7 +206,11 @@ class Sandbox:
         *,
         runtime: ContainerRuntime | None = None,
     ) -> None:
-        self._cfg = config or SandboxConfig()
+        # ``Sandbox`` is the facade that launches containers + composes
+        # gate/vault managers; resolve TCP ports here so the same
+        # registry pass covers everyone downstream.  ``cfg`` itself
+        # stays pure — only the cfg ``Sandbox`` carries is allocated.
+        self._cfg = (config or SandboxConfig()).with_resolved_ports()
         self._runtime: ContainerRuntime = runtime or PodmanRuntime()
 
     @property
