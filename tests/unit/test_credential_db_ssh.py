@@ -219,6 +219,11 @@ class TestScopeNameGuard:
             "space in name",  # whitespace
             "null\x00char",  # NUL byte
             "a" * 65,  # over the 64-char cap
+            "%",  # bare sigil, no infra name
+            "%Host",  # infra form is lowercase only
+            "%host-suffix",  # infra form allows only [a-z]+
+            "%host.x",  # ditto
+            "prefix%host",  # sigil only valid at position 0
         ],
     )
     def test_rejects_unsafe_names(self, bad: str) -> None:
@@ -228,7 +233,15 @@ class TestScopeNameGuard:
 
     @pytest.mark.parametrize(
         "good",
-        ["proj", "My-Project", "alpha.beta", "0xdeadbeef", "a" * 64],
+        [
+            "proj",
+            "My-Project",
+            "alpha.beta",
+            "0xdeadbeef",
+            "a" * 64,
+            "%host",  # reserved infra scope: krun host-side keypair
+            "%vault",  # any %[a-z]+ form is structurally accepted
+        ],
     )
     def test_accepts_reasonable_names(self, good: str) -> None:
         """Valid scope identifiers pass the guard silently."""

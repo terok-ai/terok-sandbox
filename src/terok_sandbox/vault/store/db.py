@@ -69,7 +69,13 @@ __all__ = [
 
 # ── Scope-name guard ────────────────────────────────────────────────────────
 
-_SCOPE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+_SCOPE_NAME_RE = re.compile(r"%[a-z]+|[A-Za-z0-9][A-Za-z0-9._-]*")
+"""Two parallel forms: ``%name`` for infrastructure scopes reserved by the
+sandbox itself (e.g. ``%host`` for the host-side krun keypair), and the
+plain ``name`` form for user/project scopes.  The leading ``%`` is a
+sigil that lets every call site distinguish operator-controlled scopes
+from caller-controlled ones at a glance, without a separate lookup."""
+
 _MAX_SCOPE_LEN = 64
 """Bound below the 108-byte AF_UNIX path limit once combined with
 ``ssh-agent-local-<scope>.sock`` + ``runtime_dir``."""
@@ -94,8 +100,8 @@ def _require_safe_scope(scope: str) -> None:
         raise InvalidScopeName(f"scope {scope!r} exceeds the {_MAX_SCOPE_LEN}-character limit")
     if not _SCOPE_NAME_RE.fullmatch(scope):
         raise InvalidScopeName(
-            f"invalid scope {scope!r}: must start with alphanumeric and match "
-            "[A-Za-z0-9][A-Za-z0-9._-]*"
+            f"invalid scope {scope!r}: must match either user form "
+            "[A-Za-z0-9][A-Za-z0-9._-]* or infrastructure form %[a-z]+"
         )
 
 
