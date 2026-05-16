@@ -234,6 +234,27 @@ class TestScopeNameValidation:
         with pytest.raises(SystemExit, match="exceeds"):
             _validate_scope_name("x" * 65)
 
+    def test_percent_prefix_rejected_at_cli(self) -> None:
+        """The ``%`` prefix is reserved for sandbox infrastructure scopes.
+
+        The DB validator accepts both forms because both round-trip through
+        it, but user CLI calls must never let a caller create a scope
+        that could later collide with a sandbox-reserved name (``%host``, …).
+        """
+        from terok_sandbox.commands import _validate_scope_name
+
+        with pytest.raises(SystemExit, match="reserved for sandbox"):
+            _validate_scope_name("%host")
+        with pytest.raises(SystemExit, match="reserved for sandbox"):
+            _validate_scope_name("%anything")
+
+    def test_plain_user_scope_still_accepted(self) -> None:
+        """The reservation guard doesn't regress regular user scopes."""
+        from terok_sandbox.commands import _validate_scope_name
+
+        _validate_scope_name("my-project")  # no raise
+        _validate_scope_name("alpha.beta")
+
 
 class TestImportMessaging:
     """``ssh-import`` emits different messages depending on DB + scope state."""

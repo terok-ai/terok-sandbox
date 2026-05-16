@@ -90,11 +90,19 @@ def _print_key_table(rows: list[KeyRow], *, numbered: bool = False) -> None:
 
 
 def _validate_scope_name(scope: str) -> None:
-    """Raise [`SystemExit`][SystemExit] if *scope* is not a safe filesystem identifier.
+    """Raise [`SystemExit`][SystemExit] if *scope* is not safe for a user CLI call.
 
-    Delegates to the canonical DB-layer validator so the character set
-    *and* the length bound stay co-located with the write sites that
-    depend on them.
+    Two checks, in order:
+
+    1. The DB-layer ``_require_safe_scope`` rejects character-set and
+       length violations.  Co-located with the write sites that depend
+       on them.
+    2. The ``%`` prefix is reserved for *infrastructure* scopes the
+       sandbox owns itself (``%host`` for the krun host-side keypair,
+       future ``%name`` slots).  The DB validator structurally accepts
+       both forms because both have to round-trip through it, but
+       user-facing CLI verbs must never let a caller create a scope
+       that could later collide with a sandbox-reserved name.
     """
     from ..vault.store.db import InvalidScopeName, _require_safe_scope
 
@@ -102,6 +110,12 @@ def _validate_scope_name(scope: str) -> None:
         _require_safe_scope(scope)
     except InvalidScopeName as exc:
         raise SystemExit(str(exc)) from exc
+    if scope.startswith("%"):
+        raise SystemExit(
+            f"scope {scope!r}: the ``%`` prefix is reserved for sandbox "
+            "infrastructure scopes (e.g. ``%host``) and is not allowed for "
+            "user-created scopes.  Pick a plain name instead."
+        )
 
 
 def _filter_key_rows(
