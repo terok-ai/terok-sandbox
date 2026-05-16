@@ -233,10 +233,9 @@ class VsockSSHTransport:
         a real PTY even when stdin isn't a terminal (the caller may be
         running under tmux or an IDE proxy), and falls back to a no-arg
         invocation of the in-guest user's login shell when *command* is
-        empty.  Argv tokens past ``--`` are ``shlex.quote``d via
-        [`_remote_command`][terok_sandbox.runtime.krun_transport._remote_command]
-        so the SSH wire format preserves argv semantics across the
-        login-shell parse on the far side.
+        empty.  Argv tokens past ``--`` are ``shlex.quote``d (same
+        helper the exec paths use) so the SSH wire format preserves
+        argv semantics across the login-shell parse on the far side.
         """
         endpoint = self._resolver(container)
         argv = self._ssh_argv(endpoint, interactive=True)
