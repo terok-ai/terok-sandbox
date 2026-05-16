@@ -193,10 +193,10 @@ def ensure_infra_keypair(
        ``assign_ssh_key(..., allow_infra=True)``, and return the same
        shape.
 
-    Only accepts ``%``-prefixed scopes (the infrastructure form added
-    by [`_require_safe_scope`][terok_sandbox.vault.store.db._require_safe_scope]
-    — user scopes go through the normal ``ssh init`` /
-    ``import_ssh_keypair`` paths).  The keypair material is intended
+    Only accepts ``%``-prefixed scopes (the infrastructure form the
+    DB-layer safe-scope validator recognises) — user scopes go through
+    the normal ``ssh init`` / [`import_ssh_keypair`][terok_sandbox.vault.ssh.keypair.import_ssh_keypair]
+    paths.  The keypair material is intended
     for sandbox-owned services that need a stable host-side identity
     (krun ``%host``, future infrastructure slots); user-controlled
     code never goes through this helper.
