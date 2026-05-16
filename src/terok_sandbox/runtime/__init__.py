@@ -9,6 +9,7 @@ modules directly.
 
 from __future__ import annotations
 
+from .krun import FakeKrunTransport, KrunRuntime, KrunTransport
 from .null import NullRuntime
 from .podman import GpuConfigError, PodmanRuntime
 from .protocol import (
@@ -31,8 +32,12 @@ __all__ = [
     "LogStream",
     "PortReservation",
     # Backends
+    "KrunRuntime",
     "NullRuntime",
     "PodmanRuntime",
+    # Krun transport seam (real impl ships separately)
+    "FakeKrunTransport",
+    "KrunTransport",
     # Error types that remain public
     "GpuConfigError",
 ]
