@@ -1,0 +1,236 @@
+# SPDX-FileCopyrightText: 2026 Jiri Vyskocil
+# SPDX-License-Identifier: Apache-2.0
+
+"""Orchestrator-stable surface of ``terok-sandbox``.
+
+This is the **contract** higher-layer orchestrators (terok-executor,
+terok) consume.  Sandbox commits to keep these names backward-
+compatible across minor releases; renaming, removing, or changing
+the signature of anything re-exported here is a breaking-change
+event that requires a coordinated bump across the dependency chain.
+
+Anything else exposed by ``terok_sandbox/__init__.py`` is **not** in
+this contract — those symbols are for sandbox's own CLI users and
+its tests, and may move or change without a deprecation cycle.
+
+## The forcing function
+
+Adding a symbol to this file is a deliberate edit.  Two reviewers
+(sandbox + the downstream that asked for the symbol) see the
+addition; the diff carries a story.  Auto-generating this surface
+would defeat the point — the friction is the feature: stable APIs
+stay small because growing them costs.
+
+When a downstream stops using a symbol, drop it from this file.
+Sandbox can then refactor or remove the underlying implementation
+without coordinated bumps.
+
+## Layout
+
+The re-exports below mirror the order in ``__init__.py`` so a side-
+by-side diff against the package's wider surface is easy to read.
+Group by concern — types, manager classes, free functions, command
+trees, runtime + paths — and keep symbols inside each group
+alphabetised.
+"""
+
+from __future__ import annotations
+
+# Absolute import from the package (rather than ``from . import ...``):
+# most of these names are re-exports in ``__init__.py``, not submodules,
+# so the relative form trips the ``test_no_stale_relative_imports``
+# static checker.  Absolute import is also accidentally honest — this
+# module's source of truth is the package's published surface.
+from terok_sandbox import (
+    EXIT_MANUAL_STEP_NEEDED,
+    GATE_COMMANDS,
+    SERVICES_TCP_OPTOUT_YAML,
+    SSH_COMMANDS,
+    BestEffortLogger,
+    CheckVerdict,
+    CommandDef,
+    CommandTree,
+    ConfigScope,
+    ConfigStack,
+    ContainerRuntime,
+    CredentialDB,
+    DoctorCheck,
+    EnvironmentCheck,
+    ExecResult,
+    GateAuthNotConfigured,
+    GateServerManager,
+    GateServerStatus,
+    GateStalenessInfo,
+    GitGate,
+    Image,
+    LifecycleHooks,
+    NoPassphraseError,
+    NullRuntime,
+    PodmanRuntime,
+    RawSSHSection,
+    Sandbox,
+    SandboxConfig,
+    SelinuxStatus,
+    ServicesMode,
+    SetupVerdict,
+    Sharing,
+    SSHInitResult,
+    SSHManager,
+    VaultManager,
+    VaultStatus,
+    VaultUnreachableError,
+    VolumeSpec,
+    WrongPassphraseError,
+    bold,
+    check_environment,
+    check_selinux_status,
+    check_units_outdated,
+    claim_port,
+    create_token,
+    down,
+    ensure_server_reachable,
+    ensure_vault_reachable,
+    gate_use_personal_ssh_default,
+    get_gate_base_path,
+    get_gate_server_port,
+    get_server_status,
+    get_ssh_signer_port,
+    get_token_broker_port,
+    get_vault_status,
+    handle_vault_seal,
+    handle_vault_to_keyring,
+    installed_versions,
+    is_ssh_url,
+    is_systemd_available,
+    is_systemd_creds_available,
+    is_vault_socket_active,
+    is_vault_systemd_available,
+    make_shield,
+    namespace_runtime_dir,
+    namespace_state_dir,
+    needs_setup,
+    public_line_of,
+    quarantine,
+    read_stamp,
+    red,
+    release_port,
+    resolve_container_state_dir,
+    revoke_token_for_task,
+    run_setup,
+    sandbox_doctor_checks,
+    sandbox_uninstall,
+    selinux_install_command,
+    selinux_install_script,
+    setup_hooks_direct,
+    shield_interactive_session,
+    shield_watch_session,
+    stage_line,
+    stamp_path,
+    start_daemon,
+    start_vault,
+    state,
+    status,
+    stop_daemon,
+    stop_vault,
+    systemd_creds_has_tpm2,
+    up,
+    yaml_update_section,
+    yellow,
+)
+
+__all__ = [
+    "BestEffortLogger",
+    "CheckVerdict",
+    "CommandDef",
+    "CommandTree",
+    "ConfigScope",
+    "ConfigStack",
+    "ContainerRuntime",
+    "CredentialDB",
+    "DoctorCheck",
+    "EXIT_MANUAL_STEP_NEEDED",
+    "EnvironmentCheck",
+    "ExecResult",
+    "GATE_COMMANDS",
+    "GateAuthNotConfigured",
+    "GateServerManager",
+    "GateServerStatus",
+    "GateStalenessInfo",
+    "GitGate",
+    "Image",
+    "LifecycleHooks",
+    "NoPassphraseError",
+    "NullRuntime",
+    "PodmanRuntime",
+    "RawSSHSection",
+    "SERVICES_TCP_OPTOUT_YAML",
+    "SSH_COMMANDS",
+    "SSHInitResult",
+    "SSHManager",
+    "Sandbox",
+    "SandboxConfig",
+    "SelinuxStatus",
+    "ServicesMode",
+    "SetupVerdict",
+    "Sharing",
+    "VaultManager",
+    "VaultStatus",
+    "VaultUnreachableError",
+    "VolumeSpec",
+    "WrongPassphraseError",
+    "bold",
+    "check_environment",
+    "check_selinux_status",
+    "check_units_outdated",
+    "claim_port",
+    "create_token",
+    "down",
+    "ensure_server_reachable",
+    "ensure_vault_reachable",
+    "gate_use_personal_ssh_default",
+    "get_gate_base_path",
+    "get_gate_server_port",
+    "get_server_status",
+    "get_ssh_signer_port",
+    "get_token_broker_port",
+    "get_vault_status",
+    "handle_vault_seal",
+    "handle_vault_to_keyring",
+    "installed_versions",
+    "is_ssh_url",
+    "is_systemd_available",
+    "is_systemd_creds_available",
+    "is_vault_socket_active",
+    "is_vault_systemd_available",
+    "make_shield",
+    "namespace_runtime_dir",
+    "namespace_state_dir",
+    "needs_setup",
+    "public_line_of",
+    "quarantine",
+    "read_stamp",
+    "red",
+    "release_port",
+    "resolve_container_state_dir",
+    "revoke_token_for_task",
+    "run_setup",
+    "sandbox_doctor_checks",
+    "sandbox_uninstall",
+    "selinux_install_command",
+    "selinux_install_script",
+    "setup_hooks_direct",
+    "shield_interactive_session",
+    "shield_watch_session",
+    "stage_line",
+    "stamp_path",
+    "start_daemon",
+    "start_vault",
+    "state",
+    "status",
+    "stop_daemon",
+    "stop_vault",
+    "systemd_creds_has_tpm2",
+    "up",
+    "yaml_update_section",
+    "yellow",
+]
