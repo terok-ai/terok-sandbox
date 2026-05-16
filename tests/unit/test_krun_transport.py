@@ -430,6 +430,33 @@ class TestPodmanAnnotationResolver:
             with pytest.raises(RuntimeError, match="podman inspect failed"):
                 resolver(_StubContainer("ctr"))
 
+    def test_inspect_call_uses_timeout(self) -> None:
+        """``podman inspect`` is invoked with a timeout so a wedged daemon doesn't hang the resolver."""
+        resolver = podman_annotation_resolver()
+        with patch("subprocess.check_output", return_value="9\n") as ck:
+            resolver(_StubContainer("ctr"))
+        # ``timeout`` is a keyword on ``check_output``; assert it's set
+        # to a finite positive value so a future refactor can't silently
+        # drop it back to "block forever".
+        timeout = ck.call_args.kwargs.get("timeout")
+        assert timeout is not None
+        assert timeout > 0
+
+    def test_translates_inspect_timeout_to_runtime_error(self) -> None:
+        """A ``TimeoutExpired`` from ``check_output`` becomes the resolver's
+        uniform ``RuntimeError`` (same exception shape as missing/invalid
+        annotation), so callers don't have to special-case three error
+        types from one resolver method."""
+        resolver = podman_annotation_resolver()
+        with (
+            patch(
+                "subprocess.check_output",
+                side_effect=subprocess.TimeoutExpired(cmd="podman", timeout=5.0),
+            ),
+            pytest.raises(RuntimeError, match="podman inspect timed out"),
+        ):
+            resolver(_StubContainer("ctr"))
+
     def test_invokes_inspect_with_named_annotation(self) -> None:
         resolver = podman_annotation_resolver("custom.key")
         with patch("subprocess.check_output", return_value="9\n") as ck:

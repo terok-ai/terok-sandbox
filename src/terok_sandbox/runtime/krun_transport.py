@@ -336,14 +336,28 @@ def podman_annotation_resolver(
             "--",
             container.name,
         ]
+        # A short timeout keeps the resolver from blocking forever on a
+        # wedged podman (daemon trouble, NFS-backed storage stall):
+        # ``podman inspect`` is a metadata read, so 5 s is generous.
+        # Match the other timeouts in this file by raising
+        # ``RuntimeError`` so the resolver's exception shape stays
+        # uniform across "annotation missing", "annotation invalid",
+        # and "podman didn't answer".
         try:
             out = subprocess.check_output(  # nosec B603 B607 — argv built from fixed verbs + caller-controlled scope/container names — binary PATH lookup is the cross-distro contract
                 argv,
                 text=True,
+                timeout=_RESOLVER_INSPECT_TIMEOUT_S,
             ).strip()
         except subprocess.CalledProcessError as exc:
             raise RuntimeError(
                 f"podman inspect failed for container {container.name!r}: {exc}"
+            ) from exc
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"podman inspect timed out after {_RESOLVER_INSPECT_TIMEOUT_S}s "
+                f"resolving vsock CID for container {container.name!r} — "
+                "podman daemon stuck or storage backend stalled"
             ) from exc
         if not out:
             raise RuntimeError(
@@ -371,6 +385,13 @@ def podman_annotation_resolver(
 
 
 # ── Private helpers ─────────────────────────────────────────────────────────
+
+_RESOLVER_INSPECT_TIMEOUT_S: float = 5.0
+"""Bound on ``podman inspect`` in ``podman_annotation_resolver``.
+
+Inspect is a metadata read — 5 s leaves comfortable headroom over a
+healthy podman + storage backend while still surfacing a wedged
+daemon as a loud ``RuntimeError`` instead of a forever-hang."""
 
 _VSOCK_RESERVED_CIDS: frozenset[int] = frozenset({0, 1, 2})
 """Vsock CIDs reserved by the spec (``VMADDR_CID_ANY``, ``..._HYPERVISOR``,

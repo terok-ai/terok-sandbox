@@ -468,7 +468,8 @@ class CredentialDB:
             _require_safe_scope(scope)
         else:
             _require_user_scope(scope)
-        with self._conn:
+
+        def _body() -> None:
             self._conn.execute(
                 "INSERT OR IGNORE INTO ssh_key_assignments (scope, key_id) VALUES (?, ?)",
                 (scope, keep_key_id),
@@ -499,6 +500,19 @@ class CredentialDB:
                 )
             self._bump_ssh_keys_version()
 
+        # Same ``_in_outer_tx`` pattern as the rest of the write methods.
+        # ``with self._conn:`` is the sqlite3 connection's own auto-commit
+        # context — it would clobber the outer ``BEGIN IMMEDIATE`` that
+        # ``transaction()`` started.  When inside an outer scope, run the
+        # body raw and let the outer block own the commit; standalone
+        # callers still get the self-contained connection-managed
+        # transaction they used to.
+        if self._in_outer_tx:
+            _body()
+        else:
+            with self._conn:
+                _body()
+
     def unassign_all_ssh_keys(self, scope: str, *, allow_infra: bool = False) -> int:
         """Revoke every key currently assigned to *scope*.  Returns count removed.
 
@@ -521,26 +535,39 @@ class CredentialDB:
         return len(key_ids)
 
     def list_ssh_keys_for_scope(self, scope: str) -> list[SSHKeyRow]:
-        """Return metadata rows for every key assigned to *scope*."""
+        """Return metadata rows for every key assigned to *scope*.
+
+        Ordered by ``assigned_at`` with ``k.id`` as a secondary key so
+        two assignments inside the same SQLite-second (``datetime('now')``
+        has 1-second resolution) sort by insert order rather than
+        implementation-defined order.  Callers that do ``rows[-1]`` to
+        pick "the most recently assigned" get a deterministic answer
+        even under sub-second concurrency.
+        """
         rows = self._conn.execute(
             "SELECT k.id, k.key_type, k.fingerprint, k.comment, k.created_at"
             " FROM ssh_keys k"
             " JOIN ssh_key_assignments a ON a.key_id = k.id"
             " WHERE a.scope = ?"
-            " ORDER BY a.assigned_at",
+            " ORDER BY a.assigned_at, k.id",
             (scope,),
         ).fetchall()
         return [SSHKeyRow(*r) for r in rows]
 
     def load_ssh_keys_for_scope(self, scope: str) -> list[SSHKeyRecord]:
-        """Return full records (with raw bytes) for every key assigned to *scope*."""
+        """Return full records (with raw bytes) for every key assigned to *scope*.
+
+        Same deterministic ordering as
+        [`list_ssh_keys_for_scope`][terok_sandbox.vault.store.db.CredentialDB.list_ssh_keys_for_scope]
+        — ``assigned_at`` first, then ``k.id`` as the sub-second tiebreak.
+        """
         rows = self._conn.execute(
             "SELECT k.id, k.key_type, k.private_der, k.public_blob,"
             " k.comment, k.fingerprint"
             " FROM ssh_keys k"
             " JOIN ssh_key_assignments a ON a.key_id = k.id"
             " WHERE a.scope = ?"
-            " ORDER BY a.assigned_at",
+            " ORDER BY a.assigned_at, k.id",
             (scope,),
         ).fetchall()
         return [SSHKeyRecord(*r) for r in rows]

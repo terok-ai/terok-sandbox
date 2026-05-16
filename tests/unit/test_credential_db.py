@@ -157,6 +157,38 @@ class TestTransactionAtomicity:
         # The revoke was rolled back together with the outer scope.
         assert db.lookup_token(token) is not None
 
+    def test_replace_ssh_keys_honors_outer_transaction(self, db: CredentialDB) -> None:
+        """`replace_ssh_keys_for_scope` no longer breaks an outer ``transaction()``.
+
+        Previously this method opened its own ``with self._conn:`` block
+        which committed (or rolled back) independently of any outer
+        scope.  Inside ``db.transaction()`` that would silently close
+        the outer ``BEGIN IMMEDIATE`` mid-block, defeating the whole
+        composed-atomicity contract.  Pin the new ``_in_outer_tx``
+        gating: a raise after the replace must roll back both the
+        replace and any prior write in the same scope.
+        """
+        from terok_sandbox.vault.ssh.keypair import generate_keypair
+
+        kp = generate_keypair("ed25519", comment="seed")
+        seed_id = db.store_ssh_key(
+            key_type=kp.key_type,
+            private_der=kp.private_der,
+            public_blob=kp.public_blob,
+            comment=kp.comment,
+            fingerprint=kp.fingerprint,
+        )
+
+        with pytest.raises(RuntimeError, match="bail"), db.transaction():
+            db.replace_ssh_keys_for_scope("%host", keep_key_id=seed_id, allow_infra=True)
+            raise RuntimeError("bail")
+
+        # Without the ``_in_outer_tx`` guard, the inner ``with self._conn:``
+        # would have committed the assignment before the raise reached
+        # the outer ``ROLLBACK``.  With the guard, the assignment is
+        # rolled back together with the outer scope.
+        assert db.list_ssh_keys_for_scope("%host") == []
+
 
 class TestDBLifecycle:
     """Verify database creation and cleanup."""
