@@ -188,6 +188,39 @@ class TestVsockSSHTransportExecStdio:
         assert argv[sep + 1 :] == ["sh"]
         assert rc == 7
 
+    def test_timeout_escalates_terminate_then_kill(self) -> None:
+        """If the child also ignores terminate, the cleanup escalates to kill.
+
+        Mirrors the same terminate→wait→kill→wait pattern PodmanRuntime uses
+        for ``podman exec``.  Covers the rarely-hit cleanup branch
+        (lines 185-192) so a future refactor doesn't silently leave a child
+        wedged after timeout.
+        """
+        with patch("subprocess.Popen") as popen:
+            proc = MagicMock()
+            proc.stdin = io.BytesIO()
+            proc.stdout = io.BytesIO()
+            proc.stderr = None
+            # First wait → timeout (initial run); second wait → still
+            # timed out (post-terminate grace); third wait (after kill)
+            # → succeeds.  raise sequence drives the escalation.
+            proc.wait.side_effect = [
+                subprocess.TimeoutExpired(cmd="ssh", timeout=1.0),
+                subprocess.TimeoutExpired(cmd="ssh", timeout=2.0),
+                None,
+            ]
+            popen.return_value = proc
+            with pytest.raises(subprocess.TimeoutExpired):
+                _make_transport().exec_stdio(
+                    _StubContainer("ctr"),
+                    ["sh"],
+                    stdin=io.BytesIO(),
+                    stdout=io.BytesIO(),
+                    timeout=1.0,
+                )
+        proc.terminate.assert_called_once()
+        proc.kill.assert_called_once()
+
 
 class TestPodmanAnnotationResolver:
     """The default resolver shells `podman inspect` for the CID annotation."""
