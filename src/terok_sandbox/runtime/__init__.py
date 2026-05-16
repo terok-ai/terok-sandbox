@@ -9,7 +9,7 @@ modules directly.
 
 from __future__ import annotations
 
-from .krun import FakeKrunTransport, KrunRuntime, KrunTransport
+from .krun import FakeKrunTransport, KrunContainer, KrunRuntime, KrunTransport
 from .krun_transport import (
     DEFAULT_CID_ANNOTATION,
     DEFAULT_SSH_USER,
@@ -43,6 +43,8 @@ __all__ = [
     "KrunRuntime",
     "NullRuntime",
     "PodmanRuntime",
+    # Krun container handle (krun-aware login_command override)
+    "KrunContainer",
     # Krun transport — protocol, fake (test), real (vsock-SSH)
     "FakeKrunTransport",
     "KrunTransport",

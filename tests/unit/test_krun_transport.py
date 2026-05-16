@@ -349,6 +349,51 @@ class TestVsockSSHTransportExecStdio:
         proc.kill.assert_called_once()
 
 
+class TestVsockSSHTransportLoginCommand:
+    """`login_command` mirrors `PodmanContainer.login_command` shape — argv only, no I/O."""
+
+    def test_argv_uses_pty_flag_not_batchmode(self) -> None:
+        """Interactive login forces a PTY (``-tt``) and drops ``BatchMode``."""
+        transport = _make_transport(cid=99)
+        argv = transport.login_command(_StubContainer("ctr"))
+        assert "-tt" in argv
+        # BatchMode is the exec/non-interactive marker — must be absent here.
+        assert "BatchMode=yes" not in argv
+
+    def test_argv_targets_resolved_endpoint(self) -> None:
+        """ProxyCommand carries the CID + port returned by the resolver."""
+        transport = _make_transport(cid=7, port=2222)
+        argv = transport.login_command(_StubContainer("ctr"))
+        proxy = next(a for a in argv if a.startswith("ProxyCommand="))
+        assert "VSOCK-CONNECT:7:2222" in proxy
+
+    def test_argv_ends_with_user_at_label(self) -> None:
+        """Last argv entry is ``dev@krun-guest`` when *command* is empty."""
+        transport = _make_transport()
+        argv = transport.login_command(_StubContainer("ctr"))
+        assert argv[-1] == "dev@krun-guest"
+
+    def test_command_is_shlex_quoted_after_double_dash(self) -> None:
+        """Per-token shell metacharacters cross the wire as literal data."""
+        transport = _make_transport()
+        argv = transport.login_command(
+            _StubContainer("ctr"),
+            command=("bash", "-c", "echo 'hi there'"),
+        )
+        # The remote-command string lives after ``--``.
+        dash_idx = argv.index("--")
+        remote = argv[dash_idx + 1]
+        # The single-quoted string in the user-supplied command should be
+        # re-quoted so the in-guest shell sees argv[2] as the literal
+        # "echo 'hi there'" rather than splitting on the inner quotes.
+        assert "echo" in remote
+        assert "'hi there'" in remote
+
+    def test_login_command_satisfies_transport_protocol(self) -> None:
+        """`VsockSSHTransport` still satisfies the `KrunTransport` protocol after the addition."""
+        assert isinstance(_make_transport(), KrunTransport)
+
+
 class TestPodmanAnnotationResolver:
     """The default resolver shells `podman inspect` for the CID annotation."""
 

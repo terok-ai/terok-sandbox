@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, BinaryIO, Protocol, runtime_checkable
 
-from .podman import PodmanRuntime
+from .podman import PodmanContainer, PodmanRuntime
 from .protocol import (
     Container,
     ContainerRemoveResult,
@@ -71,15 +71,24 @@ class KrunRuntime:
         """Return the transport used for [`exec`][terok_sandbox.runtime.krun.KrunRuntime.exec]."""
         return self._transport
 
-    # -- Handle factories (delegated to podman) ----------------------------
+    # -- Handle factories --------------------------------------------------
 
     def container(self, name: str) -> Container:
-        """Return a [`PodmanContainer`][terok_sandbox.runtime.podman.PodmanContainer] handle."""
-        return self._podman.container(name)
+        """Return a [`KrunContainer`][terok_sandbox.runtime.krun.KrunContainer]
+        handle wrapping the podman container — same lifecycle, krun-aware
+        ``login_command``.
+        """
+        return KrunContainer(name, runtime=self._podman, transport=self._transport)
 
     def containers_with_prefix(self, prefix: str) -> list[Container]:
-        """Delegate prefix lookup to podman."""
-        return self._podman.containers_with_prefix(prefix)
+        """Same prefix lookup as podman; rewrap each handle as a
+        [`KrunContainer`][terok_sandbox.runtime.krun.KrunContainer] so its
+        ``login_command`` routes through the vsock transport.
+        """
+        return [
+            KrunContainer(c.name, runtime=self._podman, transport=self._transport)
+            for c in self._podman.containers_with_prefix(prefix)
+        ]
 
     def image(self, ref: str) -> Image:
         """Delegate image-handle construction to podman."""
@@ -180,6 +189,21 @@ class KrunTransport(Protocol):
         """Bridge byte streams to *cmd* inside the guest; return its exit code."""
         ...
 
+    def login_command(
+        self,
+        container: Container,
+        *,
+        command: tuple[str, ...] = (),
+    ) -> list[str]:
+        """Return an argv for [`os.execvp`][os.execvp] to attach interactively.
+
+        Mirrors the protocol method on
+        [`Container.login_command`][terok_sandbox.runtime.protocol.Container.login_command]
+        but routed through the transport so the krun runtime can hand the
+        operator an SSH-vsock invocation instead of ``podman exec``.
+        """
+        ...
+
 
 # ── Fake transport for unit tests ─────────────────────────────────────────
 
@@ -242,3 +266,44 @@ class FakeKrunTransport:
         del stdin, stdout, stderr, timeout
         self.exec_stdio_calls.append((container.name, tuple(cmd), dict(env or {})))
         return 0
+
+    def login_command(
+        self,
+        container: Container,
+        *,
+        command: tuple[str, ...] = (),
+    ) -> list[str]:
+        """Return a placeholder argv ``["fake-login", <name>, *command]``.
+
+        Tests assert on the shape; no real transport is contacted.
+        """
+        return ["fake-login", container.name, *command]
+
+
+# ── Container handle (krun-aware login) ───────────────────────────────────
+
+
+class KrunContainer(PodmanContainer):
+    """Container handle for krun-managed microVMs.
+
+    Subclasses [`PodmanContainer`][terok_sandbox.runtime.podman.PodmanContainer]
+    because ``podman --runtime krun`` honours every lifecycle verb
+    (state, start/stop, logs, inspect) — only ``login_command`` diverges,
+    since ``podman exec`` can't enter the guest.  That single override
+    routes through the held [`KrunTransport`][terok_sandbox.runtime.krun.KrunTransport]
+    so the operator gets an SSH-vsock argv that actually reaches in.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        *,
+        runtime: PodmanRuntime,
+        transport: KrunTransport,
+    ) -> None:
+        super().__init__(name, runtime=runtime)
+        self._transport = transport
+
+    def login_command(self, *, command: tuple[str, ...] = ()) -> list[str]:
+        """Return the transport's interactive-attach argv for this container."""
+        return self._transport.login_command(self, command=command)

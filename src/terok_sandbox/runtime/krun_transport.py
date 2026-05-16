@@ -219,8 +219,40 @@ class VsockSSHTransport:
                 proc.wait()
             raise
 
-    def _ssh_argv(self, endpoint: VsockEndpoint) -> list[str]:
-        """Build the ssh argv up to (but not including) the remote command."""
+    def login_command(
+        self,
+        container: Container,
+        *,
+        command: tuple[str, ...] = (),
+    ) -> list[str]:
+        """Return an ``ssh`` argv that attaches a PTY to the guest's shell.
+
+        Mirrors what [`PodmanContainer.login_command`][terok_sandbox.runtime.podman.PodmanContainer.login_command]
+        does for the conventional runtime — emits the argv the operator
+        (or ``terok login``) execs into.  Adds ``-tt`` so sshd allocates
+        a real PTY even when stdin isn't a terminal (the caller may be
+        running under tmux or an IDE proxy), and falls back to a no-arg
+        invocation of the in-guest user's login shell when *command* is
+        empty.  Argv tokens past ``--`` are ``shlex.quote``d via
+        [`_remote_command`][terok_sandbox.runtime.krun_transport._remote_command]
+        so the SSH wire format preserves argv semantics across the
+        login-shell parse on the far side.
+        """
+        endpoint = self._resolver(container)
+        argv = self._ssh_argv(endpoint, interactive=True)
+        if command:
+            argv += ["--", _remote_command(list(command))]
+        return argv
+
+    def _ssh_argv(self, endpoint: VsockEndpoint, *, interactive: bool = False) -> list[str]:
+        """Build the ssh argv up to (but not including) the remote command.
+
+        *interactive* swaps ``BatchMode=yes`` for ``-tt`` (force-allocate
+        PTY) so the login flow gets a real terminal.  Exec paths keep
+        the batch-mode default so a missing identity fails fast instead
+        of prompting.
+        """
+        pty_flags = ["-tt"] if interactive else ["-o", "BatchMode=yes"]
         return [
             self._ssh,
             "-i",
@@ -246,9 +278,8 @@ class VsockSSHTransport:
             # doesn't pollute caller-visible stderr.
             "-o",
             "LogLevel=ERROR",
-            # Never prompt — the host either has the key or we fail fast.
-            "-o",
-            "BatchMode=yes",
+            # PTY/batch posture differs per call site (see *interactive*).
+            *pty_flags,
             # The hostname after ``user@`` is a label only; ProxyCommand
             # does the actual connect.  Keep it short and recognisable
             # in any ssh diagnostic output.
