@@ -226,7 +226,12 @@ def ensure_infra_keypair(
 
     existing = db.load_ssh_keys_for_scope(scope)
     if existing:
-        record = existing[0]
+        # ``load_ssh_keys_for_scope`` orders by ``assigned_at`` ascending,
+        # so the last element is the most recently assigned key.  Prefer
+        # it: if an additive rotation ever leaves more than one key under
+        # the scope, returning the oldest would silently resurrect the
+        # rotated-out material.
+        record = existing[-1]
         return InfraKeypair(
             scope=scope,
             private_pem=openssh_pem_of(record.private_der),

@@ -582,3 +582,36 @@ class TestEnsureInfraKeypair:
         result = ensure_infra_keypair("%host", db=db)
         assert result.fingerprint == seeded.fingerprint
         assert result.created is False
+
+    def test_multi_assigned_scope_returns_newest_not_oldest(self, db: CredentialDB) -> None:
+        """If the scope has multiple assigned keys, pick the newest.
+
+        ``load_ssh_keys_for_scope`` orders by ``assigned_at`` ascending,
+        so the naive ``existing[0]`` would resurrect the oldest key —
+        bad if an additive rotation ever leaves stale material under
+        the scope.  We assert the newest assignment wins.
+        """
+        old_kp = generate_keypair("ed25519", comment="old-key")
+        new_kp = generate_keypair("ed25519", comment="new-key")
+
+        old_id = db.store_ssh_key(
+            key_type=old_kp.key_type,
+            private_der=old_kp.private_der,
+            public_blob=old_kp.public_blob,
+            comment=old_kp.comment,
+            fingerprint=old_kp.fingerprint,
+        )
+        db.assign_ssh_key("%host", old_id, allow_infra=True)
+
+        new_id = db.store_ssh_key(
+            key_type=new_kp.key_type,
+            private_der=new_kp.private_der,
+            public_blob=new_kp.public_blob,
+            comment=new_kp.comment,
+            fingerprint=new_kp.fingerprint,
+        )
+        db.assign_ssh_key("%host", new_id, allow_infra=True)
+
+        result = ensure_infra_keypair("%host", db=db)
+        assert result.fingerprint == new_kp.fingerprint
+        assert result.fingerprint != old_kp.fingerprint
