@@ -586,7 +586,7 @@ class TestEnsureInfraKeypair:
     def test_load_or_mint_runs_inside_a_transaction(
         self, db: CredentialDB, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The check + mint + assign sequence is atomic via ``db.transaction()``.
+        """The check + mint + assign sequence is wrapped in ``db.transaction()``.
 
         Verify the transaction context manager is actually entered —
         otherwise a concurrent caller could observe "empty" between
@@ -609,6 +609,67 @@ class TestEnsureInfraKeypair:
 
         assert entered["count"] == 1
         assert exited["count"] == 1
+
+    def test_mint_path_is_rolled_back_on_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A mid-mint exception rolls back the partial INSERTs.
+
+        The whole point of wrapping in a real transaction is that
+        ``store_ssh_key`` and ``assign_ssh_key`` only persist if the
+        outer block reaches a clean exit — a crash between them must
+        not leave an ``ssh_keys`` row dangling without an assignment,
+        or vice-versa.
+        """
+        # Fresh DB so the test sees a clean baseline.
+        db = CredentialDB(tmp_path / "vault" / "v.db", passphrase="test")
+        try:
+            # Make the second inner write (``assign_ssh_key``) raise
+            # *after* ``store_ssh_key`` has run.  The transaction
+            # context manager must roll the store back.
+            real_assign = db.assign_ssh_key
+
+            def _boom(*args, **kwargs):
+                raise RuntimeError("simulated mid-mint failure")
+
+            monkeypatch.setattr(db, "assign_ssh_key", _boom)
+
+            with pytest.raises(RuntimeError, match="simulated"):
+                ensure_infra_keypair("%host", db=db)
+
+            # Restore so the assertions can run normally.
+            monkeypatch.setattr(db, "assign_ssh_key", real_assign)
+
+            # No assignments survived — the store was rolled back.
+            assert db.list_ssh_keys_for_scope("%host") == []
+            # Crucially: no orphaned ssh_keys row either (count would
+            # be >0 if the INSERT had been committed before the assign
+            # crash).
+            assert db.count_ssh_keys() == 0
+        finally:
+            db.close()
+
+    def test_inner_methods_skip_commit_when_asked(self, db: CredentialDB) -> None:
+        """``store_ssh_key(commit=False)`` and ``assign_ssh_key(commit=False)``
+        leave the data uncommitted so a manual ``rollback`` can wipe it."""
+        kp = generate_keypair("ed25519", comment="test")
+        # No outer transaction — inner methods are the only writers.
+        key_id = db.store_ssh_key(
+            key_type=kp.key_type,
+            private_der=kp.private_der,
+            public_blob=kp.public_blob,
+            comment=kp.comment,
+            fingerprint=kp.fingerprint,
+            commit=False,
+        )
+        db.assign_ssh_key("%host", key_id, allow_infra=True, commit=False)
+        # The writes are visible to the same connection (sqlite read-
+        # your-own-writes inside a transaction), but a rollback
+        # discards them entirely.
+        assert len(db.list_ssh_keys_for_scope("%host")) == 1
+        db._conn.rollback()  # type: ignore[attr-defined]
+        assert db.list_ssh_keys_for_scope("%host") == []
+        assert db.count_ssh_keys() == 0
 
     def test_multi_assigned_scope_returns_newest_not_oldest(self, db: CredentialDB) -> None:
         """If the scope has multiple assigned keys, pick the newest.

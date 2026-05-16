@@ -261,14 +261,20 @@ def ensure_infra_keypair(
             key_type,
             comment=comment if comment is not None else f"terok-infra:{scope}",
         )
+        # ``commit=False`` keeps both inner writes inside the outer
+        # ``transaction()`` scope — without that, each method would
+        # ``self._conn.commit()`` at its own end and end the atomic
+        # block before the next call, defeating the whole point of
+        # the wrapper.
         key_id = db.store_ssh_key(
             key_type=keypair.key_type,
             private_der=keypair.private_der,
             public_blob=keypair.public_blob,
             comment=keypair.comment,
             fingerprint=keypair.fingerprint,
+            commit=False,
         )
-        db.assign_ssh_key(scope, key_id, allow_infra=True)
+        db.assign_ssh_key(scope, key_id, allow_infra=True, commit=False)
         return InfraKeypair(
             scope=scope,
             private_pem=openssh_pem_of(keypair.private_der),
