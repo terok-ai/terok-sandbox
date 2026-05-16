@@ -90,11 +90,19 @@ def _print_key_table(rows: list[KeyRow], *, numbered: bool = False) -> None:
 
 
 def _validate_scope_name(scope: str) -> None:
-    """Raise [`SystemExit`][SystemExit] if *scope* is not a safe filesystem identifier.
+    """Raise [`SystemExit`][SystemExit] if *scope* is not safe for a user CLI call.
 
-    Delegates to the canonical DB-layer validator so the character set
-    *and* the length bound stay co-located with the write sites that
-    depend on them.
+    Two checks, in order:
+
+    1. The DB-layer ``_require_safe_scope`` rejects character-set and
+       length violations.  Co-located with the write sites that depend
+       on them.
+    2. The ``%`` prefix is reserved for *infrastructure* scopes the
+       sandbox owns itself (``%host`` for the krun host-side keypair,
+       future ``%name`` slots).  The DB validator structurally accepts
+       both forms because both have to round-trip through it, but
+       user-facing CLI verbs must never let a caller create a scope
+       that could later collide with a sandbox-reserved name.
     """
     from ..vault.store.db import InvalidScopeName, _require_safe_scope
 
@@ -102,6 +110,12 @@ def _validate_scope_name(scope: str) -> None:
         _require_safe_scope(scope)
     except InvalidScopeName as exc:
         raise SystemExit(str(exc)) from exc
+    if scope.startswith("%"):
+        raise SystemExit(
+            f"scope {scope!r}: the '%' prefix is reserved for sandbox "
+            "infrastructure scopes (e.g. '%host') and is not allowed for "
+            "user-created scopes.  Pick a plain name instead."
+        )
 
 
 def _filter_key_rows(
@@ -122,6 +136,17 @@ def _filter_key_rows(
     return rows
 
 
+def _is_infra_scope(scope: str) -> bool:
+    """Return whether *scope* is a sandbox-reserved infrastructure scope.
+
+    Infrastructure scopes use a ``%`` sigil prefix (e.g. ``%host``).
+    User-facing CLI verbs hide them from default listings and refuse to
+    accept them as ``--scope`` filter values, so a caller can neither
+    enumerate their existence nor target them by name.
+    """
+    return scope.startswith("%")
+
+
 def _key_id_from_row(row: KeyRow) -> int:
     """Extract the ``ssh_keys.id`` from a row's pseudo-path ``db:ssh_keys/<id>``."""
     return int(row.private_key.rsplit("/", 1)[-1])
@@ -132,9 +157,22 @@ def _handle_ssh_list(
     scope: str | None = None,
     cfg: SandboxConfig | None = None,
 ) -> None:
-    """List SSH keys registered in the auth proxy's key store."""
+    """List SSH keys registered in the auth proxy's key store.
+
+    By default omits sandbox-reserved infrastructure scopes
+    (``%name``) from the output so their existence and fingerprints
+    don't leak through normal operator tooling.  An explicit
+    ``--scope %name`` filter is rejected up front rather than
+    silently honoured.
+    """
     if cfg is None:
         cfg = SandboxConfig()
+
+    if scope is not None:
+        # Reject ``--scope %host`` at the user CLI; infra scopes are not
+        # caller-controllable from here.  ``_validate_scope_name`` already
+        # rejects the ``%`` prefix in addition to its structural checks.
+        _validate_scope_name(scope)
 
     rows = _build_key_rows(cfg)
     if scope:
@@ -142,6 +180,10 @@ def _handle_ssh_list(
         if not filtered:
             raise SystemExit(f"No keys registered for scope {scope!r}")
         rows = filtered
+    else:
+        # Default view: hide infrastructure scopes so their presence and
+        # fingerprints aren't exposed via routine ``ssh list``.
+        rows = [r for r in rows if not _is_infra_scope(r.scope)]
 
     _print_key_table(rows)
 
@@ -418,7 +460,16 @@ def _handle_ssh_remove(
     if cfg is None:
         cfg = SandboxConfig()
 
+    if scope is not None:
+        # Reject ``--scope %host`` up front — infra scopes are not
+        # caller-controllable from this verb, even read-then-delete.
+        _validate_scope_name(scope)
+
     all_rows = _build_key_rows(cfg)
+    # Strip infrastructure scopes from every candidate set this verb can
+    # see, so neither the interactive list nor the comment/fingerprint
+    # filter paths can target a sandbox-reserved keypair.
+    all_rows = [r for r in all_rows if not _is_infra_scope(r.scope)]
     if not all_rows:
         raise SystemExit("No SSH keys registered.")
 

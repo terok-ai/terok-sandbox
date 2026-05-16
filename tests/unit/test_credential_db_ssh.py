@@ -219,6 +219,11 @@ class TestScopeNameGuard:
             "space in name",  # whitespace
             "null\x00char",  # NUL byte
             "a" * 65,  # over the 64-char cap
+            "%",  # bare sigil, no infra name
+            "%Host",  # infra form is lowercase only
+            "%host-suffix",  # infra form allows only [a-z]+
+            "%host.x",  # ditto
+            "prefix%host",  # sigil only valid at position 0
         ],
     )
     def test_rejects_unsafe_names(self, bad: str) -> None:
@@ -228,14 +233,88 @@ class TestScopeNameGuard:
 
     @pytest.mark.parametrize(
         "good",
-        ["proj", "My-Project", "alpha.beta", "0xdeadbeef", "a" * 64],
+        [
+            "proj",
+            "My-Project",
+            "alpha.beta",
+            "0xdeadbeef",
+            "a" * 64,
+            "%host",  # reserved infra scope: krun host-side keypair
+            "%vault",  # any %[a-z]+ form is structurally accepted
+        ],
     )
     def test_accepts_reasonable_names(self, good: str) -> None:
         """Valid scope identifiers pass the guard silently."""
         _require_safe_scope(good)  # must not raise
 
     def test_assign_rejects_unsafe_scope(self, db: CredentialDB) -> None:
-        """``assign_ssh_key`` refuses to persist a hostile scope name."""
+        """[`CredentialDB.assign_ssh_key`][terok_sandbox.vault.store.db.CredentialDB.assign_ssh_key]
+        refuses to persist a hostile scope name."""
         key_id = _store_key(db, "fp-x")
         with pytest.raises(InvalidScopeName):
             db.assign_ssh_key("../evil", key_id)
+
+    def test_assign_rejects_infra_scope_by_default(self, db: CredentialDB) -> None:
+        """Caller-driven writes can't target the ``%`` infrastructure space.
+
+        The DB-layer validator is structurally permissive (both forms
+        round-trip through it), so a separate user-vs-infra guard at the
+        write entry point is what keeps a non-CLI bypass from creating
+        keys under ``%host`` or any future reserved name.
+        """
+        key_id = _store_key(db, "fp-infra")
+        with pytest.raises(InvalidScopeName, match="reserved for sandbox"):
+            db.assign_ssh_key("%host", key_id)
+
+    def test_assign_accepts_infra_scope_with_explicit_flag(self, db: CredentialDB) -> None:
+        """Sandbox internals provisioning ``%host`` opt in explicitly."""
+        key_id = _store_key(db, "fp-infra-ok")
+        db.assign_ssh_key("%host", key_id, allow_infra=True)  # no raise
+        rows = db.list_ssh_keys_for_scope("%host")
+        assert len(rows) == 1
+
+    def test_unassign_rejects_infra_scope_by_default(self, db: CredentialDB) -> None:
+        """User-facing remove paths can't decommission infra-reserved keys."""
+        key_id = _store_key(db, "fp-infra-2")
+        db.assign_ssh_key("%host", key_id, allow_infra=True)
+        with pytest.raises(InvalidScopeName, match="reserved for sandbox"):
+            db.unassign_ssh_key("%host", key_id)
+
+    def test_unassign_accepts_infra_scope_with_explicit_flag(self, db: CredentialDB) -> None:
+        """Infra-aware callers can decommission a reserved-scope key."""
+        key_id = _store_key(db, "fp-infra-unassign")
+        db.assign_ssh_key("%host", key_id, allow_infra=True)
+        db.unassign_ssh_key("%host", key_id, allow_infra=True)
+        assert db.list_ssh_keys_for_scope("%host") == []
+
+    def test_replace_rejects_infra_scope_by_default(self, db: CredentialDB) -> None:
+        """[`CredentialDB.replace_ssh_keys_for_scope`][terok_sandbox.vault.store.db.CredentialDB.replace_ssh_keys_for_scope]
+        is gated the same as assign."""
+        key_id = _store_key(db, "fp-infra-3")
+        with pytest.raises(InvalidScopeName, match="reserved for sandbox"):
+            db.replace_ssh_keys_for_scope("%host", keep_key_id=key_id)
+
+    def test_replace_accepts_infra_scope_with_explicit_flag(self, db: CredentialDB) -> None:
+        """Infra-aware rotation: old infra keys are revoked, new one survives."""
+        old = _store_key(db, "fp-infra-old")
+        new = _store_key(db, "fp-infra-new")
+        db.assign_ssh_key("%host", old, allow_infra=True)
+        db.replace_ssh_keys_for_scope("%host", keep_key_id=new, allow_infra=True)
+        rows = db.list_ssh_keys_for_scope("%host")
+        assert [r.fingerprint for r in rows] == ["fp-infra-new"]
+
+    def test_unassign_all_rejects_infra_scope_by_default(self, db: CredentialDB) -> None:
+        """[`CredentialDB.unassign_all_ssh_keys`][terok_sandbox.vault.store.db.CredentialDB.unassign_all_ssh_keys]
+        is gated the same as the single-key form."""
+        with pytest.raises(InvalidScopeName, match="reserved for sandbox"):
+            db.unassign_all_ssh_keys("%host")
+
+    def test_unassign_all_accepts_infra_scope_with_explicit_flag(self, db: CredentialDB) -> None:
+        """``allow_infra=True`` lets sandbox internals drop every infra key."""
+        k1 = _store_key(db, "fp-infra-a")
+        k2 = _store_key(db, "fp-infra-b")
+        db.assign_ssh_key("%host", k1, allow_infra=True)
+        db.assign_ssh_key("%host", k2, allow_infra=True)
+        removed = db.unassign_all_ssh_keys("%host", allow_infra=True)
+        assert removed == 2
+        assert db.list_ssh_keys_for_scope("%host") == []

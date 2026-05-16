@@ -91,6 +91,30 @@ def _seed(db_path: Path, scope: str) -> int:
         db.close()
 
 
+def _seed_infra(db_path: Path, scope: str) -> int:
+    """Seed an infrastructure-scope key (``%name``) bypassing the user-scope guard.
+
+    The user-facing helpers refuse to write ``%`` scopes; this helper
+    exists so test fixtures can put one in place to verify the
+    listing/removal hardening sees a real reserved key instead of an
+    empty table.
+    """
+    kp = generate_keypair("ed25519", comment=f"tk-main:{scope}")
+    db = CredentialDB(db_path, passphrase="test")
+    try:
+        key_id = db.store_ssh_key(
+            key_type=kp.key_type,
+            private_der=kp.private_der,
+            public_blob=kp.public_blob,
+            comment=kp.comment,
+            fingerprint=kp.fingerprint,
+        )
+        db.assign_ssh_key(scope, key_id, allow_infra=True)
+        return key_id
+    finally:
+        db.close()
+
+
 class TestPubAll:
     """``ssh-pub --all`` prints every key assigned to the scope."""
 
@@ -233,6 +257,27 @@ class TestScopeNameValidation:
 
         with pytest.raises(SystemExit, match="exceeds"):
             _validate_scope_name("x" * 65)
+
+    def test_percent_prefix_rejected_at_cli(self) -> None:
+        """The ``%`` prefix is reserved for sandbox infrastructure scopes.
+
+        The DB validator accepts both forms because both round-trip through
+        it, but user CLI calls must never let a caller create a scope
+        that could later collide with a sandbox-reserved name (``%host``, …).
+        """
+        from terok_sandbox.commands import _validate_scope_name
+
+        with pytest.raises(SystemExit, match="reserved for sandbox"):
+            _validate_scope_name("%host")
+        with pytest.raises(SystemExit, match="reserved for sandbox"):
+            _validate_scope_name("%anything")
+
+    def test_plain_user_scope_still_accepted(self) -> None:
+        """The reservation guard doesn't regress regular user scopes."""
+        from terok_sandbox.commands import _validate_scope_name
+
+        _validate_scope_name("my-project")  # no raise
+        _validate_scope_name("alpha.beta")
 
 
 class TestImportMessaging:
@@ -400,6 +445,41 @@ class TestList:
         with pytest.raises(SystemExit, match="No keys registered for scope"):
             _handle_ssh_list(scope="nowhere", cfg=mock_cfg)
 
+    def test_default_listing_hides_infra_scopes(
+        self,
+        db_path: Path,
+        mock_cfg: MagicMock,
+        patched_open_db,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """``ssh list`` (no filter) doesn't leak the existence of ``%host`` keys.
+
+        Information-disclosure hardening: the routine listing view filters
+        out infrastructure scopes so neither their presence nor their
+        fingerprint is exposed through the normal operator surface.
+        """
+        _seed(db_path, "proj-a")
+        _seed_infra(db_path, "%host")
+        _handle_ssh_list(cfg=mock_cfg)
+        out = capsys.readouterr().out
+        assert "proj-a" in out
+        assert "%host" not in out
+
+    def test_explicit_infra_scope_filter_rejected(
+        self,
+        db_path: Path,
+        mock_cfg: MagicMock,
+        patched_open_db,
+    ) -> None:
+        """``--scope %host`` is refused before the DB is even read.
+
+        Closes the unauthorized-enumeration vector — a caller can't
+        confirm or deny the existence of a reserved scope by passing it
+        as a filter.
+        """
+        with pytest.raises(SystemExit, match="reserved for sandbox"):
+            _handle_ssh_list(scope="%host", cfg=mock_cfg)
+
 
 class TestRemove:
     """``ssh-remove`` covers filter + confirmation + interactive selection."""
@@ -445,6 +525,52 @@ class TestRemove:
         _seed(db_path, "proj-a")
         with pytest.raises(SystemExit, match="without at least one filter"):
             _handle_ssh_remove(yes=True, cfg=mock_cfg)
+
+    def test_remove_rejects_explicit_infra_scope(
+        self,
+        db_path: Path,
+        mock_cfg: MagicMock,
+        patched_open_db,
+    ) -> None:
+        """``--scope %host`` is refused before the DB is touched.
+
+        Closes the unauthorized-modification / DoS vector — a caller
+        can't unassign infrastructure-reserved keys by targeting them
+        by name.
+        """
+        _seed_infra(db_path, "%host")
+        with pytest.raises(SystemExit, match="reserved for sandbox"):
+            _handle_ssh_remove(scope="%host", yes=True, cfg=mock_cfg)
+
+    def test_remove_other_filters_skip_infra_scopes(
+        self,
+        db_path: Path,
+        mock_cfg: MagicMock,
+        patched_open_db,
+    ) -> None:
+        """Comment / fingerprint filters can't reach into infra scopes either.
+
+        Even when a caller knows the fingerprint of an infra-reserved
+        key, the candidate set is stripped of ``%`` scopes before the
+        match step — so targeting by fingerprint doesn't sidestep the
+        scope filter.
+        """
+        _seed_infra(db_path, "%host")
+        db = CredentialDB(db_path, passphrase="test")
+        try:
+            (infra_row,) = db.list_ssh_keys_for_scope("%host")
+            infra_fp = infra_row.fingerprint
+        finally:
+            db.close()
+        _seed(db_path, "proj-a")
+        with pytest.raises(SystemExit, match="No keys match"):
+            _handle_ssh_remove(fingerprint=infra_fp, yes=True, cfg=mock_cfg)
+        # The infra key is still assigned afterwards.
+        db = CredentialDB(db_path, passphrase="test")
+        try:
+            assert len(db.list_ssh_keys_for_scope("%host")) == 1
+        finally:
+            db.close()
 
     def test_filter_prompt_decline(
         self,
