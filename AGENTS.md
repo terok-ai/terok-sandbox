@@ -25,6 +25,11 @@ those run on a dedicated test machine.
 - SPDX copyright: author name "Jiri Vyskocil".  Add a new
   `SPDX-FileCopyrightText` line only for a previously unlisted
   contributor making a substantive change.
+- Public API surface: ``__init__.py`` + ``__all__`` is the contract.
+  Symbols listed in ``__all__`` are stable across minor releases;
+  anything underscore-prefixed or absent from ``__all__`` is internal
+  and may change without notice.  Review the list before each release
+  — stable APIs stay small because growing them costs.
 
 ## Docs
 
