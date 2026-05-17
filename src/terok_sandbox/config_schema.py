@@ -9,13 +9,14 @@ prior decision around umbrella roots).  Each package owns the schema
 for the sub-sections it consumes; higher-level packages compose the
 full file by importing from their dependencies.
 
-This module is sandbox's contribution: the eight top-level sections
+This module is sandbox's contribution: the nine top-level sections
 sandbox actually reads (``paths``, ``credentials``, ``vault``,
-``gate_server``, ``services``, ``shield``, ``network``, ``ssh``), each
-strict on its own keys (``extra="forbid"``), wrapped in
-[`SandboxConfigView`][terok_sandbox.config_schema.SandboxConfigView] whose top level is *tolerant*
-(``extra="allow"``) so unknown sections — those owned by terok-executor
-or terok — pass through silently when sandbox is run standalone.
+``gate_server``, ``services``, ``shield``, ``network``, ``ssh``,
+``run``), each strict on its own keys (``extra="forbid"``), wrapped
+in [`SandboxConfigView`][terok_sandbox.config_schema.SandboxConfigView]
+whose top level is *tolerant* (``extra="allow"``) so unknown
+sections — those owned by terok-executor or terok — pass through
+silently when sandbox is run standalone.
 
 Validation strategy:
 
@@ -35,7 +36,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 ServicesMode = Literal["tcp", "socket"]
 """Type alias for the ``services.mode`` Literal; re-exported from
@@ -225,6 +226,124 @@ class RawSSHSection(BaseModel):
     )
 
 
+class RawHooksSection(BaseModel):
+    """Task lifecycle hook commands.
+
+    Run on the **host** (not inside the container) around container
+    lifecycle events.  Sandbox owns them because the lifecycle events
+    themselves are sandbox-mediated — the orchestrator just opts into
+    being notified.  The four hook points map to sandbox-internal
+    transitions:
+
+    - ``pre_start``: before the container exists (host-side prep).
+    - ``post_start``: after the container is created but possibly not ready.
+    - ``post_ready``: after the readiness marker has been observed.
+    - ``post_stop``: after the container has stopped (cleanup hook).
+
+    Each value is a shell command string, run by the host shell with
+    the orchestrator's environment.  ``None`` means no hook.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    pre_start: str | None = None
+    post_start: str | None = None
+    post_ready: str | None = None
+    post_stop: str | None = None
+
+
+class RawRunSection(BaseModel):
+    """The ``run:`` section — "how the container runs".
+
+    Covers OCI-runtime selection, container resource limits,
+    capability toggles, environment, and lifecycle hooks.  Sandbox
+    owns this because every field translates to a podman/runtime
+    flag or annotation sandbox emits at launch time.
+
+    Inheritable in both directions:
+
+    - At the **global** level, defaults apply to every project
+      (e.g. set ``runtime: krun`` once to opt the whole installation
+      into microVM isolation).
+    - At the **project** level, fields override the global default
+      one-by-one via the orchestrator's merge logic.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    shutdown_timeout: int = Field(
+        default=10, description="Seconds to wait before SIGKILL on container stop"
+    )
+    gpus: str | bool | None = Field(
+        default=None,
+        description='GPU passthrough: ``true``, ``"all"``, or omit to disable',
+    )
+    memory: str | None = None
+    cpus: str | None = None
+    nested_containers: bool = Field(
+        default=False,
+        description=(
+            "Declares that the project runs podman/docker inside its container. "
+            "When true, the outer container is launched with ``--security-opt "
+            "label=nested`` and ``--device /dev/fuse`` so rootless nested "
+            "containers work under SELinux without disabling labels wholesale."
+        ),
+    )
+    runtime: Literal["crun", "krun"] | None = Field(
+        default=None,
+        description=(
+            "OCI runtime: ``crun`` (default) for conventional containers, "
+            "or ``krun`` for KVM-microVM isolation (experimental).  ``None`` "
+            "resolves to ``crun`` — the OCI runtime podman picks by default "
+            "on every supported distro.  ``krun`` requires the global "
+            "``experimental: true`` flag at task launch."
+        ),
+    )
+    krun_cpus: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "vCPU count for the krun microVM (forwarded as the "
+            "``run.oci.krun.cpus`` annotation).  Must be ≥ 1.  Ignored "
+            "when ``runtime`` is not ``krun``."
+        ),
+    )
+    krun_ram_mib: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Guest RAM in MiB for the krun microVM (forwarded as the "
+            "``run.oci.krun.ram_mib`` annotation).  Must be ≥ 1.  "
+            "Ignored when ``runtime`` is not ``krun``."
+        ),
+    )
+    timezone: str | None = Field(
+        default=None,
+        description=(
+            "IANA timezone for the task container (e.g. ``Europe/Prague``, "
+            "``UTC``).  Propagated as ``TZ`` — resolved against the image's "
+            "``tzdata``.  Unset (default) means follow the host's timezone."
+        ),
+    )
+    hooks: RawHooksSection = Field(default_factory=RawHooksSection)
+
+    @field_validator("memory", "cpus", mode="before")
+    @classmethod
+    def _blank_to_none(cls, v: Any) -> str | None:
+        """Normalise empty / whitespace-only strings to ``None``."""
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_none_subsections(cls, data: Any) -> Any:
+        """Coerce a ``None`` ``hooks:`` value to the empty defaults dict."""
+        if isinstance(data, dict) and data.get("hooks") is None:
+            data["hooks"] = {}
+        return data
+
+
 # ── Sandbox's view of the global config ───────────────────────────────
 
 
@@ -259,6 +378,7 @@ class SandboxConfigView(BaseModel):
     gate_server: RawGateServerSection = Field(default_factory=RawGateServerSection)
     network: RawNetworkSection = Field(default_factory=RawNetworkSection)
     ssh: RawSSHSection = Field(default_factory=RawSSHSection)
+    run: RawRunSection = Field(default_factory=RawRunSection)
 
 
 # ── Section readers ───────────────────────────────────────────────────

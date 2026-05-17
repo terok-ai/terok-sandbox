@@ -21,8 +21,10 @@ import pytest
 from pydantic import ValidationError
 
 from terok_sandbox.config_schema import (
+    RawHooksSection,
     RawNetworkSection,
     RawPathsSection,
+    RawRunSection,
     RawShieldSection,
     RawSSHSection,
     RawVaultSection,
@@ -70,6 +72,64 @@ def test_ssh_section_use_personal_defaults_to_none() -> None:
     """``None`` (not False) is the default so layered configs can distinguish unset."""
     section = RawSSHSection.model_validate({})
     assert section.use_personal is None
+
+
+def test_run_section_defaults_runtime_to_none_so_layers_can_distinguish_unset() -> None:
+    """``runtime: None`` (not ``"crun"``) at the field level lets the orchestrator
+    tell "operator didn't set it" from "operator picked crun explicitly" — the
+    distinction matters when project values inherit/override global values.
+    """
+    section = RawRunSection.model_validate({})
+    assert section.runtime is None
+    assert section.krun_cpus is None
+    assert section.krun_ram_mib is None
+    assert section.shutdown_timeout == 10
+    assert section.nested_containers is False
+    assert section.hooks == RawHooksSection()
+
+
+def test_run_section_rejects_legacy_podman_value() -> None:
+    """``"podman"`` was the v0 value name and is now invalid.  Hard error
+    rather than silent acceptance — the new value is ``"crun"`` (the
+    actual OCI runtime podman drives by default).
+    """
+    with pytest.raises(ValidationError, match="runtime"):
+        RawRunSection.model_validate({"runtime": "podman"})
+
+
+def test_run_section_krun_sizing_must_be_positive_integers() -> None:
+    """``ge=1`` on krun_cpus / krun_ram_mib catches zero or negative typos
+    before they reach the OCI annotation that podman would silently accept."""
+    with pytest.raises(ValidationError):
+        RawRunSection.model_validate({"krun_cpus": 0})
+    with pytest.raises(ValidationError):
+        RawRunSection.model_validate({"krun_ram_mib": -1})
+
+
+def test_run_section_blank_memory_cpus_normalised_to_none() -> None:
+    """An accidentally-empty ``memory: ""`` in YAML reads as None rather
+    than as the literal empty string, so podman doesn't receive a bare
+    ``--memory ""`` flag."""
+    section = RawRunSection.model_validate({"memory": "  ", "cpus": ""})
+    assert section.memory is None
+    assert section.cpus is None
+
+
+def test_run_section_none_hooks_becomes_empty_subsection() -> None:
+    """``hooks:`` written with no value (YAML null) shouldn't crash — coerce
+    to empty defaults so all four hook fields stay ``None``.
+    """
+    section = RawRunSection.model_validate({"hooks": None})
+    assert section.hooks.pre_start is None
+    assert section.hooks.post_start is None
+    assert section.hooks.post_ready is None
+    assert section.hooks.post_stop is None
+
+
+def test_run_section_rejects_typo_in_owned_key() -> None:
+    """Sandbox-owned strictness — a misspelled key surfaces loudly."""
+    with pytest.raises(ValidationError, match="shutdwon_timeout"):
+        RawRunSection.model_validate({"shutdwon_timeout": 5})
 
 
 # ── Top-level tolerance for foreign sections ──────────────────────────
