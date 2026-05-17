@@ -16,8 +16,10 @@ Design choices and why:
   otherwise reimplement.
 - **Pubkey-only**, with ``IdentitiesOnly=yes`` so a stray host-side
   ssh-agent can't offer unrelated identities.  The host holds the
-  private key; the guest holds only the public half (baked into
-  ``authorized_keys.d/terok`` at image build).
+  private key; the guest receives the public half via a per-task
+  bind-mount onto ``/etc/ssh/authorized_keys.d/terok`` (the image
+  ships an empty placeholder, so it carries no per-installation
+  secret and caches identically across hosts).
 - **Argv-quoted remote command**: ``ssh host -- a b c`` concatenates
   the tokens and runs the result through the in-guest user's shell,
   so the transport ``shlex.quote``s each token to preserve the
@@ -62,10 +64,11 @@ from .protocol import Container, ExecResult
 # place rather than hard-coding the same literal twice.
 DEFAULT_CID_ANNOTATION = "terok.krun.cid"
 
-# Vsock port the guest sshd listens on, matching the systemd socket
-# unit drop-in baked into the L0G guest image.  Constant rather than
-# parameter — both sides must agree, and the guest side is fixed by
-# the image.  Exposed so tests can reference the same value.
+# Vsock port the guest sshd listens on, matching the ``sshd-vsock.socket``
+# vendor unit the L0 image ships in ``/usr/lib/systemd/system/``.
+# Constant rather than parameter — both sides must agree, and the guest
+# side is fixed by the image.  Exposed so tests can reference the same
+# value.
 DEFAULT_VSOCK_SSHD_PORT = 22
 
 # SSH user inside the guest — the only account the hardened sshd
