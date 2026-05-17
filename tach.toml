@@ -100,7 +100,6 @@ depends_on = [
     "terok_sandbox.config",
     "terok_sandbox.paths",
     "terok_sandbox.vault.store.encryption",
-    "terok_sandbox.vault.store.recovery",
     "terok_sandbox.vault.daemon.constants",
 ]
 
