@@ -1284,6 +1284,55 @@ class TestPlaintextBackupTarball:
         assert backup_path.stat().st_mode & 0o777 == 0o600
 
 
+class TestAnnounceGeneratedPassphrase:
+    """``_announce_generated_passphrase`` writes to TTY and (optionally) stdout.
+
+    Pins the behaviour that ``--echo-passphrase`` (``echo_to_stdout=True``)
+    makes the ``/dev/tty`` write *best-effort* — a CI run without a
+    controlling TTY must still get the value on stdout instead of
+    crashing in [`_write_to_controlling_tty`][terok_sandbox.vault.store.encryption._write_to_controlling_tty].
+    """
+
+    def test_tty_required_when_no_echo(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Without ``echo_to_stdout``, an unreachable /dev/tty must hard-fail."""
+        from pathlib import Path as _Path
+
+        from terok_sandbox.commands.credentials import _announce_generated_passphrase
+
+        real_open = _Path.open
+
+        def _no_tty(self, *args, **kwargs):
+            if str(self) == "/dev/tty":
+                raise OSError("no /dev/tty in test")
+            return real_open(self, *args, **kwargs)
+
+        monkeypatch.setattr(_Path, "open", _no_tty)
+        with pytest.raises(SystemExit, match="no controlling TTY"):
+            _announce_generated_passphrase(_PASSPHRASE)
+
+    def test_echo_to_stdout_degrades_tty_to_best_effort(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """``echo_to_stdout=True`` makes the TTY write best-effort; stdout still gets it."""
+        from pathlib import Path as _Path
+
+        from terok_sandbox.commands.credentials import _announce_generated_passphrase
+
+        real_open = _Path.open
+
+        def _no_tty(self, *args, **kwargs):
+            if str(self) == "/dev/tty":
+                raise OSError("no /dev/tty in test")
+            return real_open(self, *args, **kwargs)
+
+        monkeypatch.setattr(_Path, "open", _no_tty)
+        # Must not raise — the documented escape hatch.
+        _announce_generated_passphrase(_PASSPHRASE, echo_to_stdout=True)
+        assert _PASSPHRASE in capsys.readouterr().out
+
+
 class TestAskPassphraseMode:
     """Setup chooser refuses non-TTY without an explicit --passphrase-tier."""
 

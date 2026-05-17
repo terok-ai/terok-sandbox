@@ -101,3 +101,29 @@ class TestNonTtyRefusalFromSetup:
         monkeypatch.setattr("sys.stdin.isatty", lambda: False)
         with pytest.raises(SystemExit, match="--passphrase-tier"):
             _handle_credentials_encrypt_db(cfg=_cfg(tmp_path))
+
+
+class TestExplicitConfigTier:
+    """``--passphrase-tier=config`` still gates on the plaintext-on-disk confirmation."""
+
+    def test_config_tier_requires_yes_confirmation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Operator who says ``no`` at the plaintext gate is told to pick another tier."""
+        monkeypatch.setattr("terok_sandbox.vault.store.systemd_creds.is_available", lambda: False)
+        # Operator declines the plaintext warning — pipe ``no`` into stdin.
+        monkeypatch.setattr("sys.stdin.readline", lambda: "no\n")
+        with pytest.raises(SystemExit, match="config tier not confirmed"):
+            _handle_credentials_encrypt_db(
+                cfg=_cfg(tmp_path, passphrase="hunter2"), passphrase_tier="config"
+            )
+
+    def test_config_tier_accepts_yes(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``yes`` lands the config tier; pre-existing passphrase is reused."""
+        monkeypatch.setattr("terok_sandbox.vault.store.systemd_creds.is_available", lambda: False)
+        monkeypatch.setattr("sys.stdin.readline", lambda: "yes\n")
+        cfg = _cfg(tmp_path, passphrase="hunter2")
+        # No DB → handler short-circuits after provisioning.  No ack
+        # required because the config value pre-existed.
+        _handle_credentials_encrypt_db(cfg=cfg, passphrase_tier="config")
+        assert not cfg.vault_recovery_marker_file.exists()
