@@ -308,6 +308,57 @@ class TestRevealEdgeCases:
         assert not cfg.vault_recovery_marker_file.exists()
 
 
+class TestDefaultConfigConstruction:
+    """``cfg=None`` branches in the reveal + acknowledge handlers."""
+
+    def test_reveal_constructs_default_config(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Passing ``cfg=None`` runs the lazy ``SandboxConfig()`` construction."""
+        from terok_sandbox.commands import vault as vault_cmds
+
+        sentinel = _cfg(tmp_path)
+        monkeypatch.setattr(vault_cmds, "SandboxConfig", lambda: sentinel)
+        _handle_vault_passphrase_reveal(allow_redirect=True)
+        # Marker still missing (no SAVED typed), but the handler had to
+        # construct the cfg itself to even get this far.
+        assert not sentinel.vault_recovery_marker_file.exists()
+
+    def test_acknowledge_constructs_default_config(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``cfg=None`` ack flow lands the marker against the default config."""
+        from terok_sandbox.commands import vault as vault_cmds
+
+        sentinel = _cfg(tmp_path)
+        monkeypatch.setattr(vault_cmds, "SandboxConfig", lambda: sentinel)
+        _handle_vault_passphrase_acknowledge()
+        assert acknowledged(sentinel.vault_recovery_marker_file)
+
+
+class TestRevealStdoutIsattyHint:
+    """``--allow-redirect=False`` + interactive stdout surfaces the routing hint."""
+
+    def test_isatty_stdout_prints_routing_hint(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """The "passphrase routed to /dev/tty" message fires only on an interactive stdout."""
+        cfg = _cfg(tmp_path)
+        _patch_tty(monkeypatch)
+        monkeypatch.setattr("sys.stdout.isatty", lambda: True)
+        _handle_vault_passphrase_reveal(cfg=cfg)
+        out = capsys.readouterr().out
+        assert "passphrase routed to /dev/tty" in out
+        assert "--allow-redirect" in out
+
+
 class TestAcknowledgeDecoupling:
     """The ack verb is independent of the passphrase resolver.
 

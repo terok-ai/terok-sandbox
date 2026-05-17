@@ -1333,6 +1333,27 @@ class TestAnnounceGeneratedPassphrase:
         assert _PASSPHRASE in capsys.readouterr().out
 
 
+class TestMaybeAcknowledgeRecovery:
+    """The interactive SAVED prompt that fires after an auto-mint."""
+
+    def test_saved_response_writes_marker(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Operator types SAVED → marker file lands, success message prints."""
+        from terok_sandbox.commands.credentials import _maybe_acknowledge_recovery
+        from terok_sandbox.vault.store.recovery import acknowledged
+
+        cfg = _make_cfg(tmp_path)
+        # ``_read_from_controlling_tty`` returns the next scripted line.
+        _patch_dev_tty(monkeypatch, responses=("SAVED",))
+        _maybe_acknowledge_recovery(cfg, echo_to_stdout=False)
+        assert acknowledged(cfg.vault_recovery_marker_file)
+        assert "marked as saved" in capsys.readouterr().out
+
+
 class TestAskPassphraseMode:
     """Setup chooser refuses non-TTY without an explicit --passphrase-tier."""
 

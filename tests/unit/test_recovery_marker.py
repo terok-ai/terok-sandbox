@@ -20,6 +20,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from terok_sandbox import (
     SandboxConfig,
     acknowledge_recovery,
@@ -116,6 +118,32 @@ class TestTopLevelWrappers:
         cfg = _cfg(tmp_path, passphrase=None)
         assert acknowledge_recovery(cfg) is True
         assert is_recovery_acknowledged(cfg) is True
+
+
+class TestTopLevelWrappersDefaultConfig:
+    """``cfg=None`` branches in the top-level wrappers."""
+
+    def test_is_recovery_acknowledged_constructs_default_cfg(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """No-arg call lazy-builds ``SandboxConfig()`` (the documented default)."""
+        sentinel = _cfg(tmp_path)
+        acknowledge_recovery(sentinel)  # pre-seed the marker
+        monkeypatch.setattr("terok_sandbox.SandboxConfig", lambda: sentinel)
+        assert is_recovery_acknowledged() is True
+
+    def test_acknowledge_recovery_constructs_default_cfg(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """No-arg call lazy-builds ``SandboxConfig()`` and lands the marker."""
+        sentinel = _cfg(tmp_path)
+        monkeypatch.setattr("terok_sandbox.SandboxConfig", lambda: sentinel)
+        assert acknowledge_recovery() is True
+        assert sentinel.vault_recovery_marker_file.exists()
 
 
 class TestNoOfflineOracle:

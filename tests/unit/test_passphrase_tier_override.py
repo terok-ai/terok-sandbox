@@ -103,6 +103,47 @@ class TestNonTtyRefusalFromSetup:
             _handle_credentials_encrypt_db(cfg=_cfg(tmp_path))
 
 
+class TestExplicitSystemdCredsTier:
+    """``--passphrase-tier=systemd-creds`` with the host actually supporting it."""
+
+    def test_systemd_creds_tier_mints_and_seals(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """When systemd-creds IS available, explicit choice mints + seals + acks via TTY."""
+        from terok_sandbox.vault.store import systemd_creds as _sc
+
+        monkeypatch.setattr(_sc, "is_available", lambda: True)
+        sealed: list[tuple[str, object, str]] = []
+
+        def _seal(passphrase: str, path: object, *, key_mode: str) -> None:
+            sealed.append((passphrase, path, key_mode))
+
+        monkeypatch.setattr(_sc, "seal", _seal)
+        # Block both directions of /dev/tty so the ack flow degrades to
+        # "no controlling TTY" rather than fishing for SAVED input.
+        from pathlib import Path as _Path
+
+        real_open = _Path.open
+
+        def _no_tty(self, *args, **kwargs):
+            if str(self) == "/dev/tty":
+                raise OSError("no /dev/tty in test")
+            return real_open(self, *args, **kwargs)
+
+        monkeypatch.setattr(_Path, "open", _no_tty)
+
+        cfg = _cfg(tmp_path)
+        _handle_credentials_encrypt_db(
+            cfg=cfg, passphrase_tier="systemd-creds", echo_passphrase=True
+        )
+        # One mint → one seal call with --with-key=auto.
+        assert len(sealed) == 1
+        assert sealed[0][1] == cfg.vault_systemd_creds_file
+        assert sealed[0][2] == "auto"
+
+
 class TestExplicitConfigTier:
     """``--passphrase-tier=config`` still gates on the plaintext-on-disk confirmation."""
 
