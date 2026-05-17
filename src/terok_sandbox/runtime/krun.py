@@ -14,10 +14,11 @@ need to reach *into* the running guest.
 ``podman exec`` can't enter krun microVMs (libkrun can't inject processes
 post-boot — see crun#1098), so ``exec`` routes through a pluggable
 [`KrunTransport`][terok_sandbox.runtime.krun.KrunTransport] instead.  The
-real transport is OpenSSH over AF_VSOCK (Phase 3 step 5); a
-[`FakeKrunTransport`][terok_sandbox.runtime.krun.FakeKrunTransport] ships
-here so the skeleton and its callers are unit-testable without standing
-up a real guest.
+real transport is OpenSSH over a passt-forwarded TCP port (see
+[`TcpSSHTransport`][terok_sandbox.runtime.krun_transport.TcpSSHTransport]);
+a [`FakeKrunTransport`][terok_sandbox.runtime.krun.FakeKrunTransport]
+ships here so the skeleton and its callers are unit-testable without
+standing up a real guest.
 """
 
 from __future__ import annotations
@@ -51,7 +52,7 @@ class KrunRuntime:
     one verb that can't go through podman — ``exec``.
 
     The transport is **required**: there is no sensible default beyond a
-    real SSH-over-vsock implementation, and the fake exists explicitly
+    real SSH-over-passt-TCP implementation, and the fake exists explicitly
     for tests.  Production callers wire the real transport at the
     [`ContainerRuntime`][terok_sandbox.ContainerRuntime] selection point
     in the orchestrator.
@@ -92,7 +93,7 @@ class KrunRuntime:
     def containers_with_prefix(self, prefix: str) -> list[Container]:
         """Same prefix lookup as podman; rewrap each handle as a
         [`KrunContainer`][terok_sandbox.runtime.krun.KrunContainer] so its
-        ``login_command`` routes through the vsock transport.
+        ``login_command`` routes through the TCP-SSH transport.
 
         Same Protocol-invariance rationale as
         [`container`][terok_sandbox.runtime.krun.KrunRuntime.container]
@@ -120,7 +121,7 @@ class KrunRuntime:
         *,
         timeout: float | None = None,
     ) -> ExecResult:
-        """Route to the transport — typically SSH-over-vsock."""
+        """Route to the transport — typically SSH-over-passt-TCP."""
         if not cmd:
             raise ValueError("exec argv must not be empty")
         return self._transport.exec(container, cmd, timeout=timeout)
@@ -170,8 +171,10 @@ class KrunTransport(Protocol):
 
     The exec divergence is forced by libkrun: a microVM is sealed after
     boot and cannot accept injected processes.  The real implementation
-    speaks SSH over AF_VSOCK to a socket-activated sshd inside the guest;
-    that is wire-protocol shaped, not in-tree code we want to invent.
+    speaks SSH to a sshd inside the guest, reachable through a per-task
+    host TCP port that podman's passt has forwarded into the guest
+    namespace; that is wire-protocol shaped, not in-tree code we want to
+    invent.
 
     Kept narrow on purpose — only the two operations
     [`ContainerRuntime`][terok_sandbox.runtime.protocol.ContainerRuntime]
@@ -213,7 +216,7 @@ class KrunTransport(Protocol):
         Mirrors the protocol method on
         [`Container.login_command`][terok_sandbox.runtime.protocol.Container.login_command]
         but routed through the transport so the krun runtime can hand the
-        operator an SSH-vsock invocation instead of ``podman exec``.
+        operator an SSH invocation instead of ``podman exec``.
         """
         ...
 
@@ -227,7 +230,7 @@ class FakeKrunTransport:
     Mirrors [`NullRuntime`][terok_sandbox.runtime.null.NullRuntime]'s
     pre-register-then-replay shape so tests that already understand the
     null backend pick this up by analogy.  Records every call so tests
-    can assert dispatch without a real vsock listener.
+    can assert dispatch without a real sshd listener.
     """
 
     def __init__(self) -> None:
@@ -304,7 +307,7 @@ class KrunContainer(PodmanContainer):
     (state, start/stop, logs, inspect) — only ``login_command`` diverges,
     since ``podman exec`` can't enter the guest.  That single override
     routes through the held [`KrunTransport`][terok_sandbox.runtime.krun.KrunTransport]
-    so the operator gets an SSH-vsock argv that actually reaches in.
+    so the operator gets an SSH argv that actually reaches in.
     """
 
     def __init__(

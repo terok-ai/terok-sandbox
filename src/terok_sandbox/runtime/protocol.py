@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 class ExecResult:
     """Outcome of [`ContainerRuntime.exec`][terok_sandbox.runtime.protocol.ContainerRuntime.exec].
 
-    Backend-neutral so a future SSH-over-vsock krun backend can fill it from
+    Backend-neutral so the SSH-over-passt krun backend can fill it from
     an SSH response without pretending to be a [`subprocess.CompletedProcess`][subprocess.CompletedProcess].
     """
 
@@ -278,7 +278,8 @@ class ContainerRuntime(Protocol):
         """Run *cmd* inside *container* and return its completion record.
 
         The operation that diverges most across backends: podman uses
-        ``podman exec``; a krun backend would use SSH over vsock.
+        ``podman exec``; the krun backend uses SSH over a passt-forwarded
+        TCP port.
         """
         ...
 
