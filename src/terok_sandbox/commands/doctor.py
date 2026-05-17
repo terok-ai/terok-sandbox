@@ -20,17 +20,25 @@ def _handle_doctor(*, cfg: SandboxConfig | None = None) -> None:
     remaining checks shell out to ``probe_cmd``.  Exit code mirrors
     the worst verdict (warn = 1, error = 2).
     """
-    from ..doctor import sandbox_doctor_checks
+    from ..doctor import make_recovery_acknowledged_check, sandbox_doctor_checks
     from ..vault.daemon.lifecycle import VaultManager
 
     if cfg is None:
         cfg = SandboxConfig()
     mgr = VaultManager(cfg)
-    checks = sandbox_doctor_checks(
-        token_broker_port=mgr.token_broker_port,
-        ssh_signer_port=mgr.ssh_signer_port,
-        desired_shield_state=None,  # standalone mode — no task context
-    )
+    # The recovery-acknowledged check is a host-level concern (one
+    # marker per install, not per task), so it lives outside
+    # ``sandbox_doctor_checks`` to avoid duplicating it per container
+    # when terok's sickbay loops over tasks.  The standalone CLI is the
+    # natural caller that re-appends it.
+    checks = [
+        *sandbox_doctor_checks(
+            token_broker_port=mgr.token_broker_port,
+            ssh_signer_port=mgr.ssh_signer_port,
+            desired_shield_state=None,  # standalone mode — no task context
+        ),
+        make_recovery_acknowledged_check(),
+    ]
     worst = "ok"
     markers = {"ok": "ok", "warn": "WARN", "error": "ERROR"}
     for check in checks:

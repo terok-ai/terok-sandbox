@@ -314,19 +314,23 @@ def load_passphrase_from_command(
     return passphrase or None
 
 
-def _write_to_controlling_tty(message: str) -> None:
+def _write_to_controlling_tty(message: str, *, required: bool = True) -> None:
     """Write *message* to ``/dev/tty`` so a redirected stdout can't capture it.
 
-    Fails closed when no controlling TTY is reachable (CI, headless
-    automation): refuses rather than letting an irrecoverable
+    Fails closed by default when no controlling TTY is reachable (CI,
+    headless automation): refuses rather than letting an irrecoverable
     generated passphrase fall on the floor.  Operators automating
-    setup must pre-provide the passphrase via a tier the resolver
-    can find.
+    setup must either pre-provide the passphrase via a tier the
+    resolver can find, or pass ``--echo-passphrase`` so the value
+    reaches stdout — in which case the caller passes ``required=False``
+    here and the missing-tty error becomes a silent skip.
     """
     try:
         with Path("/dev/tty").open("w", encoding="utf-8") as tty:
             tty.write(message)
     except OSError as exc:
+        if not required:
+            return
         raise SystemExit(
             "Refusing to print the generated vault passphrase: no controlling TTY"
             f" ({exc.strerror}).\n"
@@ -334,6 +338,27 @@ def _write_to_controlling_tty(message: str) -> None:
             " passphrase (vault unlock / credentials.passphrase / sealed credential)"
             " before re-running."
         ) from exc
+
+
+def _read_from_controlling_tty(prompt: str) -> str | None:
+    """Read a single line from ``/dev/tty`` after writing *prompt* to it.
+
+    Mirrors [`_write_to_controlling_tty`][terok_sandbox.vault.store.encryption._write_to_controlling_tty]
+    but in the opposite direction — used by the ack flow to ask the
+    operator "type SAVED" on the same channel where the generated
+    passphrase was just displayed, regardless of how stdin/stdout
+    are redirected.  Returns ``None`` when no controlling TTY is
+    reachable so callers can fall through to a no-ack path on truly
+    headless runs (the announcement step has its own failure mode
+    there).
+    """
+    try:
+        with Path("/dev/tty").open("r+", encoding="utf-8") as tty:
+            tty.write(prompt)
+            tty.flush()
+            return tty.readline().rstrip("\n")
+    except OSError:
+        return None
 
 
 def prompt_passphrase(*, confirm: bool = False) -> str:

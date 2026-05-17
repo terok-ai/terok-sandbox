@@ -42,6 +42,7 @@ def _handle_sandbox_setup(
     no_gate: bool = False,
     no_clearance: bool = False,
     echo_passphrase: bool = False,
+    passphrase_tier: str | None = None,
     cfg: SandboxConfig | None = None,
 ) -> None:
     """Install shield + vault + gate + clearance in one idempotent bootstrap.
@@ -73,6 +74,11 @@ def _handle_sandbox_setup(
             without it, the recovery key only reaches the controlling
             terminal and a no-TTY run drops it silently.  Off by
             default so a routine ``setup > install.log`` can't leak it.
+        passphrase_tier: Force the credentials-DB passphrase storage
+            tier.  One of ``systemd-creds``, ``keyring``, ``session-file``,
+            ``config``.  Default ``None`` runs the auto-detect / chooser
+            chain — on a non-TTY without systemd-creds that now fails
+            closed, so headless bootstraps must pass this explicitly.
         cfg: Optional [`SandboxConfig`][terok_sandbox.config.SandboxConfig]
             override.  Defaults to the layered config — passed through
             so terok's config stays the single source of truth for paths.
@@ -81,6 +87,18 @@ def _handle_sandbox_setup(
 
     if cfg is None:
         cfg = SandboxConfig()
+
+    # Fail-fast on an unknown / unsupported ``--passphrase-tier`` *before*
+    # any host-mutating phase runs.  Without this check, a typo would let
+    # the shield install land its hooks and only blow up several phases
+    # later when the credentials provisioning rejected the tier — leaving
+    # a half-installed sandbox that's harder to back out of than to
+    # re-attempt cleanly.  When ``--no-vault`` is set, the credentials
+    # phase is skipped so the tier value is irrelevant and we don't
+    # validate it (passing the kwarg in that mode would be a documented
+    # quirk; refusing here would just block the no-vault escape hatch).
+    if passphrase_tier is not None and not no_vault:
+        _validate_passphrase_tier(passphrase_tier)
 
     selinux_result = run_prereq_report(cfg)
     print()
@@ -96,7 +114,9 @@ def _handle_sandbox_setup(
     # any non-default paths the caller (e.g. terok-executor) constructed
     # the config with.
     if not no_vault:
-        failed |= not _run_credentials_setup_phase(cfg, echo_passphrase=echo_passphrase)
+        failed |= not _run_credentials_setup_phase(
+            cfg, echo_passphrase=echo_passphrase, passphrase_tier=passphrase_tier
+        )
         cfg = dataclasses.replace(
             cfg,
             credentials_passphrase=credentials_passphrase(),
@@ -124,6 +144,40 @@ def _handle_sandbox_setup(
 
     stamp = write_stamp()
     print(f"→ setup stamp written: {stamp}")
+
+    # Trailing recovery-key reminder — fires only when the marker is
+    # absent, so re-runs on an already-acked host stay quiet.  The
+    # auto-mint announce lands mid-flow and is easy to scroll past;
+    # this block survives the scroll.
+    if not no_vault:
+        from .credentials import _post_setup_recovery_hint
+
+        _post_setup_recovery_hint(cfg)
+
+
+def _validate_passphrase_tier(tier: str) -> None:
+    """Reject an unknown / unavailable ``--passphrase-tier`` value early.
+
+    Mirrors the validation the credentials phase does internally, but
+    runs *before* any host-mutating phase so a typo can't leave shield
+    hooks installed against a sandbox that will fail at the credentials
+    step.  Imports the validator out of ``commands.credentials`` rather
+    than re-declaring the tier set so the two paths stay in lockstep.
+    """
+    from ..vault.store import systemd_creds as _systemd_creds
+    from .credentials import _EXPLICIT_TIERS
+
+    if tier not in _EXPLICIT_TIERS:
+        raise SystemExit(
+            f"unknown --passphrase-tier {tier!r};"
+            f" expected one of: {', '.join(sorted(_EXPLICIT_TIERS))}"
+        )
+    if tier == "systemd-creds" and not _systemd_creds.is_available():
+        raise SystemExit(
+            "--passphrase-tier=systemd-creds requested but systemd-creds is"
+            " unavailable (needs systemd ≥ 257 with the Varlink"
+            " io.systemd.Credentials interface)"
+        )
 
 
 def _handle_sandbox_uninstall(
@@ -196,6 +250,18 @@ SETUP_COMMANDS: tuple[CommandDef, ...] = (
                     "Also print any auto-generated vault passphrase to stdout"
                     " (default off — the value otherwise only reaches /dev/tty,"
                     " so non-interactive bootstraps must opt in to capture it)"
+                ),
+            ),
+            ArgDef(
+                name="--passphrase-tier",
+                default=None,
+                help=(
+                    "Force credentials-DB passphrase storage to a specific tier"
+                    " (systemd-creds | keyring | session-file | config) instead of"
+                    " the auto-detect / chooser chain.  Required on a non-TTY host"
+                    " without systemd-creds — the silent session-file fallback was"
+                    " removed in v0.0.100 because it minted a passphrase the"
+                    " operator never saw and lost it on the first reboot."
                 ),
             ),
         ),

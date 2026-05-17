@@ -76,7 +76,7 @@ class TestCommandRegistry:
         """The ``vault passphrase`` subgroup is reachable as a nested CommandDef."""
         passphrase = COMMANDS.find_at(("vault", "passphrase"))
         names = {c.name for c in passphrase.children}
-        assert {"seal", "to-keyring", "destroy"} == names
+        assert {"seal", "to-keyring", "reveal", "acknowledge", "destroy"} == names
 
 
 # ---------------------------------------------------------------------------

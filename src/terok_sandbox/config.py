@@ -424,6 +424,18 @@ class SandboxConfig:
         """
         return self.vault_dir / "vault.passphrase.cred"
 
+    @property
+    def vault_recovery_marker_file(self) -> Path:
+        """Return the sidecar marker path for "operator saved the recovery passphrase".
+
+        Lives next to the sealed-credential file (persistent state,
+        ``0o600``).  Contents are the SHA-256 fingerprint of the
+        acknowledged passphrase, so a re-key invalidates the marker
+        and re-prompts on the next surface that reads it
+        ([`terok_sandbox.vault.store.recovery`][terok_sandbox.vault.store.recovery]).
+        """
+        return self.vault_dir / "vault.recovery_acknowledged"
+
     def open_credential_db(
         self, db_path: Path | None = None, *, prompt_on_tty: bool = False
     ) -> Any:

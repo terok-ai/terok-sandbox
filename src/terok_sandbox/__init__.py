@@ -20,6 +20,7 @@ from __future__ import annotations
 
 __version__: str = "0.0.0"  # placeholder; replaced at build time
 
+import dataclasses
 from importlib.metadata import PackageNotFoundError, version as _meta_version
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -87,7 +88,12 @@ from .config_schema import (
     gate_use_personal_ssh_default,
 )
 from .config_stack import ConfigScope, ConfigStack
-from .doctor import CheckVerdict, DoctorCheck, sandbox_doctor_checks
+from .doctor import (
+    CheckVerdict,
+    DoctorCheck,
+    make_recovery_acknowledged_check,
+    sandbox_doctor_checks,
+)
 from .gate.lifecycle import GateServerManager, GateServerStatus
 from .gate.mirror import GateAuthNotConfigured, GateStalenessInfo, GitGate, is_ssh_url
 from .gate.tokens import TokenStore
@@ -336,6 +342,106 @@ def stop_vault(cfg: SandboxConfig | None = None) -> None:
     VaultManager(cfg).stop_daemon()
 
 
+def is_recovery_acknowledged(cfg: SandboxConfig | None = None) -> bool:
+    """Return ``True`` iff the operator has confirmed they saved the recovery key.
+
+    The vault's resolver tiers (systemd-creds, keyring, session-file)
+    are all bound to *this* machine, account, or boot — a hardware
+    failure or TPM transplant strands the vault without an off-host
+    copy of the passphrase.  This check is what surfaces the
+    "unconfirmed recovery key" warning in sickbay / doctor / the TUI
+    pill: a zero-byte marker file at
+    [`vault_recovery_marker_file`][terok_sandbox.SandboxConfig.vault_recovery_marker_file]
+    indicates the operator has acknowledged at some point.  Absence
+    (or an unreadable marker) reports ``False`` — the warning is
+    conservative by design.
+
+    Operators close the warning by running ``terok-sandbox vault
+    passphrase reveal`` (or the TUI's reveal modal) and confirming,
+    or via the silent ``vault passphrase acknowledge`` after CI /
+    TUI captured the value out-of-band.  A passphrase rotation does
+    NOT auto-invalidate the marker; operators who rotate should
+    re-ack against the new value.
+    """
+    from .vault.store.recovery import acknowledged
+
+    if cfg is None:
+        cfg = SandboxConfig()
+    return acknowledged(cfg.vault_recovery_marker_file)
+
+
+@dataclasses.dataclass(frozen=True)
+class RecoveryStatus:
+    """Combined marker + resolved-source view for the recovery-key warning surfaces.
+
+    Returned by [`recovery_status`][terok_sandbox.recovery_status] so
+    sickbay / doctor / TUI / post-launch CLI all paint the same picture
+    of "is the operator one reboot away from losing their vault?".
+    """
+
+    acknowledged: bool
+    """``True`` iff the zero-byte marker file is present."""
+
+    source: PassphraseSource | None
+    """Whichever resolver tier unlocked the chain right now, or ``None`` if locked."""
+
+    @property
+    def session_only(self) -> bool:
+        """``True`` iff the passphrase lives only in the tmpfs session-unlock file.
+
+        That tier dies on the next reboot — without an off-host copy
+        the vault becomes unrecoverable the moment the machine
+        restarts.  Severity should escalate accordingly on every
+        surface that renders this status.
+        """
+        return self.source == "session-file"
+
+    @property
+    def urgent(self) -> bool:
+        """``True`` iff unacknowledged AND session-only (one reboot away from loss)."""
+        return not self.acknowledged and self.session_only
+
+
+def recovery_status(cfg: SandboxConfig | None = None) -> RecoveryStatus:
+    """Return the combined marker + resolved-source view in one call.
+
+    Single seam for every "recovery key unconfirmed" surface — doctor,
+    sickbay, TUI pill, post-task-launch CLI footer.  Walking the
+    resolver chain to find the source is cheap (no DB open, just tier
+    knobs) and bundling it with the marker check here means no caller
+    has to repeat the "is this session-only?" lookup.
+    """
+    from .vault.store.encryption import NoPassphraseError, WrongPassphraseError
+    from .vault.store.recovery import acknowledged
+
+    if cfg is None:
+        cfg = SandboxConfig()
+    try:
+        _passphrase, source = cfg.resolve_passphrase_with_source()
+    except (NoPassphraseError, WrongPassphraseError):
+        source = None
+    return RecoveryStatus(
+        acknowledged=acknowledged(cfg.vault_recovery_marker_file),
+        source=source,
+    )
+
+
+def acknowledge_recovery(cfg: SandboxConfig | None = None) -> bool:
+    """Mark the recovery key as saved (writes the zero-byte sidecar marker).
+
+    Always succeeds and returns ``True`` — the marker is independent
+    of the passphrase resolver, so a locked vault doesn't block
+    acknowledgement.  The return value is kept for API stability with
+    callers that previously had a "locked vault" failure path.
+    """
+    from .vault.store.recovery import acknowledge
+
+    if cfg is None:
+        cfg = SandboxConfig()
+    acknowledge(cfg.vault_recovery_marker_file)
+    return True
+
+
 __all__ = [
     # Cross-package utilities
     "BestEffortLogger",
@@ -459,6 +565,14 @@ __all__ = [
     "start_vault",
     "stop_vault",
     "uninstall_vault_systemd",
+    # Recovery-key acknowledgement (operator confirmed they saved the
+    # auto-generated passphrase off-host).  False until the operator
+    # confirms via `vault passphrase reveal` / the TUI reveal modal /
+    # the silent `acknowledge_recovery` wrapper.
+    "RecoveryStatus",
+    "acknowledge_recovery",
+    "is_recovery_acknowledged",
+    "recovery_status",
     # Command registry
     "ArgDef",
     "CommandDef",
@@ -501,6 +615,7 @@ __all__ = [
     # Doctor (container health checks)
     "CheckVerdict",
     "DoctorCheck",
+    "make_recovery_acknowledged_check",
     "sandbox_doctor_checks",
     # SSH
     "DEFAULT_RSA_BITS",

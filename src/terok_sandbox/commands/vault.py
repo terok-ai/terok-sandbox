@@ -13,6 +13,11 @@ under ``vault passphrase``:
 - ``vault passphrase to-keyring`` moves it from whichever tier holds it
   now into the OS keyring (the recommended upgrade path off the
   session-file / plaintext-config tiers).
+- ``vault passphrase reveal`` resolves and prints the current
+  passphrase (to ``/dev/tty`` by default, or stdout with
+  ``--allow-redirect``) and offers to mark the recovery key as saved.
+- ``vault passphrase acknowledge`` marks the current passphrase as
+  saved without displaying it — the silent ack a TUI / CI captures.
 - ``vault passphrase destroy`` clears every persistent tier so the
   vault becomes irrecoverable without an external copy of the
   passphrase.
@@ -219,6 +224,12 @@ def _handle_vault_lock(*, cfg: SandboxConfig | None = None, forget: bool = False
                     f"failed to remove sealed credential at {sealed_cred}: {exc}"
                 ) from exc
             print(f"→ removed sealed credential at {sealed_cred}")
+        # The recovery-acknowledged marker is meaningless once every
+        # passphrase tier is gone; clear it so a future ``vault unlock``
+        # against a freshly-minted key starts from "unconfirmed" again.
+        from ..vault.store.recovery import forget as forget_recovery_marker
+
+        forget_recovery_marker(cfg.vault_recovery_marker_file)
     else:
         active = []
         if cfg.credentials_use_keyring:
@@ -377,6 +388,131 @@ def handle_vault_to_keyring(*, cfg: SandboxConfig | None = None) -> None:
         print("→ vault daemon restarted")
 
 
+def _handle_vault_passphrase_reveal(
+    *, cfg: SandboxConfig | None = None, allow_redirect: bool = False
+) -> None:
+    """Print the currently-resolvable vault passphrase and offer to ack the recovery.
+
+    The cleartext routes to ``/dev/tty`` by default so a routine
+    ``terok-sandbox vault passphrase reveal > out`` can't capture the
+    recovery key into a file by accident — the same channel the auto-mint
+    flow uses for its announcement.  ``--allow-redirect`` flips the
+    output to stdout for the operator who actually does want to pipe
+    the value into another tool (``pass insert``, ``op item create``);
+    in that mode stdout carries **only** the passphrase so the pipe
+    receives clean payload — every banner, reminder, and ack message
+    is diverted to stderr / ``/dev/tty`` so the redirected output
+    stays usable as the secret itself.
+
+    After a successful reveal the operator is prompted whether to mark
+    the current passphrase as saved.  An affirmative answer writes the
+    fingerprint marker the unconfirmed-recovery warning checks for,
+    closing the loop without a separate ``vault passphrase acknowledge``
+    invocation.
+    """
+    from ..vault.store.encryption import (
+        WrongPassphraseError,
+        _read_from_controlling_tty,
+        _write_to_controlling_tty,
+    )
+    from ..vault.store.recovery import (
+        acknowledge as acknowledge_recovery,
+        acknowledged,
+    )
+
+    if cfg is None:
+        cfg = SandboxConfig()
+
+    try:
+        passphrase, source = cfg.resolve_passphrase_with_source(prompt_on_tty=True)
+    except WrongPassphraseError as exc:
+        raise SystemExit(f"cannot reveal passphrase: {exc}") from exc
+    if not passphrase:
+        raise SystemExit("no current passphrase resolvable; run `terok-sandbox vault unlock` first")
+
+    if allow_redirect:
+        # Pipe-friendly: stdout carries *only* the passphrase string
+        # + trailing newline, suitable for ``| pass insert -e ...``
+        # or ``| op item create``.  The stderr banner deliberately
+        # does NOT echo the passphrase — many CI/log setups persist
+        # stderr by default and an operator piping stdout into a
+        # secret manager would expect stdout to be the sole carrier
+        # of the secret (audit finding #1 on PR #325).
+        print(passphrase)
+        safe_banner = (
+            f"\nVault passphrase ({source}) printed to stdout.\n"
+            "  Recovery key — save it off-host"
+            " (1Password emergency kit, paper safe, sealed envelope).\n"
+        )
+        print(safe_banner, end="", file=sys.stderr)
+    else:
+        if sys.stdout.isatty():
+            print(
+                "  (passphrase routed to /dev/tty so a redirected stdout"
+                " can't capture it; pass --allow-redirect to print to stdout)"
+            )
+        _write_to_controlling_tty(
+            f"\nVault passphrase ({source}): {passphrase}\n"
+            "  Recovery key — save it off-host"
+            " (1Password emergency kit, paper safe, sealed envelope).\n"
+        )
+
+    # In ``--allow-redirect`` mode every subsequent UX line also has to
+    # go to stderr so the stdout pipe stays a pure-secret payload.  The
+    # closure below picks the right sink once and reuses it.
+    def _say(text: str) -> None:
+        if allow_redirect:
+            print(text, file=sys.stderr)
+        else:
+            print(text)
+
+    if acknowledged(cfg.vault_recovery_marker_file):
+        _say("  recovery key already marked as saved.")
+        return
+
+    response = _read_from_controlling_tty("Mark recovery key as saved? Type SAVED to confirm: ")
+    if response is None:
+        _say(
+            "  no controlling TTY for confirmation;"
+            " run `terok-sandbox vault passphrase acknowledge` separately"
+            " once you have saved the value."
+        )
+        return
+    if response.strip() == "SAVED":
+        acknowledge_recovery(cfg.vault_recovery_marker_file)
+        _say("  recovery key marked as saved.")
+    else:
+        _say("  recovery key NOT confirmed; unconfirmed-recovery warning stays on.")
+
+
+def _handle_vault_passphrase_acknowledge(*, cfg: SandboxConfig | None = None) -> None:
+    """Mark the recovery key as saved, without displaying any passphrase.
+
+    The silent counterpart of
+    [`_handle_vault_passphrase_reveal`][terok_sandbox.commands.vault._handle_vault_passphrase_reveal]
+    — used by the TUI after it has shown the passphrase in its own
+    modal, and by CI bootstraps that captured the value via
+    ``--echo-passphrase`` and have now stashed it in their secret
+    manager.  Independent of the vault-lock state: the marker is a
+    zero-byte file, so we can flip it on without resolving anything.
+    Idempotent — calling again with the marker already in place is a
+    silent no-op.
+    """
+    from ..vault.store.recovery import (
+        acknowledge as acknowledge_recovery,
+        acknowledged,
+    )
+
+    if cfg is None:
+        cfg = SandboxConfig()
+
+    if acknowledged(cfg.vault_recovery_marker_file):
+        print("recovery key already marked as saved.")
+        return
+    acknowledge_recovery(cfg.vault_recovery_marker_file)
+    print("recovery key marked as saved.")
+
+
 def _handle_vault_destroy_passphrase(*, cfg: SandboxConfig | None = None) -> None:
     """Clear every persistent passphrase tier — the destructive lock.
 
@@ -422,6 +558,33 @@ _PASSPHRASE_GROUP = CommandDef(
             name="to-keyring",
             help="Move the current passphrase from its current tier into the OS keyring",
             handler=handle_vault_to_keyring,
+        ),
+        CommandDef(
+            name="reveal",
+            help=(
+                "Display the current vault passphrase (to /dev/tty by default)"
+                " and offer to mark the recovery key as saved"
+            ),
+            handler=_handle_vault_passphrase_reveal,
+            args=(
+                ArgDef(
+                    name="--allow-redirect",
+                    action="store_true",
+                    help=(
+                        "Print to stdout instead of /dev/tty — opt-in for the"
+                        " operator who really does want to pipe the value"
+                        " (`| pass insert`, `| op item create`)"
+                    ),
+                ),
+            ),
+        ),
+        CommandDef(
+            name="acknowledge",
+            help=(
+                "Mark the current passphrase as saved (silent ack from TUI / CI"
+                " after the value has been captured out-of-band)"
+            ),
+            handler=_handle_vault_passphrase_acknowledge,
         ),
         CommandDef(
             name="destroy",

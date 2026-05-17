@@ -156,6 +156,85 @@ def _make_vault_unlocked_check() -> DoctorCheck:
     )
 
 
+def make_recovery_acknowledged_check() -> DoctorCheck:
+    """Warn when the operator hasn't confirmed they saved the recovery key.
+
+    Two severity bands depending on the resolved tier when the marker
+    is absent — the session-file tier dies on the next reboot, so
+    "unconfirmed AND session-only" is a genuine ``error`` (you are
+    literally one reboot away from losing the vault), while every
+    durable tier (keyring, systemd-creds, config) is "only" a ``warn``
+    (machine-bound; needs an off-host copy for disaster recovery).
+
+    Intentionally NOT bundled into
+    [`sandbox_doctor_checks`][terok_sandbox.doctor.sandbox_doctor_checks]:
+    that list is consumed per-container by terok's sickbay, and a
+    host-bound recovery check would render once per task.  Top-level
+    callers (the ``terok-sandbox doctor`` CLI, terok's host-level
+    sickbay row) invoke this factory directly so the check renders
+    exactly once.
+    """
+
+    def _eval(_rc: int, _stdout: str, _stderr: str) -> CheckVerdict:
+        """Resolve marker + tier directly (foundation-layer reach-around).
+
+        Avoids the package-level ``recovery_status`` wrapper — that
+        lives at the surface layer (it's exported from
+        ``terok_sandbox/__init__.py``) and a foundation-layer doctor
+        can't depend on it.  We replicate the two-step shape here
+        because both primitives (marker read, chain walk) are
+        foundation-layer; no architectural cost beyond a couple of
+        extra import lines.
+        """
+        from ._stage import bold  # noqa: PLC0415
+        from .config import SandboxConfig  # noqa: PLC0415
+        from .vault.store.encryption import (  # noqa: PLC0415
+            NoPassphraseError,
+            WrongPassphraseError,
+        )
+        from .vault.store.recovery import acknowledged  # noqa: PLC0415
+
+        cfg = SandboxConfig()
+        if acknowledged(cfg.vault_recovery_marker_file):
+            return CheckVerdict("ok", "recovery key acknowledged")
+        try:
+            _passphrase, source = cfg.resolve_passphrase_with_source()
+        except (NoPassphraseError, WrongPassphraseError):
+            source = None
+        reveal = bold("terok-sandbox vault passphrase reveal")
+        ack = bold("terok-sandbox vault passphrase acknowledge")
+        if source == "session-file":
+            return CheckVerdict(
+                "error",
+                "vault recovery key UNCONFIRMED and the passphrase lives ONLY"
+                " in the session-unlock tmpfs file — it will be wiped on the"
+                " next reboot and your vault becomes UNRECOVERABLE then."
+                f" Run {reveal} NOW and save the value off-host,"
+                f" or {ack} if you already captured it.",
+            )
+        return CheckVerdict(
+            "warn",
+            "vault recovery key unconfirmed — every keystore tier is"
+            " machine-bound, so a hardware failure strands the vault."
+            f" Run {reveal} to view and save the value off-host,"
+            f" or {ack} if you already captured it.",
+        )
+
+    return DoctorCheck(
+        category="vault",
+        label="Recovery key acknowledged",
+        probe_cmd=[],
+        evaluate=_eval,
+        host_side=True,
+        fix_description=(
+            "Run `terok-sandbox vault passphrase reveal`, copy the value into"
+            " an off-host store (password manager / paper safe), and confirm"
+            " when prompted; or run `terok-sandbox vault passphrase acknowledge`"
+            " after capturing the value via `--echo-passphrase`."
+        ),
+    )
+
+
 def _make_plaintext_passphrase_warning_check() -> DoctorCheck:
     """Flag a plaintext ``credentials.passphrase`` field in any layered config.
 
