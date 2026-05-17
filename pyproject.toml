@@ -44,7 +44,7 @@ terok-gate = "terok_sandbox.gate.server:main"
 terok-vault = "terok_sandbox.vault.daemon.token_broker:main"
 
 [tool.poetry]
-version = "0.0.124a7"
+version = "0.0.124a8"
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
