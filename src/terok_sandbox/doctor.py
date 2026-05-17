@@ -176,16 +176,34 @@ def make_recovery_acknowledged_check() -> DoctorCheck:
     """
 
     def _eval(_rc: int, _stdout: str, _stderr: str) -> CheckVerdict:
-        """Resolve marker + tier in one shot; severity escalates on session-only."""
-        from terok_sandbox import recovery_status  # noqa: PLC0415
-        from terok_sandbox._stage import bold  # noqa: PLC0415
+        """Resolve marker + tier directly (foundation-layer reach-around).
 
-        status = recovery_status()
-        if status.acknowledged:
+        Avoids the package-level ``recovery_status`` wrapper — that
+        lives at the surface layer (it's exported from
+        ``terok_sandbox/__init__.py``) and a foundation-layer doctor
+        can't depend on it.  We replicate the two-step shape here
+        because both primitives (marker read, chain walk) are
+        foundation-layer; no architectural cost beyond a couple of
+        extra import lines.
+        """
+        from ._stage import bold  # noqa: PLC0415
+        from .config import SandboxConfig  # noqa: PLC0415
+        from .vault.store.encryption import (  # noqa: PLC0415
+            NoPassphraseError,
+            WrongPassphraseError,
+        )
+        from .vault.store.recovery import acknowledged  # noqa: PLC0415
+
+        cfg = SandboxConfig()
+        if acknowledged(cfg.vault_recovery_marker_file):
             return CheckVerdict("ok", "recovery key acknowledged")
+        try:
+            _passphrase, source = cfg.resolve_passphrase_with_source()
+        except (NoPassphraseError, WrongPassphraseError):
+            source = None
         reveal = bold("terok-sandbox vault passphrase reveal")
         ack = bold("terok-sandbox vault passphrase acknowledge")
-        if status.urgent:
+        if source == "session-file":
             return CheckVerdict(
                 "error",
                 "vault recovery key UNCONFIRMED and the passphrase lives ONLY"

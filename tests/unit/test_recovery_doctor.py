@@ -40,14 +40,13 @@ def _cfg(tmp_path: Path) -> SandboxConfig:
 def _eval_recovery(cfg: SandboxConfig) -> object:
     """Build the recovery check under *cfg* and evaluate it.
 
-    Patches the ``terok_sandbox`` top-level binding (which
-    ``recovery_status`` reads to lazy-build a default cfg) rather than
-    ``terok_sandbox.config.SandboxConfig`` — the wrapper's call site
-    resolves through the package-level re-export, not the originating
-    module.
+    Patches ``terok_sandbox.config.SandboxConfig`` because the doctor
+    check resolves ``from .config import SandboxConfig`` at call time
+    (foundation-layer reach-around to keep the check off the package's
+    surface-layer ``recovery_status`` wrapper).
     """
     check = make_recovery_acknowledged_check()
-    with patch("terok_sandbox.SandboxConfig", return_value=cfg):
+    with patch("terok_sandbox.config.SandboxConfig", return_value=cfg):
         return check.evaluate(0, "", "")
 
 
@@ -83,14 +82,16 @@ class TestRecoveryAcknowledgedCheck:
         unrecoverable on the next restart — a genuinely higher-severity
         state than the generic machine-bound warning.
         """
-        import terok_sandbox
-
-        # Spoof the resolver via the top-level helper.  We don't need a
-        # real session-file on disk — the doctor check reads only the
-        # ``RecoveryStatus`` shape.
-        fake_status = terok_sandbox.RecoveryStatus(acknowledged=False, source="session-file")
-        with patch("terok_sandbox.recovery_status", return_value=fake_status):
-            verdict = make_recovery_acknowledged_check().evaluate(0, "", "")
+        cfg = _cfg(tmp_path)
+        # Spoof the chain so it resolves via the session-file tier.
+        # We don't need a real session-file on disk — the doctor only
+        # reads the returned source string.
+        with patch.object(
+            type(cfg),
+            "resolve_passphrase_with_source",
+            lambda self, **_kw: ("p4ss", "session-file"),
+        ):
+            verdict = _eval_recovery(cfg)
         assert verdict.severity == "error"
         # The loud text must call out the reboot lifetime explicitly,
         # not just generic "machine-bound" — the operator needs to
