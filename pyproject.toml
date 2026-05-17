@@ -44,7 +44,6 @@ terok-gate = "terok_sandbox.gate.server:main"
 terok-vault = "terok_sandbox.vault.daemon.token_broker:main"
 
 [tool.poetry]
-version = "0.0.124a11"
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
@@ -60,6 +59,7 @@ classifiers = [
 packages = [
   { include = "terok_sandbox", from = "src" },
 ]
+version = "0.0.124a11"
 
 [tool.poetry.group.dev.dependencies]
 ruff = ">=0.15.10"
