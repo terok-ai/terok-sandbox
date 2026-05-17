@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for `TcpSSHTransport` and `port_annotation_resolver`.
+"""Tests for `TcpSSHTransport` and `podman_port_resolver`.
 
 Real SSH never runs — every test mocks ``subprocess.run`` /
 ``subprocess.Popen`` and asserts the assembled argv.  The transport
