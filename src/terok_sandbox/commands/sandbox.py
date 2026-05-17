@@ -145,6 +145,15 @@ def _handle_sandbox_setup(
     stamp = write_stamp()
     print(f"→ setup stamp written: {stamp}")
 
+    # Trailing recovery-key reminder — fires only when the marker is
+    # absent, so re-runs on an already-acked host stay quiet.  The
+    # auto-mint announce lands mid-flow and is easy to scroll past;
+    # this block survives the scroll.
+    if not no_vault:
+        from .credentials import _post_setup_recovery_hint
+
+        _post_setup_recovery_hint(cfg)
+
 
 def _validate_passphrase_tier(tier: str) -> None:
     """Reject an unknown / unavailable ``--passphrase-tier`` value early.

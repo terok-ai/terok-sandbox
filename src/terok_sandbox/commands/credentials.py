@@ -422,6 +422,14 @@ def _announce_generated_passphrase(passphrase: str, *, echo_to_stdout: bool = Fa
     Ansible play — can't capture the recovery key into a journal or
     log artifact.
 
+    Colours the cleartext line in bold yellow so it stands out from
+    the rest of the setup-time scroll; without the colour the line
+    blends into the surrounding ``→`` / ``ok`` rows and is the first
+    thing operators miss in screenshots and logs they paste back.
+    A trailing reminder lands at the end of ``terok setup`` via
+    [`_post_setup_recovery_hint`][terok_sandbox.commands.credentials._post_setup_recovery_hint]
+    as a belt-and-braces nudge.
+
     *echo_to_stdout* is the opt-in for the no-TTY case: CI / Ansible
     drivers explicitly pass ``--echo-passphrase`` to ``setup`` so they
     can capture the value into their own secret manager.  When set, the
@@ -433,15 +441,55 @@ def _announce_generated_passphrase(passphrase: str, *, echo_to_stdout: bool = Fa
     stays required so a redirected ``setup > install.log`` never
     silently drops the recovery key.
     """
+    from .._stage import bold, yellow
     from ..vault.store.encryption import _write_to_controlling_tty
 
+    # The passphrase line itself goes bold-yellow; the surrounding
+    # explanation stays plain so the cleartext is the visual centre
+    # of the announce block.
+    highlighted = bold(yellow(f"Vault passphrase: {passphrase}"))
     message = (
-        f"\nVault passphrase: {passphrase}\n"
+        f"\n{highlighted}\n"
         "  Write this down — it's your recovery key for rebuilds and other hosts.\n"
     )
     _write_to_controlling_tty(message, required=not echo_to_stdout)
     if echo_to_stdout:
         print(message, end="")
+
+
+def _post_setup_recovery_hint(cfg: SandboxConfig | None = None) -> None:
+    """End-of-setup reminder pointing at reveal / acknowledge.
+
+    Setup output is long and the auto-mint banner is buried somewhere
+    in the middle of it; operators who get distracted (Slack ping,
+    boss walks by) routinely miss the announce line entirely and
+    only notice the WARN rows surfacing days later.  This trailing
+    block calls out the two verbs the operator needs — ``reveal`` to
+    re-display the value, ``acknowledge`` to clear the warning once
+    they've saved it — so the breadcrumb survives the scroll.
+
+    Gated on "marker absent" rather than "minted this run": a re-run
+    of setup against a host where the operator never acked still needs
+    the nudge, while an already-acked host stays quiet.
+    """
+    from .._stage import bold
+    from ..vault.store.recovery import acknowledged
+
+    if cfg is None:
+        cfg = SandboxConfig()
+    if acknowledged(cfg.vault_recovery_marker_file):
+        return
+
+    print()
+    print(bold("Recovery key — save it off-host"))
+    print(
+        f"  • {bold('terok vault passphrase reveal')}     "
+        "show the passphrase again (route to /dev/tty by default)"
+    )
+    print(
+        f"  • {bold('terok vault passphrase acknowledge')}  "
+        "confirm you've stored it — clears the sickbay / doctor / TUI warning"
+    )
 
 
 def _persist_mode_choice(mode: SetupTier, passphrase: str) -> None:

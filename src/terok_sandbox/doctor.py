@@ -178,27 +178,28 @@ def make_recovery_acknowledged_check() -> DoctorCheck:
     def _eval(_rc: int, _stdout: str, _stderr: str) -> CheckVerdict:
         """Resolve marker + tier in one shot; severity escalates on session-only."""
         from terok_sandbox import recovery_status  # noqa: PLC0415
+        from terok_sandbox._stage import bold  # noqa: PLC0415
 
         status = recovery_status()
         if status.acknowledged:
             return CheckVerdict("ok", "recovery key acknowledged")
+        reveal = bold("terok-sandbox vault passphrase reveal")
+        ack = bold("terok-sandbox vault passphrase acknowledge")
         if status.urgent:
             return CheckVerdict(
                 "error",
                 "vault recovery key UNCONFIRMED and the passphrase lives ONLY"
                 " in the session-unlock tmpfs file — it will be wiped on the"
                 " next reboot and your vault becomes UNRECOVERABLE then."
-                " Run `terok-sandbox vault passphrase reveal` NOW and save"
-                " the value off-host, or `terok-sandbox vault passphrase"
-                " acknowledge` if you already captured it (CI / TUI flow).",
+                f" Run {reveal} NOW and save the value off-host,"
+                f" or {ack} if you already captured it.",
             )
         return CheckVerdict(
             "warn",
             "vault recovery key unconfirmed — every keystore tier is"
             " machine-bound, so a hardware failure strands the vault."
-            " Run `terok-sandbox vault passphrase reveal` to view and save"
-            " the value off-host, or `terok-sandbox vault passphrase"
-            " acknowledge` if you already captured it (CI / TUI flow).",
+            f" Run {reveal} to view and save the value off-host,"
+            f" or {ack} if you already captured it.",
         )
 
     return DoctorCheck(

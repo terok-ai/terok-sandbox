@@ -1333,6 +1333,41 @@ class TestAnnounceGeneratedPassphrase:
         assert _PASSPHRASE in capsys.readouterr().out
 
 
+class TestPostSetupRecoveryHint:
+    """End-of-setup reminder that surfaces only when the marker is absent."""
+
+    def test_prints_reminder_when_marker_missing(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Fresh install / unacked re-run → trailing block names both verbs."""
+        from terok_sandbox.commands.credentials import _post_setup_recovery_hint
+
+        cfg = _make_cfg(tmp_path)
+        _post_setup_recovery_hint(cfg)
+        out = capsys.readouterr().out
+        assert "Recovery key" in out
+        # Both remediation verbs surface, no "(CI / TUI flow)" parenthetical.
+        assert "terok vault passphrase reveal" in out
+        assert "terok vault passphrase acknowledge" in out
+        assert "CI / TUI flow" not in out
+
+    def test_silent_when_already_acked(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Re-run on an acked host stays quiet — no need to nudge again."""
+        from terok_sandbox.commands.credentials import _post_setup_recovery_hint
+        from terok_sandbox.vault.store.recovery import acknowledge
+
+        cfg = _make_cfg(tmp_path)
+        acknowledge(cfg.vault_recovery_marker_file)
+        _post_setup_recovery_hint(cfg)
+        assert capsys.readouterr().out == ""
+
+
 class TestMaybeAcknowledgeRecovery:
     """The interactive SAVED prompt that fires after an auto-mint."""
 
