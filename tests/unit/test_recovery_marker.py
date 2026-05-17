@@ -26,6 +26,7 @@ from terok_sandbox import (
     SandboxConfig,
     acknowledge_recovery,
     is_recovery_acknowledged,
+    recovery_status,
 )
 from terok_sandbox.vault.store.recovery import acknowledge, acknowledged, forget
 
@@ -144,6 +145,69 @@ class TestTopLevelWrappersDefaultConfig:
         monkeypatch.setattr("terok_sandbox.SandboxConfig", lambda: sentinel)
         assert acknowledge_recovery() is True
         assert sentinel.vault_recovery_marker_file.exists()
+
+
+class TestRecoveryStatus:
+    """``recovery_status`` bundles the marker + resolved source for every surface."""
+
+    def test_acked_durable_tier_not_urgent(self, tmp_path: Path) -> None:
+        """Acknowledged + config tier → not urgent (durable, ack present)."""
+        cfg = _cfg(tmp_path)
+        acknowledge_recovery(cfg)
+        status = recovery_status(cfg)
+        assert status.acknowledged is True
+        assert status.source == "config"
+        assert status.session_only is False
+        assert status.urgent is False
+
+    def test_unacked_durable_tier_not_urgent(self, tmp_path: Path) -> None:
+        """Unacknowledged + durable tier → warn but NOT urgent (no reboot loss risk)."""
+        status = recovery_status(_cfg(tmp_path))
+        assert status.acknowledged is False
+        assert status.session_only is False
+        assert status.urgent is False
+
+    def test_unacked_session_only_is_urgent(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Unacknowledged + session-file → urgent (one reboot away from loss)."""
+        from terok_sandbox.vault.store import encryption as enc
+
+        # Spoof the chain so it resolves via the session-file tier.  We
+        # bypass the conftest stub that nulls ``load_passphrase_from_file``
+        # by patching the resolver entry point directly.
+        cfg = _cfg(tmp_path)
+        monkeypatch.setattr(
+            enc, "resolve_passphrase_with_source", lambda **_kw: ("p4ss", "session-file")
+        )
+        status = recovery_status(cfg)
+        assert status.session_only is True
+        assert status.urgent is True
+
+    def test_acked_session_only_not_urgent(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Acknowledged + session-file → not urgent (operator saved it; rebooting just
+        means re-unlock + the ack stays valid because the marker is independent)."""
+        from terok_sandbox.vault.store import encryption as enc
+
+        cfg = _cfg(tmp_path)
+        acknowledge_recovery(cfg)
+        monkeypatch.setattr(
+            enc, "resolve_passphrase_with_source", lambda **_kw: ("p4ss", "session-file")
+        )
+        assert recovery_status(cfg).urgent is False
+
+    def test_locked_vault_source_is_none(self, tmp_path: Path) -> None:
+        """No resolvable passphrase → source=None, not urgent (locked-vault check owns it)."""
+        status = recovery_status(_cfg(tmp_path, passphrase=None))
+        assert status.source is None
+        assert status.session_only is False
+        assert status.urgent is False
 
 
 class TestNoOfflineOracle:

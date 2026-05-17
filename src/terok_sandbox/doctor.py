@@ -159,15 +159,12 @@ def _make_vault_unlocked_check() -> DoctorCheck:
 def make_recovery_acknowledged_check() -> DoctorCheck:
     """Warn when the operator hasn't confirmed they saved the recovery key.
 
-    Every keystore tier (systemd-creds, keyring, session-file) is
-    bound to *this* machine, account, or boot — a hardware failure
-    or TPM transplant strands the vault without an off-host copy of
-    the passphrase.  Absence (or unreadability) of the zero-byte
-    marker at
-    [`vault_recovery_marker_file`][terok_sandbox.SandboxConfig.vault_recovery_marker_file]
-    surfaces as ``warn`` with both remediation verbs in the message.
-    Independent of the vault-lock state — the ack flow doesn't need
-    a resolvable passphrase to run, so we don't defer here.
+    Two severity bands depending on the resolved tier when the marker
+    is absent — the session-file tier dies on the next reboot, so
+    "unconfirmed AND session-only" is a genuine ``error`` (you are
+    literally one reboot away from losing the vault), while every
+    durable tier (keyring, systemd-creds, config) is "only" a ``warn``
+    (machine-bound; needs an off-host copy for disaster recovery).
 
     Intentionally NOT bundled into
     [`sandbox_doctor_checks`][terok_sandbox.doctor.sandbox_doctor_checks]:
@@ -179,13 +176,22 @@ def make_recovery_acknowledged_check() -> DoctorCheck:
     """
 
     def _eval(_rc: int, _stdout: str, _stderr: str) -> CheckVerdict:
-        """Check the recovery marker; emit ``warn`` when absent."""
-        from .config import SandboxConfig
-        from .vault.store.recovery import acknowledged
+        """Resolve marker + tier in one shot; severity escalates on session-only."""
+        from terok_sandbox import recovery_status  # noqa: PLC0415
 
-        cfg = SandboxConfig()
-        if acknowledged(cfg.vault_recovery_marker_file):
+        status = recovery_status()
+        if status.acknowledged:
             return CheckVerdict("ok", "recovery key acknowledged")
+        if status.urgent:
+            return CheckVerdict(
+                "error",
+                "vault recovery key UNCONFIRMED and the passphrase lives ONLY"
+                " in the session-unlock tmpfs file — it will be wiped on the"
+                " next reboot and your vault becomes UNRECOVERABLE then."
+                " Run `terok-sandbox vault passphrase reveal` NOW and save"
+                " the value off-host, or `terok-sandbox vault passphrase"
+                " acknowledge` if you already captured it (CI / TUI flow).",
+            )
         return CheckVerdict(
             "warn",
             "vault recovery key unconfirmed — every keystore tier is"

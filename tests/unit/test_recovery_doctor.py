@@ -3,14 +3,15 @@
 
 """Tests for the ``Recovery key acknowledged`` doctor check.
 
-Exercises every branch of [`_make_recovery_acknowledged_check`][terok_sandbox.doctor._make_recovery_acknowledged_check]:
-marker absent (``warn``), marker present (``ok``), and the
-fix-description's dual-flow remediation hint.
+Three severity bands:
 
-The post-audit marker is a zero-byte sidecar — independent of the
-passphrase resolver — so the check no longer has a "locked vault
-defers" branch.  Pre-audit behaviour treated a missing fingerprint
-as deferred; that's gone.
+* marker present → ``ok``
+* marker absent + session-file resolver → ``error`` (one reboot away
+  from losing the vault — the session tier is wiped on restart)
+* marker absent + any durable tier → ``warn`` (machine-bound; needs
+  an off-host copy for hardware-failure DR)
+
+Plus the fix-description's dual-flow remediation hint.
 """
 
 from __future__ import annotations
@@ -37,9 +38,16 @@ def _cfg(tmp_path: Path) -> SandboxConfig:
 
 
 def _eval_recovery(cfg: SandboxConfig) -> object:
-    """Build the recovery check under *cfg* and evaluate it."""
+    """Build the recovery check under *cfg* and evaluate it.
+
+    Patches the ``terok_sandbox`` top-level binding (which
+    ``recovery_status`` reads to lazy-build a default cfg) rather than
+    ``terok_sandbox.config.SandboxConfig`` — the wrapper's call site
+    resolves through the package-level re-export, not the originating
+    module.
+    """
     check = make_recovery_acknowledged_check()
-    with patch("terok_sandbox.config.SandboxConfig", return_value=cfg):
+    with patch("terok_sandbox.SandboxConfig", return_value=cfg):
         return check.evaluate(0, "", "")
 
 
@@ -54,14 +62,44 @@ class TestRecoveryAcknowledgedCheck:
         assert verdict.severity == "ok"
         assert "acknowledged" in verdict.detail
 
-    def test_marker_missing_returns_warn(self, tmp_path: Path) -> None:
-        """Marker absent → ``warn`` naming both remediations."""
+    def test_marker_missing_with_durable_tier_returns_warn(self, tmp_path: Path) -> None:
+        """Marker absent + non-session-file source → ``warn`` naming both remediations."""
+        # ``_cfg`` resolves via the config tier (a durable, machine-bound
+        # store) — missing marker is "warn", not "error".
         verdict = _eval_recovery(_cfg(tmp_path))
         assert verdict.severity == "warn"
         assert "unconfirmed" in verdict.detail
         # Pin BOTH remediation verbs — the interactive one (reveal +
         # type SAVED) and the silent one (acknowledge, used by CI / TUI
         # after the value was captured out-of-band).
+        assert "vault passphrase reveal" in verdict.detail
+        assert "vault passphrase acknowledge" in verdict.detail
+
+    def test_marker_missing_with_session_only_returns_error(self, tmp_path: Path) -> None:
+        """Marker absent + session-file source → ``error`` with loud "next reboot" text.
+
+        The session-unlock tmpfs file is wiped on every reboot, so an
+        unconfirmed session-only key means the vault becomes
+        unrecoverable on the next restart — a genuinely higher-severity
+        state than the generic machine-bound warning.
+        """
+        import terok_sandbox
+
+        # Spoof the resolver via the top-level helper.  We don't need a
+        # real session-file on disk — the doctor check reads only the
+        # ``RecoveryStatus`` shape.
+        fake_status = terok_sandbox.RecoveryStatus(acknowledged=False, source="session-file")
+        with patch("terok_sandbox.recovery_status", return_value=fake_status):
+            verdict = make_recovery_acknowledged_check().evaluate(0, "", "")
+        assert verdict.severity == "error"
+        # The loud text must call out the reboot lifetime explicitly,
+        # not just generic "machine-bound" — the operator needs to
+        # understand the difference between "save it eventually" and
+        # "save it NOW or lose it on the next reboot".
+        assert "session-unlock" in verdict.detail
+        assert "reboot" in verdict.detail.lower()
+        assert "UNRECOVERABLE" in verdict.detail
+        # Remediation verbs still surface for the operator to act.
         assert "vault passphrase reveal" in verdict.detail
         assert "vault passphrase acknowledge" in verdict.detail
 
