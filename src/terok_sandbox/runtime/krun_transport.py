@@ -68,10 +68,19 @@ from .protocol import Container, ExecResult
 # ── Public defaults ─────────────────────────────────────────────────────────
 
 # Guest TCP port the host-side resolver looks up.  Matches what the L0
-# image's ``sshd-terok.service`` listens on.  Constant rather than
-# parameter — both sides must agree, and the guest side is fixed by the
-# image.
-DEFAULT_GUEST_SSHD_PORT = 22
+# image's rootless sshd listens on (started by ``init-ssh-and-repo.sh``
+# under the ``dev`` user).  2222 rather than 22 because:
+#
+# - libkrun mounts the guest rootfs via virtiofs with ``nosuid``, so
+#   setuid binaries (``sudo``) can't elevate to root.  Without root we
+#   can't bind privileged ports (< 1024) without ``CAP_NET_BIND_SERVICE``,
+#   which the keep-id user namespace doesn't carry to uid 1000.
+# - Per-user sshd on an unprivileged port sidesteps the whole privsep
+#   chain: no sudo, no setuid, no shared host-key files.
+#
+# Constant rather than parameter — both sides must agree, and the guest
+# side is fixed by the image.
+DEFAULT_GUEST_SSHD_PORT = 2222
 
 # Host address the forwarded port is bound to.  Loopback-only — the
 # experimental tradeoff is that the port is visible to every local user

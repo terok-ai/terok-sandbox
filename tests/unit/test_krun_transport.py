@@ -414,20 +414,27 @@ class TestPodmanPortResolver:
         assert endpoint.host == "127.0.0.42"
 
     def test_uses_custom_guest_port(self) -> None:
-        """The query target is the guest port; default matches ``DEFAULT_GUEST_SSHD_PORT``."""
-        resolver = podman_port_resolver(guest_port=2222)
+        """The query target is the guest port — caller can override the default."""
+        resolver = podman_port_resolver(guest_port=5555)
         with patch("subprocess.check_output", return_value="127.0.0.1:12345\n") as ck:
             resolver(_StubContainer("ctr"))
         argv = ck.call_args[0][0]
-        assert argv[-1] == "2222/tcp"
+        assert argv[-1] == "5555/tcp"
 
-    def test_default_guest_port_is_22(self) -> None:
-        """`DEFAULT_GUEST_SSHD_PORT` matches the L0 image's sshd-terok.service."""
+    def test_default_guest_port_is_unprivileged(self) -> None:
+        """`DEFAULT_GUEST_SSHD_PORT` matches the L0 image's rootless sshd.
+
+        Must be ≥ 1024 — under krun, virtiofs is mounted ``nosuid`` so
+        ``sudo`` can't elevate and uid 1000 can't bind privileged ports.
+        Pinning ``>= 1024`` here catches a regression that lowers this
+        value back into the privileged range.
+        """
         resolver = podman_port_resolver()
         with patch("subprocess.check_output", return_value="127.0.0.1:12345\n") as ck:
             resolver(_StubContainer("ctr"))
         argv = ck.call_args[0][0]
         assert argv[-1] == f"{DEFAULT_GUEST_SSHD_PORT}/tcp"
+        assert DEFAULT_GUEST_SSHD_PORT >= 1024
 
     def test_raises_when_mapping_empty(self) -> None:
         resolver = podman_port_resolver()
@@ -495,7 +502,7 @@ class TestPodmanPortResolver:
         argv = ck.call_args[0][0]
         assert "--" in argv
         # After ``--``: container name, then guest-port spec.
-        assert argv[argv.index("--") + 1 :] == ["hostile-name", "22/tcp"]
+        assert argv[argv.index("--") + 1 :] == ["hostile-name", f"{DEFAULT_GUEST_SSHD_PORT}/tcp"]
 
     def test_rejects_zero_port_from_mapping(self) -> None:
         """A misconfigured mapping handing back port 0 is refused at the boundary."""
