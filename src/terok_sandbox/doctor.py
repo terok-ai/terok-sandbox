@@ -108,7 +108,6 @@ def sandbox_doctor_checks(
     checks: list[DoctorCheck] = [
         _make_vault_unlocked_check(),
         _make_plaintext_passphrase_warning_check(),
-        _make_recovery_acknowledged_check(),
     ]
     if token_broker_port is not None:
         checks.append(_make_token_broker_check(token_broker_port))
@@ -157,7 +156,7 @@ def _make_vault_unlocked_check() -> DoctorCheck:
     )
 
 
-def _make_recovery_acknowledged_check() -> DoctorCheck:
+def make_recovery_acknowledged_check() -> DoctorCheck:
     """Warn when the operator hasn't confirmed they saved the recovery key.
 
     Every keystore tier (systemd-creds, keyring, session-file) is
@@ -169,6 +168,14 @@ def _make_recovery_acknowledged_check() -> DoctorCheck:
     surfaces as ``warn`` with both remediation verbs in the message.
     Independent of the vault-lock state — the ack flow doesn't need
     a resolvable passphrase to run, so we don't defer here.
+
+    Intentionally NOT bundled into
+    [`sandbox_doctor_checks`][terok_sandbox.doctor.sandbox_doctor_checks]:
+    that list is consumed per-container by terok's sickbay, and a
+    host-bound recovery check would render once per task.  Top-level
+    callers (the ``terok-sandbox doctor`` CLI, terok's host-level
+    sickbay row) invoke this factory directly so the check renders
+    exactly once.
     """
 
     def _eval(_rc: int, _stdout: str, _stderr: str) -> CheckVerdict:

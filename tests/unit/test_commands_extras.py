@@ -152,9 +152,23 @@ def _doctor_patches(
     return_value.  By default the mock returns a successful CompletedProcess.
     Pass *subprocess_side_effect* (e.g. ``FileNotFoundError``, a
     ``TimeoutExpired`` instance) to simulate probe failures.
+
+    ``make_recovery_acknowledged_check`` is appended to the standalone
+    doctor list outside the ``sandbox_doctor_checks`` bundle (it's
+    host-only and would otherwise duplicate per-task under terok's
+    sickbay).  We stub it to a benign ok check so tests that pin the
+    iteration loop's behaviour aren't perturbed by the marker's host
+    state.
     """
+    benign_recovery_check = _make_check(
+        label="Recovery key acknowledged", severity="ok", host_side=True
+    )
     with (
         patch("terok_sandbox.doctor.sandbox_doctor_checks", return_value=checks),
+        patch(
+            "terok_sandbox.doctor.make_recovery_acknowledged_check",
+            return_value=benign_recovery_check,
+        ),
         patch("subprocess.run") as run,
         patch.object(VaultManager, "token_broker_port", new=1),
         patch.object(VaultManager, "ssh_signer_port", new=2),

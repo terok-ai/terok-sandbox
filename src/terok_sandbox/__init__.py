@@ -87,7 +87,12 @@ from .config_schema import (
     gate_use_personal_ssh_default,
 )
 from .config_stack import ConfigScope, ConfigStack
-from .doctor import CheckVerdict, DoctorCheck, sandbox_doctor_checks
+from .doctor import (
+    CheckVerdict,
+    DoctorCheck,
+    make_recovery_acknowledged_check,
+    sandbox_doctor_checks,
+)
 from .gate.lifecycle import GateServerManager, GateServerStatus
 from .gate.mirror import GateAuthNotConfigured, GateStalenessInfo, GitGate, is_ssh_url
 from .gate.tokens import TokenStore
@@ -551,6 +556,7 @@ __all__ = [
     # Doctor (container health checks)
     "CheckVerdict",
     "DoctorCheck",
+    "make_recovery_acknowledged_check",
     "sandbox_doctor_checks",
     # SSH
     "DEFAULT_RSA_BITS",

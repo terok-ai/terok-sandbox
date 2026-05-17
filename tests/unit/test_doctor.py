@@ -219,11 +219,23 @@ class TestSandboxDoctorChecks:
         labels = {c.label for c in checks}
         assert "Credentials DB passphrase" in labels
         assert "Plaintext passphrase" in labels
-        assert "Recovery key acknowledged" in labels
         assert "Token broker (TCP)" in labels
         assert "SSH signer (TCP)" in labels
         assert "Shield state" in labels
-        assert len(checks) == 6
+        assert len(checks) == 5
+
+    def test_recovery_acknowledged_not_in_per_task_bundle(self) -> None:
+        """The recovery check is host-only — terok's sickbay loops over tasks
+        and would otherwise duplicate this row per container.  Top-level
+        callers (the standalone CLI, terok's host-level sickbay) invoke
+        ``make_recovery_acknowledged_check`` directly instead.
+        """
+        checks = sandbox_doctor_checks(
+            token_broker_port=TOKEN_BROKER_PORT,
+            ssh_signer_port=SSH_SIGNER_PORT,
+            desired_shield_state="up",
+        )
+        assert "Recovery key acknowledged" not in {c.label for c in checks}
 
     def test_skips_broker_when_none(self) -> None:
         checks = sandbox_doctor_checks(
@@ -253,9 +265,11 @@ class TestSandboxDoctorChecks:
             desired_shield_state=None,
         )
         categories = [c.category for c in checks]
-        # Three vault checks now: unlocked-passphrase + plaintext warning
-        # + recovery-acknowledged sidecar.
-        assert categories == ["vault", "vault", "vault", "shield"]
+        # Two vault checks: unlocked-passphrase + plaintext warning.
+        # Recovery-acknowledged is host-only (see
+        # ``test_recovery_acknowledged_not_in_per_task_bundle``) so it
+        # doesn't appear here.
+        assert categories == ["vault", "vault", "shield"]
 
     def test_all_checks_are_doctor_check_instances(self) -> None:
         checks = sandbox_doctor_checks(

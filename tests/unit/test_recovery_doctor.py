@@ -19,18 +19,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from terok_sandbox import SandboxConfig
-from terok_sandbox.doctor import sandbox_doctor_checks
+from terok_sandbox.doctor import make_recovery_acknowledged_check
 from terok_sandbox.vault.store.recovery import acknowledge as _acknowledge
 
 
 def _cfg(tmp_path: Path) -> SandboxConfig:
-    """Sandbox config rooted under tmp_path with the keyring tier disabled.
-
-    The doctor check is passphrase-independent now, but other host
-    checks in the assembled list still walk the resolver — pinning
-    the keyring tier off keeps the tests from depending on the
-    developer machine's keyring state.
-    """
+    """Sandbox config rooted under tmp_path."""
     return SandboxConfig(
         state_dir=tmp_path / "state",
         runtime_dir=tmp_path / "rt",
@@ -42,21 +36,9 @@ def _cfg(tmp_path: Path) -> SandboxConfig:
     )
 
 
-def _find_check(checks: list[object], label: str) -> object:
-    """Pull the ``DoctorCheck`` with the matching label out of the list."""
-    matches = [c for c in checks if getattr(c, "label", "") == label]
-    assert len(matches) == 1, f"expected one {label!r} check, found {len(matches)}"
-    return matches[0]
-
-
 def _eval_recovery(cfg: SandboxConfig) -> object:
-    """Build the doctor checks under *cfg* and evaluate the recovery one."""
-    check = _find_check(
-        sandbox_doctor_checks(
-            token_broker_port=None, ssh_signer_port=None, desired_shield_state=None
-        ),
-        "Recovery key acknowledged",
-    )
+    """Build the recovery check under *cfg* and evaluate it."""
+    check = make_recovery_acknowledged_check()
     with patch("terok_sandbox.config.SandboxConfig", return_value=cfg):
         return check.evaluate(0, "", "")
 
@@ -108,11 +90,6 @@ class TestRecoveryAcknowledgedCheck:
 
     def test_fix_description_mentions_both_paths(self) -> None:
         """The remediation hint covers both interactive and CI flows."""
-        check = _find_check(
-            sandbox_doctor_checks(
-                token_broker_port=None, ssh_signer_port=None, desired_shield_state=None
-            ),
-            "Recovery key acknowledged",
-        )
+        check = make_recovery_acknowledged_check()
         assert "vault passphrase reveal" in check.fix_description
         assert "vault passphrase acknowledge" in check.fix_description
