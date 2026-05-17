@@ -122,9 +122,9 @@ from .port_registry import (
     resolve_service_ports,
 )
 from .runtime import (
-    DEFAULT_CID_ANNOTATION,
+    DEFAULT_GUEST_SSHD_PORT,
+    DEFAULT_SSH_HOST,
     DEFAULT_SSH_USER,
-    DEFAULT_VSOCK_SSHD_PORT,
     Container,
     ContainerRemoveResult,
     ContainerRuntime,
@@ -139,9 +139,9 @@ from .runtime import (
     NullRuntime,
     PodmanRuntime,
     PortReservation,
-    VsockEndpoint,
-    VsockSSHTransport,
-    podman_annotation_resolver,
+    TcpEndpoint,
+    TcpSSHTransport,
+    podman_port_resolver,
 )
 from .sandbox import READY_MARKER, LifecycleHooks, RunSpec, Sandbox, Sharing, VolumeSpec
 from .setup_stamp import (
@@ -501,9 +501,9 @@ __all__ = [
     "Container",
     "ContainerRemoveResult",
     "ContainerRuntime",
-    "DEFAULT_CID_ANNOTATION",
+    "DEFAULT_GUEST_SSHD_PORT",
+    "DEFAULT_SSH_HOST",
     "DEFAULT_SSH_USER",
-    "DEFAULT_VSOCK_SSHD_PORT",
     "ExecResult",
     "FakeKrunTransport",
     "GpuConfigError",
@@ -515,9 +515,9 @@ __all__ = [
     "NullRuntime",
     "PodmanRuntime",
     "PortReservation",
-    "VsockEndpoint",
-    "VsockSSHTransport",
-    "podman_annotation_resolver",
+    "TcpEndpoint",
+    "TcpSSHTransport",
+    "podman_port_resolver",
     # Gate server
     "GateServerStatus",
     "check_units_outdated",
