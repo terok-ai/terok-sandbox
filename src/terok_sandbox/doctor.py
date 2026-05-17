@@ -196,8 +196,9 @@ def _make_recovery_acknowledged_check() -> DoctorCheck:
             "warn",
             "vault recovery key unconfirmed — every keystore tier is"
             " machine-bound, so a hardware failure strands the vault."
-            " Run `terok-sandbox vault passphrase reveal` and save the"
-            " value off-host.",
+            " Run `terok-sandbox vault passphrase reveal` to view and save"
+            " the value off-host, or `terok-sandbox vault passphrase"
+            " acknowledge` if you already captured it (CI / TUI flow).",
         )
 
     return DoctorCheck(

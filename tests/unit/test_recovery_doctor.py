@@ -64,11 +64,15 @@ class TestRecoveryAcknowledgedCheck:
         assert "acknowledged" in verdict.detail
 
     def test_unlocked_no_marker_returns_warn(self, tmp_path: Path) -> None:
-        """Vault unlocks but marker is absent → ``warn`` with the reveal hint."""
+        """Vault unlocks but marker is absent → ``warn`` naming both remediations."""
         verdict = _eval_recovery(_cfg(tmp_path))
         assert verdict.severity == "warn"
         assert "unconfirmed" in verdict.detail
+        # Pin BOTH remediation verbs — the interactive one (reveal +
+        # type SAVED) and the silent one (acknowledge, used by CI / TUI
+        # after the value was captured out-of-band).
         assert "vault passphrase reveal" in verdict.detail
+        assert "vault passphrase acknowledge" in verdict.detail
 
     def test_marker_stale_after_rotation_returns_warn(self, tmp_path: Path) -> None:
         """Marker for a different passphrase → ``warn`` (re-key invalidates ack)."""

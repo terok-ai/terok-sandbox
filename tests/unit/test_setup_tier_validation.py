@@ -107,6 +107,16 @@ class TestSetupRejectsBeforeMutation:
         # source module so the import resolves to a no-op.
         monkeypatch.setattr("terok_sandbox.setup_stamp.write_stamp", lambda: "fake-stamp")
 
+        # Boobytrap the vault phases.  ``--no-vault`` MUST short-circuit
+        # them entirely; if either fires it means the gate didn't hold
+        # and the test should fail loudly instead of just appearing to
+        # pass because we stubbed them benign.
+        def _boom(*_a: object, **_kw: object) -> bool:
+            raise RuntimeError("vault phase ran despite --no-vault")
+
+        monkeypatch.setattr("terok_sandbox.commands.sandbox._run_credentials_setup_phase", _boom)
+        monkeypatch.setattr("terok_sandbox.commands.sandbox.run_vault_install_phase", _boom)
+
         # Should not raise — the bogus tier is ignored under --no-vault.
         with patch("terok_sandbox.commands.sandbox.SandboxConfig"):
             _handle_sandbox_setup(passphrase_tier="bogus", no_vault=True)

@@ -101,13 +101,17 @@ class TestRevealDefault:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        """The cleartext lands on /dev/tty even when stdout is captured."""
+        """The cleartext lands on /dev/tty — never stdout, never stderr."""
         cfg = _cfg(tmp_path)
         tty = _patch_tty(monkeypatch)
         _handle_vault_passphrase_reveal(cfg=cfg)
         assert _PASSPHRASE in tty.value
-        # Stdout (captured by pytest) must not carry the cleartext.
-        assert _PASSPHRASE not in capsys.readouterr().out
+        # Neither stdout nor stderr (both captured by pytest) may carry
+        # the cleartext — a redirected ``terok-sandbox vault passphrase
+        # reveal 2>/dev/null > out`` must not leak the recovery key.
+        captured = capsys.readouterr()
+        assert _PASSPHRASE not in captured.out
+        assert _PASSPHRASE not in captured.err
 
     def test_locked_vault_exits(
         self,
