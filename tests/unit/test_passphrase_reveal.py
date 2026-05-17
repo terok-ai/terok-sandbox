@@ -16,7 +16,12 @@ from pathlib import Path
 import pytest
 
 from terok_sandbox import SandboxConfig
-from terok_sandbox.commands import (
+
+# These handlers stay internal to ``terok_sandbox.commands.vault`` —
+# importing them via the package facade would add stable-API contract
+# weight to symbols that the package treats as private.  Tests reach
+# into the implementing module directly.
+from terok_sandbox.commands.vault import (
     _handle_vault_passphrase_acknowledge,
     _handle_vault_passphrase_reveal,
 )

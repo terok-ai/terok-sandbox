@@ -398,7 +398,11 @@ def _handle_vault_passphrase_reveal(
     recovery key into a file by accident — the same channel the auto-mint
     flow uses for its announcement.  ``--allow-redirect`` flips the
     output to stdout for the operator who actually does want to pipe
-    the value into another tool (``pass insert``, ``op item create``).
+    the value into another tool (``pass insert``, ``op item create``);
+    in that mode stdout carries **only** the passphrase so the pipe
+    receives clean payload — every banner, reminder, and ack message
+    is diverted to stderr / ``/dev/tty`` so the redirected output
+    stays usable as the secret itself.
 
     After a successful reveal the operator is prompted whether to mark
     the current passphrase as saved.  An affirmative answer writes the
@@ -426,28 +430,43 @@ def _handle_vault_passphrase_reveal(
     if not passphrase:
         raise SystemExit("no current passphrase resolvable; run `terok-sandbox vault unlock` first")
 
-    message = (
+    banner = (
         f"\nVault passphrase ({source}): {passphrase}\n"
         "  Recovery key — save it off-host"
         " (1Password emergency kit, paper safe, sealed envelope).\n"
     )
     if allow_redirect:
-        print(message, end="")
+        # Pipe-friendly: stdout is *only* the passphrase string + a
+        # trailing newline, suitable for ``| pass insert -e ...`` or
+        # ``| op item create``.  The surrounding UX (banner + reminder
+        # + later ack prompts/status) goes to stderr so ``2>/dev/null``
+        # is a clean opt-out for noisy pipelines.
+        print(passphrase)
+        print(banner, end="", file=sys.stderr)
     else:
         if sys.stdout.isatty():
             print(
                 "  (passphrase routed to /dev/tty so a redirected stdout"
                 " can't capture it; pass --allow-redirect to print to stdout)"
             )
-        _write_to_controlling_tty(message)
+        _write_to_controlling_tty(banner)
+
+    # In ``--allow-redirect`` mode every subsequent UX line also has to
+    # go to stderr so the stdout pipe stays a pure-secret payload.  The
+    # closure below picks the right sink once and reuses it.
+    def _say(text: str) -> None:
+        if allow_redirect:
+            print(text, file=sys.stderr)
+        else:
+            print(text)
 
     if is_acknowledged(cfg.vault_recovery_marker_file, passphrase):
-        print("  recovery key already marked as saved.")
+        _say("  recovery key already marked as saved.")
         return
 
     response = _read_from_controlling_tty("Mark recovery key as saved? Type SAVED to confirm: ")
     if response is None:
-        print(
+        _say(
             "  no controlling TTY for confirmation;"
             " run `terok-sandbox vault passphrase acknowledge` separately"
             " once you have saved the value."
@@ -455,9 +474,9 @@ def _handle_vault_passphrase_reveal(
         return
     if response.strip() == "SAVED":
         acknowledge_recovery(cfg.vault_recovery_marker_file, passphrase)
-        print("  recovery key marked as saved.")
+        _say("  recovery key marked as saved.")
     else:
-        print("  recovery key NOT confirmed; unconfirmed-recovery warning stays on.")
+        _say("  recovery key NOT confirmed; unconfirmed-recovery warning stays on.")
 
 
 def _handle_vault_passphrase_acknowledge(*, cfg: SandboxConfig | None = None) -> None:

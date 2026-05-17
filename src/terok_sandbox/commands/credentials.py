@@ -403,8 +403,15 @@ def _provision_passphrase(
     if mode == "config":
         if cfg.credentials_passphrase:
             return cfg.credentials_passphrase, "config", False
+        # ``prompt_passphrase(confirm=True)`` mints-and-announces on
+        # empty input, so this branch can yield either an operator-typed
+        # passphrase or a freshly-generated one — we can't tell from the
+        # return value.  Report ``auto_generated=True`` conservatively;
+        # the ack flow is a mild "type SAVED" prompt at worst when the
+        # operator typed the value, and the correct gate when they let
+        # the helper mint one.  Same trade as the session-file branch.
         print("Enter a passphrase to write to credentials.passphrase in config.yml:")
-        return prompt_passphrase(confirm=True), "prompt", False
+        return prompt_passphrase(confirm=True), "prompt", True
 
     raise ValueError(f"unknown mode: {mode!r}")
 
@@ -419,8 +426,14 @@ def _announce_generated_passphrase(passphrase: str, *, echo_to_stdout: bool = Fa
 
     *echo_to_stdout* is the opt-in for the no-TTY case: CI / Ansible
     drivers explicitly pass ``--echo-passphrase`` to ``setup`` so they
-    can capture the value into their own secret manager.  Off by default
-    so a routine ``setup > install.log`` can't leak it.
+    can capture the value into their own secret manager.  When set, the
+    ``/dev/tty`` write becomes best-effort — a TTY-less CI run that
+    *did* pass ``--echo-passphrase`` would otherwise hit the fail-closed
+    ``SystemExit`` in [`_write_to_controlling_tty`][terok_sandbox.vault.store.encryption._write_to_controlling_tty]
+    before the stdout copy ever lands, defeating the documented escape
+    hatch.  Without ``--echo-passphrase`` the controlling-TTY write
+    stays required so a redirected ``setup > install.log`` never
+    silently drops the recovery key.
     """
     from ..vault.store.encryption import _write_to_controlling_tty
 
@@ -428,7 +441,7 @@ def _announce_generated_passphrase(passphrase: str, *, echo_to_stdout: bool = Fa
         f"\nVault passphrase: {passphrase}\n"
         "  Write this down — it's your recovery key for rebuilds and other hosts.\n"
     )
-    _write_to_controlling_tty(message)
+    _write_to_controlling_tty(message, required=not echo_to_stdout)
     if echo_to_stdout:
         print(message, end="")
 

@@ -40,10 +40,16 @@ def fingerprint(passphrase: str) -> str:
 
 
 def acknowledged_fingerprint(marker_path: Path) -> str | None:
-    """Return the recorded fingerprint, or ``None`` if no marker is set."""
+    """Return the recorded fingerprint, or ``None`` if no marker is set.
+
+    Any ``OSError`` (permission denied, busy mount, broken symlink,
+    transient I/O hiccup) degrades to ``None`` so health and
+    reporting flows can keep going — "no marker readable" is the
+    same answer the unconfirmed-warning surfaces want anyway.
+    """
     try:
         text = marker_path.read_text(encoding="utf-8").strip()
-    except FileNotFoundError:
+    except OSError:
         return None
     return text or None
 

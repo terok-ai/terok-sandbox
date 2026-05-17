@@ -164,10 +164,11 @@ def _make_recovery_acknowledged_check() -> DoctorCheck:
     bound to *this* machine, account, or boot — a hardware failure
     or TPM transplant strands the vault without an off-host copy of
     the passphrase.  The check fires only when the vault is actually
-    unlocked (a locked vault has its own check above), so the warning
-    speaks to the missing recovery-key copy rather than a chain
-    misconfig.  A locked vault, missing marker, or rotated key all
-    surface as ``warn`` here.
+    unlocked: a locked / unresolvable vault returns ``ok`` (deferred)
+    because the vault-unlocked check above already reports that as
+    an error and the recovery question can't be answered without a
+    resolvable passphrase to fingerprint.  Missing marker or a
+    fingerprint mismatch (rotated key) surface as ``warn``.
     """
 
     def _eval(_rc: int, _stdout: str, _stderr: str) -> CheckVerdict:

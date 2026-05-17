@@ -88,6 +88,18 @@ def _handle_sandbox_setup(
     if cfg is None:
         cfg = SandboxConfig()
 
+    # Fail-fast on an unknown / unsupported ``--passphrase-tier`` *before*
+    # any host-mutating phase runs.  Without this check, a typo would let
+    # the shield install land its hooks and only blow up several phases
+    # later when the credentials provisioning rejected the tier — leaving
+    # a half-installed sandbox that's harder to back out of than to
+    # re-attempt cleanly.  When ``--no-vault`` is set, the credentials
+    # phase is skipped so the tier value is irrelevant and we don't
+    # validate it (passing the kwarg in that mode would be a documented
+    # quirk; refusing here would just block the no-vault escape hatch).
+    if passphrase_tier is not None and not no_vault:
+        _validate_passphrase_tier(passphrase_tier)
+
     selinux_result = run_prereq_report(cfg)
     print()
     print("Services:")
@@ -132,6 +144,31 @@ def _handle_sandbox_setup(
 
     stamp = write_stamp()
     print(f"→ setup stamp written: {stamp}")
+
+
+def _validate_passphrase_tier(tier: str) -> None:
+    """Reject an unknown / unavailable ``--passphrase-tier`` value early.
+
+    Mirrors the validation the credentials phase does internally, but
+    runs *before* any host-mutating phase so a typo can't leave shield
+    hooks installed against a sandbox that will fail at the credentials
+    step.  Imports the validator out of ``commands.credentials`` rather
+    than re-declaring the tier set so the two paths stay in lockstep.
+    """
+    from ..vault.store import systemd_creds as _systemd_creds
+    from .credentials import _EXPLICIT_TIERS
+
+    if tier not in _EXPLICIT_TIERS:
+        raise SystemExit(
+            f"unknown --passphrase-tier {tier!r};"
+            f" expected one of: {', '.join(sorted(_EXPLICIT_TIERS))}"
+        )
+    if tier == "systemd-creds" and not _systemd_creds.is_available():
+        raise SystemExit(
+            "--passphrase-tier=systemd-creds requested but systemd-creds is"
+            " unavailable (needs systemd ≥ 257 with the Varlink"
+            " io.systemd.Credentials interface)"
+        )
 
 
 def _handle_sandbox_uninstall(
