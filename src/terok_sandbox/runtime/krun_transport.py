@@ -47,9 +47,9 @@ Design choices and why:
 Endpoint discovery is pluggable via *endpoint_resolver* so unit tests
 can synthesise endpoints without an actual microVM.  The default
 production factory
-[`port_annotation_resolver`][terok_sandbox.runtime.krun_transport.port_annotation_resolver]
-reads the forwarded host port from a podman annotation set at task
-launch.
+[`podman_port_resolver`][terok_sandbox.runtime.krun_transport.podman_port_resolver]
+asks podman directly for the host port forwarded to the guest's sshd —
+no terok-private annotation in between.
 """
 
 from __future__ import annotations
@@ -67,12 +67,11 @@ from .protocol import Container, ExecResult
 
 # ── Public defaults ─────────────────────────────────────────────────────────
 
-# Default annotation key the orchestrator sets at ``podman run`` time so
-# the host side can find the forwarded sshd port after the fact.  Read by
-# [`port_annotation_resolver`][terok_sandbox.runtime.krun_transport.port_annotation_resolver];
-# the constant is exposed so the orchestrator can name the key from one
-# place rather than hard-coding the same literal twice.
-DEFAULT_PORT_ANNOTATION = "terok.krun.port"
+# Guest TCP port the host-side resolver looks up.  Matches what the L0
+# image's ``sshd-terok.service`` listens on.  Constant rather than
+# parameter — both sides must agree, and the guest side is fixed by the
+# image.
+DEFAULT_GUEST_SSHD_PORT = 22
 
 # Host address the forwarded port is bound to.  Loopback-only — the
 # experimental tradeoff is that the port is visible to every local user
@@ -293,86 +292,82 @@ class TcpSSHTransport:
 # ── Endpoint resolvers ──────────────────────────────────────────────────────
 
 
-def port_annotation_resolver(
-    annotation_key: str = DEFAULT_PORT_ANNOTATION,
+def podman_port_resolver(
     *,
+    guest_port: int = DEFAULT_GUEST_SSHD_PORT,
     host: str = DEFAULT_SSH_HOST,
 ) -> Callable[[Container], TcpEndpoint]:
-    """Return a resolver that reads the forwarded host port from a podman annotation.
+    """Return a resolver that reads the forwarded host port via ``podman port``.
 
-    The orchestrator sets ``--annotation <annotation_key>=<port>`` when
-    launching the task (alongside the matching ``-p <port>:22``); this
-    resolver reads it back at exec time via ``podman inspect``.
-    Decouples transport from the allocator: whatever reserves a free
-    host port per task just needs to write it into the agreed
-    annotation.
+    The orchestrator launches the container with ``-p <reserved>:22``;
+    podman already records that mapping in its own metadata, so this
+    resolver just asks for it back — no terok-private annotation in the
+    middle.  ``podman port <name> <guest_port>/tcp`` emits a single
+    ``<host_ip>:<host_port>`` line per matching mapping, which is
+    exactly what we need.
 
-    *annotation_key* is validated against the OCI annotation charset
-    ``[A-Za-z0-9][A-Za-z0-9._/-]*`` at construction time — the value
-    is interpolated into a podman ``--format`` Go-template literal,
-    so a ``"`` / ``}}`` in the key would break out of the string slot
-    and let attacker-chosen template expressions execute against the
-    container's full inspect output.
+    The resolved host is overridden to *host* (loopback by default) so
+    the SSH connect goes through ``127.0.0.1`` even when pasta bound
+    the forward to ``0.0.0.0``; trusting whatever podman reports would
+    open the door to reaching the guest via a routable interface.
     """
-    if not _ANNOTATION_KEY_RE.fullmatch(annotation_key):
-        raise ValueError(
-            f"port_annotation_resolver: annotation_key {annotation_key!r} must "
-            "match [A-Za-z0-9][A-Za-z0-9._/-]* (OCI annotation charset)"
-        )
 
     def _resolve(container: Container) -> TcpEndpoint:
         # ``--`` ends podman's own option parsing, so a container handle
         # carrying a leading-dash name can't be reinterpreted as a flag.
-        argv = [
-            "podman",
-            "inspect",
-            "--format",
-            '{{ index .Config.Annotations "' + annotation_key + '" }}',
-            "--",
-            container.name,
-        ]
+        argv = ["podman", "port", "--", container.name, f"{guest_port}/tcp"]
         # A short timeout keeps the resolver from blocking forever on a
         # wedged podman (daemon trouble, NFS-backed storage stall):
-        # ``podman inspect`` is a metadata read, so 5 s is generous.
-        # Match the other timeouts in this file by raising
-        # ``RuntimeError`` so the resolver's exception shape stays
-        # uniform across "annotation missing", "annotation invalid",
-        # and "podman didn't answer".
+        # ``podman port`` is a metadata read, so 5 s is generous.  Raise
+        # ``RuntimeError`` for every failure mode so callers see one
+        # exception type across "no mapping", "unparseable output", and
+        # "podman didn't answer".
         try:
             out = subprocess.check_output(  # nosec B603 B607 — argv built from fixed verbs + caller-controlled scope/container names — binary PATH lookup is the cross-distro contract
                 argv,
                 text=True,
-                timeout=_RESOLVER_INSPECT_TIMEOUT_S,
+                timeout=_RESOLVER_PORT_TIMEOUT_S,
             ).strip()
         except subprocess.CalledProcessError as exc:
             raise RuntimeError(
-                f"podman inspect failed for container {container.name!r}: {exc}"
+                f"podman port failed for container {container.name!r}: {exc} — "
+                f"no ``-p HOST:{guest_port}`` mapping at launch?"
             ) from exc
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError(
-                f"podman inspect timed out after {_RESOLVER_INSPECT_TIMEOUT_S}s "
+                f"podman port timed out after {_RESOLVER_PORT_TIMEOUT_S}s "
                 f"resolving forwarded port for container {container.name!r} — "
                 "podman daemon stuck or storage backend stalled"
             ) from exc
         if not out:
             raise RuntimeError(
-                f"container {container.name!r} has no {annotation_key!r} annotation — "
-                "the orchestrator must reserve and set a forwarded port at launch time"
+                f"container {container.name!r} has no {guest_port}/tcp port mapping — "
+                f"the orchestrator must launch with ``-p HOST:{guest_port}``"
+            )
+        # Take the first mapping line; podman emits one per binding (it
+        # would only emit several if the operator added extra ``-p`` for
+        # the same guest port).  ``rpartition`` lets the host-ip side
+        # contain colons (IPv6 literals) without us having to special-case.
+        first_line = out.splitlines()[0]
+        _, sep, port_str = first_line.rpartition(":")
+        if not sep:
+            raise RuntimeError(
+                f"container {container.name!r} podman-port output {first_line!r} "
+                f"doesn't look like ``<host>:<port>``"
             )
         try:
-            port = int(out)
+            port = int(port_str)
         except ValueError as exc:
             raise RuntimeError(
-                f"container {container.name!r} has non-integer {annotation_key} annotation: {out!r}"
+                f"container {container.name!r} podman-port output {first_line!r} "
+                f"has non-integer port: {port_str!r}"
             ) from exc
-        # ``TcpEndpoint.__post_init__`` does the range check; raising
-        # ``RuntimeError`` here keeps the resolver's exception type
-        # uniform across "annotation missing" and "annotation invalid".
+        # ``TcpEndpoint.__post_init__`` does the range check.
         try:
             return TcpEndpoint(port=port, host=host)
         except ValueError as exc:
             raise RuntimeError(
-                f"container {container.name!r} has invalid {annotation_key} annotation: {exc}"
+                f"container {container.name!r} has invalid forwarded port {port}: {exc}"
             ) from exc
 
     return _resolve
@@ -380,12 +375,12 @@ def port_annotation_resolver(
 
 # ── Private helpers ─────────────────────────────────────────────────────────
 
-_RESOLVER_INSPECT_TIMEOUT_S: float = 5.0
-"""Bound on ``podman inspect`` in ``port_annotation_resolver``.
+_RESOLVER_PORT_TIMEOUT_S: float = 5.0
+"""Bound on ``podman port`` in ``podman_port_resolver``.
 
-Inspect is a metadata read — 5 s leaves comfortable headroom over a
-healthy podman + storage backend while still surfacing a wedged
-daemon as a loud ``RuntimeError`` instead of a forever-hang."""
+It is a metadata read — 5 s leaves comfortable headroom over a healthy
+podman + storage backend while still surfacing a wedged daemon as a
+loud ``RuntimeError`` instead of a forever-hang."""
 
 _TCP_MAX_PORT = 0xFFFF  # u16
 
@@ -394,17 +389,6 @@ _TCP_MAX_PORT = 0xFFFF  # u16
 # argument; refusing anything outside this charset keeps shell
 # metacharacters and structural junk out of the system ssh CLI.
 _HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.\-]*$")
-
-# Charset shape check for ``port_annotation_resolver``'s key parameter
-# — the value is concatenated into a ``--format`` Go-template literal
-# that podman parses, so any ``"`` / ``}`` / ``{`` would break out of
-# the intended string slot and execute attacker-chosen template
-# expressions.  Mirrors the OCI annotation charset.
-#
-# Note: this is the *reader-side* shape check (operator-supplied key
-# name).  The *writer-side* allowlist of values terok actually emits
-# lives at ``terok_sandbox.sandbox.SAFE_ANNOTATION_KEYS``.
-_ANNOTATION_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
 
 # ``ssh host -- arg1 arg2`` does NOT preserve argv on the remote side —
 # sshd concatenates the tokens and runs the result through the user's

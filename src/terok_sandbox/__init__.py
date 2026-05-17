@@ -122,7 +122,7 @@ from .port_registry import (
     resolve_service_ports,
 )
 from .runtime import (
-    DEFAULT_PORT_ANNOTATION,
+    DEFAULT_GUEST_SSHD_PORT,
     DEFAULT_SSH_HOST,
     DEFAULT_SSH_USER,
     Container,
@@ -141,7 +141,7 @@ from .runtime import (
     PortReservation,
     TcpEndpoint,
     TcpSSHTransport,
-    port_annotation_resolver,
+    podman_port_resolver,
 )
 from .sandbox import READY_MARKER, LifecycleHooks, RunSpec, Sandbox, Sharing, VolumeSpec
 from .setup_stamp import (
@@ -501,7 +501,7 @@ __all__ = [
     "Container",
     "ContainerRemoveResult",
     "ContainerRuntime",
-    "DEFAULT_PORT_ANNOTATION",
+    "DEFAULT_GUEST_SSHD_PORT",
     "DEFAULT_SSH_HOST",
     "DEFAULT_SSH_USER",
     "ExecResult",
@@ -517,7 +517,7 @@ __all__ = [
     "PortReservation",
     "TcpEndpoint",
     "TcpSSHTransport",
-    "port_annotation_resolver",
+    "podman_port_resolver",
     # Gate server
     "GateServerStatus",
     "check_units_outdated",

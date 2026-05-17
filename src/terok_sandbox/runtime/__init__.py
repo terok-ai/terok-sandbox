@@ -11,12 +11,12 @@ from __future__ import annotations
 
 from .krun import FakeKrunTransport, KrunContainer, KrunRuntime, KrunTransport
 from .krun_transport import (
-    DEFAULT_PORT_ANNOTATION,
+    DEFAULT_GUEST_SSHD_PORT,
     DEFAULT_SSH_HOST,
     DEFAULT_SSH_USER,
     TcpEndpoint,
     TcpSSHTransport,
-    port_annotation_resolver,
+    podman_port_resolver,
 )
 from .null import NullRuntime
 from .podman import GpuConfigError, PodmanRuntime
@@ -50,8 +50,8 @@ __all__ = [
     "KrunTransport",
     "TcpEndpoint",
     "TcpSSHTransport",
-    "port_annotation_resolver",
-    "DEFAULT_PORT_ANNOTATION",
+    "podman_port_resolver",
+    "DEFAULT_GUEST_SSHD_PORT",
     "DEFAULT_SSH_HOST",
     "DEFAULT_SSH_USER",
     # Error types that remain public

@@ -20,10 +20,10 @@ import pytest
 
 from terok_sandbox.runtime import ExecResult, KrunTransport
 from terok_sandbox.runtime.krun_transport import (
-    DEFAULT_PORT_ANNOTATION,
+    DEFAULT_GUEST_SSHD_PORT,
     TcpEndpoint,
     TcpSSHTransport,
-    port_annotation_resolver,
+    podman_port_resolver,
 )
 
 
@@ -387,133 +387,134 @@ class TestTcpSSHTransportLoginCommand:
         assert isinstance(_make_transport(), KrunTransport)
 
 
-class TestPortAnnotationResolver:
-    """The default resolver shells `podman inspect` for the port annotation."""
+class TestPodmanPortResolver:
+    """The default resolver shells `podman port` for the host-side mapping."""
 
-    def test_returns_endpoint_from_annotation(self) -> None:
-        resolver = port_annotation_resolver()
-        with patch("subprocess.check_output", return_value="42201\n"):
+    def test_returns_endpoint_from_mapping(self) -> None:
+        resolver = podman_port_resolver()
+        with patch("subprocess.check_output", return_value="127.0.0.1:42201\n"):
             endpoint = resolver(_StubContainer("ctr"))
         assert endpoint == TcpEndpoint(port=42201, host="127.0.0.1")
 
+    def test_overrides_host_to_loopback_even_when_podman_says_zero(self) -> None:
+        """``podman port`` may print ``0.0.0.0:N`` if the operator added an
+        ``-p 0.0.0.0:N:22`` mapping; the resolver still pins the connect
+        target to *host* (loopback by default) so the ssh argv doesn't
+        accidentally route via an external interface."""
+        resolver = podman_port_resolver()
+        with patch("subprocess.check_output", return_value="0.0.0.0:12345\n"):
+            endpoint = resolver(_StubContainer("ctr"))
+        assert endpoint.host == "127.0.0.1"
+        assert endpoint.port == 12345
+
     def test_uses_custom_host(self) -> None:
-        resolver = port_annotation_resolver(host="127.0.0.42")
-        with patch("subprocess.check_output", return_value="12345\n"):
+        resolver = podman_port_resolver(host="127.0.0.42")
+        with patch("subprocess.check_output", return_value="127.0.0.1:12345\n"):
             endpoint = resolver(_StubContainer("ctr"))
         assert endpoint.host == "127.0.0.42"
 
-    def test_raises_when_annotation_empty(self) -> None:
-        resolver = port_annotation_resolver()
+    def test_uses_custom_guest_port(self) -> None:
+        """The query target is the guest port; default matches ``DEFAULT_GUEST_SSHD_PORT``."""
+        resolver = podman_port_resolver(guest_port=2222)
+        with patch("subprocess.check_output", return_value="127.0.0.1:12345\n") as ck:
+            resolver(_StubContainer("ctr"))
+        argv = ck.call_args[0][0]
+        assert argv[-1] == "2222/tcp"
+
+    def test_default_guest_port_is_22(self) -> None:
+        """`DEFAULT_GUEST_SSHD_PORT` matches the L0 image's sshd-terok.service."""
+        resolver = podman_port_resolver()
+        with patch("subprocess.check_output", return_value="127.0.0.1:12345\n") as ck:
+            resolver(_StubContainer("ctr"))
+        argv = ck.call_args[0][0]
+        assert argv[-1] == f"{DEFAULT_GUEST_SSHD_PORT}/tcp"
+
+    def test_raises_when_mapping_empty(self) -> None:
+        resolver = podman_port_resolver()
         with patch("subprocess.check_output", return_value="\n"):
-            with pytest.raises(RuntimeError, match="no .* annotation"):
+            with pytest.raises(RuntimeError, match="no .* port mapping"):
                 resolver(_StubContainer("ctr"))
 
-    def test_raises_when_annotation_not_integer(self) -> None:
-        resolver = port_annotation_resolver()
-        with patch("subprocess.check_output", return_value="not-a-port\n"):
-            with pytest.raises(RuntimeError, match="non-integer"):
+    def test_raises_when_output_malformed(self) -> None:
+        """Output without a ``host:port`` shape is refused before reaching ssh."""
+        resolver = podman_port_resolver()
+        with patch("subprocess.check_output", return_value="just-a-bare-token\n"):
+            with pytest.raises(RuntimeError, match="doesn't look like"):
                 resolver(_StubContainer("ctr"))
 
-    def test_raises_when_podman_inspect_fails(self) -> None:
-        resolver = port_annotation_resolver()
+    def test_raises_when_port_not_integer(self) -> None:
+        resolver = podman_port_resolver()
+        with patch("subprocess.check_output", return_value="127.0.0.1:not-a-port\n"):
+            with pytest.raises(RuntimeError, match="non-integer port"):
+                resolver(_StubContainer("ctr"))
+
+    def test_raises_when_podman_port_fails(self) -> None:
+        """A non-zero exit from podman (e.g. no mapping) surfaces as RuntimeError."""
+        resolver = podman_port_resolver()
         with patch(
             "subprocess.check_output",
             side_effect=subprocess.CalledProcessError(1, "podman"),
         ):
-            with pytest.raises(RuntimeError, match="podman inspect failed"):
+            with pytest.raises(RuntimeError, match="podman port failed"):
                 resolver(_StubContainer("ctr"))
 
-    def test_inspect_call_uses_timeout(self) -> None:
-        """``podman inspect`` is invoked with a timeout so a wedged daemon doesn't hang the resolver."""
-        resolver = port_annotation_resolver()
-        with patch("subprocess.check_output", return_value="12345\n") as ck:
+    def test_port_call_uses_timeout(self) -> None:
+        """``podman port`` is invoked with a timeout so a wedged daemon doesn't hang the resolver."""
+        resolver = podman_port_resolver()
+        with patch("subprocess.check_output", return_value="127.0.0.1:12345\n") as ck:
             resolver(_StubContainer("ctr"))
-        # ``timeout`` is a keyword on ``check_output``; assert it's set
-        # to a finite positive value so a future refactor can't silently
-        # drop it back to "block forever".
         timeout = ck.call_args.kwargs.get("timeout")
         assert timeout is not None
         assert timeout > 0
 
-    def test_translates_inspect_timeout_to_runtime_error(self) -> None:
+    def test_translates_timeout_to_runtime_error(self) -> None:
         """A ``TimeoutExpired`` from ``check_output`` becomes the resolver's
         uniform ``RuntimeError`` (same exception shape as missing/invalid
-        annotation), so callers don't have to special-case three error
+        mapping), so callers don't have to special-case three error
         types from one resolver method."""
-        resolver = port_annotation_resolver()
+        resolver = podman_port_resolver()
         with (
             patch(
                 "subprocess.check_output",
                 side_effect=subprocess.TimeoutExpired(cmd="podman", timeout=5.0),
             ),
-            pytest.raises(RuntimeError, match="podman inspect timed out"),
+            pytest.raises(RuntimeError, match="podman port timed out"),
         ):
             resolver(_StubContainer("ctr"))
 
-    def test_invokes_inspect_with_named_annotation(self) -> None:
-        resolver = port_annotation_resolver("custom.key")
-        with patch("subprocess.check_output", return_value="12345\n") as ck:
-            resolver(_StubContainer("ctr"))
-        argv = ck.call_args[0][0]
-        fmt_idx = argv.index("--format") + 1
-        assert "custom.key" in argv[fmt_idx]
-
-    def test_default_annotation_constant_is_used(self) -> None:
-        """`DEFAULT_PORT_ANNOTATION` is the agreed key between orchestrator and resolver."""
-        resolver = port_annotation_resolver()
-        with patch("subprocess.check_output", return_value="12345\n") as ck:
-            resolver(_StubContainer("ctr"))
-        fmt = ck.call_args[0][0][ck.call_args[0][0].index("--format") + 1]
-        assert DEFAULT_PORT_ANNOTATION in fmt
-
-    def test_inspect_argv_uses_end_of_options_separator(self) -> None:
+    def test_port_argv_uses_end_of_options_separator(self) -> None:
         """``--`` before the container name blocks option-name injection.
 
-        A handle with a leading-dash name (``"-format=..."``) would
-        otherwise be reparsed by podman as a flag.  The end-of-options
-        ``--`` makes everything after it positional.
+        A handle with a leading-dash name (``"--all"``) would otherwise be
+        reparsed by podman as a flag.  The end-of-options ``--`` makes
+        everything after it positional.
         """
-        resolver = port_annotation_resolver()
-        with patch("subprocess.check_output", return_value="12345\n") as ck:
+        resolver = podman_port_resolver()
+        with patch("subprocess.check_output", return_value="127.0.0.1:12345\n") as ck:
             resolver(_StubContainer("hostile-name"))
         argv = ck.call_args[0][0]
         assert "--" in argv
-        assert argv[argv.index("--") + 1 :] == ["hostile-name"]
+        # After ``--``: container name, then guest-port spec.
+        assert argv[argv.index("--") + 1 :] == ["hostile-name", "22/tcp"]
 
-    def test_rejects_zero_port_from_annotation(self) -> None:
-        """A misconfigured allocator handing back port 0 is refused at the boundary."""
-        resolver = port_annotation_resolver()
-        with patch("subprocess.check_output", return_value="0\n"):
-            with pytest.raises(RuntimeError, match="invalid .* annotation"):
+    def test_rejects_zero_port_from_mapping(self) -> None:
+        """A misconfigured mapping handing back port 0 is refused at the boundary."""
+        resolver = podman_port_resolver()
+        with patch("subprocess.check_output", return_value="127.0.0.1:0\n"):
+            with pytest.raises(RuntimeError, match="invalid forwarded port"):
                 resolver(_StubContainer("ctr"))
 
-    def test_rejects_out_of_range_port_from_annotation(self) -> None:
+    def test_rejects_out_of_range_port_from_mapping(self) -> None:
         """A port outside u16 range is refused before reaching ssh argv."""
-        resolver = port_annotation_resolver()
-        with patch("subprocess.check_output", return_value="999999\n"):
-            with pytest.raises(RuntimeError, match="invalid .* annotation"):
+        resolver = podman_port_resolver()
+        with patch("subprocess.check_output", return_value="127.0.0.1:999999\n"):
+            with pytest.raises(RuntimeError, match="invalid forwarded port"):
                 resolver(_StubContainer("ctr"))
 
-    @pytest.mark.parametrize(
-        "bad_key",
-        [
-            'evil"}}{{ .Id ',  # template breakout via "}}
-            "key with space",
-            "key\nwithnewline",
-            "key\twithtab",
-            "-leading-dash",  # OCI annotation keys start with alnum
-            "",
-        ],
-    )
-    def test_rejects_malformed_annotation_key_at_construction(self, bad_key: str) -> None:
-        """``annotation_key`` is concatenated into a Go-template literal.
-
-        Anything outside the OCI annotation charset
-        (``[A-Za-z0-9][A-Za-z0-9._/-]*``) could break out of the
-        ``{{ index .Config.Annotations "<key>" }}`` string slot and
-        execute attacker-chosen template expressions against the
-        container's full inspect output.  Refuse at resolver
-        construction time so the bad key never reaches podman.
-        """
-        with pytest.raises(ValueError, match="OCI annotation charset"):
-            port_annotation_resolver(bad_key)
+    def test_picks_first_line_when_multiple_mappings(self) -> None:
+        """``podman port`` can emit multiple lines if the operator added several
+        ``-p`` flags for the same guest port; take the first one."""
+        resolver = podman_port_resolver()
+        with patch("subprocess.check_output", return_value="127.0.0.1:12222\n0.0.0.0:23333\n"):
+            endpoint = resolver(_StubContainer("ctr"))
+        assert endpoint.port == 12222
