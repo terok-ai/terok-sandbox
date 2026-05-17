@@ -73,23 +73,30 @@ class KrunRuntime:
 
     # -- Handle factories --------------------------------------------------
 
-    def container(self, name: str) -> KrunContainer:
+    def container(self, name: str) -> Container:
         """Return a [`KrunContainer`][terok_sandbox.runtime.krun.KrunContainer]
         handle wrapping the podman container — same lifecycle, krun-aware
         ``login_command``.
 
-        Narrower-than-protocol return type: ``KrunContainer`` is a
-        ``Container`` (covariant on return), so structural typing still
-        accepts this where a ``Container`` is required, while callers
-        that hold a ``KrunRuntime`` reference get to see the concrete
-        type without an explicit cast.
+        Return type stays the [`Container`][terok_sandbox.runtime.protocol.Container]
+        Protocol rather than the narrower concrete class: mypy treats
+        Protocol method return types as invariant, so a narrower
+        annotation breaks structural ``ContainerRuntime`` matching for
+        downstream consumers (terok's ``_runtime: ContainerRuntime``
+        assignment was the loud failure).  The runtime value is
+        genuinely a ``KrunContainer`` — callers needing the concrete
+        type ``cast`` at the call site.
         """
         return KrunContainer(name, runtime=self._podman, transport=self._transport)
 
-    def containers_with_prefix(self, prefix: str) -> list[KrunContainer]:
+    def containers_with_prefix(self, prefix: str) -> list[Container]:
         """Same prefix lookup as podman; rewrap each handle as a
         [`KrunContainer`][terok_sandbox.runtime.krun.KrunContainer] so its
         ``login_command`` routes through the vsock transport.
+
+        Same Protocol-invariance rationale as
+        [`container`][terok_sandbox.runtime.krun.KrunRuntime.container]
+        for the wider declared return type.
         """
         return [
             KrunContainer(c.name, runtime=self._podman, transport=self._transport)
