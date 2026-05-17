@@ -34,11 +34,13 @@ and the SQLCipher open helpers live in
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import json
 import re
 import secrets
 import sqlite3
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -232,6 +234,11 @@ class CredentialDB:
             raise NoPassphraseError(f"no SQLCipher passphrase available for {db_path}")
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = _open_connection(db_path, passphrase)
+        # Set by ``transaction()`` so write methods know whether to
+        # commit themselves or defer to the outer scope.  Bool is fine
+        # — ``BEGIN IMMEDIATE`` rejects nested calls, so the flag never
+        # needs to count.
+        self._in_outer_tx: bool = False
         try:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA foreign_keys=ON")
@@ -249,6 +256,36 @@ class CredentialDB:
                 " created with a different key"
             ) from exc
 
+    @contextlib.contextmanager
+    def transaction(self) -> Iterator[Any]:
+        """Run the body in an explicit ``BEGIN IMMEDIATE`` transaction.
+
+        Take the write lock up front so callers can compose
+        read-then-write sequences and trust the whole thing serialises
+        against concurrent writers.  Every mutating method on this
+        class (credentials, SSH keys, phantom tokens) consults the
+        ``self._in_outer_tx`` flag this context manager sets and skips
+        its own per-call commit — so the API contract is "any
+        composition of write methods inside ``with db.transaction():``
+        is atomic", with no kwarg plumbing at the call site.
+
+        On exit: ``COMMIT`` on clean exit, ``ROLLBACK`` on any
+        ``BaseException`` (``KeyboardInterrupt`` / ``SystemExit``
+        included — leaving a half-written ``%scope`` keypair around
+        would be worse than a re-mint on retry).
+        """
+        self._conn.execute("BEGIN IMMEDIATE")
+        self._in_outer_tx = True
+        try:
+            yield self._conn
+        except BaseException:
+            self._conn.execute("ROLLBACK")
+            raise
+        else:
+            self._conn.execute("COMMIT")
+        finally:
+            self._in_outer_tx = False
+
     # ── Provider credentials ────────────────────────────────────────────
 
     def store_credential(self, credential_set: str, provider: str, data: dict) -> None:
@@ -257,7 +294,8 @@ class CredentialDB:
             "INSERT OR REPLACE INTO credentials (credential_set, provider, data) VALUES (?, ?, ?)",
             (credential_set, provider, json.dumps(data)),
         )
-        self._conn.commit()
+        if not self._in_outer_tx:
+            self._conn.commit()
 
     def load_credential(self, credential_set: str, provider: str) -> dict | None:
         """Return the credential dict, or ``None`` if not found."""
@@ -281,7 +319,8 @@ class CredentialDB:
             "DELETE FROM credentials WHERE credential_set = ? AND provider = ?",
             (credential_set, provider),
         )
-        self._conn.commit()
+        if not self._in_outer_tx:
+            self._conn.commit()
 
     # ── SSH keys ────────────────────────────────────────────────────────
 
@@ -298,6 +337,10 @@ class CredentialDB:
         When a row with the same fingerprint already exists the stored bytes
         and comment are left untouched (the caller is re-asserting an
         already-known key, which is expected on repeat ``ssh-import``).
+
+        Auto-commits unless called inside a
+        [`transaction()`][terok_sandbox.vault.store.db.CredentialDB.transaction]
+        scope — in which case the outer block owns the commit.
         """
         cur = self._conn.execute(
             "INSERT OR IGNORE INTO ssh_keys"
@@ -307,7 +350,8 @@ class CredentialDB:
         )
         if cur.rowcount:
             self._bump_ssh_keys_version()
-        self._conn.commit()
+        if not self._in_outer_tx:
+            self._conn.commit()
         row = self._conn.execute(
             "SELECT id FROM ssh_keys WHERE fingerprint = ?",
             (fingerprint,),
@@ -345,7 +389,8 @@ class CredentialDB:
         )
         if cur.rowcount:
             self._bump_ssh_keys_version()
-        self._conn.commit()
+        if not self._in_outer_tx:
+            self._conn.commit()
         return bool(cur.rowcount)
 
     def assign_ssh_key(self, scope: str, key_id: int, *, allow_infra: bool = False) -> None:
@@ -360,6 +405,10 @@ class CredentialDB:
         names (``%host`` for the krun host-side keypair, future
         ``%name`` slots).  Sandbox internals that legitimately provision
         infrastructure scopes pass ``allow_infra=True``.
+
+        Auto-commits unless called inside a
+        [`transaction()`][terok_sandbox.vault.store.db.CredentialDB.transaction]
+        scope — in which case the outer block owns the commit.
         """
         if allow_infra:
             _require_safe_scope(scope)
@@ -371,7 +420,8 @@ class CredentialDB:
         )
         if cur.rowcount:
             self._bump_ssh_keys_version()
-        self._conn.commit()
+        if not self._in_outer_tx:
+            self._conn.commit()
 
     def unassign_ssh_key(self, scope: str, key_id: int, *, allow_infra: bool = False) -> None:
         """Revoke *scope*'s access to *key_id*; drop the key row if orphaned.
@@ -396,7 +446,8 @@ class CredentialDB:
                 (key_id, key_id),
             )
             self._bump_ssh_keys_version()
-        self._conn.commit()
+        if not self._in_outer_tx:
+            self._conn.commit()
 
     def replace_ssh_keys_for_scope(
         self, scope: str, *, keep_key_id: int, allow_infra: bool = False
@@ -417,7 +468,8 @@ class CredentialDB:
             _require_safe_scope(scope)
         else:
             _require_user_scope(scope)
-        with self._conn:
+
+        def _body() -> None:
             self._conn.execute(
                 "INSERT OR IGNORE INTO ssh_key_assignments (scope, key_id) VALUES (?, ?)",
                 (scope, keep_key_id),
@@ -448,6 +500,19 @@ class CredentialDB:
                 )
             self._bump_ssh_keys_version()
 
+        # Same ``_in_outer_tx`` pattern as the rest of the write methods.
+        # ``with self._conn:`` is the sqlite3 connection's own auto-commit
+        # context — it would clobber the outer ``BEGIN IMMEDIATE`` that
+        # ``transaction()`` started.  When inside an outer scope, run the
+        # body raw and let the outer block own the commit; standalone
+        # callers still get the self-contained connection-managed
+        # transaction they used to.
+        if self._in_outer_tx:
+            _body()
+        else:
+            with self._conn:
+                _body()
+
     def unassign_all_ssh_keys(self, scope: str, *, allow_infra: bool = False) -> int:
         """Revoke every key currently assigned to *scope*.  Returns count removed.
 
@@ -470,26 +535,39 @@ class CredentialDB:
         return len(key_ids)
 
     def list_ssh_keys_for_scope(self, scope: str) -> list[SSHKeyRow]:
-        """Return metadata rows for every key assigned to *scope*."""
+        """Return metadata rows for every key assigned to *scope*.
+
+        Ordered by ``assigned_at`` with ``k.id`` as a secondary key so
+        two assignments inside the same SQLite-second (``datetime('now')``
+        has 1-second resolution) sort by insert order rather than
+        implementation-defined order.  Callers that do ``rows[-1]`` to
+        pick "the most recently assigned" get a deterministic answer
+        even under sub-second concurrency.
+        """
         rows = self._conn.execute(
             "SELECT k.id, k.key_type, k.fingerprint, k.comment, k.created_at"
             " FROM ssh_keys k"
             " JOIN ssh_key_assignments a ON a.key_id = k.id"
             " WHERE a.scope = ?"
-            " ORDER BY a.assigned_at",
+            " ORDER BY a.assigned_at, k.id",
             (scope,),
         ).fetchall()
         return [SSHKeyRow(*r) for r in rows]
 
     def load_ssh_keys_for_scope(self, scope: str) -> list[SSHKeyRecord]:
-        """Return full records (with raw bytes) for every key assigned to *scope*."""
+        """Return full records (with raw bytes) for every key assigned to *scope*.
+
+        Same deterministic ordering as
+        [`list_ssh_keys_for_scope`][terok_sandbox.vault.store.db.CredentialDB.list_ssh_keys_for_scope]
+        — ``assigned_at`` first, then ``k.id`` as the sub-second tiebreak.
+        """
         rows = self._conn.execute(
             "SELECT k.id, k.key_type, k.private_der, k.public_blob,"
             " k.comment, k.fingerprint"
             " FROM ssh_keys k"
             " JOIN ssh_key_assignments a ON a.key_id = k.id"
             " WHERE a.scope = ?"
-            " ORDER BY a.assigned_at",
+            " ORDER BY a.assigned_at, k.id",
             (scope,),
         ).fetchall()
         return [SSHKeyRecord(*r) for r in rows]
@@ -549,7 +627,8 @@ class CredentialDB:
             " VALUES (?, ?, ?, ?, ?)",
             (token, scope, subject, credential_set, provider),
         )
-        self._conn.commit()
+        if not self._in_outer_tx:
+            self._conn.commit()
         return token
 
     def lookup_token(self, token: str) -> dict | None:
@@ -580,7 +659,8 @@ class CredentialDB:
             "DELETE FROM proxy_tokens WHERE scope = ? AND subject = ?",
             (scope, subject),
         )
-        self._conn.commit()
+        if not self._in_outer_tx:
+            self._conn.commit()
         return cur.rowcount
 
     # ── Lifecycle ───────────────────────────────────────────────────────

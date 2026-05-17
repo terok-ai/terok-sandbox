@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, BinaryIO, Protocol, runtime_checkable
 
-from .podman import PodmanRuntime
+from .podman import PodmanContainer, PodmanRuntime
 from .protocol import (
     Container,
     ContainerRemoveResult,
@@ -35,6 +35,129 @@ from .protocol import (
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+
+
+# ── Runtime (the entry point) ─────────────────────────────────────────────
+
+
+class KrunRuntime:
+    """Container runtime that launches tasks inside KVM microVMs.
+
+    Composition, not inheritance: holds a
+    [`PodmanRuntime`][terok_sandbox.runtime.podman.PodmanRuntime] for every
+    lifecycle verb (``podman --runtime krun`` is just podman driving a
+    different OCI runtime) and a
+    [`KrunTransport`][terok_sandbox.runtime.krun.KrunTransport] for the
+    one verb that can't go through podman — ``exec``.
+
+    The transport is **required**: there is no sensible default beyond a
+    real SSH-over-vsock implementation, and the fake exists explicitly
+    for tests.  Production callers wire the real transport at the
+    [`ContainerRuntime`][terok_sandbox.ContainerRuntime] selection point
+    in the orchestrator.
+    """
+
+    def __init__(
+        self,
+        *,
+        transport: KrunTransport,
+        podman: PodmanRuntime | None = None,
+    ) -> None:
+        self._podman = podman or PodmanRuntime()
+        self._transport = transport
+
+    @property
+    def transport(self) -> KrunTransport:
+        """Return the transport used for [`exec`][terok_sandbox.runtime.krun.KrunRuntime.exec]."""
+        return self._transport
+
+    # -- Handle factories --------------------------------------------------
+
+    def container(self, name: str) -> Container:
+        """Return a [`KrunContainer`][terok_sandbox.runtime.krun.KrunContainer]
+        handle wrapping the podman container — same lifecycle, krun-aware
+        ``login_command``.
+
+        Return type stays the [`Container`][terok_sandbox.runtime.protocol.Container]
+        Protocol rather than the narrower concrete class: mypy treats
+        Protocol method return types as invariant, so a narrower
+        annotation breaks structural ``ContainerRuntime`` matching for
+        downstream consumers (terok's ``_runtime: ContainerRuntime``
+        assignment was the loud failure).  The runtime value is
+        genuinely a ``KrunContainer`` — callers needing the concrete
+        type ``cast`` at the call site.
+        """
+        return KrunContainer(name, runtime=self._podman, transport=self._transport)
+
+    def containers_with_prefix(self, prefix: str) -> list[Container]:
+        """Same prefix lookup as podman; rewrap each handle as a
+        [`KrunContainer`][terok_sandbox.runtime.krun.KrunContainer] so its
+        ``login_command`` routes through the vsock transport.
+
+        Same Protocol-invariance rationale as
+        [`container`][terok_sandbox.runtime.krun.KrunRuntime.container]
+        for the wider declared return type.
+        """
+        return [
+            KrunContainer(c.name, runtime=self._podman, transport=self._transport)
+            for c in self._podman.containers_with_prefix(prefix)
+        ]
+
+    def image(self, ref: str) -> Image:
+        """Delegate image-handle construction to podman."""
+        return self._podman.image(ref)
+
+    def images(self, *, dangling_only: bool = False) -> list[Image]:
+        """Delegate image enumeration to podman."""
+        return self._podman.images(dangling_only=dangling_only)
+
+    # -- Exec (transport-routed — the only divergence) ---------------------
+
+    def exec(
+        self,
+        container: Container,
+        cmd: list[str],
+        *,
+        timeout: float | None = None,
+    ) -> ExecResult:
+        """Route to the transport — typically SSH-over-vsock."""
+        if not cmd:
+            raise ValueError("exec argv must not be empty")
+        return self._transport.exec(container, cmd, timeout=timeout)
+
+    def exec_stdio(
+        self,
+        container: Container,
+        cmd: list[str],
+        *,
+        stdin: BinaryIO,
+        stdout: BinaryIO,
+        stderr: BinaryIO | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> int:
+        """Route stdio-bridged exec to the transport."""
+        if not cmd:
+            raise ValueError("exec_stdio argv must not be empty")
+        return self._transport.exec_stdio(
+            container,
+            cmd,
+            stdin=stdin,
+            stdout=stdout,
+            stderr=stderr,
+            env=env,
+            timeout=timeout,
+        )
+
+    # -- Operations without a single-object receiver (delegated) -----------
+
+    def force_remove(self, containers: list[Container]) -> list[ContainerRemoveResult]:
+        """Delegate forcible removal to podman."""
+        return self._podman.force_remove(containers)
+
+    def reserve_port(self, host: str = "127.0.0.1") -> PortReservation:
+        """Delegate port reservation to podman."""
+        return self._podman.reserve_port(host)
 
 
 # ── Transport seam ────────────────────────────────────────────────────────
@@ -77,6 +200,21 @@ class KrunTransport(Protocol):
         timeout: float | None = None,
     ) -> int:
         """Bridge byte streams to *cmd* inside the guest; return its exit code."""
+        ...
+
+    def login_command(
+        self,
+        container: Container,
+        *,
+        command: tuple[str, ...] = (),
+    ) -> list[str]:
+        """Return an argv for [`os.execvp`][os.execvp] to attach interactively.
+
+        Mirrors the protocol method on
+        [`Container.login_command`][terok_sandbox.runtime.protocol.Container.login_command]
+        but routed through the transport so the krun runtime can hand the
+        operator an SSH-vsock invocation instead of ``podman exec``.
+        """
         ...
 
 
@@ -142,103 +280,43 @@ class FakeKrunTransport:
         self.exec_stdio_calls.append((container.name, tuple(cmd), dict(env or {})))
         return 0
 
+    def login_command(
+        self,
+        container: Container,
+        *,
+        command: tuple[str, ...] = (),
+    ) -> list[str]:
+        """Return a placeholder argv ``["fake-login", <name>, *command]``.
 
-# ── Runtime ───────────────────────────────────────────────────────────────
+        Tests assert on the shape; no real transport is contacted.
+        """
+        return ["fake-login", container.name, *command]
 
 
-class KrunRuntime:
-    """Container runtime that launches tasks inside KVM microVMs.
+# ── Container handle (krun-aware login) ───────────────────────────────────
 
-    Composition, not inheritance: holds a
-    [`PodmanRuntime`][terok_sandbox.runtime.podman.PodmanRuntime] for every
-    lifecycle verb (``podman --runtime krun`` is just podman driving a
-    different OCI runtime) and a
-    [`KrunTransport`][terok_sandbox.runtime.krun.KrunTransport] for the
-    one verb that can't go through podman — ``exec``.
 
-    The transport is **required**: there is no sensible default beyond a
-    real SSH-over-vsock implementation, and the fake exists explicitly
-    for tests.  Production callers wire the real transport at the
-    [`ContainerRuntime`][terok_sandbox.ContainerRuntime] selection point
-    in the orchestrator.
+class KrunContainer(PodmanContainer):
+    """Container handle for krun-managed microVMs.
+
+    Subclasses [`PodmanContainer`][terok_sandbox.runtime.podman.PodmanContainer]
+    because ``podman --runtime krun`` honours every lifecycle verb
+    (state, start/stop, logs, inspect) — only ``login_command`` diverges,
+    since ``podman exec`` can't enter the guest.  That single override
+    routes through the held [`KrunTransport`][terok_sandbox.runtime.krun.KrunTransport]
+    so the operator gets an SSH-vsock argv that actually reaches in.
     """
 
     def __init__(
         self,
+        name: str,
         *,
+        runtime: PodmanRuntime,
         transport: KrunTransport,
-        podman: PodmanRuntime | None = None,
     ) -> None:
-        self._podman = podman or PodmanRuntime()
+        super().__init__(name, runtime=runtime)
         self._transport = transport
 
-    @property
-    def transport(self) -> KrunTransport:
-        """Return the transport used for [`exec`][terok_sandbox.runtime.krun.KrunRuntime.exec]."""
-        return self._transport
-
-    # -- Handle factories (delegated to podman) ----------------------------
-
-    def container(self, name: str) -> Container:
-        """Return a [`PodmanContainer`][terok_sandbox.runtime.podman.PodmanContainer] handle."""
-        return self._podman.container(name)
-
-    def containers_with_prefix(self, prefix: str) -> list[Container]:
-        """Delegate prefix lookup to podman."""
-        return self._podman.containers_with_prefix(prefix)
-
-    def image(self, ref: str) -> Image:
-        """Delegate image-handle construction to podman."""
-        return self._podman.image(ref)
-
-    def images(self, *, dangling_only: bool = False) -> list[Image]:
-        """Delegate image enumeration to podman."""
-        return self._podman.images(dangling_only=dangling_only)
-
-    # -- Exec (transport-routed — the only divergence) ---------------------
-
-    def exec(
-        self,
-        container: Container,
-        cmd: list[str],
-        *,
-        timeout: float | None = None,
-    ) -> ExecResult:
-        """Route to the transport — typically SSH-over-vsock."""
-        if not cmd:
-            raise ValueError("exec argv must not be empty")
-        return self._transport.exec(container, cmd, timeout=timeout)
-
-    def exec_stdio(
-        self,
-        container: Container,
-        cmd: list[str],
-        *,
-        stdin: BinaryIO,
-        stdout: BinaryIO,
-        stderr: BinaryIO | None = None,
-        env: Mapping[str, str] | None = None,
-        timeout: float | None = None,
-    ) -> int:
-        """Route stdio-bridged exec to the transport."""
-        if not cmd:
-            raise ValueError("exec_stdio argv must not be empty")
-        return self._transport.exec_stdio(
-            container,
-            cmd,
-            stdin=stdin,
-            stdout=stdout,
-            stderr=stderr,
-            env=env,
-            timeout=timeout,
-        )
-
-    # -- Operations without a single-object receiver (delegated) -----------
-
-    def force_remove(self, containers: list[Container]) -> list[ContainerRemoveResult]:
-        """Delegate forcible removal to podman."""
-        return self._podman.force_remove(containers)
-
-    def reserve_port(self, host: str = "127.0.0.1") -> PortReservation:
-        """Delegate port reservation to podman."""
-        return self._podman.reserve_port(host)
+    def login_command(self, *, command: tuple[str, ...] = ()) -> list[str]:
+        """Return the transport's interactive-attach argv for this container."""
+        return self._transport.login_command(self, command=command)

@@ -12,8 +12,10 @@ from pathlib import Path
 import pytest
 
 from terok_sandbox.vault.ssh.keypair import (
+    InfraKeypair,
     KeypairMismatchError,
     PasswordProtectedKeyError,
+    ensure_infra_keypair,
     export_ssh_keypair,
     generate_keypair,
     import_ssh_keypair,
@@ -483,3 +485,222 @@ class TestParseErrors:
         """A garbage private key bubbles up as a plain ``ValueError``, not the passphrase one."""
         with pytest.raises(ValueError):
             parse_openssh_keypair(b"not-a-real-pem")
+
+
+class TestEnsureInfraKeypair:
+    """[`ensure_infra_keypair`][terok_sandbox.vault.ssh.keypair.ensure_infra_keypair]
+    is the load-or-mint single entry point for ``%scope`` slots."""
+
+    def test_first_call_generates_and_persists(self, db: CredentialDB) -> None:
+        """Empty DB → mint + store + assign, ``created=True``."""
+        result = ensure_infra_keypair("%host", db=db)
+        assert isinstance(result, InfraKeypair)
+        assert result.scope == "%host"
+        assert result.created is True
+        assert result.key_type == "ed25519"
+        assert result.private_pem.startswith(b"-----BEGIN OPENSSH PRIVATE KEY-----")
+        assert result.public_line.startswith("ssh-ed25519 ")
+        # Persisted under the infra scope.
+        assert len(db.list_ssh_keys_for_scope("%host")) == 1
+
+    def test_second_call_loads_without_rotating(self, db: CredentialDB) -> None:
+        """Subsequent calls return the same key with ``created=False``.
+
+        The OpenSSH PEM format embeds a random ``checkint`` that's fresh
+        on every serialisation, so the *bytes* differ across calls even
+        for the same underlying private key.  Fingerprint + public line
+        are the stable identity comparators.
+        """
+        first = ensure_infra_keypair("%host", db=db)
+        second = ensure_infra_keypair("%host", db=db)
+        assert second.fingerprint == first.fingerprint
+        assert second.public_line == first.public_line
+        assert second.created is False
+        # Still just one assignment — no duplicate keys.
+        assert len(db.list_ssh_keys_for_scope("%host")) == 1
+        # Both PEMs round-trip to the *same* private key material.
+        from cryptography.hazmat.primitives import serialization
+
+        k1 = serialization.load_ssh_private_key(first.private_pem, password=None)
+        k2 = serialization.load_ssh_private_key(second.private_pem, password=None)
+        assert k1.private_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PrivateFormat.Raw,
+            encryption_algorithm=serialization.NoEncryption(),
+        ) == k2.private_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PrivateFormat.Raw,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+
+    def test_rejects_non_infra_scope(self, db: CredentialDB) -> None:
+        """User scopes (no ``%`` prefix) go through ``import_ssh_keypair``."""
+        with pytest.raises(ValueError, match="must start with '%'"):
+            ensure_infra_keypair("myproject", db=db)
+
+    def test_uses_allow_infra_path(self, db: CredentialDB) -> None:
+        """The store/assign uses ``allow_infra=True`` so the
+        ``%``-prefix gate doesn't refuse the write.  Verified
+        indirectly: a successful generation must have called
+        ``assign_ssh_key`` with the gate satisfied; if it had hit the
+        user-scope guard, the call would have raised
+        ``InvalidScopeName``."""
+        ensure_infra_keypair("%host", db=db)  # no raise
+
+    def test_default_comment_names_the_scope(self, db: CredentialDB) -> None:
+        """Default comment reads ``terok-infra:%scope`` so operators
+        can tell the key apart from user-imported ones."""
+        result = ensure_infra_keypair("%host", db=db)
+        assert result.public_line.rstrip().endswith("terok-infra:%host")
+
+    def test_explicit_comment_overrides_default(self, db: CredentialDB) -> None:
+        """A caller can supply their own comment on first generation."""
+        result = ensure_infra_keypair("%host", db=db, comment="krun-host (terok)")
+        assert result.public_line.rstrip().endswith("krun-host (terok)")
+
+    def test_pem_round_trips_to_a_loadable_private_key(self, db: CredentialDB) -> None:
+        """The returned PEM is what ``ssh -i`` reads — load it back."""
+        from cryptography.hazmat.primitives import serialization
+
+        result = ensure_infra_keypair("%host", db=db)
+        # Parses without exception → valid OpenSSH PEM.
+        serialization.load_ssh_private_key(result.private_pem, password=None)
+
+    def test_existing_assignment_made_outside_helper_is_reused(self, db: CredentialDB) -> None:
+        """If sandbox internals seeded ``%host`` directly, the helper
+        re-serialises that key rather than minting a new one."""
+        seeded = generate_keypair("ed25519", comment="legacy")
+        key_id = db.store_ssh_key(
+            key_type=seeded.key_type,
+            private_der=seeded.private_der,
+            public_blob=seeded.public_blob,
+            comment=seeded.comment,
+            fingerprint=seeded.fingerprint,
+        )
+        db.assign_ssh_key("%host", key_id, allow_infra=True)
+
+        result = ensure_infra_keypair("%host", db=db)
+        assert result.fingerprint == seeded.fingerprint
+        assert result.created is False
+
+    def test_load_or_mint_runs_inside_a_transaction(
+        self, db: CredentialDB, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The check + mint + assign sequence is wrapped in ``db.transaction()``.
+
+        Verify the transaction context manager is actually entered —
+        otherwise a concurrent caller could observe "empty" between
+        our load and our assign, then race us to mint a second key
+        for the same scope.
+        """
+        from contextlib import contextmanager
+
+        entered = {"count": 0}
+        exited = {"count": 0}
+
+        @contextmanager
+        def _spy():
+            entered["count"] += 1
+            yield db._conn  # type: ignore[attr-defined]
+            exited["count"] += 1
+
+        monkeypatch.setattr(db, "transaction", _spy)
+        ensure_infra_keypair("%host", db=db)
+
+        assert entered["count"] == 1
+        assert exited["count"] == 1
+
+    def test_mint_path_is_rolled_back_on_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A mid-mint exception rolls back the partial INSERTs.
+
+        The whole point of wrapping in a real transaction is that
+        ``store_ssh_key`` and ``assign_ssh_key`` only persist if the
+        outer block reaches a clean exit — a crash between them must
+        not leave an ``ssh_keys`` row dangling without an assignment,
+        or vice-versa.
+        """
+        # Fresh DB so the test sees a clean baseline.
+        db = CredentialDB(tmp_path / "vault" / "v.db", passphrase="test")
+        try:
+            # Make the second inner write (``assign_ssh_key``) raise
+            # *after* ``store_ssh_key`` has run.  The transaction
+            # context manager must roll the store back.
+            real_assign = db.assign_ssh_key
+
+            def _boom(*args, **kwargs):
+                raise RuntimeError("simulated mid-mint failure")
+
+            monkeypatch.setattr(db, "assign_ssh_key", _boom)
+
+            with pytest.raises(RuntimeError, match="simulated"):
+                ensure_infra_keypair("%host", db=db)
+
+            # Restore so the assertions can run normally.
+            monkeypatch.setattr(db, "assign_ssh_key", real_assign)
+
+            # No assignments survived — the store was rolled back.
+            assert db.list_ssh_keys_for_scope("%host") == []
+            # Crucially: no orphaned ssh_keys row either (count would
+            # be >0 if the INSERT had been committed before the assign
+            # crash).
+            assert db.count_ssh_keys() == 0
+        finally:
+            db.close()
+
+    def test_inner_writes_defer_commit_inside_transaction(self, db: CredentialDB) -> None:
+        """Inside ``transaction()`` the inner writes skip their own commit.
+
+        ``store_ssh_key`` and ``assign_ssh_key`` detect the active outer
+        scope via ``self._in_outer_tx`` and leave the commit to the
+        wrapper, so the whole sequence rolls back together on a
+        mid-block exception.
+        """
+        kp = generate_keypair("ed25519", comment="test")
+        with pytest.raises(RuntimeError, match="abort"), db.transaction():
+            key_id = db.store_ssh_key(
+                key_type=kp.key_type,
+                private_der=kp.private_der,
+                public_blob=kp.public_blob,
+                comment=kp.comment,
+                fingerprint=kp.fingerprint,
+            )
+            db.assign_ssh_key("%host", key_id, allow_infra=True)
+            raise RuntimeError("abort")
+        # Both writes rolled back — no orphans in either table.
+        assert db.list_ssh_keys_for_scope("%host") == []
+        assert db.count_ssh_keys() == 0
+
+    def test_multi_assigned_scope_returns_newest_not_oldest(self, db: CredentialDB) -> None:
+        """If the scope has multiple assigned keys, pick the newest.
+
+        ``load_ssh_keys_for_scope`` orders by ``assigned_at`` ascending,
+        so the naive ``existing[0]`` would resurrect the oldest key —
+        bad if an additive rotation ever leaves stale material under
+        the scope.  We assert the newest assignment wins.
+        """
+        old_kp = generate_keypair("ed25519", comment="old-key")
+        new_kp = generate_keypair("ed25519", comment="new-key")
+
+        old_id = db.store_ssh_key(
+            key_type=old_kp.key_type,
+            private_der=old_kp.private_der,
+            public_blob=old_kp.public_blob,
+            comment=old_kp.comment,
+            fingerprint=old_kp.fingerprint,
+        )
+        db.assign_ssh_key("%host", old_id, allow_infra=True)
+
+        new_id = db.store_ssh_key(
+            key_type=new_kp.key_type,
+            private_der=new_kp.private_der,
+            public_blob=new_kp.public_blob,
+            comment=new_kp.comment,
+            fingerprint=new_kp.fingerprint,
+        )
+        db.assign_ssh_key("%host", new_id, allow_infra=True)
+
+        result = ensure_infra_keypair("%host", db=db)
+        assert result.fingerprint == new_kp.fingerprint
+        assert result.fingerprint != old_kp.fingerprint

@@ -129,21 +129,32 @@ class TestKrunRuntime:
                 stdout=io.BytesIO(),
             )
 
-    def test_container_factory_delegates_to_podman(self) -> None:
-        """`container()` returns whatever the held podman runtime returns."""
-        podman = MagicMock()
-        sentinel = object()
-        podman.container.return_value = sentinel
-        rt = KrunRuntime(transport=FakeKrunTransport(), podman=podman)
-        assert rt.container("ctr") is sentinel
-        podman.container.assert_called_once_with("ctr")
+    def test_container_factory_returns_krun_container(self) -> None:
+        """`container()` returns a `KrunContainer` bound to the same name + transport."""
+        from terok_sandbox.runtime.krun import KrunContainer
 
-    def test_containers_with_prefix_delegates(self) -> None:
-        """Prefix lookup is podman's concern."""
+        transport = FakeKrunTransport()
+        rt = KrunRuntime(transport=transport, podman=NullRuntime())
+        c = rt.container("ctr")
+        assert isinstance(c, KrunContainer)
+        assert c.name == "ctr"
+        # login_command routes through the transport (fake's recognisable shape).
+        assert c.login_command(command=("bash",)) == ["fake-login", "ctr", "bash"]
+
+    def test_containers_with_prefix_rewraps_each_handle(self) -> None:
+        """Prefix lookup goes to podman; each result is rewrapped as `KrunContainer`."""
+        from terok_sandbox.runtime.krun import KrunContainer
+
         podman = MagicMock()
-        podman.containers_with_prefix.return_value = []
+        podman.containers_with_prefix.return_value = [
+            _StubContainer("task-a"),
+            _StubContainer("task-b"),
+        ]
         rt = KrunRuntime(transport=FakeKrunTransport(), podman=podman)
-        assert rt.containers_with_prefix("task") == []
+        wrapped = rt.containers_with_prefix("task")
+        assert [type(c).__name__ for c in wrapped] == ["KrunContainer", "KrunContainer"]
+        assert [c.name for c in wrapped] == ["task-a", "task-b"]
+        assert all(isinstance(c, KrunContainer) for c in wrapped)
         podman.containers_with_prefix.assert_called_once_with("task")
 
     def test_image_factory_delegates_to_podman(self) -> None:
@@ -186,3 +197,31 @@ class TestKrunRuntime:
         transport = FakeKrunTransport()
         rt = KrunRuntime(transport=transport, podman=NullRuntime())
         assert rt.transport is transport
+
+
+class TestKrunContainer:
+    """`KrunContainer` is a `PodmanContainer` with a transport-routed login."""
+
+    def test_login_command_routes_through_transport(self) -> None:
+        """`login_command` defers to the transport, passing self + the command tuple."""
+        from terok_sandbox.runtime.krun import KrunContainer
+
+        recorded: list[tuple[str, tuple[str, ...]]] = []
+
+        class _Recorder(FakeKrunTransport):
+            def login_command(self, container, *, command=()):  # type: ignore[override]
+                recorded.append((container.name, tuple(command)))
+                return ["ssh", "-i", "/tmp/k", "dev@krun-guest", *command]
+
+        c = KrunContainer("ctr", runtime=NullRuntime(), transport=_Recorder())  # type: ignore[arg-type]
+        argv = c.login_command(command=("bash", "-l"))
+        assert argv == ["ssh", "-i", "/tmp/k", "dev@krun-guest", "bash", "-l"]
+        assert recorded == [("ctr", ("bash", "-l"))]
+
+    def test_login_command_empty_passes_empty_tuple(self) -> None:
+        """No *command* still calls the transport — argv shape is the transport's choice."""
+        from terok_sandbox.runtime.krun import KrunContainer
+
+        transport = FakeKrunTransport()
+        c = KrunContainer("ctr", runtime=NullRuntime(), transport=transport)  # type: ignore[arg-type]
+        assert c.login_command() == ["fake-login", "ctr"]
