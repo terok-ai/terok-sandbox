@@ -26,8 +26,8 @@ from terok_sandbox.commands.vault import (
     _handle_vault_passphrase_reveal,
 )
 from terok_sandbox.vault.store.recovery import (
-    fingerprint,
-    is_acknowledged,
+    acknowledge as _ack_marker,
+    acknowledged,
 )
 
 _PASSPHRASE = "correct-horse-battery-staple"
@@ -141,7 +141,7 @@ class TestRevealAllowRedirect:
         tmp_path: Path,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        """Pipe payload must be exactly ``passphrase\\n`` — banner goes to stderr."""
+        """Pipe payload is exactly ``passphrase\\n``; stderr UX never echoes it."""
         _handle_vault_passphrase_reveal(cfg=_cfg(tmp_path), allow_redirect=True)
         captured = capsys.readouterr()
         # stdout = passphrase + single newline; nothing else.
@@ -149,7 +149,9 @@ class TestRevealAllowRedirect:
         # The banner + recovery reminder + acknowledgement messaging
         # live on stderr so ``| pass insert -e`` gets clean input.
         assert "Recovery key" in captured.err
-        assert _PASSPHRASE in captured.err  # also echoed in stderr banner
+        # Audit finding #1: stderr must not contain the cleartext — CI
+        # log capture would otherwise persist the recovery key.
+        assert _PASSPHRASE not in captured.err
 
     def test_already_acked_status_routes_to_stderr_under_redirect(
         self,
@@ -158,12 +160,30 @@ class TestRevealAllowRedirect:
     ) -> None:
         """``allow_redirect=True`` keeps even post-reveal status off stdout."""
         cfg = _cfg(tmp_path)
-        cfg.vault_recovery_marker_file.parent.mkdir(parents=True, exist_ok=True)
-        cfg.vault_recovery_marker_file.write_text(fingerprint(_PASSPHRASE) + "\n")
+        _ack_marker(cfg.vault_recovery_marker_file)
         _handle_vault_passphrase_reveal(cfg=cfg, allow_redirect=True)
         captured = capsys.readouterr()
         assert captured.out == _PASSPHRASE + "\n"
         assert "already marked as saved" in captured.err
+
+    def test_allow_redirect_banner_does_not_leak_passphrase(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Audit finding #1: stderr banner must not echo the passphrase.
+
+        Many CI / log setups persist stderr by default — embedding the
+        cleartext there would silently leak the recovery key even when
+        the operator carefully redirects stdout into a secret manager.
+        """
+        _handle_vault_passphrase_reveal(cfg=_cfg(tmp_path), allow_redirect=True)
+        captured = capsys.readouterr()
+        assert captured.out == _PASSPHRASE + "\n"
+        assert _PASSPHRASE not in captured.err
+        # The stderr banner still surfaces the source label + the
+        # save-it-off-host reminder, just not the cleartext.
+        assert "Recovery key" in captured.err
 
 
 class TestRevealAckPrompt:
@@ -172,11 +192,11 @@ class TestRevealAckPrompt:
     def test_typing_saved_writes_marker(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """``SAVED`` lands the fingerprint marker — same shape as the standalone ack."""
+        """``SAVED`` lands the (zero-byte) marker — same shape as the standalone ack."""
         cfg = _cfg(tmp_path)
         _patch_tty(monkeypatch, responses=("SAVED",))
         _handle_vault_passphrase_reveal(cfg=cfg)
-        assert is_acknowledged(cfg.vault_recovery_marker_file, _PASSPHRASE)
+        assert acknowledged(cfg.vault_recovery_marker_file)
 
     def test_empty_response_does_not_write_marker(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -193,11 +213,10 @@ class TestRevealAckPrompt:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        """When the marker already matches, no second confirmation is needed."""
+        """When the marker is present, no second confirmation is needed."""
         cfg = _cfg(tmp_path)
         # Pre-seed the marker; reveal should short-circuit the ack prompt.
-        cfg.vault_recovery_marker_file.parent.mkdir(parents=True, exist_ok=True)
-        cfg.vault_recovery_marker_file.write_text(fingerprint(_PASSPHRASE) + "\n")
+        _ack_marker(cfg.vault_recovery_marker_file)
         _patch_tty(monkeypatch)
         _handle_vault_passphrase_reveal(cfg=cfg)
         out = capsys.readouterr().out
@@ -208,10 +227,10 @@ class TestAcknowledge:
     """``vault passphrase acknowledge`` — silent ack from the TUI / CI."""
 
     def test_writes_marker(self, tmp_path: Path) -> None:
-        """Acknowledging an unlocked vault lands the fingerprint sidecar."""
+        """Acknowledging lands the (zero-byte) sidecar marker."""
         cfg = _cfg(tmp_path)
         _handle_vault_passphrase_acknowledge(cfg=cfg)
-        assert is_acknowledged(cfg.vault_recovery_marker_file, _PASSPHRASE)
+        assert acknowledged(cfg.vault_recovery_marker_file)
 
     def test_idempotent(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         """Re-running on an already-acked marker is a no-op with a hint."""
@@ -221,10 +240,11 @@ class TestAcknowledge:
         _handle_vault_passphrase_acknowledge(cfg=cfg)
         assert "already marked as saved" in capsys.readouterr().out
 
-    def test_locked_vault_exits(self, tmp_path: Path) -> None:
-        """Locked vault → SystemExit (matching the rest of the verbs)."""
-        with pytest.raises(SystemExit, match="vault unlock"):
-            _handle_vault_passphrase_acknowledge(cfg=_cfg(tmp_path, passphrase=None))
+    def test_locked_vault_still_acks(self, tmp_path: Path) -> None:
+        """Marker is passphrase-independent — ack works even on a locked vault."""
+        cfg = _cfg(tmp_path, passphrase=None)
+        _handle_vault_passphrase_acknowledge(cfg=cfg)
+        assert acknowledged(cfg.vault_recovery_marker_file)
 
 
 class TestRevealEdgeCases:
@@ -288,22 +308,33 @@ class TestRevealEdgeCases:
         assert not cfg.vault_recovery_marker_file.exists()
 
 
-class TestAcknowledgeEdgeCases:
-    """Edge cases for the silent ack verb."""
+class TestAcknowledgeDecoupling:
+    """The ack verb is independent of the passphrase resolver.
 
-    def test_wrong_passphrase_translates_to_systemexit(
+    Pinned here because the security-audit fix decoupled the marker
+    from any passphrase-derived bytes — a regression that tried to
+    re-introduce the coupling (e.g. recompute a fingerprint, check
+    DB openability) would break these tests.
+    """
+
+    def test_does_not_touch_resolver(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """``WrongPassphraseError`` surfaces as ``cannot acknowledge: …`` exit."""
+        """Even if the resolver would raise, ack still lands the marker."""
         from terok_sandbox.vault.store.encryption import WrongPassphraseError
 
         cfg = _cfg(tmp_path)
 
-        def _raise(*_a: object, **_kw: object) -> object:
-            raise WrongPassphraseError("DB rejected the passphrase")
+        def _trap(*_a: object, **_kw: object) -> object:
+            raise WrongPassphraseError("resolver must not be called")
 
-        monkeypatch.setattr(type(cfg), "resolve_passphrase", lambda self, **_kw: _raise())
-        with pytest.raises(SystemExit, match="cannot acknowledge"):
-            _handle_vault_passphrase_acknowledge(cfg=cfg)
+        # If the handler regresses to calling the resolver, this will
+        # raise WrongPassphraseError instead of completing the ack.
+        monkeypatch.setattr(type(cfg), "resolve_passphrase", lambda self, **_kw: _trap())
+        monkeypatch.setattr(
+            type(cfg), "resolve_passphrase_with_source", lambda self, **_kw: _trap()
+        )
+        _handle_vault_passphrase_acknowledge(cfg=cfg)
+        assert acknowledged(cfg.vault_recovery_marker_file)

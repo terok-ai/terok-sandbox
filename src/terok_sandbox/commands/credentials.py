@@ -152,7 +152,7 @@ def _handle_credentials_encrypt_db(
     print(f"  passphrase source: {source}")
 
     if auto_generated:
-        _maybe_acknowledge_recovery(cfg, passphrase, echo_to_stdout=echo_passphrase)
+        _maybe_acknowledge_recovery(cfg, echo_to_stdout=echo_passphrase)
 
     if not db_path.exists():
         print(f"  no DB at {db_path}; will be created encrypted on first use.")
@@ -252,9 +252,7 @@ def _confirm_config_tier() -> bool:
     return sys.stdin.readline().strip().lower() == "yes"
 
 
-def _maybe_acknowledge_recovery(
-    cfg: SandboxConfig, passphrase: str, *, echo_to_stdout: bool
-) -> None:
+def _maybe_acknowledge_recovery(cfg: SandboxConfig, *, echo_to_stdout: bool) -> None:
     """Run the "I have saved my recovery key" gate after an auto-mint.
 
     The operator just had a fresh passphrase displayed and now needs
@@ -298,7 +296,7 @@ def _maybe_acknowledge_recovery(
         # failure mode, this is just defence in depth.
         return
     if response.strip() == "SAVED":
-        acknowledge(cfg.vault_recovery_marker_file, passphrase)
+        acknowledge(cfg.vault_recovery_marker_file)
         print("  recovery key marked as saved.")
     else:
         print(

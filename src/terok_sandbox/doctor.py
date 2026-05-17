@@ -163,34 +163,21 @@ def _make_recovery_acknowledged_check() -> DoctorCheck:
     Every keystore tier (systemd-creds, keyring, session-file) is
     bound to *this* machine, account, or boot — a hardware failure
     or TPM transplant strands the vault without an off-host copy of
-    the passphrase.  The check fires only when the vault is actually
-    unlocked: a locked / unresolvable vault returns ``ok`` (deferred)
-    because the vault-unlocked check above already reports that as
-    an error and the recovery question can't be answered without a
-    resolvable passphrase to fingerprint.  Missing marker or a
-    fingerprint mismatch (rotated key) surface as ``warn``.
+    the passphrase.  Absence (or unreadability) of the zero-byte
+    marker at
+    [`vault_recovery_marker_file`][terok_sandbox.SandboxConfig.vault_recovery_marker_file]
+    surfaces as ``warn`` with both remediation verbs in the message.
+    Independent of the vault-lock state — the ack flow doesn't need
+    a resolvable passphrase to run, so we don't defer here.
     """
 
     def _eval(_rc: int, _stdout: str, _stderr: str) -> CheckVerdict:
-        """Compare the resolved passphrase's fingerprint to the on-disk marker."""
+        """Check the recovery marker; emit ``warn`` when absent."""
         from .config import SandboxConfig
-        from .vault.store.encryption import (
-            NoPassphraseError,
-            WrongPassphraseError,
-        )
-        from .vault.store.recovery import is_acknowledged
+        from .vault.store.recovery import acknowledged
 
         cfg = SandboxConfig()
-        try:
-            passphrase = cfg.resolve_passphrase()
-        except (NoPassphraseError, WrongPassphraseError):
-            # The vault-unlocked check above already reports the locked
-            # vault as an error; staying silent here keeps the doctor
-            # output focused.
-            return CheckVerdict("ok", "vault locked — recovery check deferred")
-        if not passphrase:
-            return CheckVerdict("ok", "vault locked — recovery check deferred")
-        if is_acknowledged(cfg.vault_recovery_marker_file, passphrase):
+        if acknowledged(cfg.vault_recovery_marker_file):
             return CheckVerdict("ok", "recovery key acknowledged")
         return CheckVerdict(
             "warn",

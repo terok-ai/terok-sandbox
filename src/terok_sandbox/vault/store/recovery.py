@@ -9,65 +9,50 @@ session-file fallback), they need a written copy stashed off-host —
 every keystore tier is bound to *this* machine, account, or boot, so
 a disk failure or TPM transplant strands the vault.
 
-This module persists a small attestation that the operator has saved
-the current passphrase, keyed by a stable fingerprint of the
-passphrase itself, so a re-key naturally re-prompts.  The marker is a
-sidecar file under ``vault_dir`` (mode ``0o600``); its contents are
-SHA-256 of ``_SALT || passphrase``, hex-encoded.  Storing the raw
-passphrase here would defeat its own purpose; storing nothing at all
-would mean we couldn't distinguish "operator clicked I-have-saved-it"
-from "operator opened the reveal modal and walked away".  The salt
-is constant — the goal is "same passphrase → same digest", not
-brute-force hardening (the keystore tier holds the cleartext anyway).
+The marker is a **zero-byte sidecar file** under ``vault_dir`` (mode
+``0o600``).  Presence means "operator confirmed they saved the
+recovery key"; absence means "unconfirmed".  An earlier iteration
+stored a SHA-256 fingerprint of the passphrase here so a re-key
+would auto-invalidate the marker, but that turned the sidecar into
+an offline-guessing oracle: anyone with read access to the file
+(e.g. a leaked backup) could brute-force the passphrase by hashing
+candidates and comparing.  An empty file leaks nothing.
+
+The trade-off: a passphrase rotation does NOT auto-invalidate the
+marker.  Operators who rotate their key should re-ack (interactive
+``vault passphrase reveal`` or silent ``vault passphrase
+acknowledge``).  The destructive ``vault passphrase destroy`` flow
+clears the marker for them.
 """
 
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
 
-_SALT = b"terok-recovery-acknowledged-v1"
 
+def acknowledged(marker_path: Path) -> bool:
+    """Return ``True`` iff the marker file exists.
 
-def fingerprint(passphrase: str) -> str:
-    """Return a stable hex digest identifying *passphrase*.
-
-    A re-key changes the digest, so an acknowledgement keyed by digest
-    self-invalidates on rotation.  Not a security primitive — the
-    keystore tier holds the cleartext and is the actual trust boundary.
-    """
-    return hashlib.sha256(_SALT + passphrase.encode("utf-8")).hexdigest()
-
-
-def acknowledged_fingerprint(marker_path: Path) -> str | None:
-    """Return the recorded fingerprint, or ``None`` if no marker is set.
-
-    Any ``OSError`` (permission denied, busy mount, broken symlink,
-    transient I/O hiccup) degrades to ``None`` so health and
-    reporting flows can keep going — "no marker readable" is the
-    same answer the unconfirmed-warning surfaces want anyway.
+    A bare ``stat`` — never reads the file content because the file
+    has none.  Any ``OSError`` (permission denied, broken symlink,
+    busy mount) degrades to ``False`` so the unconfirmed-warning
+    surfaces can keep going on a host with an unreadable marker.
     """
     try:
-        text = marker_path.read_text(encoding="utf-8").strip()
+        marker_path.stat()
     except OSError:
-        return None
-    return text or None
+        return False
+    return True
 
 
-def is_acknowledged(marker_path: Path, passphrase: str) -> bool:
-    """Return ``True`` iff *passphrase*'s fingerprint matches the on-disk marker."""
-    recorded = acknowledged_fingerprint(marker_path)
-    return recorded is not None and recorded == fingerprint(passphrase)
-
-
-def acknowledge(marker_path: Path, passphrase: str) -> None:
-    """Persist the marker for *passphrase*.  Idempotent."""
+def acknowledge(marker_path: Path) -> None:
+    """Create the empty marker file (owner-only, ``0o600``).  Idempotent."""
     # Lazy import keeps the foundation layer free of an eager
     # ``_yaml`` (round-trip YAML editor) load; this code path only
     # runs at setup / ack time, not on every chain walk.
     from terok_sandbox._yaml import write_secret_text  # noqa: PLC0415
 
-    write_secret_text(marker_path, fingerprint(passphrase) + "\n")
+    write_secret_text(marker_path, "")
 
 
 def forget(marker_path: Path) -> None:
@@ -77,8 +62,6 @@ def forget(marker_path: Path) -> None:
 
 __all__ = [
     "acknowledge",
-    "acknowledged_fingerprint",
-    "fingerprint",
+    "acknowledged",
     "forget",
-    "is_acknowledged",
 ]

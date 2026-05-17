@@ -417,7 +417,7 @@ def _handle_vault_passphrase_reveal(
     )
     from ..vault.store.recovery import (
         acknowledge as acknowledge_recovery,
-        is_acknowledged,
+        acknowledged,
     )
 
     if cfg is None:
@@ -430,26 +430,32 @@ def _handle_vault_passphrase_reveal(
     if not passphrase:
         raise SystemExit("no current passphrase resolvable; run `terok-sandbox vault unlock` first")
 
-    banner = (
-        f"\nVault passphrase ({source}): {passphrase}\n"
-        "  Recovery key — save it off-host"
-        " (1Password emergency kit, paper safe, sealed envelope).\n"
-    )
     if allow_redirect:
-        # Pipe-friendly: stdout is *only* the passphrase string + a
-        # trailing newline, suitable for ``| pass insert -e ...`` or
-        # ``| op item create``.  The surrounding UX (banner + reminder
-        # + later ack prompts/status) goes to stderr so ``2>/dev/null``
-        # is a clean opt-out for noisy pipelines.
+        # Pipe-friendly: stdout carries *only* the passphrase string
+        # + trailing newline, suitable for ``| pass insert -e ...``
+        # or ``| op item create``.  The stderr banner deliberately
+        # does NOT echo the passphrase — many CI/log setups persist
+        # stderr by default and an operator piping stdout into a
+        # secret manager would expect stdout to be the sole carrier
+        # of the secret (audit finding #1 on PR #325).
         print(passphrase)
-        print(banner, end="", file=sys.stderr)
+        safe_banner = (
+            f"\nVault passphrase ({source}) printed to stdout.\n"
+            "  Recovery key — save it off-host"
+            " (1Password emergency kit, paper safe, sealed envelope).\n"
+        )
+        print(safe_banner, end="", file=sys.stderr)
     else:
         if sys.stdout.isatty():
             print(
                 "  (passphrase routed to /dev/tty so a redirected stdout"
                 " can't capture it; pass --allow-redirect to print to stdout)"
             )
-        _write_to_controlling_tty(banner)
+        _write_to_controlling_tty(
+            f"\nVault passphrase ({source}): {passphrase}\n"
+            "  Recovery key — save it off-host"
+            " (1Password emergency kit, paper safe, sealed envelope).\n"
+        )
 
     # In ``--allow-redirect`` mode every subsequent UX line also has to
     # go to stderr so the stdout pipe stays a pure-secret payload.  The
@@ -460,7 +466,7 @@ def _handle_vault_passphrase_reveal(
         else:
             print(text)
 
-    if is_acknowledged(cfg.vault_recovery_marker_file, passphrase):
+    if acknowledged(cfg.vault_recovery_marker_file):
         _say("  recovery key already marked as saved.")
         return
 
@@ -473,42 +479,37 @@ def _handle_vault_passphrase_reveal(
         )
         return
     if response.strip() == "SAVED":
-        acknowledge_recovery(cfg.vault_recovery_marker_file, passphrase)
+        acknowledge_recovery(cfg.vault_recovery_marker_file)
         _say("  recovery key marked as saved.")
     else:
         _say("  recovery key NOT confirmed; unconfirmed-recovery warning stays on.")
 
 
 def _handle_vault_passphrase_acknowledge(*, cfg: SandboxConfig | None = None) -> None:
-    """Mark the currently-resolvable passphrase as saved, without displaying it.
+    """Mark the recovery key as saved, without displaying any passphrase.
 
     The silent counterpart of
     [`_handle_vault_passphrase_reveal`][terok_sandbox.commands.vault._handle_vault_passphrase_reveal]
     — used by the TUI after it has shown the passphrase in its own
     modal, and by CI bootstraps that captured the value via
     ``--echo-passphrase`` and have now stashed it in their secret
-    manager.  A no-op when the marker already matches the current
-    fingerprint, so it's safe to call unconditionally.
+    manager.  Independent of the vault-lock state: the marker is a
+    zero-byte file, so we can flip it on without resolving anything.
+    Idempotent — calling again with the marker already in place is a
+    silent no-op.
     """
-    from ..vault.store.encryption import WrongPassphraseError
     from ..vault.store.recovery import (
         acknowledge as acknowledge_recovery,
-        is_acknowledged,
+        acknowledged,
     )
 
     if cfg is None:
         cfg = SandboxConfig()
 
-    try:
-        passphrase = cfg.resolve_passphrase(prompt_on_tty=True)
-    except WrongPassphraseError as exc:
-        raise SystemExit(f"cannot acknowledge: {exc}") from exc
-    if not passphrase:
-        raise SystemExit("no current passphrase resolvable; run `terok-sandbox vault unlock` first")
-    if is_acknowledged(cfg.vault_recovery_marker_file, passphrase):
+    if acknowledged(cfg.vault_recovery_marker_file):
         print("recovery key already marked as saved.")
         return
-    acknowledge_recovery(cfg.vault_recovery_marker_file, passphrase)
+    acknowledge_recovery(cfg.vault_recovery_marker_file)
     print("recovery key marked as saved.")
 
 
