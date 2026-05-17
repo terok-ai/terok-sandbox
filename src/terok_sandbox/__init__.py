@@ -336,6 +336,67 @@ def stop_vault(cfg: SandboxConfig | None = None) -> None:
     VaultManager(cfg).stop_daemon()
 
 
+def is_recovery_acknowledged(cfg: SandboxConfig | None = None) -> bool:
+    """Return ``True`` iff the operator has confirmed they saved the current passphrase.
+
+    The vault's resolver tiers (systemd-creds, keyring, session-file)
+    are all bound to *this* machine, account, or boot — a hardware
+    failure or TPM transplant strands the vault without an off-host
+    copy of the passphrase.  This check is what surfaces the
+    "unconfirmed recovery key" warning in sickbay / doctor / the TUI
+    pill: walk the resolution chain, compute the passphrase's
+    fingerprint, compare against the
+    [`vault_recovery_marker_file`][terok_sandbox.SandboxConfig.vault_recovery_marker_file].
+    A locked vault, missing marker, or mismatched fingerprint all
+    report ``False`` — the warning is conservative by design.
+
+    Operators close the warning by running ``terok-sandbox vault
+    passphrase reveal`` (or the TUI's reveal modal) and confirming.
+    """
+    from .vault.store.encryption import (
+        NoPassphraseError,
+        WrongPassphraseError,
+    )
+    from .vault.store.recovery import is_acknowledged
+
+    if cfg is None:
+        cfg = SandboxConfig()
+    try:
+        passphrase = cfg.resolve_passphrase()
+    except (NoPassphraseError, WrongPassphraseError):
+        return False
+    if not passphrase:
+        return False
+    return is_acknowledged(cfg.vault_recovery_marker_file, passphrase)
+
+
+def acknowledge_recovery(cfg: SandboxConfig | None = None) -> bool:
+    """Mark the currently-resolvable passphrase as saved.
+
+    Returns ``False`` (no-op) when the vault is locked; otherwise
+    writes the fingerprint sidecar and returns ``True``.  The TUI's
+    "I've saved it" button and CI bootstrap scripts that captured
+    via ``--echo-passphrase`` both land here without going through
+    the CLI subprocess.
+    """
+    from .vault.store.encryption import (
+        NoPassphraseError,
+        WrongPassphraseError,
+    )
+    from .vault.store.recovery import acknowledge
+
+    if cfg is None:
+        cfg = SandboxConfig()
+    try:
+        passphrase = cfg.resolve_passphrase()
+    except (NoPassphraseError, WrongPassphraseError):
+        return False
+    if not passphrase:
+        return False
+    acknowledge(cfg.vault_recovery_marker_file, passphrase)
+    return True
+
+
 __all__ = [
     # Cross-package utilities
     "BestEffortLogger",
@@ -459,6 +520,12 @@ __all__ = [
     "start_vault",
     "stop_vault",
     "uninstall_vault_systemd",
+    # Recovery-key acknowledgement (operator confirmed they saved the
+    # auto-generated passphrase off-host).  False until the operator
+    # confirms via `vault passphrase reveal` / the TUI reveal modal /
+    # the silent `acknowledge_recovery` wrapper.
+    "acknowledge_recovery",
+    "is_recovery_acknowledged",
     # Command registry
     "ArgDef",
     "CommandDef",

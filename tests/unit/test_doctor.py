@@ -219,10 +219,11 @@ class TestSandboxDoctorChecks:
         labels = {c.label for c in checks}
         assert "Credentials DB passphrase" in labels
         assert "Plaintext passphrase" in labels
+        assert "Recovery key acknowledged" in labels
         assert "Token broker (TCP)" in labels
         assert "SSH signer (TCP)" in labels
         assert "Shield state" in labels
-        assert len(checks) == 5
+        assert len(checks) == 6
 
     def test_skips_broker_when_none(self) -> None:
         checks = sandbox_doctor_checks(
@@ -252,8 +253,9 @@ class TestSandboxDoctorChecks:
             desired_shield_state=None,
         )
         categories = [c.category for c in checks]
-        # Two vault checks now: unlocked-passphrase + plaintext warning.
-        assert categories == ["vault", "vault", "shield"]
+        # Three vault checks now: unlocked-passphrase + plaintext warning
+        # + recovery-acknowledged sidecar.
+        assert categories == ["vault", "vault", "vault", "shield"]
 
     def test_all_checks_are_doctor_check_instances(self) -> None:
         checks = sandbox_doctor_checks(

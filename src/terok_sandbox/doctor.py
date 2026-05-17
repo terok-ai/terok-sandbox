@@ -108,6 +108,7 @@ def sandbox_doctor_checks(
     checks: list[DoctorCheck] = [
         _make_vault_unlocked_check(),
         _make_plaintext_passphrase_warning_check(),
+        _make_recovery_acknowledged_check(),
     ]
     if token_broker_port is not None:
         checks.append(_make_token_broker_check(token_broker_port))
@@ -152,6 +153,63 @@ def _make_vault_unlocked_check() -> DoctorCheck:
         host_side=True,
         fix_description=(
             "Run `terok-sandbox vault unlock` to provision the passphrase for this session."
+        ),
+    )
+
+
+def _make_recovery_acknowledged_check() -> DoctorCheck:
+    """Warn when the operator hasn't confirmed they saved the recovery key.
+
+    Every keystore tier (systemd-creds, keyring, session-file) is
+    bound to *this* machine, account, or boot — a hardware failure
+    or TPM transplant strands the vault without an off-host copy of
+    the passphrase.  The check fires only when the vault is actually
+    unlocked (a locked vault has its own check above), so the warning
+    speaks to the missing recovery-key copy rather than a chain
+    misconfig.  A locked vault, missing marker, or rotated key all
+    surface as ``warn`` here.
+    """
+
+    def _eval(_rc: int, _stdout: str, _stderr: str) -> CheckVerdict:
+        """Compare the resolved passphrase's fingerprint to the on-disk marker."""
+        from .config import SandboxConfig
+        from .vault.store.encryption import (
+            NoPassphraseError,
+            WrongPassphraseError,
+        )
+        from .vault.store.recovery import is_acknowledged
+
+        cfg = SandboxConfig()
+        try:
+            passphrase = cfg.resolve_passphrase()
+        except (NoPassphraseError, WrongPassphraseError):
+            # The vault-unlocked check above already reports the locked
+            # vault as an error; staying silent here keeps the doctor
+            # output focused.
+            return CheckVerdict("ok", "vault locked — recovery check deferred")
+        if not passphrase:
+            return CheckVerdict("ok", "vault locked — recovery check deferred")
+        if is_acknowledged(cfg.vault_recovery_marker_file, passphrase):
+            return CheckVerdict("ok", "recovery key acknowledged")
+        return CheckVerdict(
+            "warn",
+            "vault recovery key unconfirmed — every keystore tier is"
+            " machine-bound, so a hardware failure strands the vault."
+            " Run `terok-sandbox vault passphrase reveal` and save the"
+            " value off-host.",
+        )
+
+    return DoctorCheck(
+        category="vault",
+        label="Recovery key acknowledged",
+        probe_cmd=[],
+        evaluate=_eval,
+        host_side=True,
+        fix_description=(
+            "Run `terok-sandbox vault passphrase reveal`, copy the value into"
+            " an off-host store (password manager / paper safe), and confirm"
+            " when prompted; or run `terok-sandbox vault passphrase acknowledge`"
+            " after capturing the value via `--echo-passphrase`."
         ),
     )
 

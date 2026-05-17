@@ -66,10 +66,18 @@ def _disable_systemd_creds(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class _TtyCapture:
-    """Records everything written to ``/dev/tty`` via ``Path.open``."""
+    """Records writes to ``/dev/tty`` and serves scripted reads back.
 
-    def __init__(self) -> None:
+    The production code uses ``/dev/tty`` for two directions: the
+    auto-mint announcement writes the passphrase there, and the ack
+    flow reads the operator's "SAVED" confirmation from the same
+    file.  The capture supports both — *response_lines* feeds the
+    reader, *value* accumulates the writes.
+    """
+
+    def __init__(self, response_lines: tuple[str, ...] = ()) -> None:
         self.value = ""
+        self._responses = list(response_lines)
 
     def __enter__(self) -> _TtyCapture:
         return self
@@ -81,8 +89,21 @@ class _TtyCapture:
         self.value += s
         return len(s)
 
+    def flush(self) -> None:
+        """No-op flush so ``_read_from_controlling_tty`` can pump the prompt."""
 
-def _patch_dev_tty(monkeypatch: pytest.MonkeyPatch) -> _TtyCapture:
+    def readline(self) -> str:
+        """Pop the next scripted response, or return ``""`` (= "no ack typed")."""
+        if not self._responses:
+            return ""
+        return self._responses.pop(0) + "\n"
+
+
+def _patch_dev_tty(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    responses: tuple[str, ...] = (),
+) -> _TtyCapture:
     """Divert ``Path("/dev/tty").open(...)`` into an in-memory capture.
 
     The production helpers write the generated passphrase to ``/dev/tty``
@@ -90,10 +111,14 @@ def _patch_dev_tty(monkeypatch: pytest.MonkeyPatch) -> _TtyCapture:
     Tests patch ``Path.open`` selectively (only for the ``/dev/tty``
     target) so other ``Path`` reads keep working and we can inspect
     what the helper would have written to the operator's terminal.
+
+    *responses* feeds the ack-flow reader; the default ``()`` returns
+    ``""`` for every read, simulating an operator who walked away
+    without typing SAVED.
     """
     from pathlib import Path as _Path
 
-    capture = _TtyCapture()
+    capture = _TtyCapture(response_lines=responses)
     real_open = _Path.open
 
     def _selective_open(self, *args, **kwargs):
@@ -955,7 +980,7 @@ class TestProvisionPassphrase:
         # as ``vault unlock`` against a fresh DB.
         _patch_dev_tty(monkeypatch)
         _scripted_tty_prompt(monkeypatch, "")
-        pw, source = _provision_passphrase(cfg, mode="session-file")
+        pw, source, _ = _provision_passphrase(cfg, mode="session-file")
         assert source == "session-file"
         assert cfg.vault_passphrase_file.read_text().rstrip("\n") == pw
         # Mode 0600 enforced — same protection as the encrypted DB itself.
@@ -974,7 +999,7 @@ class TestProvisionPassphrase:
         cfg = _make_cfg(tmp_path)
         cfg.vault_passphrase_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         cfg.vault_passphrase_file.write_text(_PASSPHRASE + "\n")
-        pw, source = _provision_passphrase(cfg, mode="session-file")
+        pw, source, _ = _provision_passphrase(cfg, mode="session-file")
         assert pw == _PASSPHRASE
         assert source == "session-file"
 
@@ -988,7 +1013,7 @@ class TestProvisionPassphrase:
         from terok_sandbox.vault.store import encryption as enc
 
         monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda: _PASSPHRASE)
-        pw, source = _provision_passphrase(_make_cfg(tmp_path), mode="keyring")
+        pw, source, _ = _provision_passphrase(_make_cfg(tmp_path), mode="keyring")
         assert pw == _PASSPHRASE
         assert source == "keyring"
 
@@ -1007,7 +1032,7 @@ class TestProvisionPassphrase:
         monkeypatch.setattr(
             enc, "store_passphrase_in_keyring", lambda pw: stored.__setitem__("pw", pw) or True
         )
-        pw, source = _provision_passphrase(_make_cfg(tmp_path), mode="keyring")
+        pw, source, _ = _provision_passphrase(_make_cfg(tmp_path), mode="keyring")
         assert source == "keyring"
         assert pw == stored["pw"]
 
@@ -1029,7 +1054,7 @@ class TestProvisionPassphrase:
         """Config mode honours an existing credentials.passphrase value."""
         from terok_sandbox.commands import _provision_passphrase
 
-        pw, source = _provision_passphrase(
+        pw, source, _ = _provision_passphrase(
             _make_cfg(tmp_path, passphrase=_PASSPHRASE), mode="config"
         )
         assert pw == _PASSPHRASE
@@ -1044,7 +1069,7 @@ class TestProvisionPassphrase:
         from terok_sandbox.commands import _provision_passphrase
 
         _scripted_tty_prompt(monkeypatch, _PASSPHRASE, _PASSPHRASE)
-        pw, source = _provision_passphrase(_make_cfg(tmp_path), mode="config")
+        pw, source, _ = _provision_passphrase(_make_cfg(tmp_path), mode="config")
         assert pw == _PASSPHRASE
         assert source == "prompt"
 
@@ -1260,14 +1285,22 @@ class TestPlaintextBackupTarball:
 
 
 class TestAskPassphraseMode:
-    """Setup chooser defaults to ``session`` on non-TTY runs (CI, piped install)."""
+    """Setup chooser refuses non-TTY without an explicit --passphrase-tier."""
 
-    def test_non_tty_defaults_to_session(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """``terok setup < /dev/null`` lands here — must not block on stdin."""
+    def test_non_tty_refuses_with_actionable_hint(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``terok setup < /dev/null`` without ``--passphrase-tier`` must fail closed.
+
+        Earlier releases silently picked ``session-file`` here — fine
+        for `terok setup` running under the TUI's no-TTY worker, broken
+        for the operator who lost the auto-generated key on the next
+        reboot.  The non-interactive path now hard-fails with a hint
+        pointing at ``--passphrase-tier``.
+        """
         from terok_sandbox.commands import _ask_passphrase_mode
 
         monkeypatch.setattr("sys.stdin.isatty", lambda: False)
-        assert _ask_passphrase_mode() == "session-file"
+        with pytest.raises(SystemExit, match="--passphrase-tier"):
+            _ask_passphrase_mode()
 
     def test_session_keyring_pass_through(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """``s`` / ``k`` choices skip the config-tier confirmation entirely."""

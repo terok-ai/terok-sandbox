@@ -42,6 +42,7 @@ def _handle_sandbox_setup(
     no_gate: bool = False,
     no_clearance: bool = False,
     echo_passphrase: bool = False,
+    passphrase_tier: str | None = None,
     cfg: SandboxConfig | None = None,
 ) -> None:
     """Install shield + vault + gate + clearance in one idempotent bootstrap.
@@ -73,6 +74,11 @@ def _handle_sandbox_setup(
             without it, the recovery key only reaches the controlling
             terminal and a no-TTY run drops it silently.  Off by
             default so a routine ``setup > install.log`` can't leak it.
+        passphrase_tier: Force the credentials-DB passphrase storage
+            tier.  One of ``systemd-creds``, ``keyring``, ``session-file``,
+            ``config``.  Default ``None`` runs the auto-detect / chooser
+            chain — on a non-TTY without systemd-creds that now fails
+            closed, so headless bootstraps must pass this explicitly.
         cfg: Optional [`SandboxConfig`][terok_sandbox.config.SandboxConfig]
             override.  Defaults to the layered config — passed through
             so terok's config stays the single source of truth for paths.
@@ -96,7 +102,9 @@ def _handle_sandbox_setup(
     # any non-default paths the caller (e.g. terok-executor) constructed
     # the config with.
     if not no_vault:
-        failed |= not _run_credentials_setup_phase(cfg, echo_passphrase=echo_passphrase)
+        failed |= not _run_credentials_setup_phase(
+            cfg, echo_passphrase=echo_passphrase, passphrase_tier=passphrase_tier
+        )
         cfg = dataclasses.replace(
             cfg,
             credentials_passphrase=credentials_passphrase(),
@@ -196,6 +204,18 @@ SETUP_COMMANDS: tuple[CommandDef, ...] = (
                     "Also print any auto-generated vault passphrase to stdout"
                     " (default off — the value otherwise only reaches /dev/tty,"
                     " so non-interactive bootstraps must opt in to capture it)"
+                ),
+            ),
+            ArgDef(
+                name="--passphrase-tier",
+                default=None,
+                help=(
+                    "Force credentials-DB passphrase storage to a specific tier"
+                    " (systemd-creds | keyring | session-file | config) instead of"
+                    " the auto-detect / chooser chain.  Required on a non-TTY host"
+                    " without systemd-creds — the silent session-file fallback was"
+                    " removed in v0.0.100 because it minted a passphrase the"
+                    " operator never saw and lost it on the first reboot."
                 ),
             ),
         ),
