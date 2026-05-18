@@ -68,9 +68,9 @@ docstr-coverage = "^2.3.2"
 complexipy = ">=5.0"
 vulture = ">=2.12"
 reuse = "^6.2.0"
-tach = "^0.34.1"
+tach = "^0.35.0"
 pre-commit = ">=4.0"
-mypy = ">=1.13,<2.0"
+mypy = ">=2.1.0,<3.0"
 # Transitive of pre-commit; 21.2.4 ships with a broken split where
 # `virtualenv.discovery.builtin` references `.discover` but `discover.py`
 # was extracted to a separate `python_discovery` package and isn't in
