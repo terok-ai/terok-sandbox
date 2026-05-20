@@ -125,6 +125,67 @@ def test_make_shield_maps_config_to_shield_config(
     assert config.profiles_dir == MOCK_CONFIG_ROOT / "shield" / "profiles"
 
 
+def test_make_shield_resolves_ports_for_auto_allocated_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tcp-mode cfg with unset ports still produces a non-empty ``loopback_ports``.
+
+    Regression guard for the post-#315 bug where ``make_shield`` read the
+    raw ``cfg.gate_port`` / ``token_broker_port`` / ``ssh_signer_port``
+    fields without calling
+    [`SandboxConfig.with_resolved_ports`][terok_sandbox.SandboxConfig.with_resolved_ports]
+    first.  Side-effect-free ``SandboxConfig`` construction leaves those
+    fields ``None`` for auto-allocated configs, which silently produced an
+    empty ``loopback_ports`` tuple — and a bypass ruleset with no
+    ``tcp dport <p> ip daddr 169.254.1.2 accept`` rules, so every
+    container→host loopback access fell through to the private-range
+    reject after ``shield down``.
+    """
+    monkeypatch.setattr(
+        "terok_sandbox.port_registry._read_installed_ports", lambda: {}, raising=False
+    )
+
+    cfg = SandboxConfig(state_dir=MOCK_BASE / "state-tcp-auto", services_mode="tcp")
+    assert cfg.gate_port is None
+    assert cfg.token_broker_port is None
+    assert cfg.ssh_signer_port is None
+
+    with (
+        patch("terok_shield.SubprocessRunner", autospec=True),
+        patch("terok_sandbox.paths.namespace_config_root", return_value=MOCK_CONFIG_ROOT),
+    ):
+        shield = make_shield(MOCK_TASK_DIR, cfg=cfg)
+
+    assert len(shield.config.loopback_ports) == 3
+    assert all(isinstance(p, int) for p in shield.config.loopback_ports)
+    assert len(set(shield.config.loopback_ports)) == 3  # gate, broker, signer all distinct
+
+
+def test_make_shield_socket_mode_skips_port_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Socket-mode configs short-circuit ``with_resolved_ports`` and emit no loopback rules.
+
+    Companion to
+    [`test_make_shield_resolves_ports_for_auto_allocated_config`][tests.unit.test_shield.test_make_shield_resolves_ports_for_auto_allocated_config]:
+    confirms the fix doesn't accidentally claim TCP ports for socket-mode
+    deployments, where vault/gate traffic rides Unix sockets and there are
+    no host loopback listeners to allow.
+    """
+    monkeypatch.setattr(
+        "terok_sandbox.port_registry._read_installed_ports", lambda: {}, raising=False
+    )
+    cfg = SandboxConfig(state_dir=MOCK_BASE / "state-socket", services_mode="socket")
+
+    with (
+        patch("terok_shield.SubprocessRunner", autospec=True),
+        patch("terok_sandbox.paths.namespace_config_root", return_value=MOCK_CONFIG_ROOT),
+    ):
+        shield = make_shield(MOCK_TASK_DIR, cfg=cfg)
+
+    assert shield.config.loopback_ports == ()
+
+
 def test_nft_not_found_is_reexported() -> None:
     """``NftNotFoundError`` is re-exported from the adapter module."""
     from terok_sandbox.shield import NftNotFoundError as error_type

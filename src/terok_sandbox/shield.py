@@ -68,8 +68,16 @@ def make_shield(task_dir: Path, cfg: SandboxConfig | None = None) -> Shield:
     """Construct a per-task [`Shield`][terok_shield.Shield] from sandbox configuration.
 
     Builds a `ShieldConfig` with ``state_dir`` scoped to *task_dir*.
+
+    Calls [`SandboxConfig.with_resolved_ports`][terok_sandbox.SandboxConfig.with_resolved_ports]
+    so the resulting ``loopback_ports`` reflects the *actual* gate/broker/
+    signer ports — auto-allocated configs default those fields to ``None``,
+    which would otherwise silently produce an empty tuple and a shield
+    ruleset with no ``tcp dport <p> ip daddr 169.254.1.2 accept`` rules,
+    causing container→host TCP traffic to fall through to the
+    private-range reject (#156 regression follow-up).
     """
-    c = _cfg(cfg)
+    c = _cfg(cfg).with_resolved_ports()
     # Socket-mode transports emit no loopback traffic; filter ``None`` so
     # the nftables rule generator only sees ports that actually exist.
     loopback = tuple(
