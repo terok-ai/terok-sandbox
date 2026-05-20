@@ -299,24 +299,6 @@ class RawRunSection(BaseModel):
             "``experimental: true`` flag at task launch."
         ),
     )
-    krun_cpus: int | None = Field(
-        default=None,
-        ge=1,
-        description=(
-            "vCPU count for the krun microVM (forwarded as the "
-            "``run.oci.krun.cpus`` annotation).  Must be ≥ 1.  Ignored "
-            "when ``runtime`` is not ``krun``."
-        ),
-    )
-    krun_ram_mib: int | None = Field(
-        default=None,
-        ge=1,
-        description=(
-            "Guest RAM in MiB for the krun microVM (forwarded as the "
-            "``run.oci.krun.ram_mib`` annotation).  Must be ≥ 1.  "
-            "Ignored when ``runtime`` is not ``krun``."
-        ),
-    )
     timezone: str | None = Field(
         default=None,
         description=(

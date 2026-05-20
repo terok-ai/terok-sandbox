@@ -81,8 +81,6 @@ def test_run_section_defaults_runtime_to_none_so_layers_can_distinguish_unset() 
     """
     section = RawRunSection.model_validate({})
     assert section.runtime is None
-    assert section.krun_cpus is None
-    assert section.krun_ram_mib is None
     assert section.shutdown_timeout == 10
     assert section.nested_containers is False
     assert section.hooks == RawHooksSection()
@@ -95,15 +93,6 @@ def test_run_section_rejects_legacy_podman_value() -> None:
     """
     with pytest.raises(ValidationError, match="runtime"):
         RawRunSection.model_validate({"runtime": "podman"})
-
-
-def test_run_section_krun_sizing_must_be_positive_integers() -> None:
-    """``ge=1`` on krun_cpus / krun_ram_mib catches zero or negative typos
-    before they reach the OCI annotation that podman would silently accept."""
-    with pytest.raises(ValidationError):
-        RawRunSection.model_validate({"krun_cpus": 0})
-    with pytest.raises(ValidationError):
-        RawRunSection.model_validate({"krun_ram_mib": -1})
 
 
 def test_run_section_blank_memory_cpus_normalised_to_none() -> None:

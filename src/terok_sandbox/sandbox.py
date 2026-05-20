@@ -62,21 +62,21 @@ arbitrary-code-execution surface.
 
 SAFE_ANNOTATION_KEYS: frozenset[str] = frozenset(
     {
-        # krun microVM sizing (Phase 3)
-        "run.oci.krun.cpus",
-        "run.oci.krun.ram_mib",
-        # crun#1913 — passt networking selector for krun port publishing
-        "krun.use_passt",
+        # Path to the per-task dossier JSON file.  Read by the shield
+        # hook at spawn time to populate ClearanceEvent.dossier on every
+        # event — binding a running container to the orchestrator's
+        # task metadata without per-event projection.
+        "dossier.meta_path",
     }
 )
 """OCI annotations the sandbox will forward through ``podman --annotation``.
 
-Annotations are a runtime control plane — krun reads them to size the
-microVM, switch the networking backend, etc. — so they're privileged
-configuration, not arbitrary key/value pairs.  Locking the set down
-means a caller-controlled
+Annotations are how orchestrators bind a running container to host-side
+state that the shield (or other in-container readers) consult on every
+event — so they're privileged configuration, not arbitrary key/value
+pairs.  Locking the set down means a caller-controlled
 [`RunSpec`][terok_sandbox.sandbox.RunSpec] can't flip an isolation knob
-or feed an unrecognised key to whatever runtime is in use.
+or smuggle an unrecognised key past the sandbox.
 """
 
 _ANNOTATION_CTRL_CHARS = "\n\r\0"
@@ -195,10 +195,10 @@ class RunSpec:
     gpu_enabled: bool = False
     """Whether to pass GPU device args to podman."""
 
-    memory_limit: str | None = None
+    memory: str | None = None
     """Podman ``--memory`` value (e.g. ``"4g"``, ``"512m"``).  ``None`` = unlimited."""
 
-    cpu_limit: str | None = None
+    cpus: str | None = None
     """Podman ``--cpus`` value (e.g. ``"2.0"``, ``"0.5"``).  ``None`` = unlimited."""
 
     extra_args: tuple[str, ...] = ()
@@ -234,13 +234,13 @@ class RunSpec:
     annotations: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
     """OCI annotations forwarded as ``podman --annotation k=v`` entries.
 
-    Used to carry runtime-specific tuning that podman itself doesn't
-    have a dedicated flag for — e.g. ``run.oci.krun.cpus`` /
-    ``run.oci.krun.ram_mib`` (krun microVM sizing) or ``krun.use_passt``
-    (port-publishing path).  Declared as ``Mapping`` so callers can pass
-    plain ``dict``s naturally; ``__post_init__`` snapshots the value into
-    a ``MappingProxyType`` so the frozen-dataclass guarantee still holds
-    against caller-side mutation.
+    Used to bind a running container to host-side state the shield (or
+    other in-container readers) consult on every event — currently the
+    [``dossier.meta_path``][terok_sandbox.sandbox.SAFE_ANNOTATION_KEYS]
+    pointer the orchestrator sets per task.  Declared as ``Mapping`` so
+    callers can pass plain ``dict``s naturally; ``__post_init__``
+    snapshots the value into a ``MappingProxyType`` so the
+    frozen-dataclass guarantee still holds against caller-side mutation.
     """
 
     def __post_init__(self) -> None:
@@ -285,12 +285,11 @@ def _validate_runtime(runtime: str) -> str:
 def _validate_annotations(annotations: Mapping[str, str]) -> Mapping[str, str]:
     """Return *annotations* if every key is on the allowlist and every value safe.
 
-    Annotations are a runtime control plane (krun reads them to size the
-    microVM, switch the networking backend, …) — treating them as
-    privileged config means a caller-controlled
+    Annotations bind a running container to host-side state that the
+    shield (or other in-container readers) consult on every event —
+    treating them as privileged config means a caller-controlled
     [`RunSpec.annotations`][terok_sandbox.sandbox.RunSpec] can't flip an
-    isolation knob or feed an unrecognised key to whatever runtime is
-    in use.
+    isolation knob or smuggle an unrecognised key past the sandbox.
 
     Rejects any key not on
     [`SAFE_ANNOTATION_KEYS`][terok_sandbox.sandbox.SAFE_ANNOTATION_KEYS]
@@ -302,7 +301,7 @@ def _validate_annotations(annotations: Mapping[str, str]) -> Mapping[str, str]:
             raise ValueError(
                 f"OCI annotation {key!r}: not in allowlist "
                 f"{sorted(SAFE_ANNOTATION_KEYS)} — extend SAFE_ANNOTATION_KEYS "
-                "to expose a new runtime knob"
+                "to expose a new annotation key"
             )
         if not isinstance(value, str):
             raise ValueError(
@@ -421,8 +420,8 @@ class Sandbox:
         if spec.runtime is not None:
             cmd += ["--runtime", _validate_runtime(spec.runtime)]
 
-        # OCI annotations carry runtime-tuning knobs that have no
-        # dedicated podman flag — e.g. krun microVM sizing.
+        # OCI annotations bind the container to host-side state the
+        # shield reads on every event — currently the dossier path.
         for k, v in _validate_annotations(spec.annotations).items():
             cmd += ["--annotation", f"{k}={v}"]
 
@@ -449,10 +448,10 @@ class Sandbox:
 
         cmd += gpu_run_args(enabled=spec.gpu_enabled)
 
-        if spec.memory_limit is not None:
-            cmd += ["--memory", spec.memory_limit]
-        if spec.cpu_limit is not None:
-            cmd += ["--cpus", spec.cpu_limit]
+        if spec.memory is not None:
+            cmd += ["--memory", spec.memory]
+        if spec.cpus is not None:
+            cmd += ["--cpus", spec.cpus]
 
         if spec.extra_args:
             cmd += list(spec.extra_args)
