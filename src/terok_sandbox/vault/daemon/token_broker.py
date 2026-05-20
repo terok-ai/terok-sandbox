@@ -756,23 +756,36 @@ def _build_app(db_path: str, routes_path: str, audit_path: Path | None = None) -
 def _systemd_sockets() -> tuple[socket.socket | None, socket.socket | None]:
     """Return ``(unix_sock, tcp_sock)`` inherited from systemd, or ``(None, None)``.
 
-    Implements the ``sd_listen_fds(3)`` protocol.  The socket unit
-    declares two ``ListenStream=`` entries (Unix path first, TCP port
-    second), so systemd passes file descriptors 3 and 4 respectively
-    when ``LISTEN_FDS=2``.
+    Implements the ``sd_listen_fds(3)`` protocol.  The TCP-mode socket
+    unit declares a single ``ListenStream=127.0.0.1:<port>`` entry and
+    systemd passes one TCP file descriptor (``LISTEN_FDS=1``); legacy
+    rendered units with the dual Unix+TCP listeners pass two
+    (``LISTEN_FDS=2``).  Each inherited FD is classified by socket
+    family so the daemon doesn't have to know the unit's exact shape.
     """
     import os
 
     if os.environ.get("LISTEN_PID") != str(os.getpid()):
         return None, None
 
-    if os.environ.get("LISTEN_FDS") != "2":
+    try:
+        n_fds = int(os.environ.get("LISTEN_FDS", "0"))
+    except ValueError:
+        return None, None
+    if n_fds < 1:
         return None, None
 
-    unix_sock = socket.socket(fileno=3)
-    unix_sock.setblocking(False)
-    tcp_sock = socket.socket(fileno=4)
-    tcp_sock.setblocking(False)
+    unix_sock: socket.socket | None = None
+    tcp_sock: socket.socket | None = None
+    for offset in range(n_fds):
+        sock = socket.socket(fileno=3 + offset)
+        sock.setblocking(False)
+        if sock.family == socket.AF_UNIX and unix_sock is None:
+            unix_sock = sock
+        elif sock.family in (socket.AF_INET, socket.AF_INET6) and tcp_sock is None:
+            tcp_sock = sock
+        else:
+            sock.close()
     return unix_sock, tcp_sock
 
 

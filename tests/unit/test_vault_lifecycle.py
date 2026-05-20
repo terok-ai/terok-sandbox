@@ -1086,8 +1086,16 @@ class TestInstallSystemdUnits:
         svc = (unit_dir / "terok-vault.service").read_text()
         assert f"--scope-sockets-dir={cfg.runtime_dir}" in svc
 
-    def test_socket_unit_has_both_listen_streams(self, tmp_path: Path) -> None:
-        """Socket unit declares both Unix socket and TCP port ListenStream entries."""
+    def test_socket_unit_has_tcp_only_listen_stream(self, tmp_path: Path) -> None:
+        """TCP-mode socket unit declares a single ``ListenStream`` for the TCP port.
+
+        The legacy template paired a Unix-path listener with the TCP one so the
+        broker could be reached either way, but the Unix listener was never
+        consumed in TCP mode and forced systemd to create a labelled socket
+        inode that tripped SELinux on Fedora.  Tightened to TCP-only; the
+        daemon still binds the Unix socket manually for the local reachability
+        fast-path probe used by ``ensure_reachable``.
+        """
         cfg = _make_cfg(tmp_path)
         mgr = VaultManager(cfg)
         unit_dir = tmp_path / "systemd-units"
@@ -1100,9 +1108,9 @@ class TestInstallSystemdUnits:
         listen_lines = [
             line.strip() for line in socket_unit.splitlines() if line.startswith("ListenStream")
         ]
-        assert len(listen_lines) == 2
-        assert any(str(cfg.vault_socket_path) in entry for entry in listen_lines)
-        assert any(f"127.0.0.1:{cfg.token_broker_port}" in entry for entry in listen_lines)
+        assert listen_lines == [f"ListenStream=127.0.0.1:{cfg.token_broker_port}"]
+        assert str(cfg.vault_socket_path) not in socket_unit
+        assert "SocketMode=" not in socket_unit
 
 
 class TestUninstallSystemdUnits:

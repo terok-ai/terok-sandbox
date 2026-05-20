@@ -6,8 +6,6 @@
 Description=terok vault socket
 
 [Socket]
-ListenStream={{SOCKET_PATH}}
-SocketMode=0600
 ListenStream=127.0.0.1:{{PORT}}
 
 [Install]

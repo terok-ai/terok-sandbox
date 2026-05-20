@@ -43,7 +43,7 @@ from .status import VaultStatus, VaultUnreachableError
 
 # ---------- Constants ----------
 
-_UNIT_VERSION = 12
+_UNIT_VERSION = 13
 """Bump when the systemd unit templates change."""
 
 _SOCKET_UNIT = "terok-vault.socket"
