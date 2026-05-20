@@ -104,6 +104,40 @@ def test_run_section_blank_memory_cpus_normalised_to_none() -> None:
     assert section.cpus is None
 
 
+@pytest.mark.parametrize("value", ["4g", "512m", "256K", "1.5G", "1024", "2B"])
+def test_run_section_memory_accepts_podman_grammar(value: str) -> None:
+    """Decimal + optional b/k/m/g suffix (case-insensitive) is the format
+    podman's ``--memory`` accepts, mirroring ``docker/go-units.RAMInBytes``."""
+    assert RawRunSection.model_validate({"memory": value}).memory == value
+
+
+@pytest.mark.parametrize("value", ["4 GB", "two", "4gb", "-1g", "4g ", "4.g", ""])
+def test_run_section_memory_rejects_malformed(value: str) -> None:
+    """Malformed values fail at parse time rather than producing a
+    cryptic podman error at task start.  Blank strings are still
+    coerced to None upstream (see ``_blank_to_none``) — listed here
+    only as a marker that the format check fires for non-blank inputs."""
+    if value == "":
+        # blank → None via the upstream coercion, not a validator failure
+        assert RawRunSection.model_validate({"memory": value}).memory is None
+        return
+    with pytest.raises(ValidationError, match="memory"):
+        RawRunSection.model_validate({"memory": value})
+
+
+@pytest.mark.parametrize("value", ["2", "2.0", "0.5", "16"])
+def test_run_section_cpus_accepts_decimals(value: str) -> None:
+    """Positive decimal is the format podman's ``--cpus`` accepts."""
+    assert RawRunSection.model_validate({"cpus": value}).cpus == value
+
+
+@pytest.mark.parametrize("value", ["two", "-1", "1.5x", "1,5", "2.0 "])
+def test_run_section_cpus_rejects_malformed(value: str) -> None:
+    """Same parse-time vs launch-time tradeoff as memory."""
+    with pytest.raises(ValidationError, match="cpus"):
+        RawRunSection.model_validate({"cpus": value})
+
+
 def test_run_section_none_hooks_becomes_empty_subsection() -> None:
     """``hooks:`` written with no value (YAML null) shouldn't crash — coerce
     to empty defaults so all four hook fields stay ``None``.

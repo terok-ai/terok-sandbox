@@ -34,9 +34,21 @@ their own sections.  The topmost layer (terok) flips back to
 
 from __future__ import annotations
 
+import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+_MEMORY_RE = re.compile(r"\d+(\.\d+)?[bkmgBKMG]?")
+"""Format check for ``run.memory`` — decimal + optional b/k/m/g suffix.
+
+Mirrors the grammar accepted by podman's ``--memory`` flag, which itself
+defers to ``docker/go-units.RAMInBytes``.  Format only — host-availability
+and cgroup-minimum checks stay with podman at launch time.
+"""
+
+_CPUS_RE = re.compile(r"\d+(\.\d+)?")
+"""Format check for ``run.cpus`` — positive decimal (fractional allowed)."""
 
 ServicesMode = Literal["tcp", "socket"]
 """Type alias for the ``services.mode`` Literal; re-exported from
@@ -278,8 +290,23 @@ class RawRunSection(BaseModel):
         default=None,
         description='GPU passthrough: ``true``, ``"all"``, or omit to disable',
     )
-    memory: str | None = None
-    cpus: str | None = None
+    memory: str | None = Field(
+        default=None,
+        description=(
+            'Podman ``--memory`` value (e.g. ``"4g"``, ``"512m"``); ``None`` '
+            "= unlimited.  Format: decimal followed by an optional single-letter "
+            "suffix ``b``/``k``/``m``/``g`` (case-insensitive).  See "
+            "``man podman-run(1)`` and ``docker/go-units`` for the canonical grammar."
+        ),
+    )
+    cpus: str | None = Field(
+        default=None,
+        description=(
+            'Podman ``--cpus`` value (e.g. ``"2.0"``, ``"0.5"``); ``None`` '
+            "= unlimited.  Positive decimal, fractional values accepted (note: "
+            "under krun, fractional cpus round up to whole vCPUs)."
+        ),
+    )
     nested_containers: bool = Field(
         default=False,
         description=(
@@ -315,6 +342,38 @@ class RawRunSection(BaseModel):
         """Normalise empty / whitespace-only strings to ``None``."""
         if isinstance(v, str) and not v.strip():
             return None
+        return v
+
+    @field_validator("memory", mode="after")
+    @classmethod
+    def _validate_memory_format(cls, v: str | None) -> str | None:
+        """Reject malformed ``memory`` values at parse time, not launch time.
+
+        Format check only — sandbox isn't podman's SSOT for whether a
+        value fits the host (cgroup minimum, available RAM, etc.) so
+        those checks stay with podman.  The regex catches the common
+        typos (``"4 GB"``, ``"two"``, ``"4gb "``) that would otherwise
+        produce a cryptic podman error at task start.
+        """
+        if v is None:
+            return v
+        if not _MEMORY_RE.fullmatch(v):
+            raise ValueError(
+                f"memory {v!r}: expected decimal + optional b/k/m/g suffix "
+                "(see man podman-run(1) --memory)"
+            )
+        return v
+
+    @field_validator("cpus", mode="after")
+    @classmethod
+    def _validate_cpus_format(cls, v: str | None) -> str | None:
+        """Reject malformed ``cpus`` values at parse time, not launch time."""
+        if v is None:
+            return v
+        if not _CPUS_RE.fullmatch(v):
+            raise ValueError(
+                f"cpus {v!r}: expected positive decimal (see man podman-run(1) --cpus)"
+            )
         return v
 
     @model_validator(mode="before")
