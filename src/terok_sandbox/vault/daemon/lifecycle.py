@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 import signal
 import subprocess  # nosec B404 — vault daemon Popen + systemctl helpers — vault daemon Popen + systemctl helpers
+import sys
 import time
 from pathlib import Path
 
@@ -333,6 +334,7 @@ class VaultManager:
             "SSH_SIGNER_PORT": str(self._cfg.ssh_signer_port),
             "BIN": systemd_exec_argv(self._vault_exec_prefix()),
             "UNIT_VERSION": str(_UNIT_VERSION),
+            "PYTHONPATH": os.pathsep.join(sys.path),
         }
 
         # Remove units from the *other* transport mode before installing.
