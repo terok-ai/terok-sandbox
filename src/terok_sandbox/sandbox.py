@@ -62,21 +62,19 @@ arbitrary-code-execution surface.
 
 SAFE_ANNOTATION_KEYS: frozenset[str] = frozenset(
     {
-        # Path to the per-task dossier JSON file.  Read by the shield
-        # hook at spawn time to populate ClearanceEvent.dossier on every
-        # event — binding a running container to the orchestrator's
-        # task metadata without per-event projection.
+        # Per-task dossier JSON path; shield hook reads it on every
+        # event to populate ClearanceEvent.dossier.
         "dossier.meta_path",
     }
 )
-"""OCI annotations the sandbox will forward through ``podman --annotation``.
+"""OCI annotation keys allowed on
+[`RunSpec.annotations`][terok_sandbox.sandbox.RunSpec].
 
-Annotations are how orchestrators bind a running container to host-side
-state that the shield (or other in-container readers) consult on every
-event — so they're privileged configuration, not arbitrary key/value
-pairs.  Locking the set down means a caller-controlled
-[`RunSpec`][terok_sandbox.sandbox.RunSpec] can't flip an isolation knob
-or smuggle an unrecognised key past the sandbox.
+Annotations are privileged config — they bind a running container to
+host-side state the shield (or other readers) consult on every event.
+The allowlist prevents a caller-controlled
+[`RunSpec`][terok_sandbox.sandbox.RunSpec] from smuggling an
+unrecognised key past the sandbox.
 """
 
 _ANNOTATION_CTRL_CHARS = "\n\r\0"
@@ -234,13 +232,11 @@ class RunSpec:
     annotations: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
     """OCI annotations forwarded as ``podman --annotation k=v`` entries.
 
-    Used to bind a running container to host-side state the shield (or
-    other in-container readers) consult on every event — currently the
-    [``dossier.meta_path``][terok_sandbox.sandbox.SAFE_ANNOTATION_KEYS]
-    pointer the orchestrator sets per task.  Declared as ``Mapping`` so
-    callers can pass plain ``dict``s naturally; ``__post_init__``
-    snapshots the value into a ``MappingProxyType`` so the
-    frozen-dataclass guarantee still holds against caller-side mutation.
+    Keys must be on
+    [`SAFE_ANNOTATION_KEYS`][terok_sandbox.sandbox.SAFE_ANNOTATION_KEYS].
+    Declared as ``Mapping`` so callers can pass plain ``dict``s;
+    ``__post_init__`` snapshots into a ``MappingProxyType`` so the
+    frozen-dataclass guarantee holds against caller mutation.
     """
 
     def __post_init__(self) -> None:
@@ -285,16 +281,10 @@ def _validate_runtime(runtime: str) -> str:
 def _validate_annotations(annotations: Mapping[str, str]) -> Mapping[str, str]:
     """Return *annotations* if every key is on the allowlist and every value safe.
 
-    Annotations bind a running container to host-side state that the
-    shield (or other in-container readers) consult on every event —
-    treating them as privileged config means a caller-controlled
-    [`RunSpec.annotations`][terok_sandbox.sandbox.RunSpec] can't flip an
-    isolation knob or smuggle an unrecognised key past the sandbox.
-
-    Rejects any key not on
+    Rejects keys not on
     [`SAFE_ANNOTATION_KEYS`][terok_sandbox.sandbox.SAFE_ANNOTATION_KEYS]
-    and any value containing control characters that would split the
-    ``--annotation k=v`` argv element (``\\n``, ``\\r``, ``\\0``).
+    and values containing control characters (``\\n``, ``\\r``, ``\\0``)
+    that would split the ``--annotation k=v`` argv element.
     """
     for key, value in annotations.items():
         if key not in SAFE_ANNOTATION_KEYS:
@@ -421,7 +411,7 @@ class Sandbox:
             cmd += ["--runtime", _validate_runtime(spec.runtime)]
 
         # OCI annotations bind the container to host-side state the
-        # shield reads on every event — currently the dossier path.
+        # shield reads on every event (currently the dossier path).
         for k, v in _validate_annotations(spec.annotations).items():
             cmd += ["--annotation", f"{k}={v}"]
 

@@ -106,26 +106,22 @@ def test_run_section_blank_memory_cpus_normalised_to_none() -> None:
 
 @pytest.mark.parametrize("value", ["4g", "512m", "256K", "1.5G", "1024", "2B", "0"])
 def test_run_section_memory_accepts_podman_grammar(value: str) -> None:
-    """Decimal + optional b/k/m/g suffix (case-insensitive) is the format
-    podman's ``--memory`` accepts, mirroring ``docker/go-units.RAMInBytes``.
+    """Decimal + optional single-letter b/k/m/g suffix (case-insensitive).
 
-    ``"0"`` is format-valid and pinned here on purpose — semantic
-    questions ("does podman treat 0 as unlimited?") stay with podman
-    per `RawRunSection`'s format-only validator contract.
+    ``"0"`` is format-valid; semantics are podman's call (the validator
+    is format-only — see [`RawRunSection`][terok_sandbox.config_schema.RawRunSection]).
     """
     assert RawRunSection.model_validate({"memory": value}).memory == value
 
 
 @pytest.mark.parametrize("value", ["4 GB", "two", "4gb", "-1g", "4g ", "4.g", ".5g", ""])
 def test_run_section_memory_rejects_malformed(value: str) -> None:
-    """Malformed values fail at parse time rather than producing a
-    cryptic podman error at task start.  Blank strings are still
-    coerced to None upstream (see ``_blank_to_none``) — listed here
-    only as a marker that the format check fires for non-blank inputs.
+    """Malformed values fail at parse time, not task launch.
 
-    Leading-dot decimals (``".5g"``) are rejected to track
-    ``docker/go-units.RAMInBytes``, which requires at least one digit
-    before the optional decimal point — the canonical form is ``"512m"``.
+    Blank → ``None`` via ``_blank_to_none``; listed only as a marker
+    that the format check fires for non-blank inputs.  Leading-dot
+    decimals (``".5g"``) are rejected — the regex requires a leading
+    digit, so the canonical form is ``"0.5g"`` / ``"512m"``.
     """
     if value == "":
         # blank → None via the upstream coercion, not a validator failure
@@ -137,20 +133,15 @@ def test_run_section_memory_rejects_malformed(value: str) -> None:
 
 @pytest.mark.parametrize("value", ["2", "2.0", "0.5", "16", "0"])
 def test_run_section_cpus_accepts_decimals(value: str) -> None:
-    """Positive decimal is the format podman's ``--cpus`` accepts.
-
-    ``"0"`` is format-valid — same rationale as the memory case: the
-    validator stays format-only and lets podman handle the semantics
-    of a zero quota.
-    """
+    """Non-negative decimal; ``"0"`` is format-valid (same format-only
+    contract as memory)."""
     assert RawRunSection.model_validate({"cpus": value}).cpus == value
 
 
 @pytest.mark.parametrize("value", ["two", "-1", "1.5x", "1,5", "2.0 ", ".5"])
 def test_run_section_cpus_rejects_malformed(value: str) -> None:
-    """Same parse-time vs launch-time tradeoff as memory.  ``".5"`` is
-    rejected for the same leading-digit reason — canonical form is
-    ``"0.5"``."""
+    """``".5"`` is rejected for the same leading-digit reason as
+    ``".5g"`` — canonical form is ``"0.5"``."""
     with pytest.raises(ValidationError, match="cpus"):
         RawRunSection.model_validate({"cpus": value})
 
