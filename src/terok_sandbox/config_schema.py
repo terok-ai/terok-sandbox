@@ -34,9 +34,22 @@ their own sections.  The topmost layer (terok) flips back to
 
 from __future__ import annotations
 
+import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+_MEMORY_RE = re.compile(r"\d+(\.\d+)? ?[kKmMgGtTpP]?[iI]?[bB]?")
+"""Format check for ``run.memory`` — mirrors ``docker/go-units.sizeRegex``,
+which is what podman's ``--memory`` flag accepts.
+
+Accepts ``"4g"``, ``"4gb"``, ``"4gib"``, ``"4 G"``, ``"512m"``, plain
+``"1024"`` (bytes), all case-insensitive.  Format only — host-availability
+and cgroup-minimum checks stay with podman.
+"""
+
+_CPUS_RE = re.compile(r"\d+(\.\d+)?")
+"""Format check for ``run.cpus`` — non-negative decimal."""
 
 ServicesMode = Literal["tcp", "socket"]
 """Type alias for the ``services.mode`` Literal; re-exported from
@@ -278,8 +291,21 @@ class RawRunSection(BaseModel):
         default=None,
         description='GPU passthrough: ``true``, ``"all"``, or omit to disable',
     )
-    memory: str | None = None
-    cpus: str | None = None
+    memory: str | None = Field(
+        default=None,
+        description=(
+            'Podman ``--memory`` value (e.g. ``"4g"``, ``"512m"``, ``"4gib"``, '
+            'plain ``"1024"`` for bytes); ``None`` = unlimited.  Format mirrors '
+            "what podman accepts — see ``man podman-run(1)`` --memory."
+        ),
+    )
+    cpus: str | None = Field(
+        default=None,
+        description=(
+            'Podman ``--cpus`` value (e.g. ``"2.0"``, ``"0.5"``); ``None`` '
+            "= unlimited.  Non-negative decimal."
+        ),
+    )
     nested_containers: bool = Field(
         default=False,
         description=(
@@ -299,24 +325,6 @@ class RawRunSection(BaseModel):
             "``experimental: true`` flag at task launch."
         ),
     )
-    krun_cpus: int | None = Field(
-        default=None,
-        ge=1,
-        description=(
-            "vCPU count for the krun microVM (forwarded as the "
-            "``run.oci.krun.cpus`` annotation).  Must be ≥ 1.  Ignored "
-            "when ``runtime`` is not ``krun``."
-        ),
-    )
-    krun_ram_mib: int | None = Field(
-        default=None,
-        ge=1,
-        description=(
-            "Guest RAM in MiB for the krun microVM (forwarded as the "
-            "``run.oci.krun.ram_mib`` annotation).  Must be ≥ 1.  "
-            "Ignored when ``runtime`` is not ``krun``."
-        ),
-    )
     timezone: str | None = Field(
         default=None,
         description=(
@@ -329,10 +337,49 @@ class RawRunSection(BaseModel):
 
     @field_validator("memory", "cpus", mode="before")
     @classmethod
-    def _blank_to_none(cls, v: Any) -> str | None:
-        """Normalise empty / whitespace-only strings to ``None``."""
+    def _normalise(cls, v: Any) -> Any:
+        """Coerce numeric YAML inputs to str; blank strings to ``None``.
+
+        Accepts ``cpus: 2`` / ``memory: 1024`` (YAML int/float) by
+        stringifying — both shapes are valid podman input.  ``bool`` is
+        an ``int`` subclass, so reject it explicitly to keep ``cpus: true``
+        from coercing to ``"True"``.
+        """
+        if isinstance(v, bool):
+            return v  # let pydantic reject as not-str
+        if isinstance(v, int | float):
+            return str(v)
         if isinstance(v, str) and not v.strip():
             return None
+        return v
+
+    @field_validator("memory", mode="after")
+    @classmethod
+    def _validate_memory_format(cls, v: str | None) -> str | None:
+        """Reject malformed ``memory`` at parse time.
+
+        Format only — semantic checks (host RAM, cgroup minimum) stay
+        with podman.
+        """
+        if v is None:
+            return v
+        if not _MEMORY_RE.fullmatch(v):
+            raise ValueError(
+                f"memory {v!r}: expected podman-style size (e.g. ``4g``, "
+                "``512m``, ``4gib``); see man podman-run(1) --memory"
+            )
+        return v
+
+    @field_validator("cpus", mode="after")
+    @classmethod
+    def _validate_cpus_format(cls, v: str | None) -> str | None:
+        """Reject malformed ``cpus`` at parse time."""
+        if v is None:
+            return v
+        if not _CPUS_RE.fullmatch(v):
+            raise ValueError(
+                f"cpus {v!r}: expected non-negative decimal (see man podman-run(1) --cpus)"
+            )
         return v
 
     @model_validator(mode="before")

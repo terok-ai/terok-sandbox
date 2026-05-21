@@ -62,14 +62,14 @@ class TestRunSpec:
     def test_resource_limits_default_none(self) -> None:
         """Memory and CPU limits default to None (unlimited)."""
         spec = _make_spec()
-        assert spec.memory_limit is None
-        assert spec.cpu_limit is None
+        assert spec.memory is None
+        assert spec.cpus is None
 
     def test_resource_limits_carry_through(self) -> None:
         """Explicit limits survive the frozen dataclass round-trip."""
-        spec = _make_spec(memory_limit="4g", cpu_limit="2.0")
-        assert spec.memory_limit == "4g"
-        assert spec.cpu_limit == "2.0"
+        spec = _make_spec(memory="4g", cpus="2.0")
+        assert spec.memory == "4g"
+        assert spec.cpus == "2.0"
 
     def test_runtime_defaults_none(self) -> None:
         """``runtime`` defaults to None (podman picks crun)."""
@@ -88,10 +88,9 @@ class TestRunSpec:
         from types import MappingProxyType
 
         spec = _make_spec(
-            annotations=MappingProxyType({"run.oci.krun.cpus": "2", "krun.use_passt": "true"})
+            annotations=MappingProxyType({"dossier.meta_path": "/var/lib/terok/tasks/t1.json"})
         )
-        assert spec.annotations["run.oci.krun.cpus"] == "2"
-        assert spec.annotations["krun.use_passt"] == "true"
+        assert spec.annotations["dossier.meta_path"] == "/var/lib/terok/tasks/t1.json"
 
     def test_annotations_mutable_input_is_detached(self) -> None:
         """A caller's mutable dict can't mutate the spec after construction.
@@ -270,7 +269,10 @@ class TestSandbox:
         from types import MappingProxyType
 
         annotations = MappingProxyType(
-            {"run.oci.krun.cpus": "2", "krun.use_passt": "true"},
+            {
+                "dossier.meta_path": "/var/lib/terok/tasks/t1.json",
+                "krun.cpus": "2",
+            },
         )
         with (
             patch("subprocess.run") as mock_run,
@@ -282,8 +284,8 @@ class TestSandbox:
         cmd = mock_run.call_args[0][0]
         # Each annotation produces a "--annotation k=v" pair.
         emitted = [cmd[i + 1] for i, t in enumerate(cmd) if t == "--annotation"]
-        assert "run.oci.krun.cpus=2" in emitted
-        assert "krun.use_passt=true" in emitted
+        assert "dossier.meta_path=/var/lib/terok/tasks/t1.json" in emitted
+        assert "krun.cpus=2" in emitted
 
     def test_run_rejects_unknown_runtime(self) -> None:
         """A runtime outside the allowlist never reaches the podman argv.
@@ -367,7 +369,7 @@ class TestSandbox:
         from terok_sandbox.sandbox import _validate_annotations
 
         with pytest.raises(ValueError, match="must be a string"):
-            _validate_annotations({"run.oci.krun.cpus": 2})  # type: ignore[dict-item]
+            _validate_annotations({"dossier.meta_path": 2})  # type: ignore[dict-item]
 
     def test_run_rejects_annotation_value_with_control_chars(self) -> None:
         """Control chars in an annotation value would split the --annotation argv."""
@@ -383,7 +385,7 @@ class TestSandbox:
             Sandbox().run(
                 _make_spec(
                     annotations=MappingProxyType(
-                        {"run.oci.krun.cpus": "2\nrun.oci.krun.ram_mib=99999"}
+                        {"dossier.meta_path": "/var/lib/t.json\ndossier.meta_path=/etc/shadow"}
                     )
                 )
             )
@@ -489,27 +491,27 @@ class TestSandbox:
             with pytest.raises(GpuConfigError):
                 s.run(_make_spec())
 
-    def test_memory_limit_in_podman_cmd(self) -> None:
+    def test_memory_in_podman_cmd(self) -> None:
         """--memory flag appears in the assembled podman command."""
         with (
             patch("subprocess.run") as mock_run,
             patch("builtins.print"),
             patch("terok_sandbox.shield.pre_start", return_value=[]),
         ):
-            Sandbox().run(_make_spec(memory_limit="4g"))
+            Sandbox().run(_make_spec(memory="4g"))
 
         cmd = mock_run.call_args[0][0]
         idx = cmd.index("--memory")
         assert cmd[idx + 1] == "4g"
 
-    def test_cpu_limit_in_podman_cmd(self) -> None:
+    def test_cpus_in_podman_cmd(self) -> None:
         """--cpus flag appears in the assembled podman command."""
         with (
             patch("subprocess.run") as mock_run,
             patch("builtins.print"),
             patch("terok_sandbox.shield.pre_start", return_value=[]),
         ):
-            Sandbox().run(_make_spec(cpu_limit="2.0"))
+            Sandbox().run(_make_spec(cpus="2.0"))
 
         cmd = mock_run.call_args[0][0]
         idx = cmd.index("--cpus")

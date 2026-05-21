@@ -81,8 +81,6 @@ def test_run_section_defaults_runtime_to_none_so_layers_can_distinguish_unset() 
     """
     section = RawRunSection.model_validate({})
     assert section.runtime is None
-    assert section.krun_cpus is None
-    assert section.krun_ram_mib is None
     assert section.shutdown_timeout == 10
     assert section.nested_containers is False
     assert section.hooks == RawHooksSection()
@@ -97,15 +95,6 @@ def test_run_section_rejects_legacy_podman_value() -> None:
         RawRunSection.model_validate({"runtime": "podman"})
 
 
-def test_run_section_krun_sizing_must_be_positive_integers() -> None:
-    """``ge=1`` on krun_cpus / krun_ram_mib catches zero or negative typos
-    before they reach the OCI annotation that podman would silently accept."""
-    with pytest.raises(ValidationError):
-        RawRunSection.model_validate({"krun_cpus": 0})
-    with pytest.raises(ValidationError):
-        RawRunSection.model_validate({"krun_ram_mib": -1})
-
-
 def test_run_section_blank_memory_cpus_normalised_to_none() -> None:
     """An accidentally-empty ``memory: ""`` in YAML reads as None rather
     than as the literal empty string, so podman doesn't receive a bare
@@ -113,6 +102,90 @@ def test_run_section_blank_memory_cpus_normalised_to_none() -> None:
     section = RawRunSection.model_validate({"memory": "  ", "cpus": ""})
     assert section.memory is None
     assert section.cpus is None
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "4g",
+        "512m",
+        "256K",
+        "1.5G",
+        "1024",
+        "2B",
+        "0",
+        "4gb",  # podman accepts the redundant trailing 'b'
+        "4gib",  # binary-IEC suffix
+        "4GiB",  # case-insensitive across the board
+        "4 g",  # podman tolerates one space between number and unit
+    ],
+)
+def test_run_section_memory_accepts_podman_grammar(value: str) -> None:
+    """Mirrors ``docker/go-units.sizeRegex`` (what podman's ``--memory`` accepts).
+
+    ``"0"`` is format-valid; semantics are podman's call (the validator
+    is format-only — see [`RawRunSection`][terok_sandbox.config_schema.RawRunSection]).
+    """
+    assert RawRunSection.model_validate({"memory": value}).memory == value
+
+
+@pytest.mark.parametrize("value", ["two", "-1g", "4g ", "4.g", ".5g", "4  g", ""])
+def test_run_section_memory_rejects_malformed(value: str) -> None:
+    """Malformed values fail at parse time, not task launch.
+
+    Blank → ``None`` via ``_blank_to_none``; listed only as a marker
+    that the format check fires for non-blank inputs.  Leading-dot
+    decimals (``".5g"``) are rejected — the regex requires a leading
+    digit, so the canonical form is ``"0.5g"`` / ``"512m"``.  Trailing
+    whitespace and double spaces are rejected (only the single
+    podman-tolerated space between number and unit is accepted).
+    """
+    if value == "":
+        # blank → None via the upstream coercion, not a validator failure
+        assert RawRunSection.model_validate({"memory": value}).memory is None
+        return
+    with pytest.raises(ValidationError, match="memory"):
+        RawRunSection.model_validate({"memory": value})
+
+
+@pytest.mark.parametrize("value", ["2", "2.0", "0.5", "16", "0"])
+def test_run_section_cpus_accepts_decimals(value: str) -> None:
+    """Non-negative decimal; ``"0"`` is format-valid (same format-only
+    contract as memory)."""
+    assert RawRunSection.model_validate({"cpus": value}).cpus == value
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [(2, "2"), (4, "4"), (0, "0"), (0.5, "0.5"), (1024, "1024")],
+)
+def test_run_section_accepts_numeric_yaml_input(raw: object, expected: str) -> None:
+    """``cpus: 2`` / ``memory: 1024`` (YAML int/float) coerce to str.
+
+    Without this, a perfectly valid project.yml would fail with a
+    confusing "Input should be a valid string" pydantic error.
+    """
+    assert RawRunSection.model_validate({"cpus": raw}).cpus == expected
+    assert RawRunSection.model_validate({"memory": raw}).memory == expected
+
+
+@pytest.mark.parametrize("raw", [True, False])
+def test_run_section_rejects_bool(raw: bool) -> None:
+    """``bool`` is an ``int`` subclass — reject explicitly so ``cpus: true``
+    doesn't silently coerce to ``"True"`` and then fail the format check
+    with a less helpful message."""
+    with pytest.raises(ValidationError):
+        RawRunSection.model_validate({"cpus": raw})
+    with pytest.raises(ValidationError):
+        RawRunSection.model_validate({"memory": raw})
+
+
+@pytest.mark.parametrize("value", ["two", "-1", "1.5x", "1,5", "2.0 ", ".5"])
+def test_run_section_cpus_rejects_malformed(value: str) -> None:
+    """``".5"`` is rejected for the same leading-digit reason as
+    ``".5g"`` — canonical form is ``"0.5"``."""
+    with pytest.raises(ValidationError, match="cpus"):
+        RawRunSection.model_validate({"cpus": value})
 
 
 def test_run_section_none_hooks_becomes_empty_subsection() -> None:
