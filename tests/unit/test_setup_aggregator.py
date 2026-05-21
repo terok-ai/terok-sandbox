@@ -49,6 +49,14 @@ def install_spies():
         patch(
             "terok_sandbox.commands.sandbox.run_shield_install_phase", return_value=True
         ) as shield,
+        # The credentials phase is the one non-``run_*_install_phase``
+        # step the aggregator drives in-line.  It needs stubbing for
+        # the same reason as the others — without it, the real
+        # passphrase-tier resolution runs and (under proper $HOME
+        # isolation) exits via the non-TTY tier-choice prompt.
+        patch(
+            "terok_sandbox.commands.sandbox._run_credentials_setup_phase", return_value=True
+        ) as credentials,
         patch("terok_sandbox.commands.sandbox.run_vault_install_phase", return_value=True) as vault,
         patch("terok_sandbox.commands.sandbox.run_gate_install_phase", return_value=True) as gate,
         patch(
@@ -58,6 +66,7 @@ def install_spies():
         yield {
             "prereq": prereq,
             "shield": shield,
+            "credentials": credentials,
             "vault": vault,
             "gate": gate,
             "clearance": clearance,
