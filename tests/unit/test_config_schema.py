@@ -138,6 +138,31 @@ def test_run_section_cpus_accepts_decimals(value: str) -> None:
     assert RawRunSection.model_validate({"cpus": value}).cpus == value
 
 
+@pytest.mark.parametrize(
+    "raw,expected",
+    [(2, "2"), (4, "4"), (0, "0"), (0.5, "0.5"), (1024, "1024")],
+)
+def test_run_section_accepts_numeric_yaml_input(raw: object, expected: str) -> None:
+    """``cpus: 2`` / ``memory: 1024`` (YAML int/float) coerce to str.
+
+    Without this, a perfectly valid project.yml would fail with a
+    confusing "Input should be a valid string" pydantic error.
+    """
+    assert RawRunSection.model_validate({"cpus": raw}).cpus == expected
+    assert RawRunSection.model_validate({"memory": raw}).memory == expected
+
+
+@pytest.mark.parametrize("raw", [True, False])
+def test_run_section_rejects_bool(raw: bool) -> None:
+    """``bool`` is an ``int`` subclass — reject explicitly so ``cpus: true``
+    doesn't silently coerce to ``"True"`` and then fail the format check
+    with a less helpful message."""
+    with pytest.raises(ValidationError):
+        RawRunSection.model_validate({"cpus": raw})
+    with pytest.raises(ValidationError):
+        RawRunSection.model_validate({"memory": raw})
+
+
 @pytest.mark.parametrize("value", ["two", "-1", "1.5x", "1,5", "2.0 ", ".5"])
 def test_run_section_cpus_rejects_malformed(value: str) -> None:
     """``".5"`` is rejected for the same leading-digit reason as

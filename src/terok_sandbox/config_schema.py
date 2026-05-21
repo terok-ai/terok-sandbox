@@ -338,8 +338,18 @@ class RawRunSection(BaseModel):
 
     @field_validator("memory", "cpus", mode="before")
     @classmethod
-    def _blank_to_none(cls, v: Any) -> str | None:
-        """Normalise empty / whitespace-only strings to ``None``."""
+    def _normalise(cls, v: Any) -> Any:
+        """Coerce numeric YAML inputs to str; blank strings to ``None``.
+
+        Accepts ``cpus: 2`` / ``memory: 1024`` (YAML int/float) by
+        stringifying — both shapes are valid podman input.  ``bool`` is
+        an ``int`` subclass, so reject it explicitly to keep ``cpus: true``
+        from coercing to ``"True"``.
+        """
+        if isinstance(v, bool):
+            return v  # let pydantic reject as not-str
+        if isinstance(v, int | float):
+            return str(v)
         if isinstance(v, str) and not v.strip():
             return None
         return v
