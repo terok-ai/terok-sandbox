@@ -39,13 +39,13 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-_MEMORY_RE = re.compile(r"\d+(\.\d+)?[bkmgBKMG]?")
-"""Format check for ``run.memory`` — decimal + optional single-letter
-b/k/m/g suffix (case-insensitive).
+_MEMORY_RE = re.compile(r"\d+(\.\d+)? ?[kKmMgGtTpP]?[iI]?[bB]?")
+"""Format check for ``run.memory`` — mirrors ``docker/go-units.sizeRegex``,
+which is what podman's ``--memory`` flag accepts.
 
-Stricter than podman's parser: ``"4g"`` is canonical here, ``"4gb"``
-is rejected.  Format only — host-availability and cgroup-minimum
-checks stay with podman.
+Accepts ``"4g"``, ``"4gb"``, ``"4gib"``, ``"4 G"``, ``"512m"``, plain
+``"1024"`` (bytes), all case-insensitive.  Format only — host-availability
+and cgroup-minimum checks stay with podman.
 """
 
 _CPUS_RE = re.compile(r"\d+(\.\d+)?")
@@ -294,10 +294,9 @@ class RawRunSection(BaseModel):
     memory: str | None = Field(
         default=None,
         description=(
-            'Podman ``--memory`` value (e.g. ``"4g"``, ``"512m"``); ``None`` '
-            "= unlimited.  Decimal + optional single-letter b/k/m/g suffix "
-            "(case-insensitive).  See ``man podman-run(1)`` for podman's "
-            "full accepted grammar."
+            'Podman ``--memory`` value (e.g. ``"4g"``, ``"512m"``, ``"4gib"``, '
+            'plain ``"1024"`` for bytes); ``None`` = unlimited.  Format mirrors '
+            "what podman accepts — see ``man podman-run(1)`` --memory."
         ),
     )
     cpus: str | None = Field(
@@ -366,8 +365,8 @@ class RawRunSection(BaseModel):
             return v
         if not _MEMORY_RE.fullmatch(v):
             raise ValueError(
-                f"memory {v!r}: expected decimal + optional b/k/m/g suffix "
-                "(see man podman-run(1) --memory)"
+                f"memory {v!r}: expected podman-style size (e.g. ``4g``, "
+                "``512m``, ``4gib``); see man podman-run(1) --memory"
             )
         return v
 
