@@ -269,7 +269,10 @@ class TestSandbox:
         from types import MappingProxyType
 
         annotations = MappingProxyType(
-            {"dossier.meta_path": "/var/lib/terok/tasks/t1.json"},
+            {
+                "dossier.meta_path": "/var/lib/terok/tasks/t1.json",
+                "krun.cpus": "2",
+            },
         )
         with (
             patch("subprocess.run") as mock_run,
@@ -282,6 +285,7 @@ class TestSandbox:
         # Each annotation produces a "--annotation k=v" pair.
         emitted = [cmd[i + 1] for i, t in enumerate(cmd) if t == "--annotation"]
         assert "dossier.meta_path=/var/lib/terok/tasks/t1.json" in emitted
+        assert "krun.cpus=2" in emitted
 
     def test_run_rejects_unknown_runtime(self) -> None:
         """A runtime outside the allowlist never reaches the podman argv.

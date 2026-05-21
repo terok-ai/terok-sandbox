@@ -65,6 +65,13 @@ SAFE_ANNOTATION_KEYS: frozenset[str] = frozenset(
         # Per-task dossier JSON path; shield hook reads it on every
         # event to populate ClearanceEvent.dossier.
         "dossier.meta_path",
+        # krun microVM vCPU count.  Required under krun runtime — the
+        # standard ``--cpus`` flag only sets the cgroup CFS quota; it
+        # does NOT size the VM, so without this annotation the guest
+        # sees host CPU affinity (typically all host cores).  Memory
+        # has an OCI fallback in crun-krun so no analogous annotation
+        # is needed for ``--memory``.  See ``man crun-krun(1)``.
+        "krun.cpus",
     }
 )
 """OCI annotation keys allowed on
