@@ -7,6 +7,7 @@ Description=terok git gate connection handler
 
 [Service]
 Type=simple
+Environment="PYTHONPATH={{PYTHONPATH}}"
 StandardInput=socket
 StandardOutput=journal
 StandardError=journal
