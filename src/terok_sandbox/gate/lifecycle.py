@@ -31,6 +31,7 @@ from __future__ import annotations
 import os
 import signal
 import subprocess  # nosec B404 — spawning the gate server daemon — spawning the gate server daemon
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -39,7 +40,7 @@ from ..config import SandboxConfig
 
 # ---------- Constants ----------
 
-_UNIT_VERSION = 12
+_UNIT_VERSION = 13
 """Bump when the systemd unit templates change.  ``ensure_reachable``
 checks the installed version and refuses to start tasks if it is stale."""
 
@@ -272,6 +273,7 @@ class GateServerManager:
             "TOKEN_FILE": str(TokenStore(self._cfg).file_path),
             "UNIT_VERSION": str(_UNIT_VERSION),
             "TEROK_GATE_BIN": systemd_exec_argv(self._gate_exec_prefix()),
+            "PYTHONPATH": os.pathsep.join(sys.path),
         }
 
         # Remove units from the *other* transport mode before installing.
