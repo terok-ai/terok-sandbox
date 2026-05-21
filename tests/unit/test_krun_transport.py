@@ -155,10 +155,12 @@ class TestTcpSSHTransportExec:
         argv = run.call_args[0][0]
         # `--` separates ssh flags from the (single) remote command string.
         # Argv semantics are preserved across sshd's shell-parsing by
-        # shlex-quoting each token into one string.
+        # shlex-quoting each token into one string; the transport
+        # additionally wraps it in ``cd /workspace && exec`` so cwd
+        # matches the image's WORKDIR (cf. crun's podman exec).
         assert "--" in argv
         sep = argv.index("--")
-        assert argv[sep + 1 :] == ["echo hi"]
+        assert argv[sep + 1 :] == ["cd /workspace && exec echo hi"]
         assert result == ExecResult(exit_code=0, stdout="hi\n", stderr="")
 
     def test_exec_propagates_nonzero_exit_and_stderr(self) -> None:
@@ -219,9 +221,10 @@ class TestTcpSSHTransportExecStdio:
         argv = popen.call_args[0][0]
         sep = argv.index("--")
         # The whole remote command is a single shlex-quoted string at
-        # argv[-1]; env tokens come first, then the cmd.
+        # argv[-1]; the transport wraps the env+cmd payload in
+        # ``cd /workspace && exec`` so cwd matches the image WORKDIR.
         remote = argv[sep + 1]
-        assert remote.startswith("env ")
+        assert remote.startswith("cd /workspace && exec env ")
         assert "FOO=1" in remote
         assert "BAR=x" in remote
         assert remote.endswith(" sh")
@@ -243,7 +246,7 @@ class TestTcpSSHTransportExecStdio:
             )
         argv = popen.call_args[0][0]
         sep = argv.index("--")
-        assert argv[sep + 1 :] == ["sh"]
+        assert argv[sep + 1 :] == ["cd /workspace && exec sh"]
         assert rc == 7
 
     def test_shell_metacharacters_in_cmd_are_quoted(self) -> None:
@@ -360,11 +363,16 @@ class TestTcpSSHTransportLoginCommand:
         port_idx = argv.index("-p")
         assert argv[port_idx + 1] == "42201"
 
-    def test_argv_ends_with_user_at_host(self) -> None:
-        """Last argv entry is ``dev@127.0.0.1`` when *command* is empty."""
+    def test_empty_command_lands_login_shell_at_workspace(self) -> None:
+        """No *command* → login shell starts at ``/workspace`` (image WORKDIR parity)."""
         transport = _make_transport(host="127.0.0.1")
         argv = transport.login_command(_StubContainer("ctr"))
-        assert argv[-1] == "dev@127.0.0.1"
+        # User@host immediately precedes ``--`` + the remote payload;
+        # the payload chdirs to /workspace before exec'ing the login shell
+        # so the operator's PWD matches what `podman exec` gives under crun.
+        dash_idx = argv.index("--")
+        assert argv[dash_idx - 1] == "dev@127.0.0.1"
+        assert argv[dash_idx + 1] == "cd /workspace && exec bash -l"
 
     def test_command_is_shlex_quoted_after_double_dash(self) -> None:
         """Per-token shell metacharacters cross the wire as literal data."""
