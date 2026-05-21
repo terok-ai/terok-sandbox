@@ -83,6 +83,12 @@ DEFAULT_SSH_HOST = "127.0.0.1"
 # config (``AllowUsers dev``) accepts.
 DEFAULT_SSH_USER = "dev"
 
+# In-guest working directory every remote payload chdirs into before
+# exec'ing the user command.  Matches the L0 ``WORKDIR /workspace``
+# that ``podman exec`` honours under crun, so the operator's starting
+# cwd is the same across both runtimes (sshd ignores image WORKDIR).
+_REMOTE_CWD = "/workspace"
+
 
 # ── Endpoint ────────────────────────────────────────────────────────────────
 
@@ -237,17 +243,21 @@ class TcpSSHTransport:
         does for the conventional runtime — emits the argv the operator
         (or ``terok login``) execs into.  Adds ``-tt`` so sshd allocates
         a real PTY even when stdin isn't a terminal (the caller may be
-        running under tmux or an IDE proxy), and falls back to a no-arg
-        invocation of the in-guest user's login shell when *command* is
-        empty.  Argv tokens past ``--`` are ``shlex.quote``d (same
-        helper the exec paths use) so the SSH wire format preserves
-        argv semantics across the login-shell parse on the far side.
+        running under tmux or an IDE proxy).
+
+        Both the empty-*command* path (interactive login → ``bash -l``)
+        and the explicit-*command* path land at ``/workspace`` via
+        [`_at_workspace`][terok_sandbox.runtime.krun_transport._at_workspace],
+        so the operator's starting cwd matches what ``podman exec``
+        gives under crun.  Argv tokens past ``--`` are ``shlex.quote``d
+        (same helper the exec paths use) so the SSH wire format
+        preserves argv semantics across the login-shell parse on the
+        far side.
         """
         endpoint = self._resolver(container)
         argv = self._ssh_argv(endpoint, interactive=True)
-        if command:
-            argv += ["--", _remote_command(list(command))]
-        return argv
+        remote = _remote_command(list(command)) if command else _at_workspace("bash -l")
+        return [*argv, "--", remote]
 
     def _ssh_argv(self, endpoint: TcpEndpoint, *, interactive: bool = False) -> list[str]:
         """Build the ssh argv up to (but not including) the remote command.
@@ -407,7 +417,10 @@ def _remote_command(cmd: list[str], *, env: Mapping[str, str] | None = None) -> 
     OpenSSH's ``ssh host -- a b c`` concatenates the post-``--`` tokens
     and runs the result through the in-guest user's login shell, so the
     transport must do the quoting itself to honour the ``cmd: list[str]``
-    argv contract on the wire.
+    argv contract on the wire.  The payload is then routed through
+    [`_at_workspace`][terok_sandbox.runtime.krun_transport._at_workspace]
+    so every remote command starts at the image's ``WORKDIR /workspace``
+    — matching what ``podman exec`` gives under crun.
 
     Env var names are validated against ``[A-Za-z_][A-Za-z0-9_]*`` —
     the remote ``env`` command expects bare identifiers and there's no
@@ -424,4 +437,18 @@ def _remote_command(cmd: list[str], *, env: Mapping[str, str] | None = None) -> 
         tokens.append("env")
         tokens.extend(f"{k}={v}" for k, v in env.items())
     tokens.extend(cmd)
-    return " ".join(shlex.quote(t) for t in tokens)
+    return _at_workspace(" ".join(shlex.quote(t) for t in tokens))
+
+
+def _at_workspace(payload: str) -> str:
+    """Wrap *payload* so it runs with cwd = ``/workspace``.
+
+    sshd ignores image ``WORKDIR`` and lands the session in ``$HOME``;
+    ``podman exec`` honours it.  Equalising the two at the transport
+    boundary keeps the operator-visible behaviour identical across
+    runtimes.  ``&&`` makes a missing ``/workspace`` fail loud with
+    sh's own ``cd: /workspace: No such file or directory`` rather than
+    silently fall back to ``$HOME``; ``exec`` keeps the process tree
+    as shallow as the direct ``podman exec`` path.
+    """
+    return f"cd {shlex.quote(_REMOTE_CWD)} && exec {payload}"
