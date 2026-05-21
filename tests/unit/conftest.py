@@ -34,8 +34,10 @@ _TEROK_PATH_OVERRIDE_ENV_VARS = (
 
 
 @pytest.fixture(autouse=True)
-def _isolate_user_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Redirect ``HOME`` and every ``XDG_*`` / ``TEROK_*_DIR`` knob to ``tmp_path``.
+def _isolate_user_paths(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Redirect ``HOME`` and every ``XDG_*`` / ``TEROK_*_DIR`` knob to a fresh tmp dir.
 
     Without this, tests that exercise default-config code paths (e.g.
     ``SandboxConfig()`` with no overrides, ``handle_*(cfg=None)``) fall
@@ -47,13 +49,15 @@ def _isolate_user_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
     SystemExit into a successful write of ``use_keyring: true`` to the
     operator's config.
 
-    Each test gets a fresh ``tmp_path``-backed home; the per-test
-    ``monkeypatch`` undoes the env overrides at teardown, so tests
-    that need different env state can layer their own ``setenv`` /
-    ``delenv`` calls on top without leaking across cases.
+    Uses ``tmp_path_factory`` rather than ``tmp_path`` so the fake home
+    lives outside the per-test ``tmp_path`` — otherwise tests that
+    iterate ``tmp_path`` looking for fixtures see a stray ``fake-home``
+    entry.  The per-test ``monkeypatch`` undoes the env overrides at
+    teardown, so tests that need different env state can layer their
+    own ``setenv`` / ``delenv`` calls on top without leaking across
+    cases.
     """
-    fake_home = tmp_path / "fake-home"
-    fake_home.mkdir()
+    fake_home = tmp_path_factory.mktemp("fake-home")
     monkeypatch.setenv("HOME", str(fake_home))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(fake_home / ".config"))
     monkeypatch.setenv("XDG_DATA_HOME", str(fake_home / ".local" / "share"))
