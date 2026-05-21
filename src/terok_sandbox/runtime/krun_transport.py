@@ -247,9 +247,8 @@ class TcpSSHTransport:
 
         Both the empty-*command* path (interactive login → ``bash -l``)
         and the explicit-*command* path land at ``/workspace`` via
-        [`_at_workspace`][terok_sandbox.runtime.krun_transport._at_workspace],
-        so the operator's starting cwd matches what ``podman exec``
-        gives under crun.  Argv tokens past ``--`` are ``shlex.quote``d
+        ``_at_workspace``, so the operator's starting cwd matches what
+        ``podman exec`` gives under crun.  Argv tokens past ``--`` are ``shlex.quote``d
         (same helper the exec paths use) so the SSH wire format
         preserves argv semantics across the login-shell parse on the
         far side.
@@ -418,9 +417,9 @@ def _remote_command(cmd: list[str], *, env: Mapping[str, str] | None = None) -> 
     and runs the result through the in-guest user's login shell, so the
     transport must do the quoting itself to honour the ``cmd: list[str]``
     argv contract on the wire.  The payload is then routed through
-    [`_at_workspace`][terok_sandbox.runtime.krun_transport._at_workspace]
-    so every remote command starts at the image's ``WORKDIR /workspace``
-    — matching what ``podman exec`` gives under crun.
+    ``_at_workspace`` so every remote command starts at the image's
+    ``WORKDIR /workspace`` — matching what ``podman exec`` gives under
+    crun.
 
     Env var names are validated against ``[A-Za-z_][A-Za-z0-9_]*`` —
     the remote ``env`` command expects bare identifiers and there's no
