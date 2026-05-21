@@ -74,8 +74,10 @@ def _reset_config_caches() -> Iterator[None]:
     import terok_sandbox.paths as _paths
 
     _paths._config_section_cache.clear()
+    _paths._config_top_level_cache.clear()
     yield
     _paths._config_section_cache.clear()
+    _paths._config_top_level_cache.clear()
 
 
 @pytest.fixture(autouse=True)

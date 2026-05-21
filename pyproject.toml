@@ -17,7 +17,7 @@ keywords = ["podman", "containers", "sandbox", "security", "isolation"]
 requires-python = ">=3.12,<4.0"
 dynamic = ["version", "classifiers"]
 dependencies = [
-    "terok-shield @ https://github.com/terok-ai/terok-shield/releases/download/v0.6.42a4/terok_shield-0.6.42a4-py3-none-any.whl",
+    "terok-shield @ git+https://github.com/sliwowitz/terok-shield.git@feat/krun-dnsmasq-bind",
     "terok-clearance @ https://github.com/terok-ai/terok-clearance/releases/download/v0.6.14a4/terok_clearance-0.6.14a4-py3-none-any.whl",
     "platformdirs>=4.9.6",
     "aiohttp>=3.9",

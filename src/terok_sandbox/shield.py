@@ -19,6 +19,7 @@ from terok_shield import (
     Shield,
     ShieldConfig,
     ShieldMode,
+    ShieldRuntime,
     ShieldState,  # noqa: F401 — re-exported
     reader_script_path,  # noqa: F401 — re-exported so terok's shield-boundary contract holds
 )
@@ -64,7 +65,12 @@ def _cfg(cfg: SandboxConfig | None = None) -> SandboxConfig:
     return cfg or SandboxConfig()
 
 
-def make_shield(task_dir: Path, cfg: SandboxConfig | None = None) -> Shield:
+def make_shield(
+    task_dir: Path,
+    cfg: SandboxConfig | None = None,
+    *,
+    runtime: ShieldRuntime = ShieldRuntime.DEFAULT,
+) -> Shield:
     """Construct a per-task [`Shield`][terok_shield.Shield] from sandbox configuration.
 
     Builds a `ShieldConfig` with ``state_dir`` scoped to *task_dir*.
@@ -76,6 +82,12 @@ def make_shield(task_dir: Path, cfg: SandboxConfig | None = None) -> Shield:
     ruleset with no ``tcp dport <p> ip daddr 169.254.1.2 accept`` rules,
     causing container→host TCP traffic to fall through to the
     private-range reject (#156 regression follow-up).
+
+    *runtime* selects the container runtime category — ``DEFAULT`` for
+    crun/runc/youki (dnsmasq on netns ``127.0.0.1``), ``KRUN`` for the
+    libkrun microVM path (dnsmasq on a link-local address the guest can
+    reach via passt).  Callers that drive the launch path map their
+    runtime string (``RunSpec.runtime``) to the enum.
     """
     c = _cfg(cfg).with_resolved_ports()
     # Socket-mode transports emit no loopback traffic; filter ``None`` so
@@ -90,11 +102,18 @@ def make_shield(task_dir: Path, cfg: SandboxConfig | None = None) -> Shield:
         loopback_ports=loopback,
         audit_enabled=c.shield_audit,
         profiles_dir=c.shield_profiles_dir,
+        runtime=runtime,
     )
     return Shield(config)
 
 
-def pre_start(container: str, task_dir: Path, cfg: SandboxConfig | None = None) -> list[str]:
+def pre_start(
+    container: str,
+    task_dir: Path,
+    cfg: SandboxConfig | None = None,
+    *,
+    runtime: ShieldRuntime = ShieldRuntime.DEFAULT,
+) -> list[str]:
     """Return extra ``podman run`` args for egress firewalling.
 
     Returns an empty list (no firewall args) when the dangerous
@@ -107,7 +126,7 @@ def pre_start(container: str, task_dir: Path, cfg: SandboxConfig | None = None) 
         warnings.warn(_BYPASS_WARNING, stacklevel=2)
         return []
     try:
-        return make_shield(task_dir, cfg).pre_start(container)
+        return make_shield(task_dir, cfg, runtime=runtime).pre_start(container)
     except ShieldNeedsSetup as exc:
         raise SystemExit(str(exc)) from None
 

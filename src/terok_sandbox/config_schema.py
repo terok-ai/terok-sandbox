@@ -426,6 +426,16 @@ class SandboxConfigView(BaseModel):
     network: RawNetworkSection = Field(default_factory=RawNetworkSection)
     ssh: RawSSHSection = Field(default_factory=RawSSHSection)
     run: RawRunSection = Field(default_factory=RawRunSection)
+    experimental: bool = Field(
+        default=False,
+        description=(
+            "Cross-package opt-in for experimental features.  Gates terok's "
+            "krun runtime and sandbox's krun-only host-binary prereq probes "
+            "(``ip``).  Lives on the top level rather than in any one "
+            "section because it's shared between sandbox, executor, and "
+            "terok — the topmost layer (terok) inherits this declaration."
+        ),
+    )
 
 
 # ── Section readers ───────────────────────────────────────────────────

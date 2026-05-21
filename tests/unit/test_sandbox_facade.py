@@ -165,11 +165,26 @@ class TestSandbox:
             mock.assert_called_once_with("ctr", Path("/tmp/task"), cfg=s.config)
 
     def test_pre_start_args_delegates(self) -> None:
+        from terok_shield import ShieldRuntime
+
         with patch("terok_sandbox.shield.pre_start", return_value=["--hook"]) as mock:
             s = Sandbox()
             result = s.pre_start_args("ctr", Path("/tmp/task"))
             assert result == ["--hook"]
-            mock.assert_called_once_with("ctr", Path("/tmp/task"), s.config)
+            mock.assert_called_once_with(
+                "ctr", Path("/tmp/task"), s.config, runtime=ShieldRuntime.DEFAULT
+            )
+
+    def test_pre_start_args_maps_krun_runtime_to_shield_enum(self) -> None:
+        """``runtime="krun"`` flows through as ``ShieldRuntime.KRUN``."""
+        from terok_shield import ShieldRuntime
+
+        with patch("terok_sandbox.shield.pre_start", return_value=["--hook"]) as mock:
+            s = Sandbox()
+            s.pre_start_args("ctr", Path("/tmp/task"), runtime="krun")
+            mock.assert_called_once_with(
+                "ctr", Path("/tmp/task"), s.config, runtime=ShieldRuntime.KRUN
+            )
 
     def test_stop_delegates_to_runtime_force_remove(self) -> None:
         """``Sandbox.stop`` wraps names in container handles and delegates."""

@@ -22,6 +22,7 @@ from pydantic import BaseModel, ValidationError
 from .paths import (
     config_root as _config_root,
     read_config_section,
+    read_config_top_level,
     runtime_root as _runtime_root,
     state_root as _state_root,
     vault_root as _vault_root,
@@ -141,6 +142,25 @@ def shield_audit() -> bool:
 def _default_shield_audit() -> bool:
     """Default-factory indirection so tests can patch ``shield_audit``."""
     return shield_audit()
+
+
+def experimental_enabled() -> bool:
+    """Resolve the top-level ``experimental:`` opt-in from the layered config.
+
+    Ecosystem-wide flag: shared between sandbox (krun host-binary
+    prereqs), executor (krun runtime construction), and terok (krun
+    runtime selection at task launch).  Defaults to ``False`` when the
+    key is absent or malformed.
+    """
+    raw = read_config_top_level("experimental")
+    if isinstance(raw, bool):
+        return raw
+    return False
+
+
+def _default_experimental() -> bool:
+    """Default-factory indirection so tests can patch ``experimental_enabled``."""
+    return experimental_enabled()
 
 
 @functools.lru_cache(maxsize=1)
@@ -311,6 +331,17 @@ class SandboxConfig:
     rather than a free-function call per site so downstream code can't
     bypass config resolution — no manager without a ``SandboxConfig``,
     every ``SandboxConfig`` carries a resolved mode.
+    """
+
+    experimental: bool = field(default_factory=_default_experimental)
+    """Whether the ecosystem-wide ``experimental:`` opt-in is on.
+
+    Cross-package switch: gates terok's krun runtime at task launch
+    and sandbox's krun-only prereq probes (currently just ``ip``) at
+    ``terok-sandbox setup``.  Read from the top-level ``experimental:``
+    key in the layered ``config.yml`` at construct time; missing /
+    typo'd values fall back to ``False``.  Direct
+    ``SandboxConfig(experimental=…)`` always wins.
     """
 
     def with_resolved_ports(self) -> SandboxConfig:
