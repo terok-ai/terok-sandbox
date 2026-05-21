@@ -31,6 +31,17 @@ those run on a dedicated test machine.
   and may change without notice.  Review the list before each release
   — stable APIs stay small because growing them costs.
 
+## Tests
+
+- **Path isolation**: tests must never touch the operator's real
+  filesystem.  All on-disk fixtures route through `tmp_path` /
+  `tmp_path_factory`.  The autouse `_isolate_user_paths` fixture in
+  `tests/unit/conftest.py` redirects `HOME` and the `XDG_*` chain to
+  a fresh tmp dir, so default-config code paths (`SandboxConfig()`,
+  `handle_*(cfg=None)`) land in tmp by construction — don't bypass
+  it, and add to `_TEROK_PATH_OVERRIDE_ENV_VARS` when introducing a
+  new `TEROK_*_DIR` knob.
+
 ## Docs
 
 - Markdown files under `docs/` are lowercase by convention; root-level
