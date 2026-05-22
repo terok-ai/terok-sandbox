@@ -17,7 +17,7 @@ keywords = ["podman", "containers", "sandbox", "security", "isolation"]
 requires-python = ">=3.12,<4.0"
 dynamic = ["version", "classifiers"]
 dependencies = [
-    "terok-shield @ git+https://github.com/sliwowitz/terok-shield.git@feat/krun-dnsmasq-bind",
+    "terok-shield @ https://github.com/terok-ai/terok-shield/releases/download/v0.6.42a5/terok_shield-0.6.42a5-py3-none-any.whl",
     "terok-clearance @ https://github.com/terok-ai/terok-clearance/releases/download/v0.6.14a4/terok_clearance-0.6.14a4-py3-none-any.whl",
     "platformdirs>=4.9.6",
     "aiohttp>=3.9",
@@ -59,7 +59,7 @@ classifiers = [
 packages = [
   { include = "terok_sandbox", from = "src" },
 ]
-version = "0.0.124a13"
+version = "0.0.124a14"
 
 [tool.poetry.group.dev.dependencies]
 ruff = ">=0.15.10"

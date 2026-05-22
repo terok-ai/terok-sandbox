@@ -3271,23 +3271,22 @@ url = "https://github.com/terok-ai/terok-clearance/releases/download/v0.6.14a4/t
 
 [[package]]
 name = "terok-shield"
-version = "0.6.42a4"
+version = "0.6.42a5"
 description = "nftables-based egress firewalling for Podman containers"
 optional = false
 python-versions = ">=3.12,<4.0"
 groups = ["main"]
-files = []
-develop = false
+files = [
+    {file = "terok_shield-0.6.42a5-py3-none-any.whl", hash = "sha256:4e670fb7040bb39e9c1a2ec449db7fe82dd99678d9841ce97c08a146af127604"},
+]
 
 [package.dependencies]
 pydantic = ">=2.0"
 PyYAML = ">=6.0"
 
 [package.source]
-type = "git"
-url = "https://github.com/sliwowitz/terok-shield.git"
-reference = "feat/krun-dnsmasq-bind"
-resolved_reference = "b64dbeee5d6060f884860c0f8735dcafa44e5264"
+type = "url"
+url = "https://github.com/terok-ai/terok-shield/releases/download/v0.6.42a5/terok_shield-0.6.42a5-py3-none-any.whl"
 
 [[package]]
 name = "tomli"
@@ -3687,4 +3686,4 @@ propcache = ">=0.2.1"
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<4.0"
-content-hash = "db17d68d5eeb778f5913a2132f4539aa13f446e5c9559d4563c59414e9f6496a"
+content-hash = "2d931a9fcd8c15d117b8b8c22811e4969a500090b7c7b4044aa35736ad4a494b"
