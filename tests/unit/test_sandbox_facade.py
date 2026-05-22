@@ -453,6 +453,28 @@ class TestSandbox:
         mock_bypass.assert_called_once()
         mock_shield.assert_not_called()
 
+    def test_run_refuses_when_shield_setup_fails(self) -> None:
+        """A failing ``shield.pre_start`` aborts the launch with a remediation hint.
+
+        Soft-failing past shield setup would launch the container with
+        unfiltered egress under a config that explicitly asked for
+        shielding — exactly the silent-fallback shape the loud-failure
+        principle exists to prevent.
+        """
+        spec = _make_spec()
+        with (
+            patch("subprocess.run") as mock_run,
+            patch("terok_sandbox.shield.pre_start", side_effect=FileNotFoundError("nft")),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            Sandbox().run(spec)
+
+        message = str(exc_info.value)
+        assert "Shield setup failed" in message
+        assert spec.container_name in message
+        assert "shield_bypass" in message
+        mock_run.assert_not_called()
+
     def test_run_fires_lifecycle_hooks(self) -> None:
         """Sandbox.run() calls pre_start before podman and post_start after."""
         call_order: list[str] = []
