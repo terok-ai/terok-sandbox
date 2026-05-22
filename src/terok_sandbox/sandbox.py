@@ -455,12 +455,18 @@ class Sandbox:
             except SystemExit:
                 raise  # ShieldNeedsSetup; let the caller handle it
             except (OSError, FileNotFoundError) as exc:
-                import warnings
-
-                warnings.warn(
-                    f"Shield setup failed ({exc}) — container will have unfiltered egress",
-                    stacklevel=2,
-                )
+                # Refuse to launch with silent unfiltered egress: a shielded
+                # spec asked for the firewall; soft-failing past it would
+                # weaken the security posture the operator explicitly chose.
+                # ``SandboxConfig(shield_bypass=True)`` is the documented
+                # opt-out and skips this whole branch above.
+                raise SystemExit(
+                    f"Shield setup failed: {exc}\n"
+                    f"Refusing to launch {spec.container_name} with unfiltered "
+                    f"egress. Diagnose with `terok sickbay`, or set "
+                    f"SandboxConfig(shield_bypass=True) if filtering is "
+                    f"intentionally disabled for this run."
+                ) from None
 
         cmd += gpu_run_args(enabled=spec.gpu_enabled)
 
