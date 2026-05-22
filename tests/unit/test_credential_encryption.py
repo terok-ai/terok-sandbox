@@ -1681,7 +1681,7 @@ class TestVaultUnlockLock:
         user_config = tmp_path / "config.yml"
         user_config.write_text("credentials:\n  use_keyring: true\n  passphrase: from-config\n")
         monkeypatch.setattr(
-            "terok_sandbox.paths._config_file_paths", lambda: [("user", user_config)]
+            "terok_sandbox.paths.config_file_paths", lambda: [("user", user_config)]
         )
         _config._credentials_section.cache_clear()
 
@@ -1711,7 +1711,7 @@ class TestVaultUnlockLock:
             "credentials:\n  passphrase_command: pass show terok-sandbox/vault\n"
         )
         monkeypatch.setattr(
-            "terok_sandbox.paths._config_file_paths", lambda: [("user", user_config)]
+            "terok_sandbox.paths.config_file_paths", lambda: [("user", user_config)]
         )
         _config._credentials_section.cache_clear()
 
@@ -2065,7 +2065,7 @@ class TestVaultToKeyring:
         user_config = tmp_path / "config.yml"
         user_config.write_text("credentials: {}\n")
         monkeypatch.setattr(
-            "terok_sandbox.paths._config_file_paths", lambda: [("user", user_config)]
+            "terok_sandbox.paths.config_file_paths", lambda: [("user", user_config)]
         )
         _config._credentials_section.cache_clear()
 
@@ -2158,7 +2158,7 @@ class TestVaultToKeyring:
         user_config = tmp_path / "config.yml"
         user_config.write_text("credentials: {}\n")
         monkeypatch.setattr(
-            "terok_sandbox.paths._config_file_paths", lambda: [("user", user_config)]
+            "terok_sandbox.paths.config_file_paths", lambda: [("user", user_config)]
         )
         monkeypatch.setattr(
             "terok_sandbox.vault.store.encryption.load_passphrase_from_file",
@@ -2366,7 +2366,7 @@ class TestPersistModeChoice:
         user_config = tmp_path / "config.yml"
         user_config.write_text("credentials:\n  passphrase: leftover\n  use_keyring: false\n")
         monkeypatch.setattr(
-            "terok_sandbox.paths._config_file_paths", lambda: [("user", user_config)]
+            "terok_sandbox.paths.config_file_paths", lambda: [("user", user_config)]
         )
         _config._credentials_section.cache_clear()
         _persist_mode_choice("keyring", "ignored")
@@ -2384,7 +2384,7 @@ class TestPersistModeChoice:
         user_config = tmp_path / "config.yml"
         user_config.write_text("credentials:\n  use_keyring: true\n")
         monkeypatch.setattr(
-            "terok_sandbox.paths._config_file_paths", lambda: [("user", user_config)]
+            "terok_sandbox.paths.config_file_paths", lambda: [("user", user_config)]
         )
         _config._credentials_section.cache_clear()
         _persist_mode_choice("config", "new-secret")
@@ -2398,7 +2398,7 @@ class TestPersistModeChoice:
 
         user_config = tmp_path / "config.yml"
         monkeypatch.setattr(
-            "terok_sandbox.paths._config_file_paths", lambda: [("user", user_config)]
+            "terok_sandbox.paths.config_file_paths", lambda: [("user", user_config)]
         )
         _persist_mode_choice("session-file", "irrelevant")
         assert not user_config.exists()

@@ -205,9 +205,9 @@ def _handle_vault_lock(*, cfg: SandboxConfig | None = None, forget: bool = False
         config_updates = _forget_config_tier_updates(cfg)
         if config_updates:
             from .. import config as _config
-            from ..paths import _config_file_paths
+            from ..paths import config_file_paths
 
-            user_config = next((p for label, p in _config_file_paths() if label == "user"), None)
+            user_config = next((p for label, p in config_file_paths() if label == "user"), None)
             if user_config is not None and user_config.exists():
                 _yaml_update_section(
                     user_config,
@@ -360,9 +360,9 @@ def handle_vault_to_keyring(*, cfg: SandboxConfig | None = None) -> None:
     # Switch the config's tier wiring atomically: flip use_keyring on,
     # drop the plaintext + helper fallbacks so the chain can't re-resolve
     # via a stale lower tier.
-    from ..paths import _config_file_paths
+    from ..paths import config_file_paths
 
-    user_config = next((p for label, p in _config_file_paths() if label == "user"), None)
+    user_config = next((p for label, p in config_file_paths() if label == "user"), None)
     if user_config is not None:
         # nosec: B105 — clearing config keys to None, not hardcoding secrets
         updates = {  # nosec: B105

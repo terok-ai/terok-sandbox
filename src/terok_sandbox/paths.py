@@ -19,15 +19,16 @@ import os
 from pathlib import Path
 
 from terok_util import (
+    config_file_paths,
     namespace_config_dir,
     namespace_runtime_dir,
     namespace_state_dir,
     read_config_section,
     read_config_top_level,
 )
-from terok_util.paths import _config_file_paths  # noqa: F401 — re-exported
 
 __all__ = [
+    "config_file_paths",
     "config_root",
     "namespace_config_dir",
     "namespace_config_root",
@@ -67,7 +68,7 @@ def plaintext_passphrase_config_path() -> Path | None:
     from terok_util.config_stack import load_yaml_scope
 
     found: Path | None = None
-    for label, path in _config_file_paths():
+    for label, path in config_file_paths():
         try:
             scope = load_yaml_scope(label, path)
             creds = scope.data.get("credentials") if isinstance(scope.data, dict) else None

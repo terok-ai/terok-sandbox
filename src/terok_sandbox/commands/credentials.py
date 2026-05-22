@@ -510,9 +510,9 @@ def _persist_mode_choice(mode: SetupTier, passphrase: str) -> None:
     resolution chain can't see two tiers claiming ownership.
     """
     from .. import config as _config
-    from ..paths import _config_file_paths
+    from ..paths import config_file_paths
 
-    user_config = next((p for label, p in _config_file_paths() if label == "user"), None)
+    user_config = next((p for label, p in config_file_paths() if label == "user"), None)
     if user_config is None or mode == "session-file":
         return
     updates: dict[str, object | None] = (

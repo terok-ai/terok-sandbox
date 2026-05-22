@@ -253,7 +253,7 @@ class TestPlaintextPassphraseConfigPath:
         cfg = tmp_path / "config.yml"
         cfg.write_text("credentials:\n  use_keyring: true\n", encoding="utf-8")
         monkeypatch.setattr(
-            "terok_sandbox.paths._config_file_paths",
+            "terok_sandbox.paths.config_file_paths",
             lambda: [("user", cfg)],
         )
         assert plaintext_passphrase_config_path() is None
@@ -268,7 +268,7 @@ class TestPlaintextPassphraseConfigPath:
         cfg.parent.mkdir(parents=True)
         cfg.write_text("credentials:\n  passphrase: hunter2\n", encoding="utf-8")
         monkeypatch.setattr(
-            "terok_sandbox.paths._config_file_paths",
+            "terok_sandbox.paths.config_file_paths",
             lambda: [("user", cfg)],
         )
         assert plaintext_passphrase_config_path() == cfg
@@ -282,7 +282,7 @@ class TestPlaintextPassphraseConfigPath:
         system.write_text("credentials:\n  passphrase: sys-value\n", encoding="utf-8")
         user.write_text("credentials:\n  passphrase: user-value\n", encoding="utf-8")
         monkeypatch.setattr(
-            "terok_sandbox.paths._config_file_paths",
+            "terok_sandbox.paths.config_file_paths",
             lambda: [("system", system), ("user", user)],
         )
         assert plaintext_passphrase_config_path() == user
@@ -298,7 +298,7 @@ class TestPlaintextPassphraseConfigPath:
         broken.write_text(": : :\n", encoding="utf-8")
         good.write_text("credentials:\n  passphrase: visible\n", encoding="utf-8")
         monkeypatch.setattr(
-            "terok_sandbox.paths._config_file_paths",
+            "terok_sandbox.paths.config_file_paths",
             lambda: [("system", broken), ("user", good)],
         )
         assert plaintext_passphrase_config_path() == good
