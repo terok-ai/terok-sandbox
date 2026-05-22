@@ -1,0 +1,33 @@
+[importlinter]
+root_packages =
+    terok_sandbox
+include_external_packages = True
+
+# ── Cross-package boundaries ─────────────────────────────────────
+#
+# ``protected`` contract: "module X may ONLY be imported by modules
+# Y, Z".  Every sibling-wheel import in terok_sandbox funnels through
+# a single adapter under ``terok_sandbox.integrations.*``; the shield
+# adapter also has a tiny CLI-registry splice (``commands.shield``)
+# that drives the ``terok-sandbox shield …`` subcommand.  A fresh
+# ``from terok_shield`` / ``from terok_clearance`` anywhere else is a
+# CI failure: route it through the adapter instead (and extend the
+# adapter's re-export surface if the symbol is new).
+#
+# Internal layering within terok_sandbox is the responsibility of
+# ``tach.toml``; this file owns the cross-wheel boundaries only.
+
+[importlinter:contract:shield-boundary]
+name = terok_shield access restricted to the in-package shield adapter
+type = protected
+protected_modules = terok_shield
+allowed_importers =
+    terok_sandbox.integrations.shield
+    terok_sandbox.commands.shield
+
+[importlinter:contract:clearance-boundary]
+name = terok_clearance access restricted to the in-package clearance adapter
+type = protected
+protected_modules = terok_clearance
+allowed_importers =
+    terok_sandbox.integrations.clearance

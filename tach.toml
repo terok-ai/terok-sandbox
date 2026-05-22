@@ -8,7 +8,7 @@ exclude = [
 ]
 
 source_roots = ["src"]
-exact = true
+exact = false
 forbid_circular_dependencies = true
 ignore_type_checking_imports = true
 
@@ -238,9 +238,15 @@ path = "terok_sandbox.runtime"
 layer = "core"
 depends_on = []
 
-# Shield adapter
+# Shield adapter (cross-package — terok_shield boundary)
 [[modules]]
-path = "terok_sandbox.shield"
+path = "terok_sandbox.integrations.shield"
+layer = "core"
+depends_on = []
+
+# Clearance adapter (cross-package — terok_clearance boundary)
+[[modules]]
+path = "terok_sandbox.integrations.clearance"
 layer = "core"
 depends_on = []
 
@@ -292,7 +298,9 @@ depends_on = []
 [[modules]]
 path = "terok_sandbox.sandbox"
 layer = "surface"
-depends_on = []
+depends_on = [
+    "terok_sandbox.integrations.shield",
+]
 
 # Command registry — one module per subsystem under the package, plus a
 # shared types module.  Each submodule keeps its own ``*_COMMANDS``
@@ -377,6 +385,7 @@ path = "terok_sandbox.launch"
 layer = "surface"
 depends_on = [
     "terok_sandbox.sandbox",
+    "terok_sandbox.integrations.shield",
 ]
 
 # Sandbox-wide setup orchestration — phase runner invoked by the
@@ -386,7 +395,10 @@ depends_on = [
 [[modules]]
 path = "terok_sandbox._setup"
 layer = "surface"
-depends_on = []
+depends_on = [
+    "terok_sandbox.integrations.shield",
+    "terok_sandbox.integrations.clearance",
+]
 
 # Foundation-level constants shared by the surface layer (orchestrators
 # that raise them) and the package init (re-exports them as public

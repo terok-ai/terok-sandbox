@@ -333,13 +333,13 @@ class TestHandleShieldUninstall:
         assert "--root" in msg and "--user" in msg
 
     def test_user_flag_invokes_library_uninstall(self, capsys: pytest.CaptureFixture[str]) -> None:
-        with patch("terok_sandbox.shield.run_uninstall") as mock_run:
+        with patch("terok_sandbox.integrations.shield.run_uninstall") as mock_run:
             _handle_shield_uninstall(user=True)
         mock_run.assert_called_once_with(root=False, user=True)
         assert "user" in capsys.readouterr().out
 
     def test_root_flag_invokes_library_uninstall(self, capsys: pytest.CaptureFixture[str]) -> None:
-        with patch("terok_sandbox.shield.run_uninstall") as mock_run:
+        with patch("terok_sandbox.integrations.shield.run_uninstall") as mock_run:
             _handle_shield_uninstall(root=True)
         mock_run.assert_called_once_with(root=True, user=False)
         assert "system" in capsys.readouterr().out

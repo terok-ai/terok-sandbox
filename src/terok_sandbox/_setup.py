@@ -28,7 +28,7 @@ from __future__ import annotations
 import contextlib
 import shutil
 from collections.abc import Callable, Iterable
-from typing import Any, Protocol
+from typing import Any
 
 from ._exit_codes import EXIT_MANUAL_STEP_NEEDED
 from ._stage import stage_line as _stage_line
@@ -44,21 +44,7 @@ from ._util._selinux import (
 # keep working without reaching for the new foundation module.
 __all__ = ["EXIT_MANUAL_STEP_NEEDED"]
 from .config import SandboxConfig
-
-
-class _BinaryCheckLike(Protocol):
-    """Structural shape of [`terok_shield.BinaryCheck`][terok_shield.BinaryCheck].
-
-    Decouples the renderer from shield's lazy ``__getattr__``-typed
-    surface: mypy sees a real Protocol with attribute types instead of
-    the ``object`` placeholder shield returns to type checkers.
-    """
-
-    name: str
-    ok: bool
-    path: str
-    purpose: str
-
+from .integrations.shield import BinaryCheck
 
 _HOST_BINARIES: tuple[str, ...] = ("podman", "git", "ssh-keygen")
 
@@ -93,13 +79,13 @@ def _report_host_binaries() -> None:
                 s.missing("not on PATH")
 
 
-def _report_binary_checks(probe: Callable[[], Iterable[_BinaryCheckLike]]) -> None:
+def _report_binary_checks(probe: Callable[[], Iterable[BinaryCheck]]) -> None:
     """Render one stage line per [`BinaryCheck`][terok_shield.BinaryCheck] *probe* returns.
 
     *probe* is one of shield's prereq probes (``check_firewall_binaries``,
-    ``check_krun_binaries``).  Top-level ``terok_shield`` namespace
-    lookups in callers stay patchable from tests via
-    ``terok_shield.check_<name>``.
+    ``check_krun_binaries``); both are re-exported from
+    [`terok_sandbox.integrations.shield`][terok_sandbox.integrations.shield] so the cross-package
+    boundary contract holds.
     """
     for check in probe():
         with _stage_line(check.name) as s:
@@ -110,19 +96,15 @@ def _report_binary_checks(probe: Callable[[], Iterable[_BinaryCheckLike]]) -> No
 
 
 def _report_firewall_binaries() -> None:
-    # Top-level ``terok_shield`` namespace import (not ``.prereqs``) so the
-    # test patch ``terok_shield.check_firewall_binaries`` still hits the name
-    # we look up.  The lazy ``__getattr__`` on that module returns ``object``
-    # to type-checkers, so a cast is needed to bind the typed Protocol.
-    from terok_shield import check_firewall_binaries
+    from .integrations.shield import check_firewall_binaries
 
-    _report_binary_checks(check_firewall_binaries)  # type: ignore[arg-type]
+    _report_binary_checks(check_firewall_binaries)
 
 
 def _report_krun_binaries() -> None:
-    from terok_shield import check_krun_binaries
+    from .integrations.shield import check_krun_binaries
 
-    _report_binary_checks(check_krun_binaries)  # type: ignore[arg-type]
+    _report_binary_checks(check_krun_binaries)
 
 
 def _report_selinux(cfg: SandboxConfig) -> SelinuxCheckResult:
@@ -187,7 +169,7 @@ def print_selinux_install_hint(result: SelinuxCheckResult) -> None:
 
 def run_shield_install_phase(*, root: bool) -> bool:
     """Install shield OCI hooks — per-user or system-wide depending on *root*."""
-    from .shield import check_environment, run_setup
+    from .integrations.shield import check_environment, run_setup
 
     with _stage_line("Shield hooks") as s:
         try:
@@ -267,7 +249,7 @@ def run_clearance_install_phase() -> bool:
     vault / gate stack is perfectly functional without it.
     """
     try:
-        from terok_clearance.runtime.installer import (
+        from .integrations.clearance import (
             HUB_UNIT_NAME,
             NOTIFIER_UNIT_NAME,
             VERDICT_UNIT_NAME,
@@ -306,7 +288,7 @@ def run_clearance_install_phase() -> bool:
 
 def run_shield_uninstall_phase(*, root: bool) -> bool:
     """Remove shield OCI hooks — per-user or system-wide depending on *root*."""
-    from .shield import run_uninstall
+    from .integrations.shield import run_uninstall
 
     scope = "system" if root else "user"
     with _stage_line("Shield hooks") as s:
@@ -369,7 +351,7 @@ def run_clearance_uninstall_phase() -> bool:
     stays a one-liner rather than a crash.
     """
     try:
-        from terok_clearance.runtime.installer import (
+        from .integrations.clearance import (
             uninstall_notifier_service,
             uninstall_service,
         )

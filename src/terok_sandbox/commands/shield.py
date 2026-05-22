@@ -45,7 +45,7 @@ def _handle_shield_setup(*, root: bool = False, user: bool = False) -> None:
             "  shield install-hooks --root   # /etc/containers/oci/hooks.d\n"
             "  shield install-hooks --user   # ~/.local/share/containers/oci/hooks.d"
         )
-    from ..shield import run_setup
+    from ..integrations.shield import run_setup
 
     run_setup(root=root, user=user)
 
@@ -58,7 +58,7 @@ def _handle_shield_uninstall(*, root: bool = False, user: bool = False) -> None:
             "  shield uninstall-hooks --root   # /etc/containers/oci/hooks.d\n"
             "  shield uninstall-hooks --user   # ~/.local/share/containers/oci/hooks.d"
         )
-    from ..shield import run_uninstall
+    from ..integrations.shield import run_uninstall
 
     run_uninstall(root=root, user=user)
     scope = "system" if root else "user"

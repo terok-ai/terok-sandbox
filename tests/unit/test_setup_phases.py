@@ -73,7 +73,7 @@ class TestPrereqReport:
     ) -> None:
         monkeypatch.setattr("terok_sandbox._setup.shutil.which", lambda name: f"/usr/bin/{name}")
         with (
-            patch("terok_shield.check_firewall_binaries", return_value=()),
+            patch("terok_sandbox.integrations.shield.check_firewall_binaries", return_value=()),
             patch(
                 "terok_sandbox._setup.check_selinux_status",
                 return_value=MagicMock(status=SelinuxStatus.NOT_APPLICABLE_TCP_MODE),
@@ -95,7 +95,10 @@ class TestPrereqReport:
         fake_check = MagicMock(path="/usr/sbin/nft", purpose="ruleset enforcement", ok=True)
         fake_check.name = "nft"  # ``name=`` is a MagicMock constructor kwarg, not an attr
         with (
-            patch("terok_shield.check_firewall_binaries", return_value=(fake_check,)),
+            patch(
+                "terok_sandbox.integrations.shield.check_firewall_binaries",
+                return_value=(fake_check,),
+            ),
             patch(
                 "terok_sandbox._setup.check_selinux_status",
                 return_value=MagicMock(status=SelinuxStatus.NOT_APPLICABLE_TCP_MODE),
@@ -114,7 +117,7 @@ class TestPrereqReport:
     ) -> None:
         monkeypatch.setattr("terok_sandbox._setup.shutil.which", lambda _n: None)
         with (
-            patch("terok_shield.check_firewall_binaries", return_value=()),
+            patch("terok_sandbox.integrations.shield.check_firewall_binaries", return_value=()),
             patch(
                 "terok_sandbox._setup.check_selinux_status",
                 return_value=MagicMock(status=SelinuxStatus.OK),
@@ -132,7 +135,7 @@ class TestPrereqReport:
         """Hosts where SELinux isn't enforcing shouldn't see a policy stage line."""
         monkeypatch.setattr("terok_sandbox._setup.shutil.which", lambda _n: None)
         with (
-            patch("terok_shield.check_firewall_binaries", return_value=()),
+            patch("terok_sandbox.integrations.shield.check_firewall_binaries", return_value=()),
             patch(
                 "terok_sandbox._setup.check_selinux_status",
                 return_value=MagicMock(status=SelinuxStatus.NOT_APPLICABLE_PERMISSIVE),
@@ -159,7 +162,7 @@ class TestPrereqReport:
         """Problem statuses route to MISSING with a pointer-to-fix in the detail."""
         monkeypatch.setattr("terok_sandbox._setup.shutil.which", lambda _n: None)
         with (
-            patch("terok_shield.check_firewall_binaries", return_value=()),
+            patch("terok_sandbox.integrations.shield.check_firewall_binaries", return_value=()),
             patch(
                 "terok_sandbox._setup.check_selinux_status",
                 return_value=MagicMock(status=status),
@@ -182,7 +185,10 @@ class TestPrereqReport:
         bad_check = MagicMock(path="", purpose="DNS resolver", ok=False)
         bad_check.name = "dnsmasq"  # ``name=`` is a MagicMock kwarg, not an attr
         with (
-            patch("terok_shield.check_firewall_binaries", return_value=(bad_check,)),
+            patch(
+                "terok_sandbox.integrations.shield.check_firewall_binaries",
+                return_value=(bad_check,),
+            ),
             patch(
                 "terok_sandbox._setup.check_selinux_status",
                 return_value=MagicMock(status=SelinuxStatus.NOT_APPLICABLE_TCP_MODE),
@@ -206,8 +212,8 @@ class TestPrereqReport:
         bare_cfg.experimental = False
         monkeypatch.setattr("terok_sandbox._setup.shutil.which", lambda _n: None)
         with (
-            patch("terok_shield.check_firewall_binaries", return_value=()),
-            patch("terok_shield.check_krun_binaries") as krun_probe,
+            patch("terok_sandbox.integrations.shield.check_firewall_binaries", return_value=()),
+            patch("terok_sandbox.integrations.shield.check_krun_binaries") as krun_probe,
             patch(
                 "terok_sandbox._setup.check_selinux_status",
                 return_value=MagicMock(status=SelinuxStatus.NOT_APPLICABLE_TCP_MODE),
@@ -229,8 +235,10 @@ class TestPrereqReport:
         ip_check = MagicMock(path="/sbin/ip", purpose="krun in-netns IP", ok=True)
         ip_check.name = "ip"
         with (
-            patch("terok_shield.check_firewall_binaries", return_value=()),
-            patch("terok_shield.check_krun_binaries", return_value=(ip_check,)),
+            patch("terok_sandbox.integrations.shield.check_firewall_binaries", return_value=()),
+            patch(
+                "terok_sandbox.integrations.shield.check_krun_binaries", return_value=(ip_check,)
+            ),
             patch(
                 "terok_sandbox._setup.check_selinux_status",
                 return_value=MagicMock(status=SelinuxStatus.NOT_APPLICABLE_TCP_MODE),
@@ -250,9 +258,9 @@ class TestShieldInstallPhase:
 
     def test_clean_install_reports_ok(self, capsys: pytest.CaptureFixture[str]) -> None:
         with (
-            patch("terok_sandbox.shield.run_setup") as setup,
+            patch("terok_sandbox.integrations.shield.run_setup") as setup,
             patch(
-                "terok_sandbox.shield.check_environment",
+                "terok_sandbox.integrations.shield.check_environment",
                 return_value=MagicMock(health="ok"),
             ),
         ):
@@ -265,9 +273,9 @@ class TestShieldInstallPhase:
     ) -> None:
         """A bypass-firewall host lands as WARN but counts as ``ok`` for the aggregator."""
         with (
-            patch("terok_sandbox.shield.run_setup"),
+            patch("terok_sandbox.integrations.shield.run_setup"),
             patch(
-                "terok_sandbox.shield.check_environment",
+                "terok_sandbox.integrations.shield.check_environment",
                 return_value=MagicMock(health="bypass"),
             ),
         ):
@@ -275,16 +283,18 @@ class TestShieldInstallPhase:
         assert "WARN" in capsys.readouterr().out
 
     def test_install_raises_reports_fail(self, capsys: pytest.CaptureFixture[str]) -> None:
-        with patch("terok_sandbox.shield.run_setup", side_effect=RuntimeError("sudo required")):
+        with patch(
+            "terok_sandbox.integrations.shield.run_setup", side_effect=RuntimeError("sudo required")
+        ):
             assert run_shield_install_phase(root=False) is False
         assert "FAIL" in capsys.readouterr().out
 
     def test_unhealthy_post_install_reports_fail(self, capsys: pytest.CaptureFixture[str]) -> None:
         """Install succeeded on the surface but ``check_environment`` disagrees."""
         with (
-            patch("terok_sandbox.shield.run_setup"),
+            patch("terok_sandbox.integrations.shield.run_setup"),
             patch(
-                "terok_sandbox.shield.check_environment",
+                "terok_sandbox.integrations.shield.check_environment",
                 return_value=MagicMock(health="setup-needed"),
             ),
         ):
@@ -541,8 +551,8 @@ class TestClearanceInstallPhase:
 
     def test_happy_path_installs_hub_and_notifier(self, capsys: pytest.CaptureFixture[str]) -> None:
         with (
-            patch("terok_clearance.runtime.installer.install_service") as install_hub,
-            patch("terok_clearance.runtime.installer.install_notifier_service") as install_notifier,
+            patch("terok_sandbox.integrations.clearance.install_service") as install_hub,
+            patch("terok_sandbox.integrations.clearance.install_notifier_service") as install_notifier,
             patch("terok_sandbox._setup._systemctl.run_best_effort"),
             patch("terok_sandbox._setup._enable_and_restart_user_unit"),
         ):
@@ -563,8 +573,8 @@ class TestClearanceInstallPhase:
         batching fix.
         """
         with (
-            patch("terok_clearance.runtime.installer.install_service"),
-            patch("terok_clearance.runtime.installer.install_notifier_service"),
+            patch("terok_sandbox.integrations.clearance.install_service"),
+            patch("terok_sandbox.integrations.clearance.install_notifier_service"),
             patch("terok_sandbox._setup._systemctl.run_best_effort") as run,
             patch("terok_sandbox._setup._enable_and_restart_user_unit"),
         ):
@@ -577,10 +587,10 @@ class TestClearanceInstallPhase:
     def test_hub_failure_reports_fail(self, capsys: pytest.CaptureFixture[str]) -> None:
         with (
             patch(
-                "terok_clearance.runtime.installer.install_service",
+                "terok_sandbox.integrations.clearance.install_service",
                 side_effect=RuntimeError("template missing"),
             ),
-            patch("terok_clearance.runtime.installer.install_notifier_service"),
+            patch("terok_sandbox.integrations.clearance.install_notifier_service"),
             patch("terok_sandbox._setup._systemctl.run_best_effort"),
             patch("terok_sandbox._setup._enable_and_restart_user_unit"),
         ):
@@ -592,9 +602,9 @@ class TestClearanceInstallPhase:
     ) -> None:
         """Notifier is non-critical — a failure WARNs without failing the phase."""
         with (
-            patch("terok_clearance.runtime.installer.install_service"),
+            patch("terok_sandbox.integrations.clearance.install_service"),
             patch(
-                "terok_clearance.runtime.installer.install_notifier_service",
+                "terok_sandbox.integrations.clearance.install_notifier_service",
                 side_effect=RuntimeError("session bus missing"),
             ),
             patch("terok_sandbox._setup._systemctl.run_best_effort"),
@@ -671,20 +681,21 @@ class TestShieldUninstallPhase:
     """Shield uninstall: removes hooks; reports scope in the OK line."""
 
     def test_user_scope_reports_ok(self, capsys: pytest.CaptureFixture[str]) -> None:
-        with patch("terok_sandbox.shield.run_uninstall") as run:
+        with patch("terok_sandbox.integrations.shield.run_uninstall") as run:
             assert run_shield_uninstall_phase(root=False) is True
         run.assert_called_once_with(root=False, user=True)
         assert "removed (user)" in capsys.readouterr().out
 
     def test_root_scope_reports_ok(self, capsys: pytest.CaptureFixture[str]) -> None:
-        with patch("terok_sandbox.shield.run_uninstall") as run:
+        with patch("terok_sandbox.integrations.shield.run_uninstall") as run:
             assert run_shield_uninstall_phase(root=True) is True
         run.assert_called_once_with(root=True, user=False)
         assert "removed (system)" in capsys.readouterr().out
 
     def test_uninstall_raises_reports_fail(self, capsys: pytest.CaptureFixture[str]) -> None:
         with patch(
-            "terok_sandbox.shield.run_uninstall", side_effect=RuntimeError("hook dir missing")
+            "terok_sandbox.integrations.shield.run_uninstall",
+            side_effect=RuntimeError("hook dir missing"),
         ):
             assert run_shield_uninstall_phase(root=False) is False
         out = capsys.readouterr().out
@@ -834,8 +845,8 @@ class TestClearanceUninstallPhase:
 
     def test_clean_teardown_reports_ok(self, capsys: pytest.CaptureFixture[str]) -> None:
         with (
-            patch("terok_clearance.runtime.installer.uninstall_notifier_service") as un_n,
-            patch("terok_clearance.runtime.installer.uninstall_service") as un_s,
+            patch("terok_sandbox.integrations.clearance.uninstall_notifier_service") as un_n,
+            patch("terok_sandbox.integrations.clearance.uninstall_service") as un_s,
         ):
             assert run_clearance_uninstall_phase() is True
         un_n.assert_called_once()
@@ -844,7 +855,7 @@ class TestClearanceUninstallPhase:
 
     def test_import_error_skips_soft(self, capsys: pytest.CaptureFixture[str]) -> None:
         """A host without terok_clearance installed skips rather than fails."""
-        with patch.dict("sys.modules", {"terok_clearance.runtime.installer": None}):
+        with patch.dict("sys.modules", {"terok_sandbox.integrations.clearance": None}):
             assert run_clearance_uninstall_phase() is True
         out = capsys.readouterr().out
         assert "skip" in out and "terok_clearance not installed" in out
@@ -852,10 +863,10 @@ class TestClearanceUninstallPhase:
     def test_teardown_exception_reports_fail(self, capsys: pytest.CaptureFixture[str]) -> None:
         with (
             patch(
-                "terok_clearance.runtime.installer.uninstall_notifier_service",
+                "terok_sandbox.integrations.clearance.uninstall_notifier_service",
                 side_effect=RuntimeError("unit stuck"),
             ),
-            patch("terok_clearance.runtime.installer.uninstall_service"),
+            patch("terok_sandbox.integrations.clearance.uninstall_service"),
         ):
             assert run_clearance_uninstall_phase() is False
         out = capsys.readouterr().out
@@ -866,7 +877,7 @@ class TestClearanceInstallImportMissing:
     """Fills the import-missing branch of `run_clearance_install_phase`."""
 
     def test_import_error_skips_soft(self, capsys: pytest.CaptureFixture[str]) -> None:
-        with patch.dict("sys.modules", {"terok_clearance.runtime.installer": None}):
+        with patch.dict("sys.modules", {"terok_sandbox.integrations.clearance": None}):
             assert run_clearance_install_phase() is True
         out = capsys.readouterr().out
         assert "skip" in out and "terok_clearance not installed" in out

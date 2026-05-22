@@ -159,7 +159,7 @@ class TestSandbox:
             mock.assert_called_once()
 
     def test_shield_down_delegates(self) -> None:
-        with patch("terok_sandbox.shield.down") as mock:
+        with patch("terok_sandbox.integrations.shield.down") as mock:
             s = Sandbox()
             s.shield_down("ctr", Path("/tmp/task"))
             mock.assert_called_once_with("ctr", Path("/tmp/task"), cfg=s.config)
@@ -167,7 +167,7 @@ class TestSandbox:
     def test_pre_start_args_delegates(self) -> None:
         from terok_shield import ShieldRuntime
 
-        with patch("terok_sandbox.shield.pre_start", return_value=["--hook"]) as mock:
+        with patch("terok_sandbox.integrations.shield.pre_start", return_value=["--hook"]) as mock:
             s = Sandbox()
             result = s.pre_start_args("ctr", Path("/tmp/task"))
             assert result == ["--hook"]
@@ -179,7 +179,7 @@ class TestSandbox:
         """``runtime="krun"`` flows through as ``ShieldRuntime.KRUN``."""
         from terok_shield import ShieldRuntime
 
-        with patch("terok_sandbox.shield.pre_start", return_value=["--hook"]) as mock:
+        with patch("terok_sandbox.integrations.shield.pre_start", return_value=["--hook"]) as mock:
             s = Sandbox()
             s.pre_start_args("ctr", Path("/tmp/task"), runtime="krun")
             mock.assert_called_once_with(
@@ -213,7 +213,7 @@ class TestSandbox:
             patch("terok_sandbox.sandbox.shlex"),
             patch("builtins.print"),
             patch(
-                "terok_sandbox.shield.pre_start",
+                "terok_sandbox.integrations.shield.pre_start",
                 return_value=["--annotation", "test=1"],
             ),
         ):
@@ -235,7 +235,7 @@ class TestSandbox:
         with (
             patch("subprocess.run") as mock_run,
             patch("builtins.print"),
-            patch("terok_sandbox.shield.pre_start", return_value=[]),
+            patch("terok_sandbox.integrations.shield.pre_start", return_value=[]),
         ):
             Sandbox().run(_make_spec())
 
@@ -247,7 +247,7 @@ class TestSandbox:
         with (
             patch("subprocess.run") as mock_run,
             patch("builtins.print"),
-            patch("terok_sandbox.shield.pre_start", return_value=[]),
+            patch("terok_sandbox.integrations.shield.pre_start", return_value=[]),
         ):
             Sandbox().run(_make_spec(hostname="myproj-cli-k3v8h"))
 
@@ -260,7 +260,7 @@ class TestSandbox:
         with (
             patch("subprocess.run") as mock_run,
             patch("builtins.print"),
-            patch("terok_sandbox.shield.pre_start", return_value=[]),
+            patch("terok_sandbox.integrations.shield.pre_start", return_value=[]),
         ):
             Sandbox().run(_make_spec())
 
@@ -271,7 +271,7 @@ class TestSandbox:
         with (
             patch("subprocess.run") as mock_run,
             patch("builtins.print"),
-            patch("terok_sandbox.shield.pre_start", return_value=[]),
+            patch("terok_sandbox.integrations.shield.pre_start", return_value=[]),
         ):
             Sandbox().run(_make_spec(runtime="krun"))
 
@@ -292,7 +292,7 @@ class TestSandbox:
         with (
             patch("subprocess.run") as mock_run,
             patch("builtins.print"),
-            patch("terok_sandbox.shield.pre_start", return_value=[]),
+            patch("terok_sandbox.integrations.shield.pre_start", return_value=[]),
         ):
             Sandbox().run(_make_spec(annotations=annotations))
 
@@ -316,7 +316,7 @@ class TestSandbox:
         with (
             patch("subprocess.run") as mock_run,
             patch("builtins.print"),
-            patch("terok_sandbox.shield.pre_start", return_value=[]),
+            patch("terok_sandbox.integrations.shield.pre_start", return_value=[]),
             pytest.raises(ValueError, match="not in allowlist"),
         ):
             Sandbox().run(_make_spec(runtime="evil"))
@@ -329,7 +329,7 @@ class TestSandbox:
         with (
             patch("subprocess.run") as mock_run,
             patch("builtins.print"),
-            patch("terok_sandbox.shield.pre_start", return_value=[]),
+            patch("terok_sandbox.integrations.shield.pre_start", return_value=[]),
             pytest.raises(ValueError, match="paths and whitespace"),
         ):
             Sandbox().run(_make_spec(runtime="/tmp/evil-runtime"))  # noqa: S108
@@ -343,7 +343,7 @@ class TestSandbox:
         with (
             patch("subprocess.run") as mock_run,
             patch("builtins.print"),
-            patch("terok_sandbox.shield.pre_start", return_value=[]),
+            patch("terok_sandbox.integrations.shield.pre_start", return_value=[]),
             pytest.raises(ValueError, match="not in allowlist"),
         ):
             Sandbox().run(_make_spec(annotations=MappingProxyType({"evil.toggle": "1"})))
@@ -394,7 +394,7 @@ class TestSandbox:
         with (
             patch("subprocess.run") as mock_run,
             patch("builtins.print"),
-            patch("terok_sandbox.shield.pre_start", return_value=[]),
+            patch("terok_sandbox.integrations.shield.pre_start", return_value=[]),
             pytest.raises(ValueError, match="control character"),
         ):
             Sandbox().run(
@@ -411,7 +411,7 @@ class TestSandbox:
         with (
             patch("subprocess.run") as mock_run,
             patch("builtins.print"),
-            patch("terok_sandbox.shield.pre_start", return_value=[]),
+            patch("terok_sandbox.integrations.shield.pre_start", return_value=[]),
         ):
             s = Sandbox()
             s.run(_make_spec(unrestricted=False))
@@ -425,7 +425,7 @@ class TestSandbox:
         with (
             patch("subprocess.run") as mock_run,
             patch("builtins.print"),
-            patch("terok_sandbox.shield.pre_start", return_value=[]),
+            patch("terok_sandbox.integrations.shield.pre_start", return_value=[]),
         ):
             s = Sandbox()
             s.run(_make_spec(unrestricted=True))
@@ -445,7 +445,7 @@ class TestSandbox:
                 "terok_sandbox.sandbox.bypass_network_args",
                 return_value=["--network", "pasta:-T,9418"],
             ) as mock_bypass,
-            patch("terok_sandbox.shield.pre_start") as mock_shield,
+            patch("terok_sandbox.integrations.shield.pre_start") as mock_shield,
         ):
             s = Sandbox(config=cfg)
             s.run(_make_spec())
@@ -464,7 +464,9 @@ class TestSandbox:
         spec = _make_spec()
         with (
             patch("subprocess.run") as mock_run,
-            patch("terok_sandbox.shield.pre_start", side_effect=FileNotFoundError("nft")),
+            patch(
+                "terok_sandbox.integrations.shield.pre_start", side_effect=FileNotFoundError("nft")
+            ),
             pytest.raises(SystemExit) as exc_info,
         ):
             Sandbox().run(spec)
@@ -490,7 +492,7 @@ class TestSandbox:
         with (
             patch("subprocess.run") as mock_run,
             patch("builtins.print"),
-            patch("terok_sandbox.shield.pre_start", return_value=[]),
+            patch("terok_sandbox.integrations.shield.pre_start", return_value=[]),
         ):
             # Track podman call position
             def track_podman(*args, **kwargs) -> None:
@@ -509,7 +511,7 @@ class TestSandbox:
         with (
             patch("subprocess.run", side_effect=exc),
             patch("builtins.print"),
-            patch("terok_sandbox.shield.pre_start", return_value=[]),
+            patch("terok_sandbox.integrations.shield.pre_start", return_value=[]),
         ):
             s = Sandbox()
             with pytest.raises(SystemExit, match="image not found"):
@@ -522,7 +524,7 @@ class TestSandbox:
         with (
             patch("subprocess.run", side_effect=exc),
             patch("builtins.print"),
-            patch("terok_sandbox.shield.pre_start", return_value=[]),
+            patch("terok_sandbox.integrations.shield.pre_start", return_value=[]),
         ):
             s = Sandbox()
             with pytest.raises(GpuConfigError):
@@ -533,7 +535,7 @@ class TestSandbox:
         with (
             patch("subprocess.run") as mock_run,
             patch("builtins.print"),
-            patch("terok_sandbox.shield.pre_start", return_value=[]),
+            patch("terok_sandbox.integrations.shield.pre_start", return_value=[]),
         ):
             Sandbox().run(_make_spec(memory="4g"))
 
@@ -546,7 +548,7 @@ class TestSandbox:
         with (
             patch("subprocess.run") as mock_run,
             patch("builtins.print"),
-            patch("terok_sandbox.shield.pre_start", return_value=[]),
+            patch("terok_sandbox.integrations.shield.pre_start", return_value=[]),
         ):
             Sandbox().run(_make_spec(cpus="2.0"))
 
@@ -559,7 +561,7 @@ class TestSandbox:
         with (
             patch("subprocess.run") as mock_run,
             patch("builtins.print"),
-            patch("terok_sandbox.shield.pre_start", return_value=[]),
+            patch("terok_sandbox.integrations.shield.pre_start", return_value=[]),
         ):
             Sandbox().run(_make_spec())
 
@@ -688,7 +690,7 @@ class TestSandboxSealed:
         with (
             patch("subprocess.run") as mock_run,
             patch("builtins.print"),
-            patch("terok_sandbox.shield.pre_start", return_value=[]),
+            patch("terok_sandbox.integrations.shield.pre_start", return_value=[]),
         ):
             Sandbox().create(spec)
 
@@ -703,7 +705,7 @@ class TestSandboxSealed:
         with (
             patch("subprocess.run") as mock_run,
             patch("builtins.print"),
-            patch("terok_sandbox.shield.pre_start", return_value=[]),
+            patch("terok_sandbox.integrations.shield.pre_start", return_value=[]),
         ):
             Sandbox().run(spec)
 

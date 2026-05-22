@@ -87,6 +87,23 @@ jobs:
       - name: Check module boundaries
         run: tach check
 
+  lint-imports:
+    if: github.repository == 'terok-ai/terok-sandbox'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install tools
+        run: pip install -r .github/requirements-ci.txt
+
+      - name: Check cross-package import boundaries
+        run: lint-imports
+
   security:
     if: github.repository == 'terok-ai/terok-sandbox'
     runs-on: ubuntu-latest

@@ -10,7 +10,7 @@ Delegates to domain subsystems:
   mirror management, systemd/daemon lifecycle.
 - [`vault`][terok_sandbox.vault] — secret injection: token broker with phantom credentials,
   SSH signing proxy, SQLite credential store, systemd/daemon lifecycle.
-- [`shield`][terok_sandbox.shield] — egress firewall adapter (delegates to terok-shield).
+- [`shield`][terok_sandbox.integrations.shield] — egress firewall adapter (delegates to terok-shield).
 - [`runtime`][terok_sandbox.runtime] — Podman CLI wrapper (state queries, GPU, log streaming).
 - [`sandbox`][terok_sandbox.sandbox] — facade composing the above behind [`SandboxConfig`][terok_sandbox.SandboxConfig].
 - [`commands`][terok_sandbox.commands] — CLI command registry and handler implementations.
@@ -99,6 +99,29 @@ from .doctor import (
 from .gate.lifecycle import GateServerManager, GateServerStatus
 from .gate.mirror import GateAuthNotConfigured, GateStalenessInfo, GitGate, is_ssh_url
 from .gate.tokens import TokenStore
+from .integrations.shield import (
+    EnvironmentCheck,
+    NftNotFoundError,
+    ShieldNeedsSetup,
+    ShieldRuntime,
+    ShieldState,
+    check_environment,
+    down,
+    make_shield,
+    pre_start,
+    quarantine,
+    reader_script_path,
+    resolve_container_state_dir,
+    run_setup,
+    run_uninstall,
+    setup_hooks_direct,
+    shield_interactive_session,
+    shield_watch_session,
+    state,
+    status,
+    uninstall_hooks_direct,
+    up,
+)
 from .paths import (
     namespace_config_dir,
     namespace_config_root,
@@ -152,29 +175,6 @@ from .setup_stamp import (
     read_stamp,
     stamp_path,
     write_stamp,
-)
-from .shield import (
-    EnvironmentCheck,
-    NftNotFoundError,
-    ShieldNeedsSetup,
-    ShieldRuntime,
-    ShieldState,
-    check_environment,
-    down,
-    make_shield,
-    pre_start,
-    quarantine,
-    reader_script_path,
-    resolve_container_state_dir,
-    run_setup,
-    run_uninstall,
-    setup_hooks_direct,
-    shield_interactive_session,
-    shield_watch_session,
-    state,
-    status,
-    uninstall_hooks_direct,
-    up,
 )
 from .vault.daemon.constants import CODEX_SHARED_OAUTH_MARKER, PHANTOM_CREDENTIALS_MARKER
 from .vault.daemon.lifecycle import (
