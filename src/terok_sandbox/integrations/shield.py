@@ -19,7 +19,7 @@ from terok_shield import (
     Shield,
     ShieldConfig,
     ShieldMode,
-    ShieldRuntime,
+    ShieldRuntime,  # noqa: F401 — re-exported for the cross-package adapter contract
     ShieldState,  # noqa: F401 — re-exported
     reader_script_path,  # noqa: F401 — re-exported so terok's shield-boundary contract holds
 )
@@ -33,9 +33,14 @@ from terok_shield.container import (
 # call sites.  Pull them straight from the owning submodules.
 from terok_shield.hooks.install import setup_global_hooks
 from terok_shield.podman_info import ensure_containers_conf_hooks_dir, system_hooks_dir
+from terok_shield.prereqs import (  # noqa: F401 — re-exported with concrete types
+    BinaryCheck,
+    check_firewall_binaries,
+    check_krun_binaries,
+)
 from terok_shield.run import NftNotFoundError, ShieldNeedsSetup  # noqa: F401
 
-from .config import SandboxConfig
+from ..config import SandboxConfig
 
 # The file names below mirror what ``setup_global_hooks`` writes — a small
 # coupling surface kept local so the uninstaller does not need to import
@@ -153,7 +158,7 @@ def up(container: str, task_dir: Path, cfg: SandboxConfig | None = None) -> None
 def quarantine(container: str, task_dir: Path, cfg: SandboxConfig | None = None) -> None:
     """Total network blackout — drop all traffic, log dropped traffic.
 
-    Unlike [`up`][terok_sandbox.shield.up] and [`down`][terok_sandbox.shield.down], this ignores ``shield_bypass``
+    Unlike [`up`][terok_sandbox.integrations.shield.up] and [`down`][terok_sandbox.integrations.shield.down], this ignores ``shield_bypass``
     because panic overrides all safety bypasses.
     """
     make_shield(task_dir, cfg).quarantine(container)
@@ -289,7 +294,7 @@ def uninstall_hooks_direct(*, root: bool = False) -> None:
     """Delete shield hook files from the user or system hooks directory.
 
     Uses sudo for the system directory (matching the install path in
-    [`setup_hooks_direct`][terok_sandbox.shield.setup_hooks_direct]) so the Python process stays unprivileged.
+    [`setup_hooks_direct`][terok_sandbox.integrations.shield.setup_hooks_direct]) so the Python process stays unprivileged.
     Bridge hook files are removed when present so a plain
     ``shield uninstall-hooks`` leaves no residue from an earlier
     ``terok setup`` that registered the D-Bus bridge.

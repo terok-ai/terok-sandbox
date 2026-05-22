@@ -168,9 +168,9 @@ def compose(
     is the job of the CLI layer.
 
     Raises ``SystemExit`` if shield setup is required (propagated from
-    [`shield.pre_start`][terok_sandbox.shield.pre_start]).
+    [`shield.pre_start`][terok_sandbox.integrations.shield.pre_start]).
     """
-    from . import shield as shield_module
+    from .integrations import shield as shield_module
 
     # Profile override flows through cfg so shield's internal builder
     # (which reads ``cfg.shield_profiles``) picks it up without a new
@@ -408,7 +408,7 @@ def cleanup(container: str, *, cfg: SandboxConfig) -> bool:
     Returns ``True`` when state was found and torn down, ``False`` when
     there was nothing to clean up.  Idempotent — safe to call repeatedly.
     """
-    from . import shield as shield_module
+    from .integrations import shield as shield_module
 
     state_dir = run_state_dir(cfg, container)
     plan = _read_meta(state_dir)

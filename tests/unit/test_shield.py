@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for the terok-shield adapter (``terok_sandbox.shield``)."""
+"""Tests for the terok-shield adapter (``terok_sandbox.integrations.shield``)."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ from terok_shield import (
 )
 
 from terok_sandbox.config import SandboxConfig
-from terok_sandbox.shield import (
+from terok_sandbox.integrations.shield import (
     _BYPASS_WARNING,
     _HOOK_FILES,
     check_environment,
@@ -188,14 +188,14 @@ def test_make_shield_socket_mode_skips_port_resolution(
 
 def test_nft_not_found_is_reexported() -> None:
     """``NftNotFoundError`` is re-exported from the adapter module."""
-    from terok_sandbox.shield import NftNotFoundError as error_type
+    from terok_sandbox.integrations.shield import NftNotFoundError as error_type
 
     assert error_type is NftNotFoundError
 
 
 def test_shield_state_is_reexported() -> None:
     """``ShieldState`` is re-exported from the adapter module."""
-    from terok_sandbox.shield import ShieldState as shield_state_type
+    from terok_sandbox.integrations.shield import ShieldState as shield_state_type
 
     assert shield_state_type is ShieldState
 
@@ -210,7 +210,7 @@ def test_shield_state_is_reexported() -> None:
         pytest.param(pre_start, "pre_start", ["--network", "hook-net"], id="pre-start"),
     ],
 )
-@patch("terok_sandbox.shield.make_shield")
+@patch("terok_sandbox.integrations.shield.make_shield")
 def test_shield_functions_delegate_to_per_task_shield(
     mock_make: MagicMock,
     func: Callable[..., object],
@@ -240,7 +240,7 @@ def test_shield_functions_delegate_to_per_task_shield(
         assert result == expected
 
 
-@patch("terok_sandbox.shield.make_shield")
+@patch("terok_sandbox.integrations.shield.make_shield")
 def test_shield_down_allow_all(mock_make: MagicMock) -> None:
     """The ``down`` wrapper passes ``allow_all=True`` when requested."""
     mock_shield = make_mock_shield()
@@ -273,7 +273,7 @@ def test_status_custom_config() -> None:
 
 
 @pytest.mark.parametrize("func", [down, up], ids=["down", "up"])
-@patch("terok_sandbox.shield.make_shield")
+@patch("terok_sandbox.integrations.shield.make_shield")
 def test_bypass_makes_down_and_up_noops(
     mock_make: MagicMock,
     func: Callable[..., object],
@@ -284,7 +284,7 @@ def test_bypass_makes_down_and_up_noops(
     mock_make.assert_not_called()
 
 
-@patch("terok_sandbox.shield.make_shield")
+@patch("terok_sandbox.integrations.shield.make_shield")
 def test_quarantine_ignores_bypass(mock_make: MagicMock) -> None:
     """Quarantine overrides bypass — panic must always work."""
     mock_shield = make_mock_shield()
@@ -305,7 +305,7 @@ def test_bypass_pre_start_returns_empty_with_warning() -> None:
     assert any(_BYPASS_WARNING in str(item.message) for item in caught)
 
 
-@patch("terok_sandbox.shield.make_shield")
+@patch("terok_sandbox.integrations.shield.make_shield")
 def test_bypass_state_still_queries_real_shield(
     mock_make: MagicMock,
 ) -> None:
@@ -335,7 +335,7 @@ def test_status_includes_bypass_flag_only_when_active(
     assert "profiles" in result
 
 
-@patch("terok_sandbox.shield.make_shield")
+@patch("terok_sandbox.integrations.shield.make_shield")
 def test_check_environment_forwards_result(mock_make: MagicMock) -> None:
     """Environment checking delegates to ``Shield.check_environment``."""
     expected = EnvironmentCheck(ok=True, health="ok", podman_version=(5, 6, 0))
@@ -356,7 +356,7 @@ def test_check_environment_bypass_returns_synthetic_result() -> None:
     assert any("bypass" in issue for issue in result.issues)
 
 
-@patch("terok_sandbox.shield.make_shield")
+@patch("terok_sandbox.integrations.shield.make_shield")
 def test_pre_start_converts_shield_needs_setup_to_system_exit(mock_make: MagicMock) -> None:
     """``ShieldNeedsSetup`` is converted into a diagnostic SystemExit."""
     mock_shield = make_mock_shield()
@@ -380,7 +380,7 @@ def test_run_setup(
     expected_call: dict[str, bool] | None,
 ) -> None:
     """Shield setup handles usage, user, and root installation paths."""
-    with patch("terok_sandbox.shield.setup_hooks_direct") as mock_direct:
+    with patch("terok_sandbox.integrations.shield.setup_hooks_direct") as mock_direct:
         if expected_call is None:
             # Library layer is UX-agnostic: raises ValueError on invalid combos.
             # The CLI layer (_handle_shield_setup) turns this into a SystemExit
@@ -400,9 +400,9 @@ def test_run_setup(
         pytest.param(True, True, False, id="root-mode"),
     ],
 )
-@patch("terok_sandbox.shield.system_hooks_dir")
-@patch("terok_sandbox.shield.ensure_containers_conf_hooks_dir")
-@patch("terok_sandbox.shield.setup_global_hooks")
+@patch("terok_sandbox.integrations.shield.system_hooks_dir")
+@patch("terok_sandbox.integrations.shield.ensure_containers_conf_hooks_dir")
+@patch("terok_sandbox.integrations.shield.setup_global_hooks")
 def test_setup_hooks_direct(
     mock_setup: MagicMock,
     mock_conf: MagicMock,
@@ -469,7 +469,7 @@ def test_run_uninstall(
     expected_calls: list[dict[str, bool]] | None,
 ) -> None:
     """``run_uninstall`` removes every scope the caller names; neither → ValueError."""
-    with patch("terok_sandbox.shield.uninstall_hooks_direct") as mock_direct:
+    with patch("terok_sandbox.integrations.shield.uninstall_hooks_direct") as mock_direct:
         if expected_calls is None:
             with pytest.raises(ValueError, match="root=True or user=True"):
                 run_uninstall(**kwargs)
@@ -505,7 +505,7 @@ def test_uninstall_hooks_direct_user_is_idempotent(tmp_path: Path) -> None:
 
 
 @patch("subprocess.run")
-@patch("terok_sandbox.shield.system_hooks_dir")
+@patch("terok_sandbox.integrations.shield.system_hooks_dir")
 def test_uninstall_hooks_direct_root_delegates_to_sudo(
     mock_system_dir: MagicMock, mock_run: MagicMock, tmp_path: Path
 ) -> None:

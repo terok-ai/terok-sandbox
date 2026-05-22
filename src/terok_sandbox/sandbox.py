@@ -390,9 +390,7 @@ class Sandbox:
         so shield picks the right dnsmasq bind for the krun guest's
         isolated loopback.
         """
-        from terok_shield import ShieldRuntime
-
-        from .shield import pre_start
+        from .integrations.shield import ShieldRuntime, pre_start
 
         return pre_start(
             container, task_dir, self._cfg, runtime=ShieldRuntime.from_runtime_name(runtime)
@@ -400,7 +398,7 @@ class Sandbox:
 
     def shield_down(self, container: str, task_dir: Path) -> None:
         """Remove shield rules for a container (allow all egress)."""
-        from .shield import down
+        from .integrations.shield import down
 
         down(container, task_dir, cfg=self._cfg)
 
@@ -442,16 +440,7 @@ class Sandbox:
             cmd += bypass_network_args(self._cfg.gate_port)
         else:
             try:
-                from terok_shield import ShieldRuntime
-
-                from .shield import pre_start
-
-                cmd += pre_start(
-                    spec.container_name,
-                    spec.task_dir,
-                    self._cfg,
-                    runtime=ShieldRuntime.from_runtime_name(spec.runtime),
-                )
+                cmd += self.pre_start_args(spec.container_name, spec.task_dir, runtime=spec.runtime)
             except SystemExit:
                 raise  # ShieldNeedsSetup; let the caller handle it
             except (OSError, FileNotFoundError) as exc:

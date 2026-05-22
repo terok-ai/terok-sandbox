@@ -64,7 +64,7 @@ def test_import_config():
 
 def test_import_shield():
     """Shield adapter module is importable."""
-    from terok_sandbox import shield
+    from terok_sandbox.integrations import shield
 
     assert callable(shield.make_shield)
     assert callable(shield.pre_start)
