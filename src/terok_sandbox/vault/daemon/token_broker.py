@@ -758,10 +758,11 @@ def _systemd_sockets() -> tuple[socket.socket | None, socket.socket | None]:
 
     Implements the ``sd_listen_fds(3)`` protocol.  The TCP-mode socket
     unit declares a single ``ListenStream=127.0.0.1:<port>`` entry and
-    systemd passes one TCP file descriptor (``LISTEN_FDS=1``); legacy
-    rendered units with the dual Unix+TCP listeners pass two
-    (``LISTEN_FDS=2``).  Each inherited FD is classified by socket
-    family so the daemon doesn't have to know the unit's exact shape.
+    systemd passes one TCP file descriptor (``LISTEN_FDS=1``); a
+    dual-listener unit shape with a Unix socket alongside the TCP one
+    is also accepted (``LISTEN_FDS=2``).  Each inherited FD is
+    classified by socket family so the daemon doesn't have to know
+    the unit's exact shape.
     """
     import os
 

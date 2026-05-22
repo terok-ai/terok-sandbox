@@ -604,19 +604,6 @@ class SandboxConfig:
         """Return the base directory for per-scope SSH keys."""
         return self.state_dir / "ssh-keys"
 
-    @property
-    def ssh_keys_json_path(self) -> Path:
-        """Return the path to the SSH key mapping JSON.
-
-        .. deprecated::
-            SSH keys are stored in [`db_path`][terok_sandbox.config.SandboxConfig.db_path] (table ``ssh_keys``) and
-            served via per-scope sockets at
-            [`ssh_signer_local_socket_path`][terok_sandbox.config.SandboxConfig.ssh_signer_local_socket_path].  This path is retained
-            only for transitional callers in sibling packages; new code
-            must not read or write it.
-        """
-        return self.vault_dir / "ssh-keys.json"
-
     def ssh_signer_local_socket_path(self, scope: str) -> Path:
         """Return the per-scope vault SSH-agent socket path for *scope*.
 

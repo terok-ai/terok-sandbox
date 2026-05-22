@@ -10,8 +10,8 @@ SQLCipher open / migrate primitives the rest of the package builds on.
 ``resolve_passphrase`` documents the chain order; ``open_sqlcipher``
 is the only entry point that ever calls ``sqlcipher3.connect``.
 
-The setup-time plaintext→SQLCipher migration (deprecated in 0.9.0,
-removed in 0.10.0) lives at the bottom of the file; nothing in the
+The setup-time plaintext→SQLCipher migration (deprecated in 0.8.0,
+removed in 0.9.0) lives at the bottom of the file; nothing in the
 runtime chain touches it.
 """
 
@@ -444,8 +444,8 @@ def generate_passphrase() -> str:
 # for users upgrading from pre-encryption releases.  Fresh installs
 # never enter this code — the DB is created encrypted on first write.
 #
-# Deprecated in 0.9.0 (warning surfaced at setup time).
-# Removed in 0.10.0 — after which any leftover plaintext DB stops
+# Deprecated in 0.8.0 (warning surfaced at setup time).
+# Removed in 0.9.0 — after which any leftover plaintext DB stops
 # being recognised and the operator must restore from the
 # ``.plaintext-backup-<stamp>.tar.gz`` snapshot or reinitialise.
 
@@ -489,10 +489,10 @@ def _unlink_sidecars(db_path: Path) -> None:
 def encrypt_in_place(db_path: Path, passphrase: str) -> None:
     """Convert plaintext *db_path* into a SQLCipher-encrypted DB.
 
-    Deprecated in 0.9.0; scheduled for removal in 0.10.0.  After
+    Deprecated in 0.8.0; scheduled for removal in 0.9.0.  After
     removal, this function and its CLI surface
     (``terok-sandbox credentials encrypt-db``) disappear — installs
-    older than 0.9.0 must migrate before upgrading past 0.10.0.
+    older than 0.8.0 must migrate before upgrading past 0.9.0.
 
     Atomic: a crash between export and rename leaves the original
     plaintext file untouched, so a re-run starts cleanly.
