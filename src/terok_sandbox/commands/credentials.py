@@ -11,8 +11,8 @@ daemon start — session mode self-describes via the tmpfs file's
 presence; keyring sets ``credentials.use_keyring=true``; config writes
 the passphrase itself into the file.
 
-The plaintext→encrypted migration is deprecated in 0.9.0 and slated
-for removal in 0.10.0.  After that release fresh installs stay the
+The plaintext→encrypted migration is deprecated in 0.8.0 and slated
+for removal in 0.9.0.  After that release fresh installs stay the
 only supported entry point; operators with a stale plaintext DB must
 restore from the ``.plaintext-backup-<stamp>.tar.gz`` snapshot this
 phase writes before re-keying.
@@ -134,6 +134,8 @@ def _handle_credentials_encrypt_db(
     — and writes a sidecar marker so the unconfirmed-recovery warning
     in the TUI / sickbay / doctor turns off.
     """
+    import warnings
+
     from ..vault.store.encryption import encrypt_in_place, is_plaintext_sqlite
 
     if cfg is None:
@@ -143,6 +145,13 @@ def _handle_credentials_encrypt_db(
     if db_path.exists() and not is_plaintext_sqlite(db_path):
         print(f"  {db_path} is already SQLCipher-encrypted.")
         return
+
+    warnings.warn(
+        "the plaintext→SQLCipher migration path is deprecated in 0.8.0 and "
+        "will be removed in 0.9.0; run this migration before upgrading past 0.8.x",
+        DeprecationWarning,
+        stacklevel=2,
+    )
 
     passphrase, source, auto_generated = _select_and_provision(
         cfg,
@@ -645,7 +654,7 @@ CREDENTIALS_COMMANDS: tuple[CommandDef, ...] = (
                 name="encrypt-db",
                 help=(
                     "Migrate a legacy plaintext credentials DB to SQLCipher-encrypted "
-                    "(deprecated in 0.9.0, removed in 0.10.0)"
+                    "(deprecated in 0.8.0, removed in 0.9.0)"
                 ),
                 handler=_handle_credentials_encrypt_db,
             ),

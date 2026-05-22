@@ -381,7 +381,7 @@ class VaultManager:
                 unit_file.unlink()
 
     def _sweep_orphan_units(self) -> None:
-        """Disable + remove proxy unit files from prior versions.
+        """Disable + remove proxy unit files we own that aren't in the current set.
 
         A unit file is considered ours (and eligible for removal) when
         its first line begins with `_OWNED_MARKER_PREFIX` — every
@@ -391,10 +391,9 @@ class VaultManager:
         Current-version files are skipped here and handled by the
         subsequent pass in `_remove_unit_files`.
 
-        This catches legacy filenames from previous releases — e.g. if
-        a future rename changes a unit's filename, the sweep cleans up
-        the old one on the next ``terok setup`` without a manual
-        uninstall step.
+        Preserves the contract that any future rename can rely on the
+        next ``terok setup`` to clean up the previous filename — the
+        marker is the cross-version ownership stamp, not the unit name.
         """
         unit_dir = self._systemd_unit_dir()
         if not unit_dir.is_dir():

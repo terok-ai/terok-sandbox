@@ -249,7 +249,9 @@ class CredentialDB:
             if _looks_like_plaintext_db(db_path):
                 raise PlaintextDBFoundError(
                     f"{db_path} is a legacy plaintext sqlite DB — run "
-                    "`terok-sandbox credentials encrypt-db` to migrate it"
+                    "`terok-sandbox credentials encrypt-db` to migrate it.\n"
+                    "  The migration path is deprecated in 0.8.0 and will be "
+                    "removed in 0.9.0; run it before upgrading past 0.8.x."
                 ) from exc
             raise WrongPassphraseError(
                 f"could not decrypt {db_path} — wrong passphrase, or the DB was"

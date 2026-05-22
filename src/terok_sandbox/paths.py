@@ -6,7 +6,8 @@
 
 Provides generic **namespace resolvers** that any sibling package can call
 to place its state/config/runtime under the shared ``terok/`` namespace,
-plus sandbox-specific thin wrappers for backward compatibility.
+plus sandbox-specific thin wrappers that bind sandbox's own subsystems
+(vault, gate, hooks) to those resolvers.
 """
 
 import getpass
