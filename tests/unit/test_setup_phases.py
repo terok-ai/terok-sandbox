@@ -552,7 +552,9 @@ class TestClearanceInstallPhase:
     def test_happy_path_installs_hub_and_notifier(self, capsys: pytest.CaptureFixture[str]) -> None:
         with (
             patch("terok_sandbox.integrations.clearance.install_service") as install_hub,
-            patch("terok_sandbox.integrations.clearance.install_notifier_service") as install_notifier,
+            patch(
+                "terok_sandbox.integrations.clearance.install_notifier_service"
+            ) as install_notifier,
             patch("terok_sandbox._setup._systemctl.run_best_effort"),
             patch("terok_sandbox._setup._enable_and_restart_user_unit"),
         ):

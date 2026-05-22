@@ -92,17 +92,35 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - name: Set up Python
+        id: setup-python
         uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
-      - name: Install tools
-        run: pip install -r .github/requirements-ci.txt
+      - name: Install Poetry
+        uses: snok/install-poetry@76e04a911780d5b312d89783f7b1cd627778900a # v1.4.1
+        with:
+          version: "2.4.1"
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+          plugins: poetry-dynamic-versioning[plugin]
+
+      - name: Load cached venv
+        id: cached-poetry-dependencies
+        uses: actions/cache@v5
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-lint-imports-${{ hashFiles('**/pyproject.toml', '**/poetry.lock') }}
+
+      - name: Install project
+        run: poetry install --with dev --no-interaction
 
       - name: Check cross-package import boundaries
-        run: lint-imports
+        run: poetry run lint-imports
 
   security:
     if: github.repository == 'terok-ai/terok-sandbox'
