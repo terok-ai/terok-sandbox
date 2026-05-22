@@ -3428,6 +3428,26 @@ type = "url"
 url = "https://github.com/terok-ai/terok-shield/releases/download/v0.6.42a5/terok_shield-0.6.42a5-py3-none-any.whl"
 
 [[package]]
+name = "terok-util"
+version = "0.0.0"
+description = "Shared utility library for the terok-* sibling packages"
+optional = false
+python-versions = ">=3.12,<4.0"
+groups = ["main"]
+files = []
+develop = false
+
+[package.dependencies]
+platformdirs = ">=4.9.6"
+"ruamel.yaml" = ">=0.18"
+
+[package.source]
+type = "git"
+url = "https://github.com/sliwowitz/terok-util.git"
+reference = "chore/initial-scaffold"
+resolved_reference = "0250710f55925e83b6176af6c2b31d8cc794a79c"
+
+[[package]]
 name = "tomli"
 version = "2.4.1"
 description = "A lil' TOML parser"
@@ -3825,4 +3845,4 @@ propcache = ">=0.2.1"
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<4.0"
-content-hash = "33e3e3e5c9dbe467ffeaf42afe72b498c3f506628f933d38b400f9bb3412850c"
+content-hash = "1062e752e7ca672a7bb6855dbb9ad13f6dc5ff616eb2b11467ed2a008c67e170"

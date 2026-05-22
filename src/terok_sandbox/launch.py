@@ -23,9 +23,10 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from terok_util import podman_userns_args
+
 from .config import CONTAINER_RUNTIME_DIR, SandboxConfig
 from .gate.tokens import TokenStore
-from .runtime.podman import podman_userns_args
 from .sandbox import Sharing, VolumeSpec
 
 # Container-side path where bridge resources are bind-mounted (runtime

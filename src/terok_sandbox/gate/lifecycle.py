@@ -245,9 +245,11 @@ class GateServerManager:
         Transport resolution happens once at ``SandboxConfig`` construction
         — callers can't smuggle a divergent mode past the config layer.
         """
+        from terok_util import render_template
+
         import terok_sandbox.gate
 
-        from .._util import render_template, systemd_exec_argv
+        from .._util import systemd_exec_argv
         from .tokens import TokenStore
 
         transport = self._cfg.services_mode

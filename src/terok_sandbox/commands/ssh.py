@@ -16,7 +16,8 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .._util import sanitize_tty
+from terok_util import sanitize_tty
+
 from ..config import SandboxConfig
 from ._types import ArgDef, CommandDef, KeyRow
 

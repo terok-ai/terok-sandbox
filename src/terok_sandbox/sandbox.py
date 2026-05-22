@@ -21,13 +21,14 @@ from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
+from terok_util import podman_userns_args
+
 from .config import SandboxConfig
 from .runtime import ContainerRuntime, PodmanRuntime
 from .runtime.podman import (
     bypass_network_args,
     check_gpu_error,
     gpu_run_args,
-    podman_userns_args,
     redact_env_args,
 )
 

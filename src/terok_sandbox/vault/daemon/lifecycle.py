@@ -316,8 +316,9 @@ class VaultManager:
                 "or pin ``vault.token_broker_port`` / ``vault.ssh_signer_port`` explicitly."
             )
 
+        from terok_util import render_template
+
         import terok_sandbox.vault
-        from terok_sandbox._util import render_template
 
         unit_dir = self._systemd_unit_dir()
         unit_dir.mkdir(parents=True, exist_ok=True)
@@ -434,7 +435,7 @@ class VaultManager:
         sock_path.parent.mkdir(parents=True, exist_ok=True)
         pidfile.parent.mkdir(parents=True, exist_ok=True)
 
-        from terok_sandbox._util import write_sensitive_file
+        from terok_util import write_sensitive_file
 
         if write_sensitive_file(routes_path, "{}\n"):
             import logging

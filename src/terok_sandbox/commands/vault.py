@@ -29,7 +29,8 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .._util import sanitize_tty
+from terok_util import sanitize_tty
+
 from .._yaml import update_section as _yaml_update_section
 from ..config import SandboxConfig
 from ._types import ArgDef, CommandDef

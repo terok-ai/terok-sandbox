@@ -35,8 +35,7 @@ from cryptography.hazmat.primitives.asymmetric.padding import PKCS1v15
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
 from cryptography.hazmat.primitives.hashes import SHA256, SHA512
 from cryptography.hazmat.primitives.serialization import load_der_private_key
-
-from terok_sandbox._util import sanitize_tty
+from terok_util import sanitize_tty
 
 from ..store.db import SSHKeyRecord
 

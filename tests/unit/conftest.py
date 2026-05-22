@@ -71,13 +71,11 @@ def _isolate_user_paths(
 @pytest.fixture(autouse=True)
 def _reset_config_caches() -> Iterator[None]:
     """Clear config caches between tests to prevent cross-test pollution."""
-    import terok_sandbox.paths as _paths
+    from terok_util.paths import _reset_config_caches_for_tests
 
-    _paths._config_section_cache.clear()
-    _paths._config_top_level_cache.clear()
+    _reset_config_caches_for_tests()
     yield
-    _paths._config_section_cache.clear()
-    _paths._config_top_level_cache.clear()
+    _reset_config_caches_for_tests()
 
 
 @pytest.fixture(autouse=True)

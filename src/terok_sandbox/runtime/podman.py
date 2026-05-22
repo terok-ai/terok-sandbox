@@ -38,19 +38,6 @@ from .protocol import (
     PortReservation,
 )
 
-# ── Argv helpers (used by Sandbox when assembling podman run) ─────────────
-
-
-def podman_userns_args() -> list[str]:
-    """Rootless user namespace mapping — host user maps to container UID 1000.
-
-    1000 is the conventional non-root ``dev`` user in terok images.
-    """
-    if os.geteuid() == 0:
-        return []
-    return ["--userns=keep-id:uid=1000,gid=1000"]
-
-
 _CDI_HINT = (
     "Hint: NVIDIA CDI configuration appears to be missing or broken.\n"
     "Ensure the NVIDIA Container Toolkit is installed and CDI is configured.\n"

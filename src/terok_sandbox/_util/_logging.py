@@ -84,7 +84,7 @@ class BestEffortLogger:
         terminal.  The file-side write is unsanitised so the log keeps
         the original bytes for forensic review.
         """
-        from ._sanitize import sanitize_tty
+        from terok_util import sanitize_tty
 
         try:
             print(

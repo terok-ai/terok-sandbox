@@ -33,19 +33,13 @@ path = "terok_sandbox._util"
 layer = "foundation"
 utility = true
 
-# Domain-agnostic layered config merge engine — zero internal deps
-[[modules]]
-path = "terok_sandbox.config_stack"
-layer = "foundation"
-depends_on = []
-
-# Platform-aware path resolution — uses config_stack for layered config merge
+# Platform-aware path resolution — generic resolvers + layered-config
+# readers live in terok-util; this module wraps them with sandbox-specific
+# binders (vault_root, runtime_root, …).
 [[modules]]
 path = "terok_sandbox.paths"
 layer = "foundation"
-depends_on = [
-    "terok_sandbox.config_stack",
-]
+depends_on = []
 
 # Shared port registry — depends on paths for configurable registry dir
 [[modules]]
