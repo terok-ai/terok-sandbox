@@ -223,7 +223,15 @@ def test_shield_functions_delegate_to_per_task_shield(
 
     result = func("my-container", MOCK_TASK_DIR)
 
-    mock_make.assert_called_once_with(MOCK_TASK_DIR, None)
+    # pre_start threads a ``runtime=`` kwarg through to ``make_shield`` so the
+    # OCI hook can pick the dnsmasq bind for crun vs krun.  Other wrappers
+    # don't carry runtime — they operate on already-running containers.
+    if method_name == "pre_start":
+        from terok_shield import ShieldRuntime
+
+        mock_make.assert_called_once_with(MOCK_TASK_DIR, None, runtime=ShieldRuntime.DEFAULT)
+    else:
+        mock_make.assert_called_once_with(MOCK_TASK_DIR, None)
     if method_name == "down":
         getattr(mock_shield, method_name).assert_called_once_with("my-container", allow_all=False)
     else:

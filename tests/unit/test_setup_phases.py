@@ -49,6 +49,7 @@ def bare_cfg() -> SandboxConfig:
     mock = MagicMock(spec=SandboxConfig)
     mock.with_resolved_ports.return_value = mock
     mock.services_mode = "socket"
+    mock.experimental = False
     return mock
 
 
@@ -190,6 +191,55 @@ class TestPrereqReport:
             run_prereq_report(bare_cfg)
         out = capsys.readouterr().out
         assert "dnsmasq" in out and "MISSING" in out and "DNS resolver" in out
+
+    def test_krun_binaries_skipped_when_experimental_off(
+        self,
+        bare_cfg: SandboxConfig,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Default operators (experimental off) don't see a krun probe row.
+
+        Reporting ``ip`` as missing would be confusing noise for the 99%
+        of users who never touch the krun runtime.
+        """
+        bare_cfg.experimental = False
+        monkeypatch.setattr("terok_sandbox._setup.shutil.which", lambda _n: None)
+        with (
+            patch("terok_shield.check_firewall_binaries", return_value=()),
+            patch("terok_shield.check_krun_binaries") as krun_probe,
+            patch(
+                "terok_sandbox._setup.check_selinux_status",
+                return_value=MagicMock(status=SelinuxStatus.NOT_APPLICABLE_TCP_MODE),
+            ),
+        ):
+            run_prereq_report(bare_cfg)
+        krun_probe.assert_not_called()
+        assert "ip" not in capsys.readouterr().out.split()
+
+    def test_krun_binaries_reported_when_experimental_on(
+        self,
+        bare_cfg: SandboxConfig,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``experimental: true`` in the config flips the krun probe on."""
+        bare_cfg.experimental = True
+        monkeypatch.setattr("terok_sandbox._setup.shutil.which", lambda _n: None)
+        ip_check = MagicMock(path="/sbin/ip", purpose="krun in-netns IP", ok=True)
+        ip_check.name = "ip"
+        with (
+            patch("terok_shield.check_firewall_binaries", return_value=()),
+            patch("terok_shield.check_krun_binaries", return_value=(ip_check,)),
+            patch(
+                "terok_sandbox._setup.check_selinux_status",
+                return_value=MagicMock(status=SelinuxStatus.NOT_APPLICABLE_TCP_MODE),
+            ),
+        ):
+            run_prereq_report(bare_cfg)
+        out = capsys.readouterr().out
+        assert "ip" in out
+        assert "/sbin/ip" in out
 
 
 # ── Shield install phase ─────────────────────────────────────────────

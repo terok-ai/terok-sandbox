@@ -19,6 +19,7 @@ from terok_sandbox.paths import (
     namespace_config_root,
     namespace_runtime_dir,
     namespace_state_dir,
+    read_config_top_level,
     runtime_root,
     state_root,
     vault_root,
@@ -589,3 +590,76 @@ class TestPlaintextPassphraseConfigPath:
             lambda: [("system", broken), ("user", good)],
         )
         assert plaintext_passphrase_config_path() == good
+
+
+class TestReadConfigTopLevel:
+    """Tests for ``read_config_top_level`` — counterpart to
+    ``read_config_section`` for top-level scalar/list keys."""
+
+    def test_returns_top_level_scalar(self, tmp_path: Path) -> None:
+        """A top-level boolean is returned with its native type, not stringified."""
+        cfg = tmp_path / "config.yml"
+        cfg.write_text("experimental: true\n", encoding="utf-8")
+        with unittest.mock.patch.object(
+            _paths_mod, "_config_file_paths", return_value=[("user", cfg)]
+        ):
+            assert read_config_top_level("experimental") is True
+
+    def test_returns_none_when_key_absent(self, tmp_path: Path) -> None:
+        """Missing top-level key → ``None`` (cached)."""
+        cfg = tmp_path / "config.yml"
+        cfg.write_text("paths:\n  root: /opt/terok\n", encoding="utf-8")
+        with unittest.mock.patch.object(
+            _paths_mod, "_config_file_paths", return_value=[("user", cfg)]
+        ):
+            assert read_config_top_level("missing_key") is None
+
+    def test_user_overrides_system(self, tmp_path: Path) -> None:
+        """User scope wins at the leaf level for top-level keys too."""
+        sys_cfg = tmp_path / "system.yml"
+        usr_cfg = tmp_path / "user.yml"
+        sys_cfg.write_text("experimental: false\n", encoding="utf-8")
+        usr_cfg.write_text("experimental: true\n", encoding="utf-8")
+        with unittest.mock.patch.object(
+            _paths_mod,
+            "_config_file_paths",
+            return_value=[("system", sys_cfg), ("user", usr_cfg)],
+        ):
+            assert read_config_top_level("experimental") is True
+
+    def test_cache_hit_skips_io(self, tmp_path: Path) -> None:
+        """Second call for the same key never re-reads the YAML files.
+
+        Matters because ``SandboxConfig`` builds many instances per
+        process via its default-factory chain — uncached, each one
+        would re-parse both system and user configs.
+        """
+        cfg = tmp_path / "config.yml"
+        cfg.write_text("experimental: true\n", encoding="utf-8")
+        call_count = 0
+
+        def _counting_paths() -> list[tuple[str, Path]]:
+            nonlocal call_count
+            call_count += 1
+            return [("user", cfg)]
+
+        with unittest.mock.patch.object(
+            _paths_mod, "_config_file_paths", side_effect=_counting_paths
+        ):
+            assert read_config_top_level("experimental") is True
+            assert read_config_top_level("experimental") is True
+        # First call hits I/O, second one returns from ``_config_top_level_cache``.
+        assert call_count == 1
+
+    def test_fails_silent_on_malformed_yaml(self, tmp_path: Path) -> None:
+        """A broken YAML scope collapses to ``None`` rather than crashing.
+
+        Field default factories must never raise — they run during
+        ``SandboxConfig()`` construction, which would block startup.
+        """
+        cfg = tmp_path / "config.yml"
+        cfg.write_text(": : : not valid yaml\n", encoding="utf-8")
+        with unittest.mock.patch.object(
+            _paths_mod, "_config_file_paths", return_value=[("user", cfg)]
+        ):
+            assert read_config_top_level("experimental") is None

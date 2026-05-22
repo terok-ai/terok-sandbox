@@ -43,6 +43,7 @@ def _is_root() -> bool:
 # ---------------------------------------------------------------------------
 
 _config_section_cache: dict[str, dict[str, str]] = {}
+_config_top_level_cache: dict[str, object | None] = {}
 
 
 def _config_file_paths() -> list[tuple[str, Path]]:
@@ -89,6 +90,31 @@ def read_config_section(section: str) -> dict[str, str]:
     except Exception:  # noqa: BLE001 — fail-silent; bad config should not crash path resolution  # nosec B110 — best-effort probe; failure is non-fatal
         pass
     _config_section_cache[section] = result
+    return result
+
+
+def read_config_top_level(key: str) -> object | None:
+    """Read a top-level scalar/list from the layered config (cached, fail-silent).
+
+    Counterpart to [`read_config_section`][terok_sandbox.paths.read_config_section]
+    for keys whose value isn't a dict — e.g. the ecosystem-wide
+    ``experimental: true`` opt-in.  Returns the merged value or
+    ``None`` when the key is absent or the config files can't be loaded.
+    """
+    if key in _config_top_level_cache:
+        return _config_top_level_cache[key]
+
+    result: object | None = None
+    try:
+        from .config_stack import ConfigStack, load_yaml_scope
+
+        stack = ConfigStack()
+        for label, path in _config_file_paths():
+            stack.push(load_yaml_scope(label, path))
+        result = stack.resolve().get(key)
+    except Exception:  # noqa: BLE001 — fail-silent; bad config should not crash field resolution  # nosec B110 — best-effort probe; failure is non-fatal
+        pass
+    _config_top_level_cache[key] = result
     return result
 
 

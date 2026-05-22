@@ -110,3 +110,60 @@ class TestSocketModeSkipsPortResolution:
             resolved = cfg.with_resolved_ports()
         resolve.assert_not_called()
         assert resolved is cfg
+
+
+class TestExperimentalEnabled:
+    """Tests for ``experimental_enabled`` — the top-level opt-in reader.
+
+    Gates the krun runtime in terok and ``check_krun_binaries`` in
+    sandbox's prereq report.  Single declaration on
+    ``SandboxConfigView``; the reader walks the layered config and
+    coerces defensively.
+    """
+
+    def test_returns_true_when_set(self) -> None:
+        """``experimental: true`` in config.yml flips the bit on."""
+        from terok_sandbox.config import experimental_enabled
+
+        with unittest.mock.patch("terok_sandbox.config.read_config_top_level", return_value=True):
+            assert experimental_enabled() is True
+
+    def test_returns_false_when_unset(self) -> None:
+        """Missing top-level key collapses to ``False`` (the safe default)."""
+        from terok_sandbox.config import experimental_enabled
+
+        with unittest.mock.patch("terok_sandbox.config.read_config_top_level", return_value=None):
+            assert experimental_enabled() is False
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            pytest.param("true", id="string-true"),
+            pytest.param(1, id="int-one"),
+            pytest.param([True], id="list"),
+            pytest.param({"nested": True}, id="dict"),
+        ],
+    )
+    def test_returns_false_for_non_bool_values(self, raw: object) -> None:
+        """A malformed value (string, int, list, dict) falls through to ``False``.
+
+        Defensive against operators who write ``experimental: "yes"``
+        thinking YAML coerces; never crash, never accidentally enable
+        an experimental code path on a typo.
+        """
+        from terok_sandbox.config import experimental_enabled
+
+        with unittest.mock.patch("terok_sandbox.config.read_config_top_level", return_value=raw):
+            assert experimental_enabled() is False
+
+    def test_sandbox_config_picks_up_value(self) -> None:
+        """``SandboxConfig().experimental`` flows through the default-factory."""
+        with unittest.mock.patch("terok_sandbox.config.experimental_enabled", return_value=True):
+            cfg = SandboxConfig()
+        assert cfg.experimental is True
+
+    def test_explicit_override_wins(self) -> None:
+        """``SandboxConfig(experimental=False)`` overrides the config-derived value."""
+        with unittest.mock.patch("terok_sandbox.config.experimental_enabled", return_value=True):
+            cfg = SandboxConfig(experimental=False)
+        assert cfg.experimental is False

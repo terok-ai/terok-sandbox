@@ -380,11 +380,23 @@ class Sandbox:
 
     # -- Shield -------------------------------------------------------------
 
-    def pre_start_args(self, container: str, task_dir: Path) -> list[str]:
-        """Return extra podman args for shield integration."""
+    def pre_start_args(
+        self, container: str, task_dir: Path, *, runtime: str | None = None
+    ) -> list[str]:
+        """Return extra podman args for shield integration.
+
+        *runtime* is the podman ``--runtime`` selector — passed to
+        [`ShieldRuntime.from_runtime_name`][terok_shield.ShieldRuntime.from_runtime_name]
+        so shield picks the right dnsmasq bind for the krun guest's
+        isolated loopback.
+        """
+        from terok_shield import ShieldRuntime
+
         from .shield import pre_start
 
-        return pre_start(container, task_dir, self._cfg)
+        return pre_start(
+            container, task_dir, self._cfg, runtime=ShieldRuntime.from_runtime_name(runtime)
+        )
 
     def shield_down(self, container: str, task_dir: Path) -> None:
         """Remove shield rules for a container (allow all egress)."""
@@ -430,9 +442,16 @@ class Sandbox:
             cmd += bypass_network_args(self._cfg.gate_port)
         else:
             try:
+                from terok_shield import ShieldRuntime
+
                 from .shield import pre_start
 
-                cmd += pre_start(spec.container_name, spec.task_dir, self._cfg)
+                cmd += pre_start(
+                    spec.container_name,
+                    spec.task_dir,
+                    self._cfg,
+                    runtime=ShieldRuntime.from_runtime_name(spec.runtime),
+                )
             except SystemExit:
                 raise  # ShieldNeedsSetup; let the caller handle it
             except (OSError, FileNotFoundError) as exc:

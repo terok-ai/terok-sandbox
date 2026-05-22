@@ -28,7 +28,7 @@ from __future__ import annotations
 import contextlib
 import shutil
 from collections.abc import Callable, Iterable
-from typing import Any
+from typing import Any, Protocol
 
 from ._exit_codes import EXIT_MANUAL_STEP_NEEDED
 from ._stage import stage_line as _stage_line
@@ -45,6 +45,21 @@ from ._util._selinux import (
 __all__ = ["EXIT_MANUAL_STEP_NEEDED"]
 from .config import SandboxConfig
 
+
+class _BinaryCheckLike(Protocol):
+    """Structural shape of [`terok_shield.BinaryCheck`][terok_shield.BinaryCheck].
+
+    Decouples the renderer from shield's lazy ``__getattr__``-typed
+    surface: mypy sees a real Protocol with attribute types instead of
+    the ``object`` placeholder shield returns to type checkers.
+    """
+
+    name: str
+    ok: bool
+    path: str
+    purpose: str
+
+
 _HOST_BINARIES: tuple[str, ...] = ("podman", "git", "ssh-keygen")
 
 
@@ -58,10 +73,13 @@ def run_prereq_report(cfg: SandboxConfig) -> SelinuxCheckResult:
     re-surface the install hint at the end of output — sandbox#854's
     fix for the install command getting buried mid-output.  Purely
     informational for the binary checks; never blocks on those.
+    ``cfg.experimental`` gates the krun-only probes (currently ``ip``).
     """
     print("Prerequisites:")
     _report_host_binaries()
     _report_firewall_binaries()
+    if cfg.experimental:
+        _report_krun_binaries()
     return _report_selinux(cfg)
 
 
@@ -75,21 +93,36 @@ def _report_host_binaries() -> None:
                 s.missing("not on PATH")
 
 
-def _report_firewall_binaries() -> None:
-    """Delegate the nft / dnsmasq / dig probes to terok-shield's own list."""
-    # Top-level ``terok_shield`` namespace import (not ``.prereqs``) so the
-    # test patch ``terok_shield.check_firewall_binaries`` still hits the
-    # name we look up.  The lazy ``__getattr__`` returns ``object`` to
-    # type-checkers — ``[operator]`` silences the resulting callable
-    # warning.
-    from terok_shield import check_firewall_binaries
+def _report_binary_checks(probe: Callable[[], Iterable[_BinaryCheckLike]]) -> None:
+    """Render one stage line per [`BinaryCheck`][terok_shield.BinaryCheck] *probe* returns.
 
-    for check in check_firewall_binaries():  # type: ignore[operator]
+    *probe* is one of shield's prereq probes (``check_firewall_binaries``,
+    ``check_krun_binaries``).  Top-level ``terok_shield`` namespace
+    lookups in callers stay patchable from tests via
+    ``terok_shield.check_<name>``.
+    """
+    for check in probe():
         with _stage_line(check.name) as s:
             if check.ok:
                 s.ok(check.path)
             else:
                 s.missing(check.purpose)
+
+
+def _report_firewall_binaries() -> None:
+    # Top-level ``terok_shield`` namespace import (not ``.prereqs``) so the
+    # test patch ``terok_shield.check_firewall_binaries`` still hits the name
+    # we look up.  The lazy ``__getattr__`` on that module returns ``object``
+    # to type-checkers, so a cast is needed to bind the typed Protocol.
+    from terok_shield import check_firewall_binaries
+
+    _report_binary_checks(check_firewall_binaries)  # type: ignore[arg-type]
+
+
+def _report_krun_binaries() -> None:
+    from terok_shield import check_krun_binaries
+
+    _report_binary_checks(check_krun_binaries)  # type: ignore[arg-type]
 
 
 def _report_selinux(cfg: SandboxConfig) -> SelinuxCheckResult:
