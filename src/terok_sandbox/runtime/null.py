@@ -264,11 +264,11 @@ class NullRuntime:
         self._container_rw_sizes[name] = bytes_
 
     def set_exit_code(self, name: str, code: int) -> None:
-        """Record the exit code [`Container.wait`][terok_sandbox.Container.wait] will return for *name*."""
+        """Record the exit code [`Container.wait`][terok_sandbox.runtime.Container.wait] will return for *name*."""
         self._container_exit_codes[name] = code
 
     def set_ready_result(self, name: str, ready: bool) -> None:
-        """Record the outcome [`Container.stream_initial_logs`][terok_sandbox.Container.stream_initial_logs] returns."""
+        """Record the outcome [`Container.stream_initial_logs`][terok_sandbox.runtime.Container.stream_initial_logs] returns."""
         self._ready_results[name] = ready
 
     def add_image(

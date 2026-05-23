@@ -65,13 +65,13 @@ _PALETTE: dict[Marker, str | None] = {
 def stage(label: str, marker: Marker, detail: str = "") -> None:
     """Write one complete stage line: ``'  <label>  <marker>[ (<detail>)]'``.
 
-    Matches [`stage_begin`][terok_sandbox.stage_begin] + [`stage_end`][terok_sandbox.stage_end] when the caller
+    Matches [`stage_begin`][terok_sandbox._stage.stage_begin] + [`stage_end`][terok_sandbox._stage.stage_end] when the caller
     doesn't need progressive output.  The marker is ANSI-coloured
     according to `_PALETTE` when colour is enabled.
 
     Multi-line *detail* is split: only the first line lands inside the
     parentheses; remaining lines are emitted as an indented
-    continuation block underneath.  See [`stage_end`][terok_sandbox.stage_end] for the
+    continuation block underneath.  See [`stage_end`][terok_sandbox._stage.stage_end] for the
     rationale (callers passing a multi-line exception ``str()``).
     """
     head, tail = _split_detail(detail)
@@ -83,7 +83,7 @@ def stage(label: str, marker: Marker, detail: str = "") -> None:
 def stage_begin(label: str) -> None:
     """Write the label column and flush — no newline, no marker.
 
-    Pairs with [`stage_end`][terok_sandbox.stage_end].  Use when the phase takes long enough
+    Pairs with [`stage_end`][terok_sandbox._stage.stage_end].  Use when the phase takes long enough
     that the operator benefits from seeing *which* step is running
     before the marker lands.  Without this, a slow
     ``systemctl --user restart`` looks like a frozen terminal.
@@ -94,8 +94,8 @@ def stage_begin(label: str) -> None:
 def stage_end(marker: Marker, detail: str = "") -> None:
     """Write the marker and optional detail with trailing newline.
 
-    The sibling of [`stage_begin`][terok_sandbox.stage_begin]; together they render the same
-    line [`stage`][terok_sandbox.stage] would.
+    The sibling of [`stage_begin`][terok_sandbox._stage.stage_begin]; together they render the same
+    line [`stage`][terok_sandbox._stage.stage] would.
 
     Multi-line *detail* is split: only the first line lands inside the
     parentheses on the marker line; the remainder is emitted as an
@@ -114,7 +114,7 @@ def stage_end(marker: Marker, detail: str = "") -> None:
 class StageLine:
     """Context-managed progressive stage line.
 
-    Couples [`stage_begin`][terok_sandbox.stage_begin] and [`stage_end`][terok_sandbox.stage_end] at one call site
+    Couples [`stage_begin`][terok_sandbox._stage.stage_begin] and [`stage_end`][terok_sandbox._stage.stage_end] at one call site
     so the begin/end pairing is structurally visible — a missing or
     misplaced ``end`` becomes impossible rather than a bug waiting to
     happen.
@@ -125,8 +125,8 @@ class StageLine:
             do_work()  # slow; label shows immediately
             s.ok("systemd, socket, reachable")  # marker + detail
 
-    Set the marker via [`ok`][terok_sandbox.ExecResult.ok], [`warn`][terok_sandbox.StageLine.warn], [`fail`][terok_sandbox.StageLine.fail],
-    [`missing`][terok_sandbox.StageLine.missing], or [`skip`][terok_sandbox.StageLine.skip]; only the most recent call wins
+    Set the marker via [`ok`][terok_sandbox.ExecResult.ok], [`warn`][terok_sandbox._stage.StageLine.warn], [`fail`][terok_sandbox._stage.StageLine.fail],
+    [`missing`][terok_sandbox._stage.StageLine.missing], or [`skip`][terok_sandbox._stage.StageLine.skip]; only the most recent call wins
     (the single-line output has room for one marker).  The caller can
     ``return`` early — the context manager's ``__exit__`` still runs
     and emits whatever marker was last set.
@@ -139,7 +139,7 @@ class StageLine:
     raise; without this precedence rule the log would misleadingly
     read ``ok`` while the actual run failed.  Callers that want their
     own message in the log should catch the exception, call
-    [`fail`][terok_sandbox.StageLine.fail] with the wanted detail, and return normally — that
+    [`fail`][terok_sandbox._stage.StageLine.fail] with the wanted detail, and return normally — that
     path emits the caller's message with no exception to contend with.
     A block that exits with no marker set *and* no exception is a
     caller bug; the line is completed as ``FAIL (no marker set)`` to
@@ -194,7 +194,7 @@ class StageLine:
 
 
 def stage_line(label: str) -> StageLine:
-    """Return a [`StageLine`][terok_sandbox.StageLine] context manager for progressive rendering.
+    """Return a [`StageLine`][terok_sandbox._stage.StageLine] context manager for progressive rendering.
 
     Thin factory so the call site reads ``with stage_line("Vault") as
     s:`` rather than the class name.
@@ -216,7 +216,7 @@ def supports_color() -> bool:
 
 
 def bold(text: str) -> str:
-    """Return *text* wrapped in ANSI bold when [`supports_color`][terok_sandbox.supports_color] is true."""
+    """Return *text* wrapped in ANSI bold when [`supports_color`][terok_sandbox._stage.supports_color] is true."""
     return _color(text, "1")
 
 

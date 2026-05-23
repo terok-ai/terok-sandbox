@@ -1,31 +1,33 @@
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""Pin the public API for the sandbox-wide install/uninstall aggregators.
+"""Pin the public API for the sandbox-wide uninstall aggregator.
 
-External consumers (``terok``, ``terok-executor``) should reach the
-aggregators through the stable unprefixed names ``sandbox_setup`` /
-``sandbox_uninstall`` on the package root, not through the
-``commands._handle_*`` implementation symbols.  This test makes sure
-the two sets stay identity-linked so a renamed implementation can't
-silently leave the public names pointing at stale callables.
+External consumers (``terok``, ``terok-executor``) reach the
+sandbox-wide install/uninstall aggregators in two shapes:
+
+- ``sandbox_uninstall`` is published on the package root for the
+  ``terok`` CLI's ``uninstall`` command, which calls it directly.
+- The corresponding setup verb (``_handle_sandbox_setup``) is imported
+  by ``terok-executor`` from ``terok_sandbox.commands`` via its
+  integrations adapter — no top-level alias is published for it.
+
+This test fixes the identity link between the top-level
+``sandbox_uninstall`` and the implementation handler so a renamed
+implementation can't silently leave the public name pointing at a
+stale callable.
 """
 
 from __future__ import annotations
 
 import terok_sandbox
-from terok_sandbox.commands import _handle_sandbox_setup, _handle_sandbox_uninstall
-
-
-def test_sandbox_setup_is_public_alias_of_aggregator() -> None:
-    assert terok_sandbox.sandbox_setup is _handle_sandbox_setup
+from terok_sandbox.commands import _handle_sandbox_uninstall
 
 
 def test_sandbox_uninstall_is_public_alias_of_aggregator() -> None:
     assert terok_sandbox.sandbox_uninstall is _handle_sandbox_uninstall
 
 
-def test_aggregators_are_in_all() -> None:
-    """Listing in ``__all__`` — the contract ``from terok_sandbox import *`` promises."""
-    assert "sandbox_setup" in terok_sandbox.__all__
+def test_sandbox_uninstall_listed_in_all() -> None:
+    """``__all__`` lists ``sandbox_uninstall`` — pins the star-import contract."""
     assert "sandbox_uninstall" in terok_sandbox.__all__

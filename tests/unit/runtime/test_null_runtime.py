@@ -7,13 +7,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from terok_sandbox import (
-    Container,
-    ContainerRuntime,
-    ExecResult,
-    Image,
-    NullRuntime,
-)
+from terok_sandbox import ContainerRuntime, ExecResult, Image, NullRuntime
+from terok_sandbox.runtime import Container
 
 
 class TestNullRuntimeProtocolConformance:

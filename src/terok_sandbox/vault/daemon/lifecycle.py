@@ -39,7 +39,7 @@ from ..store.encryption import (
     PassphraseSource,
     WrongPassphraseError,
 )
-from .constants import HEALTH_PATH as _HEALTH_PATH
+from . import HEALTH_PATH as _HEALTH_PATH
 from .status import VaultStatus, VaultUnreachableError
 
 # ---------- Constants ----------

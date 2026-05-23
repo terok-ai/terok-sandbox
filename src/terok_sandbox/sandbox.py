@@ -615,7 +615,7 @@ class Sandbox:
     def stop(self, containers: list[str]) -> list[ContainerRemoveResult]:
         """Best-effort stop and remove *containers*.
 
-        Returns one [`ContainerRemoveResult`][terok_sandbox.ContainerRemoveResult] per entry.
+        Returns one [`ContainerRemoveResult`][terok_sandbox.runtime.ContainerRemoveResult] per entry.
         """
         handles = [self._runtime.container(name) for name in containers]
         return self._runtime.force_remove(handles)

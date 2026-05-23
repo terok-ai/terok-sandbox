@@ -10,7 +10,8 @@ from unittest.mock import patch
 
 import pytest
 
-from terok_sandbox import ContainerRemoveResult, PodmanRuntime
+from terok_sandbox import PodmanRuntime
+from terok_sandbox.runtime import ContainerRemoveResult
 
 
 class TestContainerRemoveResult:

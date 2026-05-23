@@ -263,7 +263,7 @@ def _make_plaintext_passphrase_warning_check() -> DoctorCheck:
 
 def _make_token_broker_check(token_broker_port: int) -> DoctorCheck:
     """Check that the token broker is reachable from inside the container."""
-    from .vault.daemon.constants import HEALTH_PATH
+    from .vault.daemon import HEALTH_PATH
 
     url = f"http://host.containers.internal:{token_broker_port}{HEALTH_PATH}"
 

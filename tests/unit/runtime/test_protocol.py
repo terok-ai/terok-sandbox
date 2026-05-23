@@ -7,15 +7,8 @@ from __future__ import annotations
 
 import pytest
 
-from terok_sandbox import (
-    Container,
-    ContainerRemoveResult,
-    ContainerRuntime,
-    ExecResult,
-    Image,
-    NullRuntime,
-    PodmanRuntime,
-)
+from terok_sandbox import ContainerRuntime, ExecResult, Image, NullRuntime, PodmanRuntime
+from terok_sandbox.runtime import Container, ContainerRemoveResult
 
 
 class TestExecResult:
