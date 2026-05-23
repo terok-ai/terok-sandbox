@@ -7,7 +7,6 @@
 from terok_util import (
     ensure_dir,
     ensure_dir_writable,
-    render_template,
     sanitize_tty,
     write_sensitive_file,
 )
@@ -26,7 +25,6 @@ __all__ = [
     "log_debug",
     "log_warning",
     "read_pidfile_safely",
-    "render_template",
     "sanitize_tty",
     "systemd_escape",
     "systemd_exec_argv",

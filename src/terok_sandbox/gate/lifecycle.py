@@ -245,7 +245,7 @@ class GateServerManager:
         Transport resolution happens once at ``SandboxConfig`` construction
         — callers can't smuggle a divergent mode past the config layer.
         """
-        from terok_util import render_template
+        import jinja2
 
         import terok_sandbox.gate
 
@@ -268,6 +268,16 @@ class GateServerManager:
         unit_dir.mkdir(parents=True, exist_ok=True)
 
         resource_dir = Path(terok_sandbox.gate.__file__).resolve().parent / "resources" / "systemd"
+        # ``StrictUndefined`` upgrades silent ``{{TYPO}}`` to a hard
+        # error; ``autoescape=False`` because systemd unit syntax has
+        # nothing to do with HTML and any escaping would corrupt
+        # paths / command lines.
+        jenv = jinja2.Environment(  # noqa: S701 — see comment above
+            loader=jinja2.FileSystemLoader(str(resource_dir)),
+            keep_trailing_newline=True,
+            undefined=jinja2.StrictUndefined,
+            autoescape=False,
+        )
         variables = {
             "PORT": str(self._cfg.gate_port),
             "SOCKET_PATH": str(self._cfg.gate_socket_path),
@@ -289,10 +299,9 @@ class GateServerManager:
             enable_unit = _SOCKET_UNIT
 
         for template_name in templates:
-            template_path = resource_dir / template_name
-            if not template_path.is_file():
-                raise SystemExit(f"Missing systemd template: {template_path}")
-            content = render_template(template_path, variables)
+            if not (resource_dir / template_name).is_file():
+                raise SystemExit(f"Missing systemd template: {resource_dir / template_name}")
+            content = jenv.get_template(template_name).render(**variables)
             (unit_dir / template_name).write_text(content, encoding="utf-8")
 
         # Capture the "Created symlink ..." notice — otherwise it interleaves

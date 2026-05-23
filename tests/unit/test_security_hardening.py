@@ -3,9 +3,8 @@
 
 """Tests for sandbox-specific security hardening.
 
-The strict ``render_template`` validation and the
-``write_sensitive_file`` 0o600 behaviour are exercised in
-``terok-util``'s own test suite — they live there now.  The
+The ``write_sensitive_file`` 0o600 behaviour is exercised in
+``terok-util``'s own test suite — it lives there now.  The
 ``systemd_user_unit_dir`` helper stays in sandbox because the
 user-systemd story is a sandbox concern.
 """

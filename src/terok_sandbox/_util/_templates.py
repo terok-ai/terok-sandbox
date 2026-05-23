@@ -2,15 +2,12 @@
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""Sandbox-specific template helpers.
+"""Sandbox-specific template helpers — systemd argv escaping.
 
-The strict ``{{VAR}}`` renderer lives in
-[`terok_util.templates`][terok_util.templates]; sandbox's
-``_util/__init__.py`` re-exports it so the existing
-``from .._util import render_template`` callsites keep working.
-Only the systemd argv-escape helpers stay in this module — they're
-sandbox-specific (unit-file ``ExecStart=`` quoting) and are not shared
-with the other terok packages.
+Unit-file rendering uses Jinja2 directly at each callsite (``gate``,
+``vault.daemon``); only the ``ExecStart=`` argv-quoting helpers live
+here.  They're sandbox-specific (systemd has a quoting dialect that
+diverges from POSIX shell where ``shlex.join`` lives).
 """
 
 from collections.abc import Iterable
