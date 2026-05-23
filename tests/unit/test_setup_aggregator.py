@@ -375,6 +375,7 @@ class TestAggregatorSocketMode:
         assert cfg.token_broker_port is None and cfg.ssh_signer_port is None
 
         with (
+            patch.object(VaultManager, "is_systemd_available", return_value=True),
             patch.object(VaultManager, "stop_daemon"),
             patch.object(VaultManager, "uninstall_systemd_units"),
             patch.object(VaultManager, "install_systemd_units") as install,
