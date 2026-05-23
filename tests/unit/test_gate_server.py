@@ -309,6 +309,31 @@ class TestInstallUninstall:
             )
 
     @unittest.mock.patch("subprocess.run")
+    def test_install_raises_when_template_missing(self, mock_run: unittest.mock.Mock) -> None:
+        """A missing systemd template surfaces as a ``SystemExit`` with the path.
+
+        Guards the rare-but-real case where a partial install / corrupt
+        wheel leaves the bundled resources directory without
+        ``terok-gate.socket`` — without this branch, Jinja2's
+        ``TemplateNotFound`` would surface as a generic stack trace
+        instead of the named-path error the operator needs.
+        """
+        from types import SimpleNamespace
+
+        mock_run.return_value = make_run_result(returncode=0)
+        with tempfile.TemporaryDirectory() as td:
+            unit_dir = Path(td) / "systemd" / "user"
+            empty_pkg = Path(td) / "empty-gate-pkg"
+            (empty_pkg / "resources" / "systemd").mkdir(parents=True)
+            fake_gate = SimpleNamespace(__file__=str(empty_pkg / "__init__.py"))
+            with (
+                patched_install_env(unit_dir),
+                unittest.mock.patch.dict("sys.modules", {"terok_sandbox.gate": fake_gate}),
+                pytest.raises(SystemExit, match="Missing systemd template"),
+            ):
+                GateServerManager().install_systemd_units()
+
+    @unittest.mock.patch("subprocess.run")
     def test_uninstall_removes_files(self, mock_run: unittest.mock.Mock) -> None:
         mock_run.return_value = make_run_result(returncode=0)
         with patched_unit_dir(unit_file_contents()):

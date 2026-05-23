@@ -3,12 +3,18 @@
 
 """Vendored utility functions for filesystem, templates, logging, naming, and sanitization."""
 
-from ._fs import ensure_dir, ensure_dir_writable, systemd_user_unit_dir, write_sensitive_file
+from terok_util import (
+    ensure_dir,
+    ensure_dir_writable,
+    sanitize_tty,
+    write_sensitive_file,
+)
+
+from ._fs import systemd_user_unit_dir
 from ._logging import BestEffortLogger, log_debug, log_warning, warn_user
 from ._naming import effective_ssh_key_name
 from ._pidfile import read_pidfile_safely, unlink_pidfile_safely
-from ._sanitize import sanitize_tty
-from ._templates import render_template, systemd_escape, systemd_exec_argv
+from ._templates import systemd_escape, systemd_exec_argv
 
 __all__ = [
     "BestEffortLogger",
@@ -18,7 +24,6 @@ __all__ = [
     "log_debug",
     "log_warning",
     "read_pidfile_safely",
-    "render_template",
     "sanitize_tty",
     "systemd_escape",
     "systemd_exec_argv",

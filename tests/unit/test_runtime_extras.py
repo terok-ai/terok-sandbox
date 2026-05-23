@@ -21,25 +21,10 @@ from terok_sandbox.runtime.podman import (
     bypass_network_args,
     check_gpu_error,
     gpu_run_args,
-    podman_userns_args,
     redact_env_args,
 )
 
 # ── Argv helpers (pure functions on the podman backend) ───────────────────
-
-
-class TestPodmanUsernsArgs:
-    """``podman_userns_args`` returns mapping args only rootless."""
-
-    @patch("terok_sandbox.runtime.podman.os.geteuid", return_value=1000)
-    def test_rootless_emits_keep_id(self, _euid) -> None:
-        """Non-zero euid yields the keep-id user namespace flag."""
-        assert podman_userns_args() == ["--userns=keep-id:uid=1000,gid=1000"]
-
-    @patch("terok_sandbox.runtime.podman.os.geteuid", return_value=0)
-    def test_root_emits_nothing(self, _euid) -> None:
-        """Running as root yields no extra args."""
-        assert podman_userns_args() == []
 
 
 class TestCheckGpuError:

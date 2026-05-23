@@ -316,13 +316,24 @@ class VaultManager:
                 "or pin ``vault.token_broker_port`` / ``vault.ssh_signer_port`` explicitly."
             )
 
+        import jinja2
+
         import terok_sandbox.vault
-        from terok_sandbox._util import render_template
 
         unit_dir = self._systemd_unit_dir()
         unit_dir.mkdir(parents=True, exist_ok=True)
 
         resource_dir = Path(terok_sandbox.vault.__file__).resolve().parent / "resources" / "systemd"
+        # ``StrictUndefined`` upgrades silent ``{{TYPO}}`` to a hard
+        # error; ``autoescape=False`` because systemd unit syntax has
+        # nothing to do with HTML and any escaping would corrupt
+        # paths / command lines.
+        jenv = jinja2.Environment(  # nosec B701 — see comment above  # noqa: S701
+            loader=jinja2.FileSystemLoader(str(resource_dir)),
+            keep_trailing_newline=True,
+            undefined=jinja2.StrictUndefined,
+            autoescape=False,
+        )
         variables = {
             "SOCKET_PATH": str(self._cfg.vault_socket_path),
             "SSH_SIGNER_SOCKET_PATH": str(self._cfg.ssh_signer_socket_path),
@@ -348,10 +359,9 @@ class VaultManager:
             enable_unit = _SOCKET_UNIT
 
         for template_name in templates:
-            template_path = resource_dir / template_name
-            if not template_path.is_file():
-                raise SystemExit(f"Missing systemd template: {template_path}")
-            content = render_template(template_path, variables)
+            if not (resource_dir / template_name).is_file():
+                raise SystemExit(f"Missing systemd template: {resource_dir / template_name}")
+            content = jenv.get_template(template_name).render(**variables)
             (unit_dir / template_name).write_text(content, encoding="utf-8")
 
         self._cfg.vault_socket_path.parent.mkdir(parents=True, exist_ok=True)
@@ -434,7 +444,7 @@ class VaultManager:
         sock_path.parent.mkdir(parents=True, exist_ok=True)
         pidfile.parent.mkdir(parents=True, exist_ok=True)
 
-        from terok_sandbox._util import write_sensitive_file
+        from terok_util import write_sensitive_file
 
         if write_sensitive_file(routes_path, "{}\n"):
             import logging

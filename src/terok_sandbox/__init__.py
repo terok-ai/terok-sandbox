@@ -1,5 +1,4 @@
 # SPDX-FileCopyrightText: 2025 Jiri Vyskocil
-# SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
 """terok-sandbox: hardened Podman container runner with gate and shield integration.
@@ -25,6 +24,9 @@ from importlib.metadata import PackageNotFoundError, version as _meta_version
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from terok_util import ConfigStack, sanitize_tty
+from terok_util.config_stack import ConfigScope
+
 from ._exit_codes import EXIT_MANUAL_STEP_NEEDED
 from ._stage import (
     STAGE_WIDTH,
@@ -39,7 +41,7 @@ from ._stage import (
     supports_color,
     yellow,
 )
-from ._util import BestEffortLogger, sanitize_tty
+from ._util import BestEffortLogger
 from ._util._selinux import (
     SELINUX_SOCKET_TYPE,
     SelinuxCheckResult,
@@ -89,7 +91,6 @@ from .config_schema import (
     ServicesMode,
     gate_use_personal_ssh_default,
 )
-from .config_stack import ConfigScope, ConfigStack
 from .doctor import (
     CheckVerdict,
     DoctorCheck,

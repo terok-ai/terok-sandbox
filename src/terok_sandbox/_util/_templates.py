@@ -1,12 +1,15 @@
 # SPDX-FileCopyrightText: 2025 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""Minimal template rendering via ``{{VAR}}`` token replacement."""
+"""Sandbox-specific template helpers — systemd argv escaping.
+
+Unit-file rendering uses Jinja2 directly at each callsite (``gate``,
+``vault.daemon``); only the ``ExecStart=`` argv-quoting helpers live
+here.  They're sandbox-specific (systemd has a quoting dialect that
+diverges from POSIX shell where ``shlex.join`` lives).
+"""
 
 from collections.abc import Iterable
-from pathlib import Path
-
-_FORBIDDEN_CHARS = frozenset("\n\r\0")
 
 
 def systemd_escape(arg: str) -> str:
@@ -38,19 +41,3 @@ def systemd_exec_argv(prefix: Iterable[str]) -> str:
     contain ``%`` or whitespace.
     """
     return " ".join(systemd_escape(arg) for arg in prefix)
-
-
-def render_template(template_path: Path, variables: dict[str, str]) -> str:
-    """Read *template_path* and replace ``{{KEY}}`` tokens with *variables* values.
-
-    Raises [`ValueError`][ValueError] if any value contains control characters
-    (newline, carriage-return, NUL) that could inject extra directives
-    into the rendered systemd unit.
-    """
-    for key, val in variables.items():
-        if _FORBIDDEN_CHARS & set(val):
-            raise ValueError(f"Template variable {key!r} contains forbidden control characters")
-    content = template_path.read_text()
-    for k, v in variables.items():
-        content = content.replace(f"{{{{{k}}}}}", v)
-    return content
