@@ -1123,17 +1123,23 @@ class TestInstallSystemdUnits:
         ``TemplateNotFound`` would surface as a generic stack trace
         instead of the named-path error the operator needs.
         """
+        import terok_sandbox
+
         cfg = _make_cfg(tmp_path)
         mgr = VaultManager(cfg)
         # Point ``terok_sandbox.vault.__file__`` at an empty dir so the
-        # ``resource_dir / template_name`` probe sees nothing.
+        # ``resource_dir / template_name`` probe sees nothing.  Patch the
+        # *attribute* on the parent package (not just ``sys.modules``)
+        # because ``import terok_sandbox.vault`` reads the binding from
+        # the already-loaded parent's ``vault`` attribute, not from
+        # ``sys.modules`` directly.
         empty_pkg = tmp_path / "empty-vault-pkg"
         (empty_pkg / "resources" / "systemd").mkdir(parents=True)
         fake_vault = SimpleNamespace(__file__=str(empty_pkg / "__init__.py"))
         with (
             patch.object(VaultManager, "_systemd_unit_dir", return_value=tmp_path / "units"),
             patch("subprocess.run"),
-            patch.dict("sys.modules", {"terok_sandbox.vault": fake_vault}),
+            patch.object(terok_sandbox, "vault", fake_vault),
             pytest.raises(SystemExit, match="Missing systemd template"),
         ):
             mgr.install_systemd_units()

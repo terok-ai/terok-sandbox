@@ -320,15 +320,22 @@ class TestInstallUninstall:
         """
         from types import SimpleNamespace
 
+        import terok_sandbox
+
         mock_run.return_value = make_run_result(returncode=0)
         with tempfile.TemporaryDirectory() as td:
             unit_dir = Path(td) / "systemd" / "user"
             empty_pkg = Path(td) / "empty-gate-pkg"
             (empty_pkg / "resources" / "systemd").mkdir(parents=True)
             fake_gate = SimpleNamespace(__file__=str(empty_pkg / "__init__.py"))
+            # Patch the *attribute* on the parent package — ``import
+            # terok_sandbox.gate`` reads the binding from
+            # ``terok_sandbox.gate`` (the attribute), not ``sys.modules``,
+            # so a sys.modules-only patch doesn't reach the production
+            # callsite.
             with (
                 patched_install_env(unit_dir),
-                unittest.mock.patch.dict("sys.modules", {"terok_sandbox.gate": fake_gate}),
+                unittest.mock.patch.object(terok_sandbox, "gate", fake_gate),
                 pytest.raises(SystemExit, match="Missing systemd template"),
             ):
                 GateServerManager().install_systemd_units()
