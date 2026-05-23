@@ -204,6 +204,34 @@ class TestRecoveryStatus:
         assert status.session_only is False
         assert status.urgent is False
 
+    def test_resolver_exception_collapses_to_locked(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``WrongPassphraseError`` from the resolver → source=None, not urgent.
+
+        Pins the except branch in
+        [`RecoveryStatus.load`][terok_sandbox.vault.store.recovery.RecoveryStatus.load]
+        — a vault that fails to resolve (mismatched passphrase tier,
+        corrupt session file, denied keyring) should surface the same
+        "source unknown" shape as a fresh locked install rather than
+        propagating the resolver exception into every doctor / sickbay /
+        pill caller.
+        """
+        from terok_sandbox.config import SandboxConfig as _SandboxConfig
+        from terok_sandbox.vault.store.encryption import WrongPassphraseError
+
+        cfg = _cfg(tmp_path)
+
+        def _raise(self, **_kw: object) -> object:
+            raise WrongPassphraseError("decryption failed under test")
+
+        monkeypatch.setattr(_SandboxConfig, "resolve_passphrase_with_source", _raise)
+        status = RecoveryStatus.load(cfg)
+        assert status.source is None
+        assert status.urgent is False
+
 
 class TestNoOfflineOracle:
     """The audit-driven contract: the marker file leaks no passphrase signal.
