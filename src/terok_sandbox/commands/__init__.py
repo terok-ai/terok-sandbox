@@ -3,8 +3,8 @@
 
 """Command registry for terok-sandbox — one module per subsystem.
 
-Follows the same [`CommandDef`][terok_sandbox.commands.CommandDef] /
-[`ArgDef`][terok_sandbox.commands.ArgDef] pattern as
+Follows the same [`CommandDef`][terok_util.cli_types.CommandDef] /
+[`ArgDef`][terok_util.cli_types.ArgDef] pattern as
 ``terok_shield.registry``.  Higher-level consumers (terok,
 terok-executor) import ``COMMANDS`` to build their own CLI frontends
 without duplicating argument definitions or handler logic.
@@ -90,15 +90,15 @@ from .vault import (
     handle_vault_to_keyring,
 )
 
-#: Sandbox's top-level command forest — a [`CommandTree`][terok_sandbox.commands.CommandTree]
+#: Sandbox's top-level command forest — a [`CommandTree`][terok_util.cli_types.CommandTree]
 #: of every verb the package exposes.  Each per-subsystem ``*_COMMANDS``
 #: tuple contributes one or more root verbs; subsystem groups (gate,
 #: shield, vault, ssh, credentials) each contribute exactly one root
 #: holding their subverbs as ``children`` so the structural nesting
 #: matches the operator-facing CLI surface.  Out-of-tree consumers
 #: (terok, terok-executor) walk this tree via
-#: [`CommandTree.overlay`][terok_sandbox.commands.CommandTree.overlay]
-#: and [`CommandTree.wire`][terok_sandbox.commands.CommandTree.wire].
+#: [`CommandTree.overlay`][terok_util.cli_types.CommandTree.overlay]
+#: and [`CommandTree.wire`][terok_util.cli_types.CommandTree.wire].
 COMMANDS: CommandTree = CommandTree(
     SETUP_COMMANDS
     + GATE_COMMANDS

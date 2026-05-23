@@ -532,7 +532,7 @@ def _handle_vault_destroy_passphrase(*, cfg: SandboxConfig | None = None) -> Non
 
 
 #: Subverbs of ``vault passphrase``.  Live inside the vault group as a
-#: nested [`CommandDef`][terok_sandbox.commands.CommandDef] so the
+#: nested [`CommandDef`][terok_util.cli_types.CommandDef] so the
 #: passphrase verbs reach the CLI exclusively via the vault subparser —
 #: no separate top-level tuple to keep in sync.
 _PASSPHRASE_GROUP = CommandDef(
@@ -600,10 +600,10 @@ _PASSPHRASE_GROUP = CommandDef(
 
 
 #: The vault command group exposed at the package's top level — a
-#: single [`CommandDef`][terok_sandbox.commands.CommandDef] whose
+#: single [`CommandDef`][terok_util.cli_types.CommandDef] whose
 #: ``children`` are the daemon-lifecycle verbs plus the nested
 #: ``passphrase`` group.  Consumers wire the whole subtree via
-#: [`CommandTree`][terok_sandbox.commands.CommandTree]; the structural
+#: [`CommandTree`][terok_util.cli_types.CommandTree]; the structural
 #: nesting is what makes ``vault passphrase X`` work without manual
 #: subparser plumbing.
 VAULT_COMMANDS: tuple[CommandDef, ...] = (
