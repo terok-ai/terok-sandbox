@@ -620,6 +620,12 @@ class Sandbox:
         handles = [self._runtime.container(name) for name in containers]
         return self._runtime.force_remove(handles)
 
+    # -- Per-task state -----------------------------------------------------
+
+    def task_state_dir(self, container: str) -> Path:
+        """Per-container state directory used by ``prepare`` / ``cleanup``."""
+        return self._cfg.state_dir / "sandbox" / "runs" / container
+
     # -- SSH ----------------------------------------------------------------
 
     def init_ssh(self, scope: str) -> SSHManager:

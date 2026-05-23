@@ -416,10 +416,7 @@ def _handle_vault_passphrase_reveal(
         _read_from_controlling_tty,
         _write_to_controlling_tty,
     )
-    from ..vault.store.recovery import (
-        acknowledge as acknowledge_recovery,
-        acknowledged,
-    )
+    from ..vault.store.recovery import acknowledge, acknowledged
 
     if cfg is None:
         cfg = SandboxConfig()
@@ -480,7 +477,7 @@ def _handle_vault_passphrase_reveal(
         )
         return
     if response.strip() == "SAVED":
-        acknowledge_recovery(cfg.vault_recovery_marker_file)
+        acknowledge(cfg.vault_recovery_marker_file)
         _say("  recovery key marked as saved.")
     else:
         _say("  recovery key NOT confirmed; unconfirmed-recovery warning stays on.")
@@ -499,10 +496,7 @@ def _handle_vault_passphrase_acknowledge(*, cfg: SandboxConfig | None = None) ->
     Idempotent — calling again with the marker already in place is a
     silent no-op.
     """
-    from ..vault.store.recovery import (
-        acknowledge as acknowledge_recovery,
-        acknowledged,
-    )
+    from ..vault.store.recovery import acknowledge, acknowledged
 
     if cfg is None:
         cfg = SandboxConfig()
@@ -510,7 +504,7 @@ def _handle_vault_passphrase_acknowledge(*, cfg: SandboxConfig | None = None) ->
     if acknowledged(cfg.vault_recovery_marker_file):
         print("recovery key already marked as saved.")
         return
-    acknowledge_recovery(cfg.vault_recovery_marker_file)
+    acknowledge(cfg.vault_recovery_marker_file)
     print("recovery key marked as saved.")
 
 

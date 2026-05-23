@@ -22,12 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from terok_sandbox import (
-    SandboxConfig,
-    acknowledge_recovery,
-    is_recovery_acknowledged,
-    recovery_status,
-)
+from terok_sandbox import RecoveryStatus, SandboxConfig
 from terok_sandbox.vault.store.recovery import acknowledge, acknowledged, forget
 
 
@@ -97,64 +92,64 @@ class TestSidecarPrimitives:
         assert not acknowledged(marker)
 
 
-class TestTopLevelWrappers:
-    """``is_recovery_acknowledged`` / ``acknowledge_recovery`` (terok consumes these)."""
+class TestRecoveryStatusMarkerMethods:
+    """``RecoveryStatus.is_acknowledged`` / ``.acknowledge`` (terok consumes these)."""
 
-    def test_is_recovery_acknowledged_false_when_marker_missing(self, tmp_path: Path) -> None:
+    def test_is_acknowledged_false_when_marker_missing(self, tmp_path: Path) -> None:
         """Fresh install — marker missing → False."""
-        assert is_recovery_acknowledged(_cfg(tmp_path)) is False
+        assert RecoveryStatus.is_acknowledged(_cfg(tmp_path)) is False
 
-    def test_acknowledge_recovery_writes_marker(self, tmp_path: Path) -> None:
-        """Writing through the wrapper lands the marker on disk."""
+    def test_acknowledge_writes_marker(self, tmp_path: Path) -> None:
+        """Writing through the classmethod lands the marker on disk."""
         cfg = _cfg(tmp_path)
-        assert acknowledge_recovery(cfg) is True
-        assert is_recovery_acknowledged(cfg) is True
+        RecoveryStatus.acknowledge(cfg)
+        assert RecoveryStatus.is_acknowledged(cfg) is True
 
-    def test_acknowledge_recovery_works_on_locked_vault(self, tmp_path: Path) -> None:
+    def test_acknowledge_works_on_locked_vault(self, tmp_path: Path) -> None:
         """Marker is independent of the passphrase resolver — locked vault ack works.
 
         Closing the loop quickly matters more than gating on a working
         resolver chain; the marker just records "operator confirmed".
         """
         cfg = _cfg(tmp_path, passphrase=None)
-        assert acknowledge_recovery(cfg) is True
-        assert is_recovery_acknowledged(cfg) is True
+        RecoveryStatus.acknowledge(cfg)
+        assert RecoveryStatus.is_acknowledged(cfg) is True
 
 
-class TestTopLevelWrappersDefaultConfig:
-    """``cfg=None`` branches in the top-level wrappers."""
+class TestRecoveryStatusDefaultConfig:
+    """``cfg=None`` branches in the classmethods."""
 
-    def test_is_recovery_acknowledged_constructs_default_cfg(
+    def test_is_acknowledged_constructs_default_cfg(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """No-arg call lazy-builds ``SandboxConfig()`` (the documented default)."""
         sentinel = _cfg(tmp_path)
-        acknowledge_recovery(sentinel)  # pre-seed the marker
-        monkeypatch.setattr("terok_sandbox.SandboxConfig", lambda: sentinel)
-        assert is_recovery_acknowledged() is True
+        RecoveryStatus.acknowledge(sentinel)  # pre-seed the marker
+        monkeypatch.setattr("terok_sandbox.config.SandboxConfig", lambda: sentinel)
+        assert RecoveryStatus.is_acknowledged() is True
 
-    def test_acknowledge_recovery_constructs_default_cfg(
+    def test_acknowledge_constructs_default_cfg(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """No-arg call lazy-builds ``SandboxConfig()`` and lands the marker."""
         sentinel = _cfg(tmp_path)
-        monkeypatch.setattr("terok_sandbox.SandboxConfig", lambda: sentinel)
-        assert acknowledge_recovery() is True
+        monkeypatch.setattr("terok_sandbox.config.SandboxConfig", lambda: sentinel)
+        RecoveryStatus.acknowledge()
         assert sentinel.vault_recovery_marker_file.exists()
 
 
 class TestRecoveryStatus:
-    """``recovery_status`` bundles the marker + resolved source for every surface."""
+    """``RecoveryStatus.load`` bundles the marker + resolved source for every surface."""
 
     def test_acked_durable_tier_not_urgent(self, tmp_path: Path) -> None:
         """Acknowledged + config tier → not urgent (durable, ack present)."""
         cfg = _cfg(tmp_path)
-        acknowledge_recovery(cfg)
-        status = recovery_status(cfg)
+        RecoveryStatus.acknowledge(cfg)
+        status = RecoveryStatus.load(cfg)
         assert status.acknowledged is True
         assert status.source == "config"
         assert status.session_only is False
@@ -162,7 +157,7 @@ class TestRecoveryStatus:
 
     def test_unacked_durable_tier_not_urgent(self, tmp_path: Path) -> None:
         """Unacknowledged + durable tier → warn but NOT urgent (no reboot loss risk)."""
-        status = recovery_status(_cfg(tmp_path))
+        status = RecoveryStatus.load(_cfg(tmp_path))
         assert status.acknowledged is False
         assert status.session_only is False
         assert status.urgent is False
@@ -182,7 +177,7 @@ class TestRecoveryStatus:
         monkeypatch.setattr(
             enc, "resolve_passphrase_with_source", lambda **_kw: ("p4ss", "session-file")
         )
-        status = recovery_status(cfg)
+        status = RecoveryStatus.load(cfg)
         assert status.session_only is True
         assert status.urgent is True
 
@@ -196,15 +191,15 @@ class TestRecoveryStatus:
         from terok_sandbox.vault.store import encryption as enc
 
         cfg = _cfg(tmp_path)
-        acknowledge_recovery(cfg)
+        RecoveryStatus.acknowledge(cfg)
         monkeypatch.setattr(
             enc, "resolve_passphrase_with_source", lambda **_kw: ("p4ss", "session-file")
         )
-        assert recovery_status(cfg).urgent is False
+        assert RecoveryStatus.load(cfg).urgent is False
 
     def test_locked_vault_source_is_none(self, tmp_path: Path) -> None:
         """No resolvable passphrase → source=None, not urgent (locked-vault check owns it)."""
-        status = recovery_status(_cfg(tmp_path, passphrase=None))
+        status = RecoveryStatus.load(_cfg(tmp_path, passphrase=None))
         assert status.source is None
         assert status.session_only is False
         assert status.urgent is False
@@ -222,15 +217,15 @@ class TestNoOfflineOracle:
     def test_marker_content_is_empty(self, tmp_path: Path) -> None:
         """A read of the on-disk marker yields no data — nothing to guess against."""
         cfg = _cfg(tmp_path)
-        acknowledge_recovery(cfg)
+        RecoveryStatus.acknowledge(cfg)
         assert cfg.vault_recovery_marker_file.read_bytes() == b""
 
     def test_marker_does_not_change_with_passphrase(self, tmp_path: Path) -> None:
         """Two installs with different passphrases produce identical marker bytes."""
         cfg_a = _cfg(tmp_path / "a", passphrase="alpha")
         cfg_b = _cfg(tmp_path / "b", passphrase="beta")
-        acknowledge_recovery(cfg_a)
-        acknowledge_recovery(cfg_b)
+        RecoveryStatus.acknowledge(cfg_a)
+        RecoveryStatus.acknowledge(cfg_b)
         assert (
             cfg_a.vault_recovery_marker_file.read_bytes()
             == cfg_b.vault_recovery_marker_file.read_bytes()
