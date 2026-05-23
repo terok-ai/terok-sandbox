@@ -9,6 +9,7 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -1111,6 +1112,31 @@ class TestInstallSystemdUnits:
         assert listen_lines == [f"ListenStream=127.0.0.1:{cfg.token_broker_port}"]
         assert str(cfg.vault_socket_path) not in socket_unit
         assert "SocketMode=" not in socket_unit
+
+    @pytest.mark.skipif(shutil.which("systemctl") is None, reason="needs systemctl on PATH")
+    def test_install_raises_when_template_missing(self, tmp_path: Path) -> None:
+        """A missing systemd template surfaces as a ``SystemExit`` with the path.
+
+        Guards the rare-but-real case where a partial install / corrupt
+        wheel leaves the bundled resources directory without the
+        ``terok-vault.socket`` template — without this branch, Jinja2's
+        ``TemplateNotFound`` would surface as a generic stack trace
+        instead of the named-path error the operator needs.
+        """
+        cfg = _make_cfg(tmp_path)
+        mgr = VaultManager(cfg)
+        # Point ``terok_sandbox.vault.__file__`` at an empty dir so the
+        # ``resource_dir / template_name`` probe sees nothing.
+        empty_pkg = tmp_path / "empty-vault-pkg"
+        (empty_pkg / "resources" / "systemd").mkdir(parents=True)
+        fake_vault = SimpleNamespace(__file__=str(empty_pkg / "__init__.py"))
+        with (
+            patch.object(VaultManager, "_systemd_unit_dir", return_value=tmp_path / "units"),
+            patch("subprocess.run"),
+            patch.dict("sys.modules", {"terok_sandbox.vault": fake_vault}),
+            pytest.raises(SystemExit, match="Missing systemd template"),
+        ):
+            mgr.install_systemd_units()
 
 
 class TestUninstallSystemdUnits:
