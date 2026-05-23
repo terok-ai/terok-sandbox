@@ -35,6 +35,7 @@ from terok_util.config_stack import ConfigScope
 from ._stage import bold, red, stage_line, yellow
 from ._util import BestEffortLogger
 from ._util._selinux import (
+    SelinuxCheckResult,
     SelinuxStatus,
     check_status as check_selinux_status,
     install_command as selinux_install_command,
@@ -193,6 +194,7 @@ __all__ = [
     "sandbox_doctor_checks",
     # SELinux (one-call probe + install plumbing; the granular probes
     # stay in ``_util._selinux``).
+    "SelinuxCheckResult",
     "SelinuxStatus",
     "check_selinux_status",
     "selinux_install_command",
