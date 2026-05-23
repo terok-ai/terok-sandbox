@@ -8,8 +8,8 @@ Built from the [`COMMANDS`][terok_sandbox.commands.COMMANDS] forest in
 encodes the subparser nesting (``vault passphrase seal`` is a leaf
 inside the ``passphrase`` group inside the ``vault`` group), so this
 module is just a wrapper around
-[`CommandTree.wire`][terok_sandbox.commands.CommandTree.wire] and
-[`CommandTree.dispatch`][terok_sandbox.commands.CommandTree.dispatch].
+[`CommandTree.wire`][terok_util.cli_types.CommandTree.wire] and
+[`CommandTree.dispatch`][terok_util.cli_types.CommandTree.dispatch].
 """
 
 from __future__ import annotations

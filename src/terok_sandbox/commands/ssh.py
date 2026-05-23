@@ -31,7 +31,7 @@ def _open_db(cfg: SandboxConfig) -> CredentialDB:
 
 
 def _build_key_rows(cfg: SandboxConfig) -> list[KeyRow]:
-    """Enumerate every registered SSH key as a displayable [`KeyRow`][terok_sandbox.commands.KeyRow]."""
+    """Enumerate every registered SSH key as a displayable [`KeyRow`][terok_util.cli_types.KeyRow]."""
     db = _open_db(cfg)
     try:
         rows: list[KeyRow] = []

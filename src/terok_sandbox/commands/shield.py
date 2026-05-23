@@ -24,6 +24,10 @@ from typing import TYPE_CHECKING, Any
 
 from terok_shield import COMMANDS as _SHIELD_REGISTRY, Shield
 from terok_shield.cli.main import _build_config as _shield_build_config  # noqa: PLC2701
+from terok_shield.commands import (
+    needs_container as _shield_needs_container,
+    standalone_only as _shield_standalone_only,
+)
 
 from ._types import ArgDef, CommandDef
 
@@ -116,12 +120,13 @@ def _adapt_shield_command(cmd: Any) -> CommandDef:
         )
         for arg in cmd.args
     )
-    if cmd.needs_container:
+    needs_container = _shield_needs_container(cmd)
+    if needs_container:
         args = (ArgDef(name="container", help="Container name"), *args)
     return CommandDef(
         name=cmd.name,
         help=cmd.help,
-        handler=_wrap_shield_handler(cmd.handler, needs_container=cmd.needs_container),
+        handler=_wrap_shield_handler(cmd.handler, needs_container=needs_container),
         args=args,
     )
 
@@ -138,7 +143,7 @@ def _imported_shield_children() -> tuple[CommandDef, ...]:
     return tuple(
         _adapt_shield_command(cmd)
         for cmd in _SHIELD_REGISTRY
-        if not cmd.standalone_only and cmd.handler is not None
+        if not _shield_standalone_only(cmd) and cmd.handler is not None
     )
 
 
