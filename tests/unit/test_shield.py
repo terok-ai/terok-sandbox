@@ -109,7 +109,7 @@ def test_make_shield_maps_config_to_shield_config(
     """SandboxConfig values are translated into the per-task ``ShieldConfig``."""
     cfg = SandboxConfig(**cfg_kwargs)
     with (
-        patch("terok_shield.SubprocessRunner", autospec=True),
+        patch("terok_shield.run.SubprocessRunner", autospec=True),
         patch("terok_sandbox.paths.namespace_config_root", return_value=MOCK_CONFIG_ROOT),
     ):
         shield = make_shield(MOCK_TASK_DIR, cfg=cfg)
@@ -150,7 +150,7 @@ def test_make_shield_resolves_ports_for_auto_allocated_config(
     assert cfg.ssh_signer_port is None
 
     with (
-        patch("terok_shield.SubprocessRunner", autospec=True),
+        patch("terok_shield.run.SubprocessRunner", autospec=True),
         patch("terok_sandbox.paths.namespace_config_root", return_value=MOCK_CONFIG_ROOT),
     ):
         shield = make_shield(MOCK_TASK_DIR, cfg=cfg)
@@ -177,7 +177,7 @@ def test_make_shield_socket_mode_skips_port_resolution(
     cfg = SandboxConfig(state_dir=MOCK_BASE / "state-socket", services_mode="socket")
 
     with (
-        patch("terok_shield.SubprocessRunner", autospec=True),
+        patch("terok_shield.run.SubprocessRunner", autospec=True),
         patch("terok_sandbox.paths.namespace_config_root", return_value=MOCK_CONFIG_ROOT),
     ):
         shield = make_shield(MOCK_TASK_DIR, cfg=cfg)

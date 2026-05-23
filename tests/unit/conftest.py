@@ -69,6 +69,29 @@ def _isolate_user_paths(
 
 
 @pytest.fixture(autouse=True)
+def _pin_systemctl_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin ``_SYSTEMCTL_PATH`` to a known absolute path for every unit test.
+
+    The ``_systemctl`` helper resolves ``systemctl`` once at module import
+    via ``shutil.which`` — a hardening choice that prevents a hostile
+    ``PATH`` from redirecting probes mid-run, but a hazard for tests.
+    On CI hosts (no systemctl) the resolved path is ``None``, which
+    short-circuits ``_systemctl.query`` to a synthetic ``127`` *before*
+    ``subprocess.run`` is reached, silently bypassing the per-test
+    ``@mock.patch("subprocess.run")`` decorators that gate-server,
+    vault-lifecycle, shield-make, and setup-aggregator tests rely on.
+
+    Tests that intentionally exercise the "no systemctl" branch keep
+    using ``without_systemctl_path`` from ``test_systemctl_helper.py``;
+    that fixture re-pins to ``None`` after this autouse runs, so opt-in
+    cases still work.
+    """
+    from terok_sandbox._util import _systemctl
+
+    monkeypatch.setattr(_systemctl, "_SYSTEMCTL_PATH", "/usr/bin/systemctl")
+
+
+@pytest.fixture(autouse=True)
 def _reset_config_caches() -> Iterator[None]:
     """Clear config caches between tests to prevent cross-test pollution."""
     from terok_util.paths import _reset_config_caches_for_tests
