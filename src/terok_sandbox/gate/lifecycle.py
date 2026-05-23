@@ -272,7 +272,7 @@ class GateServerManager:
         # error; ``autoescape=False`` because systemd unit syntax has
         # nothing to do with HTML and any escaping would corrupt
         # paths / command lines.
-        jenv = jinja2.Environment(  # noqa: S701 — see comment above
+        jenv = jinja2.Environment(  # nosec B701 — see comment above  # noqa: S701
             loader=jinja2.FileSystemLoader(str(resource_dir)),
             keep_trailing_newline=True,
             undefined=jinja2.StrictUndefined,
