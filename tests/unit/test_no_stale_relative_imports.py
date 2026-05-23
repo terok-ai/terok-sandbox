@@ -105,27 +105,73 @@ def _iter_python_files(root: Path):
 def _resolves_statically(target: str) -> bool:
     """Return True when *target* exists on disk under the source tree.
 
-    Walks the dotted name down the source tree and uses
-    ``PathFinder.find_spec(target, [parent_dir])`` for the leaf lookup —
-    a finder restricted to the parent directory cannot trigger any
-    import side effects (no parent ``__init__`` evaluation, no
-    ``sys.modules`` writes).  Names outside ``terok_sandbox.*`` are
-    treated as resolving (third-party + stdlib are not our concern
-    here).  Underflow sentinels emitted by the collector — strings
-    starting with ``<underflow:`` — are non-modules and must surface
-    as failures rather than getting swept up by the early return.
+    Walks the dotted name down the source tree.  The leaf can be one of
+    two shapes:
+
+    1. A submodule — handled via
+       ``PathFinder.find_spec(target, [parent_dir])`` (no side effects).
+    2. A top-level attribute defined in the parent's ``__init__.py`` —
+       handled by static-parsing the parent's ``__init__.py`` for
+       assigns / function-defs / class-defs / re-exports that bind the
+       leaf name at module top level.
+
+    Both shapes are valid for ``from .pkg import leaf`` and ``from . import leaf``,
+    so the resolver has to accept either.  Names outside
+    ``terok_sandbox.*`` are treated as resolving (third-party + stdlib
+    are not our concern here).  Underflow sentinels emitted by the
+    collector — strings starting with ``<underflow:`` — are non-modules
+    and must surface as failures rather than getting swept up by the
+    early return.
     """
     if target.startswith("<underflow:"):
         return False
     if not target.startswith("terok_sandbox"):
         return True
-    parent_dotted, _, _ = target.rpartition(".")
+    parent_dotted, _, leaf = target.rpartition(".")
     parent_rel = Path(*parent_dotted.split("."))
     parent_dir = _REPO_ROOT / parent_rel
     if not parent_dir.is_dir():
         return False
     spec = PathFinder.find_spec(target, [str(parent_dir)])
-    return spec is not None
+    if spec is not None:
+        return True
+    # Leaf may be a top-level attribute defined in the parent's __init__.py
+    # (assigned constant, def, class, or `from .X import Y` re-export).
+    init_path = parent_dir / "__init__.py"
+    if not init_path.is_file():
+        return False
+    return _name_defined_at_module_top(init_path, leaf)
+
+
+def _name_defined_at_module_top(path: Path, name: str) -> bool:
+    """``True`` iff *name* is bound at module top level in *path*.
+
+    Catches simple assignments (``X = ...``), function / class defs,
+    and ``from X import Y`` re-exports (including ``as Y`` aliases).
+    Conservative: anything we don't recognise as a top-level bind
+    returns ``False``, so a future syntax we don't model surfaces as a
+    failure instead of a silent pass.
+    """
+    tree = ast.parse(path.read_text())
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            for t in node.targets:
+                if isinstance(t, ast.Name) and t.id == name:
+                    return True
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if node.name == name:
+                return True
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                bound = alias.asname or alias.name
+                if bound == name:
+                    return True
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                bound = alias.asname or alias.name.split(".")[0]
+                if bound == name:
+                    return True
+    return False
 
 
 def _stale_imports() -> list[str]:

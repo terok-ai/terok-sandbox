@@ -436,7 +436,7 @@ class TestStaticPhantomMarker:
         """Static marker resolves to Claude credential (returns 502 since upstream is down)."""
         from aiohttp.test_utils import TestClient, TestServer
 
-        from terok_sandbox.vault.daemon.constants import PHANTOM_CREDENTIALS_MARKER
+        from terok_sandbox.vault.daemon import PHANTOM_CREDENTIALS_MARKER
 
         app = _static_marker_env
         async with TestClient(TestServer(app)) as client:
@@ -451,7 +451,7 @@ class TestStaticPhantomMarker:
         """Codex shared auth.json marker resolves to the Codex credential."""
         from aiohttp.test_utils import TestClient, TestServer
 
-        from terok_sandbox.vault.daemon.constants import CODEX_SHARED_OAUTH_MARKER
+        from terok_sandbox.vault.daemon import CODEX_SHARED_OAUTH_MARKER
 
         app = _static_marker_env
         async with TestClient(TestServer(app)) as client:
@@ -465,7 +465,7 @@ class TestStaticPhantomMarker:
         """Static marker returns 502 (no credential) when Claude has no stored credentials."""
         from aiohttp.test_utils import TestClient, TestServer
 
-        from terok_sandbox.vault.daemon.constants import PHANTOM_CREDENTIALS_MARKER
+        from terok_sandbox.vault.daemon import PHANTOM_CREDENTIALS_MARKER
 
         db = CredentialDB(tmp_path / "test.db", passphrase="test")
         db.close()  # empty DB

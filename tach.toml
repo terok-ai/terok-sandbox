@@ -94,9 +94,9 @@ depends_on = [
     "terok_sandbox._stage",
     "terok_sandbox.config",
     "terok_sandbox.paths",
+    "terok_sandbox.vault.daemon",
     "terok_sandbox.vault.store.encryption",
     "terok_sandbox.vault.store.recovery",
-    "terok_sandbox.vault.daemon.constants",
 ]
 
 # ── Vault: store, ssh, daemon ──────────────────────────────
@@ -190,8 +190,8 @@ depends_on = []
 path = "terok_sandbox.vault.daemon.token_broker"
 layer = "foundation"
 depends_on = [
+    "terok_sandbox.vault.daemon",
     "terok_sandbox.vault.daemon.audit",
-    "terok_sandbox.vault.daemon.constants",
     "terok_sandbox.vault.store.db",
     "terok_sandbox.vault.store.encryption",
     "terok_sandbox.config",
@@ -199,11 +199,6 @@ depends_on = [
 
 [[modules]]
 path = "terok_sandbox.vault.daemon.audit"
-layer = "foundation"
-depends_on = []
-
-[[modules]]
-path = "terok_sandbox.vault.daemon.constants"
 layer = "foundation"
 depends_on = []
 
@@ -288,7 +283,7 @@ depends_on = []
 [[modules]]
 path = "terok_sandbox.vault.daemon.lifecycle"
 layer = "core"
-depends_on = []
+depends_on = ["terok_sandbox.vault.daemon"]
 
 # ── Surface ────────────────────────────────────────────────
 # Orchestration + CLI.  Core and foundation imports are implicit.

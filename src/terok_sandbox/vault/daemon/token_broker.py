@@ -273,7 +273,7 @@ def _extract_phantom_token(request: web.Request) -> str | None:
 
 def _static_oauth_token_info(token: str) -> dict | None:
     """Return synthetic token metadata for shared OAuth marker tokens."""
-    from .constants import CODEX_SHARED_OAUTH_MARKER, PHANTOM_CREDENTIALS_MARKER
+    from . import CODEX_SHARED_OAUTH_MARKER, PHANTOM_CREDENTIALS_MARKER
 
     static_markers = {
         PHANTOM_CREDENTIALS_MARKER: "claude",
@@ -746,7 +746,7 @@ def _build_app(db_path: str, routes_path: str, audit_path: Path | None = None) -
         app[_KEY_AUDIT] = AuditWriter(audit_path)
     app.on_startup.append(_on_startup)
     app.on_cleanup.append(_on_cleanup)
-    from .constants import HEALTH_PATH
+    from . import HEALTH_PATH
 
     app.router.add_get(HEALTH_PATH, _handle_health)
     app.router.add_route("*", "/{tail:.*}", _handle_request)

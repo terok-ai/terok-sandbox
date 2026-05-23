@@ -11,11 +11,8 @@ from unittest.mock import patch
 
 import pytest
 
-from terok_sandbox import (
-    ContainerRemoveResult,
-    GpuConfigError,
-    PodmanRuntime,
-)
+from terok_sandbox import GpuConfigError, PodmanRuntime
+from terok_sandbox.runtime import ContainerRemoveResult
 from terok_sandbox.runtime.podman import (
     _detect_rootless_network_mode,
     bypass_network_args,

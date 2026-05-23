@@ -20,7 +20,6 @@ from terok_shield import (
     ShieldMode,
     ShieldRuntime,  # noqa: F401 — re-exported for the cross-package adapter contract
     ShieldState,  # noqa: F401 — re-exported
-    reader_script_path,  # noqa: F401 — re-exported so terok's shield-boundary contract holds
 )
 from terok_shield.container import (
     resolve_state_dir as resolve_container_state_dir,  # noqa: F401 — re-exported

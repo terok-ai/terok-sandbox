@@ -3402,13 +3402,13 @@ tomli-w = ">=1.0,<2.0"
 
 [[package]]
 name = "terok-clearance"
-version = "0.6.14a5"
+version = "0.6.14a6"
 description = "Shield clearance and desktop notifications for terok"
 optional = false
 python-versions = ">=3.12,<4.0"
 groups = ["main"]
 files = [
-    {file = "terok_clearance-0.6.14a5-py3-none-any.whl", hash = "sha256:db302829615dc6ce4febc011cf87730b2ccf58c10e00c26e2da2f13a42bd2212"},
+    {file = "terok_clearance-0.6.14a6-py3-none-any.whl", hash = "sha256:9f31a09b6c99723b52ea0f7a3e90ce1e0c8507d24f41273ebbb0f616b0809534"},
 ]
 
 [package.dependencies]
@@ -3419,17 +3419,17 @@ terok_util = {url = "https://github.com/terok-ai/terok-util/releases/download/v0
 
 [package.source]
 type = "url"
-url = "https://github.com/terok-ai/terok-clearance/releases/download/v0.6.14a5/terok_clearance-0.6.14a5-py3-none-any.whl"
+url = "https://github.com/terok-ai/terok-clearance/releases/download/v0.6.14a6/terok_clearance-0.6.14a6-py3-none-any.whl"
 
 [[package]]
 name = "terok-shield"
-version = "0.6.42a7"
+version = "0.6.42a8"
 description = "nftables-based egress firewalling for Podman containers"
 optional = false
 python-versions = ">=3.12,<4.0"
 groups = ["main"]
 files = [
-    {file = "terok_shield-0.6.42a7-py3-none-any.whl", hash = "sha256:812ce581acb559f8455dc558c40e94a118a820b8932b06bb67982a6b8a6d5cae"},
+    {file = "terok_shield-0.6.42a8-py3-none-any.whl", hash = "sha256:82488d094222383a96bfb837760643954492639685f7acb9aa800c47bc899487"},
 ]
 
 [package.dependencies]
@@ -3439,7 +3439,7 @@ terok_util = {url = "https://github.com/terok-ai/terok-util/releases/download/v0
 
 [package.source]
 type = "url"
-url = "https://github.com/terok-ai/terok-shield/releases/download/v0.6.42a7/terok_shield-0.6.42a7-py3-none-any.whl"
+url = "https://github.com/terok-ai/terok-shield/releases/download/v0.6.42a8/terok_shield-0.6.42a8-py3-none-any.whl"
 
 [[package]]
 name = "terok-util"
@@ -3858,4 +3858,4 @@ propcache = ">=0.2.1"
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<4.0"
-content-hash = "9ac3c008dda7435dd8aa51405a57bfa249efd1687053531a46c1b7de47cbc272"
+content-hash = "eb2789dd716fca759965334bf009634b09e714ec1c6c17c7c63486140cf17e79"
