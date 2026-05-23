@@ -137,14 +137,20 @@ path = "terok_sandbox.vault.store.encryption"
 layer = "foundation"
 depends_on = ["terok_sandbox.vault.store.systemd_creds"]
 
-# Vault.store.recovery — sidecar marker for "operator saved the
-# auto-generated recovery passphrase".  Pure data; the only outbound
-# import is a lazy reach into ``_yaml.write_secret_text`` at ack-write
-# time (atomic 0o600 write).
+# Vault.store.recovery — sidecar marker + the ``RecoveryStatus`` bundle
+# (marker presence + resolved passphrase source) used by every surface
+# that warns about an unconfirmed recovery key.  Reaches into config to
+# accept a ``SandboxConfig`` (default-fill ``cfg=None``) and into the
+# encryption module to swallow ``NoPassphraseError`` /
+# ``WrongPassphraseError`` while walking the resolver chain.
 [[modules]]
 path = "terok_sandbox.vault.store.recovery"
 layer = "foundation"
-depends_on = ["terok_sandbox._yaml"]
+depends_on = [
+    "terok_sandbox._yaml",
+    "terok_sandbox.config",
+    "terok_sandbox.vault.store.encryption",
+]
 
 [[modules]]
 path = "terok_sandbox.vault.store.systemd_creds"

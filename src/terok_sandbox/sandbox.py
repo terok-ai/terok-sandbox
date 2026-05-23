@@ -620,6 +620,21 @@ class Sandbox:
         handles = [self._runtime.container(name) for name in containers]
         return self._runtime.force_remove(handles)
 
+    # -- Per-task state -----------------------------------------------------
+
+    def task_state_dir(self, container: str) -> Path:
+        """Per-container state directory used by the launch / cleanup verbs.
+
+        The path is consumed by the
+        [`launch`][terok_sandbox.launch] module: ``compose`` writes
+        the plan + readiness markers under it, and
+        [`launch.cleanup`][terok_sandbox.launch.cleanup] removes it on
+        teardown.  The facade owns the *derivation* — ``state_dir /
+        "sandbox" / "runs" / {container}`` — so the runs subtree
+        layout has a single canonical owner.
+        """
+        return self._cfg.state_dir / "sandbox" / "runs" / container
+
     # -- SSH ----------------------------------------------------------------
 
     def init_ssh(self, scope: str) -> SSHManager:

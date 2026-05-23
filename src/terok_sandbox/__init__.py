@@ -19,9 +19,7 @@ from __future__ import annotations
 
 __version__: str = "0.0.0"  # placeholder; replaced at build time
 
-import dataclasses
 from importlib.metadata import PackageNotFoundError, version as _meta_version
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from terok_util import ConfigStack, sanitize_tty
@@ -203,6 +201,7 @@ from .vault.ssh.keypair import (
 from .vault.ssh.manager import SSHInitResult, SSHManager
 from .vault.store.db import CredentialDB, SSHKeyRecord, SSHKeyRow, UnsafeCommentError
 from .vault.store.encryption import NoPassphraseError, PassphraseSource, WrongPassphraseError
+from .vault.store.recovery import RecoveryStatus
 from .vault.store.systemd_creds import (
     has_tpm2 as systemd_creds_has_tpm2,
     is_available as is_systemd_creds_available,
@@ -215,244 +214,6 @@ try:
     __version__ = _meta_version("terok-sandbox")
 except PackageNotFoundError:
     pass  # editable install or running from source without metadata
-
-
-# ---------------------------------------------------------------------------
-# Convenience wrappers — default-config delegates for the top-level API.
-#
-# External consumers import ``from terok_sandbox import get_server_status``
-# etc.  These thin wrappers instantiate the manager with the caller's
-# (optional) config and delegate to the class method.
-# ---------------------------------------------------------------------------
-
-
-# -- Gate server wrappers ----------------------------------------------------
-
-
-def check_units_outdated(cfg: SandboxConfig | None = None) -> str | None:
-    """Return a warning string if installed systemd units are stale."""
-    return GateServerManager(cfg).check_units_outdated()
-
-
-def ensure_server_reachable(cfg: SandboxConfig | None = None) -> None:
-    """Verify the gate server is running and configured correctly."""
-    GateServerManager(cfg).ensure_reachable()
-
-
-def get_gate_base_path(cfg: SandboxConfig | None = None) -> Path:
-    """Return the gate base path."""
-    return GateServerManager(cfg).gate_base_path
-
-
-def get_gate_server_port(cfg: SandboxConfig | None = None) -> int | None:
-    """Return the configured gate server TCP port, or ``None`` in socket mode."""
-    return GateServerManager(cfg).server_port
-
-
-def get_server_status(cfg: SandboxConfig | None = None) -> GateServerStatus:
-    """Return the current gate server status."""
-    return GateServerManager(cfg).get_status()
-
-
-def is_daemon_running(cfg: SandboxConfig | None = None) -> bool:
-    """Check whether the gate daemon is alive."""
-    return GateServerManager(cfg).is_daemon_running()
-
-
-def is_systemd_available() -> bool:
-    """Check whether ``systemctl --user`` is usable."""
-    return GateServerManager().is_systemd_available()
-
-
-def start_daemon(port: int | None = None, cfg: SandboxConfig | None = None) -> None:
-    """Start a gate daemon process."""
-    GateServerManager(cfg).start_daemon(port)
-
-
-def stop_daemon(cfg: SandboxConfig | None = None) -> None:
-    """Stop the managed gate daemon."""
-    GateServerManager(cfg).stop_daemon()
-
-
-# -- Gate token wrappers -----------------------------------------------------
-
-
-def create_token(scope: str, task_id: str, cfg: SandboxConfig | None = None) -> str:
-    """Generate a gate token for a task."""
-    return TokenStore(cfg).create(scope, task_id)
-
-
-def revoke_token_for_task(scope: str, task_id: str, cfg: SandboxConfig | None = None) -> None:
-    """Remove all tokens for a scope+task pair."""
-    TokenStore(cfg).revoke_for_task(scope, task_id)
-
-
-# -- Vault wrappers ----------------------------------------------------------
-
-
-def ensure_vault_reachable(cfg: SandboxConfig | None = None) -> None:
-    """Verify the vault is running and its TCP ports are up."""
-    VaultManager(cfg).ensure_reachable()
-
-
-def get_vault_status(cfg: SandboxConfig | None = None) -> VaultStatus:
-    """Return the current vault status."""
-    return VaultManager(cfg).get_status()
-
-
-def get_token_broker_port(cfg: SandboxConfig | None = None) -> int | None:
-    """Return the configured token broker TCP port (``None`` in socket mode)."""
-    return VaultManager(cfg).token_broker_port
-
-
-def get_ssh_signer_port(cfg: SandboxConfig | None = None) -> int | None:
-    """Return the configured SSH signer TCP port (``None`` in socket mode)."""
-    return VaultManager(cfg).ssh_signer_port
-
-
-def is_vault_running(cfg: SandboxConfig | None = None) -> bool:
-    """Check whether the managed vault daemon is alive."""
-    return VaultManager(cfg).is_daemon_running()
-
-
-def is_vault_service_active() -> bool:
-    """Check whether the vault service unit is active."""
-    return VaultManager().is_service_active()
-
-
-def is_vault_socket_active() -> bool:
-    """Check whether the vault socket unit is active."""
-    return VaultManager().is_socket_active()
-
-
-def is_vault_socket_installed() -> bool:
-    """Check whether the vault socket unit file exists."""
-    return VaultManager().is_socket_installed()
-
-
-def is_vault_systemd_available() -> bool:
-    """Check whether the systemd user session is reachable."""
-    return VaultManager().is_systemd_available()
-
-
-def install_vault_systemd(cfg: SandboxConfig | None = None) -> None:
-    """Install and start the vault's systemd user units."""
-    VaultManager(cfg).install_systemd_units()
-
-
-def uninstall_vault_systemd(cfg: SandboxConfig | None = None) -> None:
-    """Remove the vault's systemd user units."""
-    VaultManager(cfg).uninstall_systemd_units()
-
-
-def start_vault(cfg: SandboxConfig | None = None) -> None:
-    """Start the vault as a background daemon."""
-    VaultManager(cfg).start_daemon()
-
-
-def stop_vault(cfg: SandboxConfig | None = None) -> None:
-    """Stop the managed vault daemon."""
-    VaultManager(cfg).stop_daemon()
-
-
-def is_recovery_acknowledged(cfg: SandboxConfig | None = None) -> bool:
-    """Return ``True`` iff the operator has confirmed they saved the recovery key.
-
-    The vault's resolver tiers (systemd-creds, keyring, session-file)
-    are all bound to *this* machine, account, or boot — a hardware
-    failure or TPM transplant strands the vault without an off-host
-    copy of the passphrase.  This check is what surfaces the
-    "unconfirmed recovery key" warning in sickbay / doctor / the TUI
-    pill: a zero-byte marker file at
-    [`vault_recovery_marker_file`][terok_sandbox.SandboxConfig.vault_recovery_marker_file]
-    indicates the operator has acknowledged at some point.  Absence
-    (or an unreadable marker) reports ``False`` — the warning is
-    conservative by design.
-
-    Operators close the warning by running ``terok-sandbox vault
-    passphrase reveal`` (or the TUI's reveal modal) and confirming,
-    or via the silent ``vault passphrase acknowledge`` after CI /
-    TUI captured the value out-of-band.  A passphrase rotation does
-    NOT auto-invalidate the marker; operators who rotate should
-    re-ack against the new value.
-    """
-    from .vault.store.recovery import acknowledged
-
-    if cfg is None:
-        cfg = SandboxConfig()
-    return acknowledged(cfg.vault_recovery_marker_file)
-
-
-@dataclasses.dataclass(frozen=True)
-class RecoveryStatus:
-    """Combined marker + resolved-source view for the recovery-key warning surfaces.
-
-    Returned by [`recovery_status`][terok_sandbox.recovery_status] so
-    sickbay / doctor / TUI / post-launch CLI all paint the same picture
-    of "is the operator one reboot away from losing their vault?".
-    """
-
-    acknowledged: bool
-    """``True`` iff the zero-byte marker file is present."""
-
-    source: PassphraseSource | None
-    """Whichever resolver tier unlocked the chain right now, or ``None`` if locked."""
-
-    @property
-    def session_only(self) -> bool:
-        """``True`` iff the passphrase lives only in the tmpfs session-unlock file.
-
-        That tier dies on the next reboot — without an off-host copy
-        the vault becomes unrecoverable the moment the machine
-        restarts.  Severity should escalate accordingly on every
-        surface that renders this status.
-        """
-        return self.source == "session-file"
-
-    @property
-    def urgent(self) -> bool:
-        """``True`` iff unacknowledged AND session-only (one reboot away from loss)."""
-        return not self.acknowledged and self.session_only
-
-
-def recovery_status(cfg: SandboxConfig | None = None) -> RecoveryStatus:
-    """Return the combined marker + resolved-source view in one call.
-
-    Single seam for every "recovery key unconfirmed" surface — doctor,
-    sickbay, TUI pill, post-task-launch CLI footer.  Walking the
-    resolver chain to find the source is cheap (no DB open, just tier
-    knobs) and bundling it with the marker check here means no caller
-    has to repeat the "is this session-only?" lookup.
-    """
-    from .vault.store.encryption import NoPassphraseError, WrongPassphraseError
-    from .vault.store.recovery import acknowledged
-
-    if cfg is None:
-        cfg = SandboxConfig()
-    try:
-        _passphrase, source = cfg.resolve_passphrase_with_source()
-    except (NoPassphraseError, WrongPassphraseError):
-        source = None
-    return RecoveryStatus(
-        acknowledged=acknowledged(cfg.vault_recovery_marker_file),
-        source=source,
-    )
-
-
-def acknowledge_recovery(cfg: SandboxConfig | None = None) -> bool:
-    """Mark the recovery key as saved (writes the zero-byte sidecar marker).
-
-    Always succeeds and returns ``True`` — the marker is independent
-    of the passphrase resolver, so a locked vault doesn't block
-    acknowledgement.  The return value is kept for API stability with
-    callers that previously had a "locked vault" failure path.
-    """
-    from .vault.store.recovery import acknowledge
-
-    if cfg is None:
-        cfg = SandboxConfig()
-    acknowledge(cfg.vault_recovery_marker_file)
-    return True
 
 
 __all__ = [
@@ -522,18 +283,6 @@ __all__ = [
     "podman_port_resolver",
     # Gate server
     "GateServerStatus",
-    "check_units_outdated",
-    "ensure_server_reachable",
-    "get_gate_base_path",
-    "get_gate_server_port",
-    "get_server_status",
-    "is_daemon_running",
-    "is_systemd_available",
-    "start_daemon",
-    "stop_daemon",
-    # Gate tokens
-    "create_token",
-    "revoke_token_for_task",
     # Shield
     "EnvironmentCheck",
     "NftNotFoundError",
@@ -575,27 +324,10 @@ __all__ = [
     # Vault
     "VaultStatus",
     "VaultUnreachableError",
-    "ensure_vault_reachable",
-    "get_token_broker_port",
-    "get_vault_status",
-    "get_ssh_signer_port",
-    "is_vault_running",
-    "is_vault_service_active",
-    "is_vault_socket_active",
-    "is_vault_socket_installed",
-    "is_vault_systemd_available",
-    "install_vault_systemd",
-    "start_vault",
-    "stop_vault",
-    "uninstall_vault_systemd",
-    # Recovery-key acknowledgement (operator confirmed they saved the
-    # auto-generated passphrase off-host).  False until the operator
-    # confirms via `vault passphrase reveal` / the TUI reveal modal /
-    # the silent `acknowledge_recovery` wrapper.
+    # Recovery-key acknowledgement view — bundle of the marker probe
+    # and the resolved passphrase source.  Operators surface this via
+    # ``RecoveryStatus.load()`` / ``.is_acknowledged()`` / ``.acknowledge()``.
     "RecoveryStatus",
-    "acknowledge_recovery",
-    "is_recovery_acknowledged",
-    "recovery_status",
     # Command registry
     "ArgDef",
     "CommandDef",

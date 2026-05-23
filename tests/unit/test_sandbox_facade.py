@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from terok_sandbox import GpuConfigError
+from terok_sandbox import GpuConfigError, SandboxConfig
 from terok_sandbox.runtime.podman import check_gpu_error, redact_env_args
 from terok_sandbox.sandbox import (
     READY_MARKER,
@@ -839,3 +839,15 @@ class TestRedactEnvArgs:
         cmd = ["-e", "TASK_ID=abc123"]
         result = redact_env_args(cmd)
         assert result == ["-e", "TASK_ID=abc123"]
+
+
+class TestTaskStateDir:
+    """Verify the per-container state-dir derivation on the facade."""
+
+    def test_task_state_dir_under_sandbox_runs(self, tmp_path: Path) -> None:
+        """Resolves under ``{state_dir}/sandbox/runs/{container}`` for any container name."""
+        cfg = SandboxConfig(state_dir=tmp_path / "state")
+        sandbox = Sandbox(cfg)
+        assert (
+            sandbox.task_state_dir("my-task") == tmp_path / "state" / "sandbox" / "runs" / "my-task"
+        )
