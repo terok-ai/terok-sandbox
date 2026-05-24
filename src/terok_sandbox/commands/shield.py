@@ -65,8 +65,8 @@ def _handle_shield_uninstall(*, root: bool = False, user: bool = False) -> None:
     from ..integrations.shield import ShieldHooks
 
     ShieldHooks.uninstall(root=root, user=user)
-    scope = "system" if root else "user"
-    print(f"Shield hooks removed from {scope} hooks directory.")
+    scope = "both system and user" if (root and user) else ("system" if root else "user")
+    print(f"Shield hooks removed from {scope} hooks director{'ies' if (root and user) else 'y'}.")
 
 
 def _wrap_shield_handler(

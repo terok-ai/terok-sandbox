@@ -7,9 +7,13 @@ Two classes carry the sandbox-side policy layer over terok-shield:
 
 * [`ShieldManager`][terok_sandbox.integrations.shield.ShieldManager] —
   per-task wrapper around [`Shield`][terok_shield.Shield].  Caches the
-  underlying instance and applies the ``shield_bypass`` short-circuit
-  uniformly across pre-start, up/down, quarantine, state, status,
-  and environment-check calls.
+  underlying instance.  Bypassable methods (``pre_start``, ``up``,
+  ``down``, ``check_environment``) short-circuit when
+  ``shield_bypass`` is set; non-bypassable methods (``quarantine``,
+  ``state``) always hit the live shield because panic overrides every
+  safety bypass and state probes report what nft actually sees.
+  ``status`` is config-level only and surfaces the bypass flag in
+  its dict rather than short-circuiting.
 * [`ShieldHooks`][terok_sandbox.integrations.shield.ShieldHooks] — the
   host-wide OCI hooks installer, scoped to the root/user dual-scope
   flag pair the ``terok setup`` and ``terok-sandbox`` CLIs expose.
