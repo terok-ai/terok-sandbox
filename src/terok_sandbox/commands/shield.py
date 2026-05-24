@@ -49,9 +49,9 @@ def _handle_shield_setup(*, root: bool = False, user: bool = False) -> None:
             "  shield install-hooks --root   # /etc/containers/oci/hooks.d\n"
             "  shield install-hooks --user   # ~/.local/share/containers/oci/hooks.d"
         )
-    from ..integrations.shield import run_setup
+    from ..integrations.shield import ShieldHooks
 
-    run_setup(root=root, user=user)
+    ShieldHooks.install(root=root, user=user)
 
 
 def _handle_shield_uninstall(*, root: bool = False, user: bool = False) -> None:
@@ -62,11 +62,11 @@ def _handle_shield_uninstall(*, root: bool = False, user: bool = False) -> None:
             "  shield uninstall-hooks --root   # /etc/containers/oci/hooks.d\n"
             "  shield uninstall-hooks --user   # ~/.local/share/containers/oci/hooks.d"
         )
-    from ..integrations.shield import run_uninstall
+    from ..integrations.shield import ShieldHooks
 
-    run_uninstall(root=root, user=user)
-    scope = "system" if root else "user"
-    print(f"Shield hooks removed from {scope} hooks directory.")
+    ShieldHooks.uninstall(root=root, user=user)
+    scope = "both system and user" if (root and user) else ("system" if root else "user")
+    print(f"Shield hooks removed from {scope} hooks director{'ies' if (root and user) else 'y'}.")
 
 
 def _wrap_shield_handler(

@@ -391,17 +391,17 @@ class Sandbox:
         so shield picks the right dnsmasq bind for the krun guest's
         isolated loopback.
         """
-        from .integrations.shield import ShieldRuntime, pre_start
+        from .integrations.shield import ShieldManager, ShieldRuntime
 
-        return pre_start(
-            container, task_dir, self._cfg, runtime=ShieldRuntime.from_runtime_name(runtime)
-        )
+        return ShieldManager(
+            task_dir, self._cfg, runtime=ShieldRuntime.from_runtime_name(runtime)
+        ).pre_start(container)
 
     def shield_down(self, container: str, task_dir: Path) -> None:
         """Remove shield rules for a container (allow all egress)."""
-        from .integrations.shield import down
+        from .integrations.shield import ShieldManager
 
-        down(container, task_dir, cfg=self._cfg)
+        ShieldManager(task_dir, self._cfg).down(container)
 
     # -- Container launch ---------------------------------------------------
     #

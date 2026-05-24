@@ -3,22 +3,40 @@
 
 """Adapter for terok-shield egress firewall.
 
-Creates per-task [`Shield`][terok_shield.Shield] instances from the sandbox configuration.
-Each task gets its own ``state_dir`` under ``{task_dir}/shield/``.
+Two classes carry the sandbox-side policy layer over terok-shield:
+
+* [`ShieldManager`][terok_sandbox.integrations.shield.ShieldManager] —
+  per-task wrapper around [`Shield`][terok_shield.Shield].  Caches the
+  underlying instance.  Bypassable methods (``pre_start``, ``up``,
+  ``down``, ``check_environment``) short-circuit when
+  ``shield_bypass`` is set; non-bypassable methods (``quarantine``,
+  ``state``) always hit the live shield because panic overrides every
+  safety bypass and state probes report what nft actually sees.
+  ``status`` is config-level only and surfaces the bypass flag in
+  its dict rather than short-circuiting.
+* [`ShieldHooks`][terok_sandbox.integrations.shield.ShieldHooks] — the
+  host-wide OCI hooks installer, scoped to the root/user dual-scope
+  flag pair the ``terok setup`` and ``terok-sandbox`` CLIs expose.
+  Delegates to terok-shield's [`HooksInstaller`][terok_shield.HooksInstaller]
+  for the actual file writes — sandbox no longer carries a private
+  ``_HOOK_FILES`` mirror of the on-disk install layout.
 """
+
+from __future__ import annotations
 
 import tempfile
 import warnings
+from functools import cached_property
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from terok_shield import (
-    HOOK_ENTRYPOINT_NAME,
-    USER_HOOKS_DIR,
     EnvironmentCheck,  # noqa: F401 — re-exported
+    HooksInstaller,
     Shield,
     ShieldConfig,
     ShieldMode,
-    ShieldRuntime,  # noqa: F401 — re-exported for the cross-package adapter contract
+    ShieldRuntime,
     ShieldState,  # noqa: F401 — re-exported
 )
 from terok_shield.container import (
@@ -26,11 +44,9 @@ from terok_shield.container import (
 )
 
 # Several symbols are exposed via the top-level ``terok_shield.__getattr__``
-# lazy importer which returns ``object`` to type-checkers — that breaks both
-# ``except`` narrowing on the error classes and ``setup_global_hooks(...)``
-# call sites.  Pull them straight from the owning submodules.
-from terok_shield.hooks.install import setup_global_hooks
-from terok_shield.podman_info import ensure_containers_conf_hooks_dir, system_hooks_dir
+# lazy importer which returns ``object`` to type-checkers — that breaks
+# both ``except`` narrowing on the error classes and concrete typing on
+# the prereqs dataclasses.  Pull them straight from the owning submodules.
 from terok_shield.prereqs import (  # noqa: F401 — re-exported with concrete types
     BinaryCheck,
     check_firewall_binaries,
@@ -40,21 +56,13 @@ from terok_shield.run import NftNotFoundError, ShieldNeedsSetup  # noqa: F401
 
 from ..config import SandboxConfig
 
-# The file names below mirror what ``setup_global_hooks`` writes — a small
-# coupling surface kept local so the uninstaller does not need to import
-# private helpers from ``terok_shield.hooks.install``.
-_HOOK_FILES = (
-    HOOK_ENTRYPOINT_NAME,
-    "terok-shield-createRuntime.json",
-    "terok-shield-poststop.json",
-    "terok-shield-bridge-hook",
-    "terok-shield-bridge-createRuntime.json",
-    "terok-shield-bridge-poststop.json",
-    "_oci_state.py",
-)
+if TYPE_CHECKING:
+    from terok_shield import HOOK_ENTRYPOINT_NAME  # noqa: F401 — re-export typing
 
-# DANGEROUS TRANSITIONAL OVERRIDE — will be removed once terok-shield
-# supports all target podman versions (see terok-shield#71, #101).
+#: Warning emitted by every bypassable [`ShieldManager`][terok_sandbox.integrations.shield.ShieldManager]
+#: method when ``shield_bypass`` is set.  DANGEROUS TRANSITIONAL OVERRIDE —
+#: will be removed once terok-shield supports all target podman versions
+#: (see terok-shield#71, #101).
 _BYPASS_WARNING = (
     "WARNING: shield.bypass_firewall_no_protection is set — "
     "the egress firewall is DISABLED.  Containers have unrestricted "
@@ -63,255 +71,258 @@ _BYPASS_WARNING = (
 )
 
 
-def _cfg(cfg: SandboxConfig | None = None) -> SandboxConfig:
-    """Return *cfg* or a default [`SandboxConfig`][terok_sandbox.SandboxConfig]."""
-    return cfg or SandboxConfig()
+# ── Per-task shield manager ─────────────────────────────
 
 
-def make_shield(
-    task_dir: Path,
-    cfg: SandboxConfig | None = None,
-    *,
-    runtime: ShieldRuntime = ShieldRuntime.DEFAULT,
-) -> Shield:
-    """Construct a per-task [`Shield`][terok_shield.Shield] from sandbox configuration.
+class ShieldManager:
+    """Per-task wrapper around [`Shield`][terok_shield.Shield].
 
-    Builds a `ShieldConfig` with ``state_dir`` scoped to *task_dir*.
+    Holds the (task_dir, cfg, runtime) tuple a Shield is built from
+    and caches the constructed instance — the previous free-function
+    surface rebuilt a Shield on every call, which paid the
+    ``ShieldConfig`` + collaborator-wiring cost twice for every
+    transition pair (``pre_start`` → ``up``, ``up`` → ``down``, …).
 
-    Calls [`SandboxConfig.with_resolved_ports`][terok_sandbox.SandboxConfig.with_resolved_ports]
-    so the resulting ``loopback_ports`` reflects the *actual* gate/broker/
-    signer ports — auto-allocated configs default those fields to ``None``,
-    which would otherwise silently produce an empty tuple and a shield
-    ruleset with no ``tcp dport <p> ip daddr 169.254.1.2 accept`` rules,
-    causing container→host TCP traffic to fall through to the
-    private-range reject (#156 regression follow-up).
-
-    *runtime* selects the container runtime category — ``DEFAULT`` for
-    crun/runc/youki (dnsmasq on netns ``127.0.0.1``), ``KRUN`` for the
-    libkrun microVM path (dnsmasq on a link-local address the guest can
-    reach via passt).  Callers that drive the launch path map their
-    runtime string (``RunSpec.runtime``) to the enum.
+    Bypassable methods (``pre_start``, ``up``, ``down``) short-circuit
+    when ``shield_bypass`` is set on the configuration.
+    Non-bypassable methods (``quarantine``, ``state``) always run —
+    panic overrides every safety bypass, and state probes report what
+    nft actually sees regardless of operator intent.
     """
-    c = _cfg(cfg).with_resolved_ports()
-    # Socket-mode transports emit no loopback traffic; filter ``None`` so
-    # the nftables rule generator only sees ports that actually exist.
-    loopback = tuple(
-        p for p in (c.gate_port, c.token_broker_port, c.ssh_signer_port) if p is not None
-    )
-    config = ShieldConfig(
-        state_dir=task_dir / "shield",
-        mode=ShieldMode.HOOK,
-        default_profiles=c.shield_profiles,
-        loopback_ports=loopback,
-        audit_enabled=c.shield_audit,
-        profiles_dir=c.shield_profiles_dir,
-        runtime=runtime,
-    )
-    return Shield(config)
+
+    def __init__(
+        self,
+        task_dir: Path,
+        cfg: SandboxConfig | None = None,
+        *,
+        runtime: ShieldRuntime = ShieldRuntime.DEFAULT,
+    ) -> None:
+        """Bind the manager to a task directory and shield configuration.
+
+        *runtime* selects the container runtime category — ``DEFAULT``
+        for crun/runc/youki (dnsmasq on netns ``127.0.0.1``), ``KRUN``
+        for the libkrun microVM path (dnsmasq on a link-local address
+        the guest can reach via passt).  Callers that drive the launch
+        path map their runtime string (``RunSpec.runtime``) to the
+        enum.
+        """
+        self._task_dir = task_dir
+        self._cfg = cfg or SandboxConfig()
+        self._runtime = runtime
+
+    @property
+    def state_dir(self) -> Path:
+        """Per-task shield state directory: ``{task_dir}/shield``."""
+        return self._task_dir / "shield"
+
+    @property
+    def bypass(self) -> bool:
+        """True when ``shield_bypass`` is set on the sandbox configuration."""
+        return self._cfg.shield_bypass
+
+    @cached_property
+    def shield(self) -> Shield:
+        """Lazily constructed [`Shield`][terok_shield.Shield] instance.
+
+        Built from a [`ShieldConfig`][terok_shield.ShieldConfig] whose
+        ``loopback_ports`` reflect the *actual* gate/broker/signer
+        ports — auto-allocated configs default those fields to ``None``,
+        which would otherwise silently produce an empty tuple and a
+        shield ruleset with no
+        ``tcp dport <p> ip daddr 169.254.1.2 accept`` rules, causing
+        container→host TCP traffic to fall through to the
+        private-range reject (#156 regression follow-up).
+        """
+        resolved = self._cfg.with_resolved_ports()
+        # Socket-mode transports emit no loopback traffic; filter ``None`` so
+        # the nftables rule generator only sees ports that actually exist.
+        loopback = tuple(
+            p
+            for p in (resolved.gate_port, resolved.token_broker_port, resolved.ssh_signer_port)
+            if p is not None
+        )
+        config = ShieldConfig(
+            state_dir=self.state_dir,
+            mode=ShieldMode.HOOK,
+            default_profiles=resolved.shield_profiles,
+            loopback_ports=loopback,
+            audit_enabled=resolved.shield_audit,
+            profiles_dir=resolved.shield_profiles_dir,
+            runtime=self._runtime,
+        )
+        return Shield(config)
+
+    # ── Bypassable lifecycle operations ─────────────────
+
+    def pre_start(self, container: str) -> list[str]:
+        """Return extra ``podman run`` args for egress firewalling.
+
+        Returns an empty list (no firewall args) when the dangerous
+        ``bypass_firewall_no_protection`` override is active.
+
+        Raises [`SystemExit`][SystemExit] with setup instructions when
+        the podman environment requires one-time hook installation.
+        """
+        if self.bypass:
+            warnings.warn(_BYPASS_WARNING, stacklevel=2)
+            return []
+        try:
+            return self.shield.pre_start(container)
+        except ShieldNeedsSetup as exc:
+            raise SystemExit(str(exc)) from None
+
+    def up(self, container: str) -> None:
+        """Set shield to deny-all mode for a running container."""
+        if self.bypass:
+            return
+        self.shield.up(container)
+
+    def down(self, container: str, *, allow_all: bool = False) -> None:
+        """Set shield to bypass mode (allow egress) for a running container.
+
+        When *allow_all* is True, also permits private-range (RFC 1918) traffic.
+        """
+        if self.bypass:
+            return
+        self.shield.down(container, allow_all=allow_all)
+
+    # ── Non-bypassable operations ───────────────────────
+
+    def quarantine(self, container: str) -> None:
+        """Total network blackout — drop all traffic, log dropped traffic.
+
+        Ignores ``shield_bypass`` because panic overrides every safety bypass.
+        """
+        self.shield.quarantine(container)
+
+    def state(self, container: str) -> ShieldState:
+        """Return the live shield state for a running container.
+
+        Queries actual nft state even when bypass is set, because
+        containers started *before* bypass was enabled may still have
+        active rules.
+        """
+        return self.shield.state(container)
+
+    # ── Configuration probes ────────────────────────────
+
+    def status(self) -> dict:
+        """Return shield status dict from the sandbox configuration.
+
+        Reads only the sandbox configuration — does not instantiate
+        the underlying Shield, so callers that only want
+        configuration-level shape don't pay the Shield wire-up cost.
+        """
+        result: dict = {
+            "mode": "hook",
+            "profiles": list(self._cfg.shield_profiles),
+            "audit_enabled": self._cfg.shield_audit,
+        }
+        if self.bypass:
+            result["bypass_firewall_no_protection"] = True
+        return result
+
+    def check_environment(self) -> EnvironmentCheck:
+        """Check the podman environment for shield compatibility.
+
+        Returns a synthetic [`EnvironmentCheck`][terok_shield.EnvironmentCheck]
+        with bypass info when the dangerous bypass override is active.
+        """
+        if self.bypass:
+            return EnvironmentCheck(
+                ok=False,
+                health="bypass",
+                issues=["bypass_firewall_no_protection is set — egress firewall disabled"],
+            )
+        return self.shield.check_environment()
+
+    # ── Operator-facing session helpers ─────────────────
+
+    def interactive_session(self, container: str) -> None:
+        """Run the terminal clearance fallback for this task's shield.
+
+        Thin wrapper that spares callers from reaching into
+        [`terok_shield.simple_clearance`][terok_shield.simple_clearance]
+        and rebuilding the ``state_dir`` themselves.  Refuses to run
+        when the D-Bus clearance hub is already handling the session.
+        """
+        from terok_shield.simple_clearance import run_simple_clearance
+
+        run_simple_clearance(self.state_dir, container)
+
+    def watch_session(self, container: str) -> None:
+        """Stream shield blocked-access events for this task as JSON lines.
+
+        Thin wrapper that spares callers from reaching into
+        [`terok_shield.watch`][terok_shield.watch] and rebuilding the
+        ``state_dir`` themselves.
+        """
+        from terok_shield.watch import run_watch
+
+        run_watch(self.state_dir, container)
 
 
-def pre_start(
-    container: str,
-    task_dir: Path,
-    cfg: SandboxConfig | None = None,
-    *,
-    runtime: ShieldRuntime = ShieldRuntime.DEFAULT,
-) -> list[str]:
-    """Return extra ``podman run`` args for egress firewalling.
+# ── Host-wide OCI hooks ──────────────────────────────────
 
-    Returns an empty list (no firewall args) when the dangerous
-    ``bypass_firewall_no_protection`` override is active.
 
-    Raises [`SystemExit`][SystemExit] with setup instructions when the
-    podman environment requires one-time hook installation.
+class ShieldHooks:
+    """Host-wide OCI hooks installer — no task context.
+
+    Wraps terok-shield's [`HooksInstaller`][terok_shield.HooksInstaller]
+    in the root/user dual-scope flag pattern the sandbox setup CLI
+    exposes: a single ``ShieldHooks.install(root=…, user=…)`` call
+    can target one or both scopes, mirroring the symmetric
+    ``ShieldHooks.uninstall`` path.
     """
-    if _cfg(cfg).shield_bypass:
-        warnings.warn(_BYPASS_WARNING, stacklevel=2)
-        return []
-    try:
-        return make_shield(task_dir, cfg, runtime=runtime).pre_start(container)
-    except ShieldNeedsSetup as exc:
-        raise SystemExit(str(exc)) from None
+
+    @staticmethod
+    def install(*, root: bool = False, user: bool = False) -> None:
+        """Install global OCI hooks for shield egress firewalling.
+
+        Global hooks are required on all podman versions to survive
+        container stop/start cycles (terok-shield#122).  At least one
+        of *root* or *user* must be true; passing both installs into
+        both scopes so callers that want system-wide and per-user
+        coverage can do it in a single call.
+
+        Raises [`ValueError`][ValueError] when neither flag is true.
+        """
+        if not root and not user:
+            raise ValueError("ShieldHooks.install requires either root=True or user=True")
+        if user:
+            HooksInstaller.user().install()
+        if root:
+            HooksInstaller.system().install()
+
+    @staticmethod
+    def uninstall(*, root: bool = False, user: bool = False) -> None:
+        """Remove the global OCI hooks [`install`][terok_sandbox.integrations.shield.ShieldHooks.install] writes.
+
+        At least one of *root* or *user* must be true; passing both is
+        valid and removes hooks from both scopes.  Missing files are
+        tolerated so the uninstaller is idempotent.
+        """
+        if not root and not user:
+            raise ValueError("ShieldHooks.uninstall requires either root=True or user=True")
+        if user:
+            HooksInstaller.user().uninstall()
+        if root:
+            HooksInstaller.system().uninstall()
 
 
-def down(
-    container: str, task_dir: Path, *, allow_all: bool = False, cfg: SandboxConfig | None = None
-) -> None:
-    """Set shield to bypass mode (allow egress) for a running container.
-
-    When *allow_all* is True, also permits private-range (RFC 1918) traffic.
-    """
-    if _cfg(cfg).shield_bypass:
-        return
-    make_shield(task_dir, cfg).down(container, allow_all=allow_all)
-
-
-def up(container: str, task_dir: Path, cfg: SandboxConfig | None = None) -> None:
-    """Set shield to deny-all mode for a running container."""
-    if _cfg(cfg).shield_bypass:
-        return
-    make_shield(task_dir, cfg).up(container)
-
-
-def quarantine(container: str, task_dir: Path, cfg: SandboxConfig | None = None) -> None:
-    """Total network blackout — drop all traffic, log dropped traffic.
-
-    Unlike [`up`][terok_sandbox.integrations.shield.up] and [`down`][terok_sandbox.integrations.shield.down], this ignores ``shield_bypass``
-    because panic overrides all safety bypasses.
-    """
-    make_shield(task_dir, cfg).quarantine(container)
-
-
-def state(container: str, task_dir: Path, cfg: SandboxConfig | None = None) -> ShieldState:
-    """Return the live shield state for a running container.
-
-    Queries actual nft state even when bypass is set, because containers
-    started *before* bypass was enabled may still have active rules.
-    """
-    return make_shield(task_dir, cfg).state(container)
-
-
-def status(cfg: SandboxConfig | None = None) -> dict:
-    """Return shield status dict from the sandbox configuration."""
-    c = _cfg(cfg)
-    result: dict = {
-        "mode": "hook",
-        "profiles": list(c.shield_profiles),
-        "audit_enabled": c.shield_audit,
-    }
-    if c.shield_bypass:
-        result["bypass_firewall_no_protection"] = True
-    return result
+# ── Bypass-aware environment probe (no task context) ────
 
 
 def check_environment(cfg: SandboxConfig | None = None) -> EnvironmentCheck:
-    """Check the podman environment for shield compatibility.
+    """Probe the podman environment with no task context.
 
-    Returns a synthetic [`EnvironmentCheck`][terok_shield.EnvironmentCheck] with bypass info when the
-    dangerous bypass override is active.
+    Returns a synthetic [`EnvironmentCheck`][terok_shield.EnvironmentCheck]
+    when ``shield_bypass`` is set; otherwise constructs a throwaway
+    [`ShieldManager`][terok_sandbox.integrations.shield.ShieldManager]
+    bound to a temp directory and delegates to its
+    [`check_environment`][terok_sandbox.integrations.shield.ShieldManager.check_environment].
+    Kept as a free function because the setup CLI runs before any
+    task directory exists.
     """
-    if _cfg(cfg).shield_bypass:
-        return EnvironmentCheck(
-            ok=False,
-            health="bypass",
-            issues=["bypass_firewall_no_protection is set — egress firewall disabled"],
-        )
     with tempfile.TemporaryDirectory() as tmp:
-        return make_shield(Path(tmp), cfg).check_environment()
-
-
-def shield_interactive_session(
-    container: str,
-    task_dir: Path,
-    *,
-    cfg: SandboxConfig | None = None,
-) -> None:
-    """Run the terminal clearance fallback for a task's shield.
-
-    Thin wrapper that spares callers from reaching into
-    [`terok_shield.simple_clearance`][terok_shield.simple_clearance] and rebuilding the
-    ``state_dir`` themselves.  Refuses to run when the D-Bus
-    clearance hub is already handling the session.
-    """
-    from terok_shield.simple_clearance import run_simple_clearance
-
-    run_simple_clearance(make_shield(task_dir, cfg).config.state_dir, container)
-
-
-def shield_watch_session(
-    container: str,
-    task_dir: Path,
-    cfg: SandboxConfig | None = None,
-) -> None:
-    """Stream shield blocked-access events for a task as JSON lines.
-
-    Thin wrapper that spares callers from reaching into
-    [`terok_shield.watch`][terok_shield.watch] and rebuilding the ``state_dir``
-    themselves.
-    """
-    from terok_shield.watch import run_watch
-
-    run_watch(make_shield(task_dir, cfg).config.state_dir, container)
-
-
-def run_setup(*, root: bool = False, user: bool = False) -> None:
-    """Install global OCI hooks for shield egress firewalling.
-
-    Global hooks are required on all podman versions to survive
-    container stop/start cycles (terok-shield#122).  At least one of
-    ``root`` or ``user`` must be true; passing both installs into both
-    scopes so callers that want system-wide and per-user coverage can
-    do it in a single call.
-
-    Raises [`ValueError`][ValueError] when neither flag is true.  The CLI
-    layer (``_handle_shield_setup`` in `.commands`) maps this to
-    a ``SystemExit`` with actionable ``shield install-hooks …`` hints;
-    the library stays UX-agnostic.
-    """
-    if not root and not user:
-        raise ValueError("run_setup requires either root=True or user=True")
-    if user:
-        setup_hooks_direct(root=False)
-    if root:
-        setup_hooks_direct(root=True)
-
-
-def setup_hooks_direct(*, root: bool = False) -> None:
-    """Install global hooks via the terok-shield Python API (no subprocess).
-
-    Suitable for TUI callers that need direct control.  Installs hooks
-    to the system directory (with sudo) when *root* is True, otherwise
-    to the user directory.
-    """
-    if root:
-        target = system_hooks_dir()
-        setup_global_hooks(target, use_sudo=True)
-    else:
-        target = Path(USER_HOOKS_DIR).expanduser()
-        setup_global_hooks(target)
-        ensure_containers_conf_hooks_dir(target)
-
-
-def run_uninstall(*, root: bool = False, user: bool = False) -> None:
-    """Remove the global OCI hooks that ``run_setup`` installs.
-
-    At least one of ``root`` or ``user`` must be true; passing both is
-    valid and removes hooks from both scopes — callers that installed
-    into both directories can clean up in a single call.  Missing files
-    are tolerated so the uninstaller is idempotent.
-    """
-    if not root and not user:
-        raise ValueError("run_uninstall requires either root=True or user=True")
-    if user:
-        uninstall_hooks_direct(root=False)
-    if root:
-        uninstall_hooks_direct(root=True)
-
-
-def uninstall_hooks_direct(*, root: bool = False) -> None:
-    """Delete shield hook files from the user or system hooks directory.
-
-    Uses sudo for the system directory (matching the install path in
-    [`setup_hooks_direct`][terok_sandbox.integrations.shield.setup_hooks_direct]) so the Python process stays unprivileged.
-    Bridge hook files are removed when present so a plain
-    ``shield uninstall-hooks`` leaves no residue from an earlier
-    ``terok setup`` that registered the D-Bus bridge.
-    """
-    target = system_hooks_dir() if root else Path(USER_HOOKS_DIR).expanduser()
-    if root:
-        _remove_hook_files_via_sudo(target)
-    else:
-        for name in _HOOK_FILES:
-            (target / name).unlink(missing_ok=True)
-
-
-def _remove_hook_files_via_sudo(target_dir: Path) -> None:
-    """Remove hook files from a root-owned directory via ``sudo rm -f``.
-
-    Paired with the ``sudo cp`` path in ``setup_hooks_direct`` — keeps
-    the process itself unprivileged while still managing system dirs.
-    """
-    import subprocess  # nosec B404 — shield daemon health probe
-
-    paths = [str(target_dir / name) for name in _HOOK_FILES]
-    subprocess.run(["sudo", "rm", "-f", *paths], check=True)  # noqa: S603, S607  # nosec B603 B607 — argv is a fixed list controlled by this module — sudo PATH lookup is the cross-distro contract
+        return ShieldManager(Path(tmp), cfg).check_environment()

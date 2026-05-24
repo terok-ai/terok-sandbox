@@ -62,7 +62,8 @@ class TestCompose:
         """With no --scope, gate/broker/ssh skip silently; shield still applies."""
         cfg = _make_cfg(tmp_path)
         with patch(
-            "terok_sandbox.integrations.shield.pre_start", return_value=["--annotation=t-s=1"]
+            "terok_sandbox.integrations.shield.ShieldManager.pre_start",
+            return_value=["--annotation=t-s=1"],
         ):
             args, plan = compose("myc", cfg=cfg, shield=True, gate=True, broker=True, scope=None)
         assert plan.shield is True
@@ -80,7 +81,8 @@ class TestCompose:
         cfg = _make_cfg(tmp_path, services_mode="socket")
         with (
             patch(
-                "terok_sandbox.integrations.shield.pre_start", return_value=["--annotation=t-s=1"]
+                "terok_sandbox.integrations.shield.ShieldManager.pre_start",
+                return_value=["--annotation=t-s=1"],
             ),
             patch("terok_sandbox.gate.tokens.TokenStore.create", return_value="terok-g-abc"),
             patch(
@@ -109,7 +111,7 @@ class TestCompose:
         """TCP mode emits port env vars instead of socket mounts."""
         cfg = _make_cfg(tmp_path, services_mode="tcp")
         with (
-            patch("terok_sandbox.integrations.shield.pre_start", return_value=[]),
+            patch("terok_sandbox.integrations.shield.ShieldManager.pre_start", return_value=[]),
             patch("terok_sandbox.gate.tokens.TokenStore.create", return_value="terok-g-abc"),
             patch(
                 "terok_sandbox.vault.store.db.CredentialDB.create_token",
@@ -126,7 +128,7 @@ class TestCompose:
     def test_no_shield_skips_shield_pre_start(self, tmp_path: Path) -> None:
         """--no-shield path doesn't call shield.pre_start."""
         cfg = _make_cfg(tmp_path)
-        with patch("terok_sandbox.integrations.shield.pre_start") as mocked:
+        with patch("terok_sandbox.integrations.shield.ShieldManager.pre_start") as mocked:
             compose("myc", cfg=cfg, shield=False, gate=False, broker=False, scope=None)
             mocked.assert_not_called()
 
@@ -135,7 +137,7 @@ class TestCompose:
     ) -> None:
         """When --gate/--broker requested without --scope, stderr notes it."""
         cfg = _make_cfg(tmp_path)
-        with patch("terok_sandbox.integrations.shield.pre_start", return_value=[]):
+        with patch("terok_sandbox.integrations.shield.ShieldManager.pre_start", return_value=[]):
             compose("myc", cfg=cfg, shield=False, gate=True, broker=True, scope=None)
         err = capsys.readouterr().err
         assert "--gate requires --scope" in err
@@ -152,7 +154,7 @@ class TestMetaAndCleanup:
 
     def test_meta_written_on_compose(self, tmp_path: Path) -> None:
         cfg = _make_cfg(tmp_path)
-        with patch("terok_sandbox.integrations.shield.pre_start", return_value=[]):
+        with patch("terok_sandbox.integrations.shield.ShieldManager.pre_start", return_value=[]):
             compose("myc", cfg=cfg, shield=True, gate=False, broker=False, scope=None)
         meta = run_state_dir(cfg, "myc") / "meta.json"
         assert meta.is_file()
@@ -169,8 +171,8 @@ class TestMetaAndCleanup:
         """Second cleanup is a no-op."""
         cfg = _make_cfg(tmp_path)
         with (
-            patch("terok_sandbox.integrations.shield.pre_start", return_value=[]),
-            patch("terok_sandbox.integrations.shield.down") as down,
+            patch("terok_sandbox.integrations.shield.ShieldManager.pre_start", return_value=[]),
+            patch("terok_sandbox.integrations.shield.ShieldManager.down") as down,
             patch("terok_sandbox.gate.tokens.TokenStore.create", return_value="terok-g-abc"),
             patch(
                 "terok_sandbox.vault.store.db.CredentialDB.create_token",
@@ -188,8 +190,8 @@ class TestMetaAndCleanup:
         """Cleanup uses container name as the subject when revoking."""
         cfg = _make_cfg(tmp_path)
         with (
-            patch("terok_sandbox.integrations.shield.pre_start", return_value=[]),
-            patch("terok_sandbox.integrations.shield.down"),
+            patch("terok_sandbox.integrations.shield.ShieldManager.pre_start", return_value=[]),
+            patch("terok_sandbox.integrations.shield.ShieldManager.down"),
             patch("terok_sandbox.gate.tokens.TokenStore.create", return_value="terok-g-abc"),
             patch(
                 "terok_sandbox.vault.store.db.CredentialDB.create_token",
@@ -215,8 +217,8 @@ class TestMetaAndCleanup:
 
         cfg = _make_cfg(tmp_path)
         with (
-            patch("terok_sandbox.integrations.shield.pre_start", return_value=[]),
-            patch("terok_sandbox.integrations.shield.down"),
+            patch("terok_sandbox.integrations.shield.ShieldManager.pre_start", return_value=[]),
+            patch("terok_sandbox.integrations.shield.ShieldManager.down"),
             patch("terok_sandbox.gate.tokens.TokenStore.create", return_value="terok-g-abc"),
             patch(
                 "terok_sandbox.vault.store.db.CredentialDB.create_token",
@@ -245,7 +247,7 @@ class TestMetaAndCleanup:
 
         cfg = _make_cfg(tmp_path)
         with (
-            patch("terok_sandbox.integrations.shield.pre_start", return_value=[]),
+            patch("terok_sandbox.integrations.shield.ShieldManager.pre_start", return_value=[]),
             patch(
                 "terok_sandbox.gate.tokens.TokenStore.create", return_value="terok-g-abc"
             ) as gate_create,
@@ -408,7 +410,10 @@ class TestHandlers:
         self, tmp_path: Path, capsys: pytest.CaptureFixture
     ) -> None:
         cfg = _make_cfg(tmp_path)
-        with patch("terok_sandbox.integrations.shield.pre_start", return_value=["--annotation=x"]):
+        with patch(
+            "terok_sandbox.integrations.shield.ShieldManager.pre_start",
+            return_value=["--annotation=x"],
+        ):
             _handle_prepare("myc", cfg=cfg)
         out = capsys.readouterr().out
         assert "--annotation=x" in out
@@ -416,7 +421,10 @@ class TestHandlers:
 
     def test_prepare_json_output(self, tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
         cfg = _make_cfg(tmp_path)
-        with patch("terok_sandbox.integrations.shield.pre_start", return_value=["--annotation=x"]):
+        with patch(
+            "terok_sandbox.integrations.shield.ShieldManager.pre_start",
+            return_value=["--annotation=x"],
+        ):
             _handle_prepare("myc", output_json=True, cfg=cfg)
         out = capsys.readouterr().out.strip()
         parsed = json.loads(out)
@@ -434,9 +442,9 @@ class TestHandlers:
         self, tmp_path: Path, capsys: pytest.CaptureFixture
     ) -> None:
         cfg = _make_cfg(tmp_path)
-        with patch("terok_sandbox.integrations.shield.pre_start", return_value=[]):
+        with patch("terok_sandbox.integrations.shield.ShieldManager.pre_start", return_value=[]):
             compose("myc", cfg=cfg, shield=True, gate=False, broker=False, scope=None)
-        with patch("terok_sandbox.integrations.shield.down"):
+        with patch("terok_sandbox.integrations.shield.ShieldManager.down"):
             _handle_cleanup("myc", cfg=cfg)
         out = capsys.readouterr().out
         assert "Cleaned up sandbox state for myc" in out
@@ -445,7 +453,10 @@ class TestHandlers:
         """`_handle_run` composes args and `os.execv`s into podman."""
         cfg = _make_cfg(tmp_path)
         with (
-            patch("terok_sandbox.integrations.shield.pre_start", return_value=["--annotation=x"]),
+            patch(
+                "terok_sandbox.integrations.shield.ShieldManager.pre_start",
+                return_value=["--annotation=x"],
+            ),
             patch("terok_sandbox.launch.shutil.which", return_value="/usr/bin/podman"),
             patch("terok_sandbox.launch.Path.resolve", return_value=Path("/usr/bin/podman")),
             patch("terok_sandbox.launch.Path.is_file", return_value=True),
@@ -499,14 +510,25 @@ class TestEdgeCases:
 
     def test_profiles_override_shield_profiles(self, tmp_path: Path) -> None:
         """`--profiles` reaches shield via a `dataclasses.replace`d cfg."""
+        from terok_sandbox.integrations.shield import ShieldManager
+
         cfg = _make_cfg(tmp_path)
         captured: list[SandboxConfig] = []
+        real_init = ShieldManager.__init__
 
-        def fake_pre_start(container: str, task_dir: Path, c: SandboxConfig) -> list[str]:
+        def capturing_init(
+            self,  # noqa: ANN001 — bound instance
+            task_dir: Path,
+            c: SandboxConfig | None = None,
+            **kwargs: object,
+        ) -> None:
             captured.append(c)
-            return []
+            real_init(self, task_dir, c, **kwargs)
 
-        with patch("terok_sandbox.integrations.shield.pre_start", side_effect=fake_pre_start):
+        with (
+            patch.object(ShieldManager, "__init__", capturing_init),
+            patch.object(ShieldManager, "pre_start", return_value=[]),
+        ):
             compose(
                 "myc",
                 cfg=cfg,
@@ -529,9 +551,11 @@ class TestEdgeCases:
     def test_cleanup_swallows_shield_down_failure(self, tmp_path: Path) -> None:
         """`cleanup` is best-effort against shield.down errors."""
         cfg = _make_cfg(tmp_path)
-        with patch("terok_sandbox.integrations.shield.pre_start", return_value=[]):
+        with patch("terok_sandbox.integrations.shield.ShieldManager.pre_start", return_value=[]):
             compose("myc", cfg=cfg, shield=True, gate=False, broker=False, scope=None)
-        with patch("terok_sandbox.integrations.shield.down", side_effect=OSError("nft gone")):
+        with patch(
+            "terok_sandbox.integrations.shield.ShieldManager.down", side_effect=OSError("nft gone")
+        ):
             assert cleanup("myc", cfg=cfg) is True
         # State dir gone even though shield.down failed.
         assert not run_state_dir(cfg, "myc").exists()
@@ -554,14 +578,14 @@ class TestEdgeCases:
         """A missing credential DB at cleanup time is treated as already-revoked."""
         cfg = _make_cfg(tmp_path)
         with (
-            patch("terok_sandbox.integrations.shield.pre_start", return_value=[]),
+            patch("terok_sandbox.integrations.shield.ShieldManager.pre_start", return_value=[]),
             patch("terok_sandbox.gate.tokens.TokenStore.create", return_value="t"),
             patch("terok_sandbox.vault.store.db.CredentialDB.create_token", return_value="p"),
         ):
             compose("myc", cfg=cfg, shield=True, gate=True, broker=True, scope="proj")
         # Now make CredentialDB construction fail at cleanup.
         with (
-            patch("terok_sandbox.integrations.shield.down"),
+            patch("terok_sandbox.integrations.shield.ShieldManager.down"),
             patch(
                 "terok_sandbox.config.SandboxConfig.open_credential_db",
                 side_effect=OSError("db file vanished"),
@@ -577,7 +601,7 @@ class TestEdgeCases:
         fake_cfg = _make_cfg(tmp_path)
         with (
             patch.object(launch_cmds, "SandboxConfig", return_value=fake_cfg),
-            patch("terok_sandbox.integrations.shield.pre_start", return_value=[]),
+            patch("terok_sandbox.integrations.shield.ShieldManager.pre_start", return_value=[]),
             patch("terok_sandbox.launch.shutil.which", return_value="/usr/bin/podman"),
             patch("terok_sandbox.launch.Path.resolve", return_value=Path("/usr/bin/podman")),
             patch("terok_sandbox.launch.Path.is_file", return_value=True),

@@ -131,7 +131,8 @@ def _handle_run(
 def _handle_cleanup(container: str, *, cfg: SandboxConfig | None = None) -> None:
     """Reverse a prior `prepare`/`run` for *container*.
 
-    Revokes minted tokens, calls [`shield.down`][terok_sandbox.integrations.shield.down],
+    Revokes minted tokens, calls
+    [`ShieldManager.down`][terok_sandbox.integrations.shield.ShieldManager.down],
     and removes the per-container state directory.  Idempotent — exits
     quietly when no state is found.
     """

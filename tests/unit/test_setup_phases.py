@@ -258,7 +258,7 @@ class TestShieldInstallPhase:
 
     def test_clean_install_reports_ok(self, capsys: pytest.CaptureFixture[str]) -> None:
         with (
-            patch("terok_sandbox.integrations.shield.run_setup") as setup,
+            patch("terok_sandbox.integrations.shield.ShieldHooks.install") as setup,
             patch(
                 "terok_sandbox.integrations.shield.check_environment",
                 return_value=MagicMock(health="ok"),
@@ -273,7 +273,7 @@ class TestShieldInstallPhase:
     ) -> None:
         """A bypass-firewall host lands as WARN but counts as ``ok`` for the aggregator."""
         with (
-            patch("terok_sandbox.integrations.shield.run_setup"),
+            patch("terok_sandbox.integrations.shield.ShieldHooks.install"),
             patch(
                 "terok_sandbox.integrations.shield.check_environment",
                 return_value=MagicMock(health="bypass"),
@@ -284,7 +284,8 @@ class TestShieldInstallPhase:
 
     def test_install_raises_reports_fail(self, capsys: pytest.CaptureFixture[str]) -> None:
         with patch(
-            "terok_sandbox.integrations.shield.run_setup", side_effect=RuntimeError("sudo required")
+            "terok_sandbox.integrations.shield.ShieldHooks.install",
+            side_effect=RuntimeError("sudo required"),
         ):
             assert run_shield_install_phase(root=False) is False
         assert "FAIL" in capsys.readouterr().out
@@ -292,7 +293,7 @@ class TestShieldInstallPhase:
     def test_unhealthy_post_install_reports_fail(self, capsys: pytest.CaptureFixture[str]) -> None:
         """Install succeeded on the surface but ``check_environment`` disagrees."""
         with (
-            patch("terok_sandbox.integrations.shield.run_setup"),
+            patch("terok_sandbox.integrations.shield.ShieldHooks.install"),
             patch(
                 "terok_sandbox.integrations.shield.check_environment",
                 return_value=MagicMock(health="setup-needed"),
@@ -551,9 +552,9 @@ class TestClearanceInstallPhase:
 
     def test_happy_path_installs_hub_and_notifier(self, capsys: pytest.CaptureFixture[str]) -> None:
         with (
-            patch("terok_sandbox.integrations.clearance.install_service") as install_hub,
+            patch("terok_sandbox.integrations.clearance.HubService.install") as install_hub,
             patch(
-                "terok_sandbox.integrations.clearance.install_notifier_service"
+                "terok_sandbox.integrations.clearance.NotifierService.install"
             ) as install_notifier,
             patch("terok_sandbox._setup._systemctl.run_best_effort"),
             patch("terok_sandbox._setup._enable_and_restart_user_unit"),
@@ -575,8 +576,8 @@ class TestClearanceInstallPhase:
         batching fix.
         """
         with (
-            patch("terok_sandbox.integrations.clearance.install_service"),
-            patch("terok_sandbox.integrations.clearance.install_notifier_service"),
+            patch("terok_sandbox.integrations.clearance.HubService.install"),
+            patch("terok_sandbox.integrations.clearance.NotifierService.install"),
             patch("terok_sandbox._setup._systemctl.run_best_effort") as run,
             patch("terok_sandbox._setup._enable_and_restart_user_unit"),
         ):
@@ -589,10 +590,10 @@ class TestClearanceInstallPhase:
     def test_hub_failure_reports_fail(self, capsys: pytest.CaptureFixture[str]) -> None:
         with (
             patch(
-                "terok_sandbox.integrations.clearance.install_service",
+                "terok_sandbox.integrations.clearance.HubService.install",
                 side_effect=RuntimeError("template missing"),
             ),
-            patch("terok_sandbox.integrations.clearance.install_notifier_service"),
+            patch("terok_sandbox.integrations.clearance.NotifierService.install"),
             patch("terok_sandbox._setup._systemctl.run_best_effort"),
             patch("terok_sandbox._setup._enable_and_restart_user_unit"),
         ):
@@ -604,9 +605,9 @@ class TestClearanceInstallPhase:
     ) -> None:
         """Notifier is non-critical — a failure WARNs without failing the phase."""
         with (
-            patch("terok_sandbox.integrations.clearance.install_service"),
+            patch("terok_sandbox.integrations.clearance.HubService.install"),
             patch(
-                "terok_sandbox.integrations.clearance.install_notifier_service",
+                "terok_sandbox.integrations.clearance.NotifierService.install",
                 side_effect=RuntimeError("session bus missing"),
             ),
             patch("terok_sandbox._setup._systemctl.run_best_effort"),
@@ -683,20 +684,20 @@ class TestShieldUninstallPhase:
     """Shield uninstall: removes hooks; reports scope in the OK line."""
 
     def test_user_scope_reports_ok(self, capsys: pytest.CaptureFixture[str]) -> None:
-        with patch("terok_sandbox.integrations.shield.run_uninstall") as run:
+        with patch("terok_sandbox.integrations.shield.ShieldHooks.uninstall") as run:
             assert run_shield_uninstall_phase(root=False) is True
         run.assert_called_once_with(root=False, user=True)
         assert "removed (user)" in capsys.readouterr().out
 
     def test_root_scope_reports_ok(self, capsys: pytest.CaptureFixture[str]) -> None:
-        with patch("terok_sandbox.integrations.shield.run_uninstall") as run:
+        with patch("terok_sandbox.integrations.shield.ShieldHooks.uninstall") as run:
             assert run_shield_uninstall_phase(root=True) is True
         run.assert_called_once_with(root=True, user=False)
         assert "removed (system)" in capsys.readouterr().out
 
     def test_uninstall_raises_reports_fail(self, capsys: pytest.CaptureFixture[str]) -> None:
         with patch(
-            "terok_sandbox.integrations.shield.run_uninstall",
+            "terok_sandbox.integrations.shield.ShieldHooks.uninstall",
             side_effect=RuntimeError("hook dir missing"),
         ):
             assert run_shield_uninstall_phase(root=False) is False
@@ -847,8 +848,8 @@ class TestClearanceUninstallPhase:
 
     def test_clean_teardown_reports_ok(self, capsys: pytest.CaptureFixture[str]) -> None:
         with (
-            patch("terok_sandbox.integrations.clearance.uninstall_notifier_service") as un_n,
-            patch("terok_sandbox.integrations.clearance.uninstall_service") as un_s,
+            patch("terok_sandbox.integrations.clearance.NotifierService.uninstall") as un_n,
+            patch("terok_sandbox.integrations.clearance.HubService.uninstall") as un_s,
         ):
             assert run_clearance_uninstall_phase() is True
         un_n.assert_called_once()
@@ -865,10 +866,10 @@ class TestClearanceUninstallPhase:
     def test_teardown_exception_reports_fail(self, capsys: pytest.CaptureFixture[str]) -> None:
         with (
             patch(
-                "terok_sandbox.integrations.clearance.uninstall_notifier_service",
+                "terok_sandbox.integrations.clearance.NotifierService.uninstall",
                 side_effect=RuntimeError("unit stuck"),
             ),
-            patch("terok_sandbox.integrations.clearance.uninstall_service"),
+            patch("terok_sandbox.integrations.clearance.HubService.uninstall"),
         ):
             assert run_clearance_uninstall_phase() is False
         out = capsys.readouterr().out

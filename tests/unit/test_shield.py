@@ -5,13 +5,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 from terok_shield import (
-    USER_HOOKS_DIR,
     EnvironmentCheck,
     NftNotFoundError,
     Shield,
@@ -23,21 +21,9 @@ from terok_shield import (
 from terok_sandbox.config import SandboxConfig
 from terok_sandbox.integrations.shield import (
     _BYPASS_WARNING,
-    _HOOK_FILES,
+    ShieldHooks,
+    ShieldManager,
     check_environment,
-    down,
-    make_shield,
-    pre_start,
-    quarantine,
-    run_setup,
-    run_uninstall,
-    setup_hooks_direct,
-    shield_interactive_session,
-    shield_watch_session,
-    state,
-    status,
-    uninstall_hooks_direct,
-    up,
 )
 from tests.constants import (
     GATE_PORT,
@@ -61,6 +47,9 @@ def make_mock_shield(
         ["--network", "hook-net"] if pre_start_args is None else pre_start_args
     )
     return mock_shield
+
+
+# ── ShieldManager.shield (the lazy Shield builder) ───────────────────────
 
 
 @pytest.mark.parametrize(
@@ -100,7 +89,7 @@ def make_mock_shield(
         ),
     ],
 )
-def test_make_shield_maps_config_to_shield_config(
+def test_shield_property_maps_config_to_shield_config(
     cfg_kwargs: dict[str, object],
     expected_profiles: tuple[str, ...],
     expected_port: int,
@@ -112,7 +101,7 @@ def test_make_shield_maps_config_to_shield_config(
         patch("terok_shield.run.SubprocessRunner", autospec=True),
         patch("terok_sandbox.paths.namespace_config_root", return_value=MOCK_CONFIG_ROOT),
     ):
-        shield = make_shield(MOCK_TASK_DIR, cfg=cfg)
+        shield = ShieldManager(MOCK_TASK_DIR, cfg=cfg).shield
 
     assert isinstance(shield, Shield)
     config = shield.config
@@ -124,21 +113,21 @@ def test_make_shield_maps_config_to_shield_config(
     assert config.profiles_dir == MOCK_CONFIG_ROOT / "shield" / "profiles"
 
 
-def test_make_shield_resolves_ports_for_auto_allocated_config(
+def test_shield_property_resolves_ports_for_auto_allocated_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A tcp-mode cfg with unset ports still produces a non-empty ``loopback_ports``.
 
-    Regression guard for the post-#315 bug where ``make_shield`` read the
-    raw ``cfg.gate_port`` / ``token_broker_port`` / ``ssh_signer_port``
-    fields without calling
+    Regression guard for the post-#315 bug where Shield construction
+    read the raw ``cfg.gate_port`` / ``token_broker_port`` /
+    ``ssh_signer_port`` fields without calling
     [`SandboxConfig.with_resolved_ports`][terok_sandbox.SandboxConfig.with_resolved_ports]
-    first.  Side-effect-free ``SandboxConfig`` construction leaves those
-    fields ``None`` for auto-allocated configs, which silently produced an
-    empty ``loopback_ports`` tuple — and a bypass ruleset with no
-    ``tcp dport <p> ip daddr 169.254.1.2 accept`` rules, so every
-    container→host loopback access fell through to the private-range
-    reject after ``shield down``.
+    first.  Side-effect-free ``SandboxConfig`` construction leaves
+    those fields ``None`` for auto-allocated configs, which silently
+    produced an empty ``loopback_ports`` tuple — and a bypass ruleset
+    with no ``tcp dport <p> ip daddr 169.254.1.2 accept`` rules, so
+    every container→host loopback access fell through to the
+    private-range reject after ``shield down``.
     """
     monkeypatch.setattr(
         "terok_sandbox.port_registry._read_installed_ports", lambda: {}, raising=False
@@ -153,24 +142,17 @@ def test_make_shield_resolves_ports_for_auto_allocated_config(
         patch("terok_shield.run.SubprocessRunner", autospec=True),
         patch("terok_sandbox.paths.namespace_config_root", return_value=MOCK_CONFIG_ROOT),
     ):
-        shield = make_shield(MOCK_TASK_DIR, cfg=cfg)
+        shield = ShieldManager(MOCK_TASK_DIR, cfg=cfg).shield
 
     assert len(shield.config.loopback_ports) == 3
     assert all(isinstance(p, int) for p in shield.config.loopback_ports)
     assert len(set(shield.config.loopback_ports)) == 3  # gate, broker, signer all distinct
 
 
-def test_make_shield_socket_mode_skips_port_resolution(
+def test_shield_property_socket_mode_skips_port_resolution(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Socket-mode configs short-circuit ``with_resolved_ports`` and emit no loopback rules.
-
-    Companion to
-    [`test_make_shield_resolves_ports_for_auto_allocated_config`][tests.unit.test_shield.test_make_shield_resolves_ports_for_auto_allocated_config]:
-    confirms the fix doesn't accidentally claim TCP ports for socket-mode
-    deployments, where vault/gate traffic rides Unix sockets and there are
-    no host loopback listeners to allow.
-    """
+    """Socket-mode configs short-circuit ``with_resolved_ports`` and emit no loopback rules."""
     monkeypatch.setattr(
         "terok_sandbox.port_registry._read_installed_ports", lambda: {}, raising=False
     )
@@ -180,9 +162,25 @@ def test_make_shield_socket_mode_skips_port_resolution(
         patch("terok_shield.run.SubprocessRunner", autospec=True),
         patch("terok_sandbox.paths.namespace_config_root", return_value=MOCK_CONFIG_ROOT),
     ):
-        shield = make_shield(MOCK_TASK_DIR, cfg=cfg)
+        shield = ShieldManager(MOCK_TASK_DIR, cfg=cfg).shield
 
     assert shield.config.loopback_ports == ()
+
+
+def test_shield_property_is_cached() -> None:
+    """The shield instance is built once per manager — repeated reads return the same object."""
+    cfg = SandboxConfig(gate_port=GATE_PORT, token_broker_port=18731, ssh_signer_port=18732)
+    with (
+        patch("terok_shield.run.SubprocessRunner", autospec=True),
+        patch("terok_sandbox.paths.namespace_config_root", return_value=MOCK_CONFIG_ROOT),
+    ):
+        manager = ShieldManager(MOCK_TASK_DIR, cfg=cfg)
+        first = manager.shield
+        second = manager.shield
+    assert first is second
+
+
+# ── Re-exports ───────────────────────────────────────────────────────────
 
 
 def test_nft_not_found_is_reexported() -> None:
@@ -199,62 +197,57 @@ def test_shield_state_is_reexported() -> None:
     assert shield_state_type is ShieldState
 
 
+# ── ShieldManager delegation to the underlying Shield ───────────────────
+
+
 @pytest.mark.parametrize(
-    ("func", "method_name", "expected"),
+    ("method_name", "delegated_call", "expected"),
     [
-        pytest.param(down, "down", None, id="down"),
-        pytest.param(up, "up", None, id="up"),
-        pytest.param(quarantine, "quarantine", None, id="quarantine"),
-        pytest.param(state, "state", ShieldState.UP, id="state"),
-        pytest.param(pre_start, "pre_start", ["--network", "hook-net"], id="pre-start"),
+        pytest.param("up", ("up", "ctr"), None, id="up"),
+        pytest.param("quarantine", ("quarantine", "ctr"), None, id="quarantine"),
+        pytest.param("state", ("state", "ctr"), ShieldState.UP, id="state"),
     ],
 )
-@patch("terok_sandbox.integrations.shield.make_shield")
-def test_shield_functions_delegate_to_per_task_shield(
-    mock_make: MagicMock,
-    func: Callable[..., object],
+def test_manager_methods_delegate_to_shield(
     method_name: str,
+    delegated_call: tuple[str, str],
     expected: object,
 ) -> None:
-    """The thin wrapper functions delegate to the corresponding ``Shield`` methods."""
+    """Each manager method forwards to the corresponding ``Shield`` method."""
     mock_shield = make_mock_shield()
-    mock_make.return_value = mock_shield
-
-    result = func("my-container", MOCK_TASK_DIR)
-
-    # pre_start threads a ``runtime=`` kwarg through to ``make_shield`` so the
-    # OCI hook can pick the dnsmasq bind for crun vs krun.  Other wrappers
-    # don't carry runtime — they operate on already-running containers.
-    if method_name == "pre_start":
-        from terok_shield import ShieldRuntime
-
-        mock_make.assert_called_once_with(MOCK_TASK_DIR, None, runtime=ShieldRuntime.DEFAULT)
-    else:
-        mock_make.assert_called_once_with(MOCK_TASK_DIR, None)
-    if method_name == "down":
-        getattr(mock_shield, method_name).assert_called_once_with("my-container", allow_all=False)
-    else:
-        getattr(mock_shield, method_name).assert_called_once_with("my-container")
+    manager = ShieldManager(MOCK_TASK_DIR)
+    with patch.object(ShieldManager, "shield", new=mock_shield):
+        result = getattr(manager, method_name)("ctr")
+    getattr(mock_shield, delegated_call[0]).assert_called_once_with(delegated_call[1])
     if expected is not None:
         assert result == expected
 
 
-@patch("terok_sandbox.integrations.shield.make_shield")
-def test_shield_down_allow_all(mock_make: MagicMock) -> None:
-    """The ``down`` wrapper passes ``allow_all=True`` when requested."""
+def test_manager_down_passes_allow_all() -> None:
+    """``ShieldManager.down`` forwards ``allow_all=True`` to the underlying Shield."""
     mock_shield = make_mock_shield()
-    mock_make.return_value = mock_shield
+    manager = ShieldManager(MOCK_TASK_DIR)
+    with patch.object(ShieldManager, "shield", new=mock_shield):
+        manager.down("ctr", allow_all=True)
+    mock_shield.down.assert_called_once_with("ctr", allow_all=True)
 
-    down("my-container", MOCK_TASK_DIR, allow_all=True)
 
-    mock_make.assert_called_once_with(MOCK_TASK_DIR, None)
-    mock_shield.down.assert_called_once_with("my-container", allow_all=True)
+def test_manager_pre_start_threads_runtime_into_shield() -> None:
+    """The runtime kwarg flows into the ShieldConfig the Shield is built from."""
+    from terok_shield import ShieldRuntime
+
+    cfg = SandboxConfig(gate_port=GATE_PORT, token_broker_port=18731, ssh_signer_port=18732)
+    with (
+        patch("terok_shield.run.SubprocessRunner", autospec=True),
+        patch("terok_sandbox.paths.namespace_config_root", return_value=MOCK_CONFIG_ROOT),
+    ):
+        manager = ShieldManager(MOCK_TASK_DIR, cfg=cfg, runtime=ShieldRuntime.KRUN)
+        assert manager.shield.config.runtime is ShieldRuntime.KRUN
 
 
 def test_status_defaults() -> None:
     """Status reflects the default configured shield state."""
-    cfg = SandboxConfig()
-    assert status(cfg=cfg) == {
+    assert ShieldManager(MOCK_TASK_DIR, SandboxConfig()).status() == {
         "mode": "hook",
         "profiles": ["dev-standard"],
         "audit_enabled": True,
@@ -264,55 +257,51 @@ def test_status_defaults() -> None:
 def test_status_custom_config() -> None:
     """Status reflects custom configured profiles and audit settings."""
     cfg = SandboxConfig(shield_profiles=("custom",), shield_audit=False)
-    assert status(cfg=cfg) == {
+    assert ShieldManager(MOCK_TASK_DIR, cfg).status() == {
         "mode": "hook",
         "profiles": ["custom"],
         "audit_enabled": False,
     }
 
 
-@pytest.mark.parametrize("func", [down, up], ids=["down", "up"])
-@patch("terok_sandbox.integrations.shield.make_shield")
-def test_bypass_makes_down_and_up_noops(
-    mock_make: MagicMock,
-    func: Callable[..., object],
-) -> None:
-    """Bypass mode makes the up/down wrapper functions no-ops."""
-    cfg = SandboxConfig(shield_bypass=True)
-    func("ctr", MOCK_TASK_DIR, cfg=cfg)
-    mock_make.assert_not_called()
+# ── Bypass handling ─────────────────────────────────────────────────────
 
 
-@patch("terok_sandbox.integrations.shield.make_shield")
-def test_quarantine_ignores_bypass(mock_make: MagicMock) -> None:
+@pytest.mark.parametrize("method_name", ["down", "up"])
+def test_bypass_makes_down_and_up_noops(method_name: str) -> None:
+    """Bypass mode makes ``ShieldManager.up`` / ``.down`` no-ops without touching Shield."""
+    mock_shield = MagicMock(spec=Shield)
+    manager = ShieldManager(MOCK_TASK_DIR, SandboxConfig(shield_bypass=True))
+    with patch.object(ShieldManager, "shield", new=mock_shield):
+        getattr(manager, method_name)("ctr")
+    mock_shield.up.assert_not_called()
+    mock_shield.down.assert_not_called()
+
+
+def test_quarantine_ignores_bypass() -> None:
     """Quarantine overrides bypass — panic must always work."""
     mock_shield = make_mock_shield()
-    mock_make.return_value = mock_shield
-    cfg = SandboxConfig(shield_bypass=True)
-
-    quarantine("ctr", MOCK_TASK_DIR, cfg=cfg)
-
-    mock_make.assert_called_once()
+    manager = ShieldManager(MOCK_TASK_DIR, SandboxConfig(shield_bypass=True))
+    with patch.object(ShieldManager, "shield", new=mock_shield):
+        manager.quarantine("ctr")
     mock_shield.quarantine.assert_called_once_with("ctr")
 
 
 def test_bypass_pre_start_returns_empty_with_warning() -> None:
-    """Bypass mode returns no pre-start Podman args and warns loudly."""
-    cfg = SandboxConfig(shield_bypass=True)
+    """Bypass mode returns no pre-start podman args and warns loudly."""
+    manager = ShieldManager(MOCK_TASK_DIR, SandboxConfig(shield_bypass=True))
     with pytest.warns(UserWarning) as caught:
-        assert pre_start("ctr", MOCK_TASK_DIR, cfg=cfg) == []
+        assert manager.pre_start("ctr") == []
     assert any(_BYPASS_WARNING in str(item.message) for item in caught)
 
 
-@patch("terok_sandbox.integrations.shield.make_shield")
-def test_bypass_state_still_queries_real_shield(
-    mock_make: MagicMock,
-) -> None:
+def test_bypass_state_still_queries_real_shield() -> None:
     """State lookup still queries the real shield to handle pre-bypass containers."""
-    cfg = SandboxConfig(shield_bypass=True)
-    mock_make.return_value = make_mock_shield(shield_state=ShieldState.UP)
-    assert state("ctr", MOCK_TASK_DIR, cfg=cfg) == ShieldState.UP
-    mock_make.assert_called_once_with(MOCK_TASK_DIR, cfg)
+    mock_shield = make_mock_shield(shield_state=ShieldState.UP)
+    manager = ShieldManager(MOCK_TASK_DIR, SandboxConfig(shield_bypass=True))
+    with patch.object(ShieldManager, "shield", new=mock_shield):
+        assert manager.state("ctr") == ShieldState.UP
+    mock_shield.state.assert_called_once_with("ctr")
 
 
 @pytest.mark.parametrize(
@@ -327,217 +316,153 @@ def test_status_includes_bypass_flag_only_when_active(
     expected_key: bool,
 ) -> None:
     """Status output surfaces the dangerous bypass flag only when it is active."""
-    cfg = SandboxConfig(shield_bypass=bypass_enabled)
-    result = status(cfg=cfg)
+    result = ShieldManager(MOCK_TASK_DIR, SandboxConfig(shield_bypass=bypass_enabled)).status()
     assert ("bypass_firewall_no_protection" in result) is expected_key
     assert result["mode"] == "hook"
     assert "profiles" in result
 
 
-@patch("terok_sandbox.integrations.shield.make_shield")
-def test_check_environment_forwards_result(mock_make: MagicMock) -> None:
-    """Environment checking delegates to ``Shield.check_environment``."""
+# ── Environment probe ──────────────────────────────────────────────────
+
+
+def test_check_environment_forwards_result() -> None:
+    """The free check_environment delegates to a throwaway ``ShieldManager``."""
     expected = EnvironmentCheck(ok=True, health="ok", podman_version=(5, 6, 0))
     mock_shield = make_mock_shield()
     mock_shield.check_environment.return_value = expected
-    mock_make.return_value = mock_shield
-
-    assert check_environment() == expected
+    with patch.object(ShieldManager, "shield", new=mock_shield):
+        assert check_environment() == expected
     mock_shield.check_environment.assert_called_once()
 
 
 def test_check_environment_bypass_returns_synthetic_result() -> None:
     """Bypass mode surfaces a synthetic degraded environment result."""
-    cfg = SandboxConfig(shield_bypass=True)
-    result = check_environment(cfg=cfg)
+    result = check_environment(cfg=SandboxConfig(shield_bypass=True))
     assert not result.ok
     assert result.health == "bypass"
     assert any("bypass" in issue for issue in result.issues)
 
 
-@patch("terok_sandbox.integrations.shield.make_shield")
-def test_pre_start_converts_shield_needs_setup_to_system_exit(mock_make: MagicMock) -> None:
+def test_pre_start_converts_shield_needs_setup_to_system_exit() -> None:
     """``ShieldNeedsSetup`` is converted into a diagnostic SystemExit."""
     mock_shield = make_mock_shield()
     mock_shield.pre_start.side_effect = ShieldNeedsSetup("hooks not installed")
-    mock_make.return_value = mock_shield
-
-    with pytest.raises(SystemExit, match="hooks not installed"):
-        pre_start("ctr", MOCK_TASK_DIR)
-
-
-@pytest.mark.parametrize(
-    ("kwargs", "expected_call"),
-    [
-        pytest.param({}, None, id="missing-flags"),
-        pytest.param({"user": True}, {"root": False}, id="user-setup"),
-        pytest.param({"root": True}, {"root": True}, id="root-setup"),
-    ],
-)
-def test_run_setup(
-    kwargs: dict[str, bool],
-    expected_call: dict[str, bool] | None,
-) -> None:
-    """Shield setup handles usage, user, and root installation paths."""
-    with patch("terok_sandbox.integrations.shield.setup_hooks_direct") as mock_direct:
-        if expected_call is None:
-            # Library layer is UX-agnostic: raises ValueError on invalid combos.
-            # The CLI layer (_handle_shield_setup) turns this into a SystemExit
-            # with install-hooks remediation hints.
-            with pytest.raises(ValueError, match="root=True or user=True"):
-                run_setup(**kwargs)
-            mock_direct.assert_not_called()
-        else:
-            run_setup(**kwargs)
-            mock_direct.assert_called_once_with(**expected_call)
+    manager = ShieldManager(MOCK_TASK_DIR)
+    with (
+        patch.object(ShieldManager, "shield", new=mock_shield),
+        pytest.raises(SystemExit, match="hooks not installed"),
+    ):
+        manager.pre_start("ctr")
 
 
-@pytest.mark.parametrize(
-    ("root", "expected_use_sudo", "should_configure_user_hooks"),
-    [
-        pytest.param(False, False, True, id="user-mode"),
-        pytest.param(True, True, False, id="root-mode"),
-    ],
-)
-@patch("terok_sandbox.integrations.shield.system_hooks_dir")
-@patch("terok_sandbox.integrations.shield.ensure_containers_conf_hooks_dir")
-@patch("terok_sandbox.integrations.shield.setup_global_hooks")
-def test_setup_hooks_direct(
-    mock_setup: MagicMock,
-    mock_conf: MagicMock,
-    mock_system_hooks_dir: MagicMock,
-    root: bool,
-    expected_use_sudo: bool,
-    should_configure_user_hooks: bool,
-) -> None:
-    """Hook installation chooses the correct target and user/root post-processing."""
-    expected_target = (MOCK_BASE / "system-hooks") if root else Path(USER_HOOKS_DIR).expanduser()
-    mock_system_hooks_dir.return_value = expected_target
-
-    setup_hooks_direct(root=root)
-
-    args, kwargs = mock_setup.call_args
-    assert args == (expected_target,)
-    assert kwargs.get("use_sudo", False) is expected_use_sudo
-    if should_configure_user_hooks:
-        mock_conf.assert_called_once_with(expected_target)
-    else:
-        mock_conf.assert_not_called()
-
-
-@patch("terok_shield.simple_clearance.run_simple_clearance")
-def test_shield_interactive_session_delegates_to_simple_clearance(
-    mock_run_simple_clearance: MagicMock,
-) -> None:
-    """Session helper forwards the shield state_dir and container to the terminal fallback."""
-    shield_interactive_session("task-ctr", MOCK_TASK_DIR)
-
-    mock_run_simple_clearance.assert_called_once_with(MOCK_TASK_DIR / "shield", "task-ctr")
-
-
-@patch("terok_shield.watch.run_watch")
-def test_shield_watch_session_delegates_to_run_watch(mock_run_watch: MagicMock) -> None:
-    """Session helper forwards the shield state_dir and container to terok-shield."""
-    shield_watch_session("task-ctr", MOCK_TASK_DIR)
-
-    mock_run_watch.assert_called_once_with(MOCK_TASK_DIR / "shield", "task-ctr")
-
-
-# ── Uninstall (global hooks) ─────────────────────────────────────────────
-#
-# Install/uninstall is the contract under test: a setup-then-uninstall
-# round trip must leave the hooks directory exactly as it was, and a
-# stand-alone uninstall must not error when nothing is installed.
+# ── ShieldHooks (host-wide installer) ───────────────────────────────────
 
 
 @pytest.mark.parametrize(
     ("kwargs", "expected_calls"),
     [
         pytest.param({}, None, id="missing-flags"),
-        pytest.param({"user": True}, [{"root": False}], id="user-only"),
-        pytest.param({"root": True}, [{"root": True}], id="root-only"),
-        pytest.param(
-            {"root": True, "user": True},
-            [{"root": False}, {"root": True}],
-            id="both-scopes-removed",
-        ),
+        pytest.param({"user": True}, [("user",)], id="user-only"),
+        pytest.param({"root": True}, [("system",)], id="root-only"),
+        pytest.param({"root": True, "user": True}, [("user",), ("system",)], id="both-scopes"),
     ],
 )
-def test_run_uninstall(
+def test_shield_hooks_install_dispatches_per_scope(
     kwargs: dict[str, bool],
-    expected_calls: list[dict[str, bool]] | None,
+    expected_calls: list[tuple[str]] | None,
 ) -> None:
-    """``run_uninstall`` removes every scope the caller names; neither → ValueError."""
-    with patch("terok_sandbox.integrations.shield.uninstall_hooks_direct") as mock_direct:
+    """``ShieldHooks.install`` calls the matching ``HooksInstaller`` factories."""
+    with (
+        patch("terok_sandbox.integrations.shield.HooksInstaller.user") as user_factory,
+        patch("terok_sandbox.integrations.shield.HooksInstaller.system") as system_factory,
+    ):
         if expected_calls is None:
             with pytest.raises(ValueError, match="root=True or user=True"):
-                run_uninstall(**kwargs)
-            mock_direct.assert_not_called()
-        else:
-            run_uninstall(**kwargs)
-            assert mock_direct.call_count == len(expected_calls)
-            for call, expected in zip(mock_direct.call_args_list, expected_calls, strict=True):
-                assert call.kwargs == expected
+                ShieldHooks.install(**kwargs)
+            user_factory.assert_not_called()
+            system_factory.assert_not_called()
+            return
+        ShieldHooks.install(**kwargs)
+        factories = {"user": user_factory, "system": system_factory}
+        invoked = {scope for (scope,) in expected_calls}
+        for scope in invoked:
+            factories[scope].assert_called_once()
+            factories[scope].return_value.install.assert_called_once()
+        # Non-selected scopes must not be touched — guards against
+        # accidentally installing into both scopes when only one flag
+        # was set.
+        for scope in set(factories) - invoked:
+            factories[scope].assert_not_called()
 
 
-def test_uninstall_hooks_direct_user_removes_all_known_files(tmp_path: Path) -> None:
-    """User-mode uninstall deletes every hook file ``setup_global_hooks`` would write."""
-    for name in _HOOK_FILES:
-        (tmp_path / name).write_text("placeholder")
-    # Also drop an unrelated file so we can assert it survives.
-    stray = tmp_path / "unrelated.json"
-    stray.write_text("keep me")
-
-    with patch("pathlib.Path.expanduser", return_value=tmp_path):
-        uninstall_hooks_direct(root=False)
-
-    for name in _HOOK_FILES:
-        assert not (tmp_path / name).exists()
-    assert stray.exists()
-
-
-def test_uninstall_hooks_direct_user_is_idempotent(tmp_path: Path) -> None:
-    """Calling uninstall twice — or on an empty directory — must not raise."""
-    with patch("pathlib.Path.expanduser", return_value=tmp_path):
-        uninstall_hooks_direct(root=False)  # nothing installed
-        uninstall_hooks_direct(root=False)  # still nothing
-
-
-@patch("subprocess.run")
-@patch("terok_sandbox.integrations.shield.system_hooks_dir")
-def test_uninstall_hooks_direct_root_delegates_to_sudo(
-    mock_system_dir: MagicMock, mock_run: MagicMock, tmp_path: Path
+@pytest.mark.parametrize(
+    ("kwargs", "expected_calls"),
+    [
+        pytest.param({}, None, id="missing-flags"),
+        pytest.param({"user": True}, [("user",)], id="user-only"),
+        pytest.param({"root": True}, [("system",)], id="root-only"),
+        pytest.param({"root": True, "user": True}, [("user",), ("system",)], id="both-scopes"),
+    ],
+)
+def test_shield_hooks_uninstall_dispatches_per_scope(
+    kwargs: dict[str, bool],
+    expected_calls: list[tuple[str]] | None,
 ) -> None:
-    """Root-mode uninstall drops a single ``sudo rm -f`` covering every hook file."""
-    mock_system_dir.return_value = tmp_path
+    """``ShieldHooks.uninstall`` calls the matching ``HooksInstaller`` factories."""
+    with (
+        patch("terok_sandbox.integrations.shield.HooksInstaller.user") as user_factory,
+        patch("terok_sandbox.integrations.shield.HooksInstaller.system") as system_factory,
+    ):
+        if expected_calls is None:
+            with pytest.raises(ValueError, match="root=True or user=True"):
+                ShieldHooks.uninstall(**kwargs)
+            user_factory.assert_not_called()
+            system_factory.assert_not_called()
+            return
+        ShieldHooks.uninstall(**kwargs)
+        factories = {"user": user_factory, "system": system_factory}
+        invoked = {scope for (scope,) in expected_calls}
+        for scope in invoked:
+            factories[scope].assert_called_once()
+            factories[scope].return_value.uninstall.assert_called_once()
+        # Non-selected scopes must not be touched — same guard as the
+        # install path above.
+        for scope in set(factories) - invoked:
+            factories[scope].assert_not_called()
 
-    uninstall_hooks_direct(root=True)
 
-    mock_run.assert_called_once()
-    argv = mock_run.call_args.args[0]
-    assert argv[0:3] == ["sudo", "rm", "-f"]
-    removed = set(argv[3:])
-    for name in _HOOK_FILES:
-        assert str(tmp_path / name) in removed
+# ── Session helpers ─────────────────────────────────────────────────────
 
 
-def test_setup_then_uninstall_round_trip(tmp_path: Path) -> None:
-    """Setup-then-uninstall leaves the hooks directory exactly as it was."""
-    from terok_shield.hooks.install import setup_global_hooks
+@patch("terok_shield.simple_clearance.run_simple_clearance")
+def test_interactive_session_delegates_to_simple_clearance(
+    mock_run_simple_clearance: MagicMock,
+) -> None:
+    """Session helper forwards the shield state_dir and container to the terminal fallback."""
+    ShieldManager(MOCK_TASK_DIR).interactive_session("task-ctr")
+    mock_run_simple_clearance.assert_called_once_with(MOCK_TASK_DIR / "shield", "task-ctr")
+
+
+@patch("terok_shield.watch.run_watch")
+def test_watch_session_delegates_to_run_watch(mock_run_watch: MagicMock) -> None:
+    """Session helper forwards the shield state_dir and container to terok-shield."""
+    ShieldManager(MOCK_TASK_DIR).watch_session("task-ctr")
+    mock_run_watch.assert_called_once_with(MOCK_TASK_DIR / "shield", "task-ctr")
+
+
+# ── Round-trip ──────────────────────────────────────────────────────────
+
+
+def test_install_then_uninstall_round_trip(tmp_path: Path) -> None:
+    """``HooksInstaller.user().install()`` + ``.uninstall()`` round-trip leaves no residue."""
+    from terok_shield import HooksInstaller
 
     hooks_dir = tmp_path / "hooks.d"
-    # Capture the pre-install snapshot.  Directory may not exist yet — that's
-    # the real user experience on a fresh host.
-    assert not hooks_dir.exists()
-
-    setup_global_hooks(hooks_dir)
+    installer = HooksInstaller(target_dir=hooks_dir)
+    installer.install()
     assert hooks_dir.is_dir()
     assert any(hooks_dir.iterdir())
-
-    with patch("pathlib.Path.expanduser", return_value=hooks_dir):
-        uninstall_hooks_direct(root=False)
-
+    installer.uninstall()
     # The directory itself is left in place (other tools may share it);
     # only our files are gone.
-    remaining = list(hooks_dir.iterdir())
-    assert remaining == [], f"uninstall left residue: {remaining}"
+    assert list(hooks_dir.iterdir()) == []
