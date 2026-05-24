@@ -384,9 +384,15 @@ def test_shield_hooks_install_dispatches_per_scope(
             return
         ShieldHooks.install(**kwargs)
         factories = {"user": user_factory, "system": system_factory}
-        for (scope,) in expected_calls:
+        invoked = {scope for (scope,) in expected_calls}
+        for scope in invoked:
             factories[scope].assert_called_once()
             factories[scope].return_value.install.assert_called_once()
+        # Non-selected scopes must not be touched — guards against
+        # accidentally installing into both scopes when only one flag
+        # was set.
+        for scope in set(factories) - invoked:
+            factories[scope].assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -415,9 +421,14 @@ def test_shield_hooks_uninstall_dispatches_per_scope(
             return
         ShieldHooks.uninstall(**kwargs)
         factories = {"user": user_factory, "system": system_factory}
-        for (scope,) in expected_calls:
+        invoked = {scope for (scope,) in expected_calls}
+        for scope in invoked:
             factories[scope].assert_called_once()
             factories[scope].return_value.uninstall.assert_called_once()
+        # Non-selected scopes must not be touched — same guard as the
+        # install path above.
+        for scope in set(factories) - invoked:
+            factories[scope].assert_not_called()
 
 
 # ── Session helpers ─────────────────────────────────────────────────────
