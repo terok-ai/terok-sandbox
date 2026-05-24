@@ -18,8 +18,8 @@ requires-python = ">=3.12,<4.0"
 dynamic = ["version", "classifiers"]
 dependencies = [
     "terok-util @ https://github.com/terok-ai/terok-util/releases/download/v0.0.2a1/terok_util-0.0.2a1-py3-none-any.whl",
-    "terok-shield @ git+https://github.com/terok-ai/terok-shield.git@refs/pull/333/head",
-    "terok-clearance @ git+https://github.com/terok-ai/terok-clearance.git@refs/pull/143/head",
+    "terok-shield @ https://github.com/terok-ai/terok-shield/releases/download/v0.6.42a9/terok_shield-0.6.42a9-py3-none-any.whl",
+    "terok-clearance @ https://github.com/terok-ai/terok-clearance/releases/download/v0.6.14a7/terok_clearance-0.6.14a7-py3-none-any.whl",
     "platformdirs>=4.9.6",
     "aiohttp>=3.9",
     "cryptography>=46.0.7",
@@ -61,7 +61,7 @@ classifiers = [
 packages = [
   { include = "terok_sandbox", from = "src" },
 ]
-version = "0.0.124a19"
+version = "0.0.124a20"
 
 [tool.poetry.group.dev.dependencies]
 ruff = ">=0.15.10"
