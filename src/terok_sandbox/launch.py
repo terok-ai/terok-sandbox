@@ -169,9 +169,9 @@ def compose(
     is the job of the CLI layer.
 
     Raises ``SystemExit`` if shield setup is required (propagated from
-    [`shield.pre_start`][terok_sandbox.integrations.shield.pre_start]).
+    [`ShieldManager.pre_start`][terok_sandbox.integrations.shield.ShieldManager.pre_start]).
     """
-    from .integrations import shield as shield_module
+    from .integrations.shield import ShieldManager
 
     # Profile override flows through cfg so shield's internal builder
     # (which reads ``cfg.shield_profiles``) picks it up without a new
@@ -215,7 +215,7 @@ def compose(
     # Shield first — its OCI hook expects to see the annotations before
     # podman processes any of the other flags.
     if shield:
-        args += shield_module.pre_start(container, state_dir, cfg)
+        args += ShieldManager(state_dir, cfg).pre_start(container)
 
     # User-namespace mapping ensures the host UID matches inside the
     # container, which both the bind-mounted sockets (0600 host-owned)
@@ -409,7 +409,7 @@ def cleanup(container: str, *, cfg: SandboxConfig) -> bool:
     Returns ``True`` when state was found and torn down, ``False`` when
     there was nothing to clean up.  Idempotent — safe to call repeatedly.
     """
-    from .integrations import shield as shield_module
+    from .integrations.shield import ShieldManager
 
     state_dir = run_state_dir(cfg, container)
     plan = _read_meta(state_dir)
@@ -463,7 +463,7 @@ def cleanup(container: str, *, cfg: SandboxConfig) -> bool:
     # the OCI poststop hook has already removed the rules.
     if plan.shield:
         try:
-            shield_module.down(container, state_dir, cfg=cfg)
+            ShieldManager(state_dir, cfg).down(container)
         except (SystemExit, OSError):
             pass
 

@@ -18,8 +18,8 @@ requires-python = ">=3.12,<4.0"
 dynamic = ["version", "classifiers"]
 dependencies = [
     "terok-util @ https://github.com/terok-ai/terok-util/releases/download/v0.0.2a1/terok_util-0.0.2a1-py3-none-any.whl",
-    "terok-shield @ https://github.com/terok-ai/terok-shield/releases/download/v0.6.42a8/terok_shield-0.6.42a8-py3-none-any.whl",
-    "terok-clearance @ https://github.com/terok-ai/terok-clearance/releases/download/v0.6.14a6/terok_clearance-0.6.14a6-py3-none-any.whl",
+    "terok-shield @ git+https://github.com/terok-ai/terok-shield.git@refs/pull/333/head",
+    "terok-clearance @ git+https://github.com/terok-ai/terok-clearance.git@refs/pull/143/head",
     "platformdirs>=4.9.6",
     "aiohttp>=3.9",
     "cryptography>=46.0.7",

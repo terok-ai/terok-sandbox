@@ -169,11 +169,11 @@ def print_selinux_install_hint(result: SelinuxCheckResult) -> None:
 
 def run_shield_install_phase(*, root: bool) -> bool:
     """Install shield OCI hooks — per-user or system-wide depending on *root*."""
-    from .integrations.shield import check_environment, run_setup
+    from .integrations.shield import ShieldHooks, check_environment
 
     with _stage_line("Shield hooks") as s:
         try:
-            run_setup(root=root, user=not root)
+            ShieldHooks.install(root=root, user=not root)
         except Exception as exc:  # noqa: BLE001 — aggregator reports all failures uniformly
             s.fail(str(exc))
             return False
@@ -249,27 +249,20 @@ def run_clearance_install_phase() -> bool:
     vault / gate stack is perfectly functional without it.
     """
     try:
-        from .integrations.clearance import (
-            HUB_UNIT_NAME,
-            NOTIFIER_UNIT_NAME,
-            VERDICT_UNIT_NAME,
-            install_notifier_service,
-            install_service,
-        )
+        from .integrations.clearance import HubService, NotifierService
     except ImportError:
         with _stage_line("Clearance") as s:
             s.skip("terok_clearance not installed")
         return True
 
-    # ``install_service()`` / ``install_notifier_service()`` default
-    # their own argv internally — clearance owns the knowledge of
-    # which module serves its hub / notifier, so sandbox doesn't have
-    # to spell ``[sys.executable, "-m", "terok_clearance.cli.main"]``
+    # The class factories default their argv internally — clearance owns
+    # the knowledge of which module serves its hub / notifier, so sandbox
+    # doesn't have to spell ``[sys.executable, "-m", "terok_clearance.cli.main"]``
     # and leak that layout across the package boundary.
     hub_ok = _install_clearance_unit_pair(
         label="Clearance hub",
-        install_fn=install_service,
-        units_to_enable=(HUB_UNIT_NAME, VERDICT_UNIT_NAME),
+        install_fn=HubService.install,
+        units_to_enable=HubService.UNIT_NAMES,
     )
     # Notifier failure is non-fatal — the hub is the critical path;
     # the notifier only enriches desktop popups.  Return value is
@@ -277,8 +270,8 @@ def run_clearance_install_phase() -> bool:
     # remote SSH install) doesn't flip the aggregator's exit code.
     _install_clearance_unit_pair(
         label="Clearance notifier",
-        install_fn=install_notifier_service,
-        units_to_enable=(NOTIFIER_UNIT_NAME,),
+        install_fn=NotifierService.install,
+        units_to_enable=NotifierService.UNIT_NAMES,
     )
     return hub_ok
 
@@ -288,12 +281,12 @@ def run_clearance_install_phase() -> bool:
 
 def run_shield_uninstall_phase(*, root: bool) -> bool:
     """Remove shield OCI hooks — per-user or system-wide depending on *root*."""
-    from .integrations.shield import run_uninstall
+    from .integrations.shield import ShieldHooks
 
     scope = "system" if root else "user"
     with _stage_line("Shield hooks") as s:
         try:
-            run_uninstall(root=root, user=not root)
+            ShieldHooks.uninstall(root=root, user=not root)
         except Exception as exc:  # noqa: BLE001 — aggregator uniform error surface
             s.fail(str(exc))
             return False
@@ -351,18 +344,15 @@ def run_clearance_uninstall_phase() -> bool:
     stays a one-liner rather than a crash.
     """
     try:
-        from .integrations.clearance import (
-            uninstall_notifier_service,
-            uninstall_service,
-        )
+        from .integrations.clearance import HubService, NotifierService
     except ImportError:
         with _stage_line("Clearance") as s:
             s.skip("terok_clearance not installed")
         return True
     with _stage_line("Clearance") as s:
         try:
-            uninstall_notifier_service()
-            uninstall_service()
+            NotifierService.uninstall()
+            HubService.uninstall()
         except Exception as exc:  # noqa: BLE001
             s.fail(str(exc))
             return False

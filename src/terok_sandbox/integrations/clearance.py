@@ -19,8 +19,6 @@ from terok_clearance.runtime.installer import (  # noqa: F401 — re-exported pu
     HUB_UNIT_NAME,
     NOTIFIER_UNIT_NAME,
     VERDICT_UNIT_NAME,
-    install_notifier_service,
-    install_service,
-    uninstall_notifier_service,
-    uninstall_service,
+    HubService,
+    NotifierService,
 )

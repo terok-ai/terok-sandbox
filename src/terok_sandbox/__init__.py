@@ -63,16 +63,10 @@ from .gate.mirror import GateAuthNotConfigured, GateStalenessInfo, GitGate, is_s
 from .gate.tokens import TokenStore
 from .integrations.shield import (
     EnvironmentCheck,
+    ShieldHooks,
+    ShieldManager,
     check_environment,
-    down,
-    make_shield,
-    quarantine,
     resolve_container_state_dir,
-    run_setup,
-    setup_hooks_direct,
-    state,
-    status,
-    up,
 )
 from .port_registry import claim_port, release_port
 from .runtime import (
@@ -126,7 +120,6 @@ __all__ = [
     "needs_setup",
     "read_stamp",
     "sandbox_uninstall",
-    "setup_hooks_direct",
     "stamp_path",
     # Lifecycle managers
     "GateServerManager",
@@ -152,17 +145,12 @@ __all__ = [
     "TcpSSHTransport",
     "VolumeSpec",
     "podman_port_resolver",
-    # Shield (wrappers terok-sandbox owns; the egress-firewall layer lives in terok-shield)
+    # Shield (sandbox-side policy classes; the egress-firewall layer lives in terok-shield)
     "EnvironmentCheck",
+    "ShieldHooks",
+    "ShieldManager",
     "check_environment",
-    "down",
-    "make_shield",
-    "quarantine",
     "resolve_container_state_dir",
-    "run_setup",
-    "state",
-    "status",
-    "up",
     # Git gate
     "GateAuthNotConfigured",
     "GateStalenessInfo",

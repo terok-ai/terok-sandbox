@@ -53,7 +53,7 @@ class DoctorCheck:
       ``probe_cmd`` directly via ``subprocess`` on the host.
     - *Host-side mode* (``host_side=True``): the orchestrator bypasses
       ``probe_cmd`` entirely and performs the check via Python APIs
-      (e.g. ``make_shield``), then passes resolved state to ``evaluate``.
+      (e.g. ``ShieldManager``), then passes resolved state to ``evaluate``.
       The standalone ``doctor`` command calls ``evaluate(0, "", "")`` and
       the function performs the check itself or reports a neutral result.
     """
