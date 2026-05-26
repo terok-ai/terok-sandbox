@@ -304,18 +304,16 @@ class TestCountCommitsRange:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-def _make_log_handler() -> object:
-    """Create a GateRequestHandler instance for log_message testing."""
-    import json
-    import tempfile
+def _make_log_handler(base: Path) -> object:
+    """Create a GateRequestHandler instance for log_message testing.
 
-    from terok_sandbox.gate.server import TokenStore, _make_handler_class
+    *base* is a pytest-managed directory (``tmp_path``); the handler's
+    on-disk root routes through it so the test never touches the
+    operator's real filesystem.
+    """
+    from terok_sandbox.gate.server import _make_handler_class, _SingleTokenStore
 
-    td = tempfile.mkdtemp()
-    base = Path(td)
-    token_file = base / "tokens.json"
-    token_file.write_text(json.dumps({}))
-    store = TokenStore(token_file)
+    store = _SingleTokenStore("terok-g-tok", "proj")
     handler_class = _make_handler_class(base, store)
 
     handler = handler_class.__new__(handler_class)
@@ -392,64 +390,46 @@ class TestStopTaskContainersLogging:
         assert results[0].error == "podman not found"
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 2d. vault_lifecycle — DB read failure logging
-# ═══════════════════════════════════════════════════════════════════════════
-
-
-class TestVaultStatusDbFailure:
-    """Verify get_vault_status' behaviour when the credential DB can't be read."""
-
-    def test_decrypt_failure_marks_vault_locked(self, tmp_path: Path) -> None:
-        """A file that fails to decrypt surfaces as ``locked`` — the actionable signal."""
-        from terok_sandbox import SandboxConfig
-        from terok_sandbox.vault.daemon.lifecycle import VaultManager
-
-        cfg = SandboxConfig(state_dir=tmp_path)
-        # Bytes that aren't a SQLCipher-encrypted DB: HMAC check fails ⇒
-        # WrongPassphraseError ⇒ ``locked`` rather than a generic warning.
-        cfg.db_path.parent.mkdir(parents=True, exist_ok=True)
-        cfg.db_path.write_text("not a sqlite db")
-
-        status = VaultManager(cfg).get_status()
-        assert status.locked is True
-        assert status.credentials_stored == ()
+# The VaultManager.get_status() coverage that lived here is gone with
+# the per-container-supervisor refactor (May 2026) — VaultStatus and
+# VaultManager no longer exist.  Per-container supervisors open the
+# SQLCipher DB directly and surface failures via their own logging.
 
 
 class TestGateHandlerLogMessage:
     """Tests for GateRequestHandler.log_message filtering by HTTP status code."""
 
-    def test_log_message_silent_for_2xx(self) -> None:
+    def test_log_message_silent_for_2xx(self, tmp_path: Path) -> None:
         """2xx responses are silently suppressed."""
-        handler = _make_log_handler()
+        handler = _make_log_handler(tmp_path)
         with unittest.mock.patch("terok_sandbox.gate.server._logger") as mock_logger:
             handler.log_message("%s %s %s", "GET /foo", "200", "-")
             mock_logger.warning.assert_not_called()
 
-    def test_log_message_warns_for_4xx(self) -> None:
+    def test_log_message_warns_for_4xx(self, tmp_path: Path) -> None:
         """4xx responses are logged at WARNING level."""
-        handler = _make_log_handler()
+        handler = _make_log_handler(tmp_path)
         with unittest.mock.patch("terok_sandbox.gate.server._logger") as mock_logger:
             handler.log_message("%s %s %s", "GET /foo", "404", "-")
             mock_logger.warning.assert_called_once()
 
-    def test_log_message_warns_for_5xx(self) -> None:
+    def test_log_message_warns_for_5xx(self, tmp_path: Path) -> None:
         """5xx responses are logged at WARNING level."""
-        handler = _make_log_handler()
+        handler = _make_log_handler(tmp_path)
         with unittest.mock.patch("terok_sandbox.gate.server._logger") as mock_logger:
             handler.log_message("%s %s %s", "POST /bar", "500", "-")
             mock_logger.warning.assert_called_once()
 
-    def test_log_message_silent_for_3xx(self) -> None:
+    def test_log_message_silent_for_3xx(self, tmp_path: Path) -> None:
         """3xx responses are silently suppressed (below 400 threshold)."""
-        handler = _make_log_handler()
+        handler = _make_log_handler(tmp_path)
         with unittest.mock.patch("terok_sandbox.gate.server._logger") as mock_logger:
             handler.log_message("%s %s %s", "GET /foo", "302", "-")
             mock_logger.warning.assert_not_called()
 
-    def test_log_message_handles_malformed_args(self) -> None:
+    def test_log_message_handles_malformed_args(self, tmp_path: Path) -> None:
         """Malformed arguments do not raise — silently ignored."""
-        handler = _make_log_handler()
+        handler = _make_log_handler(tmp_path)
         with unittest.mock.patch("terok_sandbox.gate.server._logger") as mock_logger:
             # No args at all
             handler.log_message("no args")
@@ -458,9 +438,9 @@ class TestGateHandlerLogMessage:
             handler.log_message("%s %s", "GET /foo", 200)
             mock_logger.warning.assert_not_called()
 
-    def test_log_message_non_numeric_status_no_crash(self) -> None:
+    def test_log_message_non_numeric_status_no_crash(self, tmp_path: Path) -> None:
         """Non-numeric status string hits ValueError catch without crashing."""
-        handler = _make_log_handler()
+        handler = _make_log_handler(tmp_path)
         with unittest.mock.patch("terok_sandbox.gate.server._logger") as mock_logger:
             handler.log_message("%s %s", "GET /foo", "not-a-number")
             mock_logger.warning.assert_not_called()

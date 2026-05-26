@@ -1,109 +1,41 @@
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for gate server helpers: TokenStore, basic-auth parsing, CGI plumbing."""
+"""Tests for gate server helpers: single-token store, basic-auth parsing, CGI plumbing."""
 
 from __future__ import annotations
 
 import base64
 import io
-import logging
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from terok_sandbox.gate.server import (
-    _ADMIN_WILDCARD,  # noqa: PLC2701
-    TokenStore,
     _build_cgi_env,  # noqa: PLC2701
-    _configure_logging,  # noqa: PLC2701
     _extract_basic_auth_token,  # noqa: PLC2701
     _parse_cgi_headers,  # noqa: PLC2701
     _parse_content_length,  # noqa: PLC2701
+    _SingleTokenStore,  # noqa: PLC2701
     _stream_request_body,  # noqa: PLC2701
     _stream_response_body,  # noqa: PLC2701
-    _validate_token_data,  # noqa: PLC2701
-    main,
 )
 
 # ---------------------------------------------------------------------------
-# _validate_token_data
+# _SingleTokenStore
 # ---------------------------------------------------------------------------
 
 
-class TestValidateTokenData:
-    """_validate_token_data accepts only well-formed {token: {scope, task}} maps."""
+class TestSingleTokenStore:
+    """The per-container store validates the single minted token."""
 
-    def test_valid_returns_unchanged(self) -> None:
-        data = {"tok-1": {"scope": "myproj", "task": "t1"}}
-        assert _validate_token_data(data) == data
-
-    def test_non_dict_returns_empty(self) -> None:
-        assert _validate_token_data([1, 2, 3]) == {}
-        assert _validate_token_data(None) == {}
-        assert _validate_token_data("not-a-dict") == {}
-
-    def test_filters_invalid_scope_or_task(self) -> None:
-        data = {
-            "ok": {"scope": "p", "task": "t"},
-            "no-scope": {"task": "t"},
-            "non-string-scope": {"scope": 1, "task": "t"},
-            "missing-task": {"scope": "p"},
-        }
-        result = _validate_token_data(data)
-        assert "ok" in result
-        assert "no-scope" not in result
-        assert "non-string-scope" not in result
-        assert "missing-task" not in result
-
-
-# ---------------------------------------------------------------------------
-# TokenStore
-# ---------------------------------------------------------------------------
-
-
-class TestTokenStore:
-    """TokenStore validates tokens against a JSON-backed registry."""
-
-    def _write(self, tmp_path: Path, content: str) -> Path:
-        p = tmp_path / "tokens.json"
-        p.write_text(content)
-        return p
-
-    def test_admin_token_returns_wildcard(self, tmp_path: Path) -> None:
-        store = TokenStore(self._write(tmp_path, "{}"), admin_token="root-token")
-        assert store.validate("root-token") == _ADMIN_WILDCARD
-
-    def test_unknown_token_returns_none(self, tmp_path: Path) -> None:
-        store = TokenStore(self._write(tmp_path, '{"good": {"scope": "s", "task": "t"}}'))
-        assert store.validate("bogus") is None
-
-    def test_known_token_returns_scope(self, tmp_path: Path) -> None:
-        store = TokenStore(self._write(tmp_path, '{"good": {"scope": "myscope", "task": "t1"}}'))
+    def test_known_token_returns_scope(self) -> None:
+        store = _SingleTokenStore("good", "myscope")
         assert store.validate("good") == "myscope"
 
-    def test_missing_file_validates_to_none(self, tmp_path: Path) -> None:
-        store = TokenStore(tmp_path / "missing.json")
-        assert store.validate("any") is None
-
-    def test_corrupt_json_validates_to_none(self, tmp_path: Path) -> None:
-        store = TokenStore(self._write(tmp_path, "{not json"))
-        assert store.validate("any") is None
-
-    def test_reload_picks_up_new_token_after_mtime_change(self, tmp_path: Path) -> None:
-        """File modified after first read → reload triggers on next validate."""
-        path = self._write(tmp_path, '{"a": {"scope": "x", "task": "t"}}')
-        store = TokenStore(path)
-        assert store.validate("a") == "x"
-        # Rewrite the file with a different token; bump mtime.
-        path.write_text('{"b": {"scope": "y", "task": "t"}}')
-        import os
-
-        os.utime(path, (1_700_000_000, 1_700_000_000))
-        assert store.validate("a") is None
-        assert store.validate("b") == "y"
+    def test_unknown_token_returns_none(self) -> None:
+        store = _SingleTokenStore("good", "myscope")
+        assert store.validate("bogus") is None
 
 
 # ---------------------------------------------------------------------------
@@ -326,187 +258,7 @@ class TestStreamResponseBody:
 
 
 # ---------------------------------------------------------------------------
-# _configure_logging
-# ---------------------------------------------------------------------------
-
-
-class TestConfigureLogging:
-    """_configure_logging picks the right handler for daemon vs interactive use."""
-
-    def teardown_method(self) -> None:
-        # Drain handlers so tests don't pollute each other or other suites.
-        from terok_sandbox.gate.server import _logger as gate_logger
-
-        gate_logger.handlers.clear()
-
-    def test_non_daemon_uses_streamhandler(self) -> None:
-        from terok_sandbox.gate.server import _logger as gate_logger
-
-        _configure_logging(daemon=False)
-        assert any(isinstance(h, logging.StreamHandler) for h in gate_logger.handlers)
-        assert gate_logger.level == logging.WARNING
-
-    def test_daemon_uses_syslog_handler(self) -> None:
-        # Patch SysLogHandler so we don't open /dev/log on the test host.
-        from terok_sandbox.gate.server import _logger as gate_logger
-
-        with patch("logging.handlers.SysLogHandler") as syslog_cls:
-            syslog_cls.return_value = logging.NullHandler()
-            _configure_logging(daemon=True)
-            syslog_cls.assert_called_once_with(address="/dev/log")
-        # The NullHandler we substituted in is what got attached.
-        assert gate_logger.handlers
-
-
-# ---------------------------------------------------------------------------
-# main() — argparse + mode dispatch
-# ---------------------------------------------------------------------------
-
-
-def _make_token_file(tmp_path: Path) -> Path:
-    """Create an empty tokens.json under *tmp_path* and return its path."""
-    token_file = tmp_path / "tokens.json"
-    token_file.write_text("{}")
-    return token_file
-
-
-class TestMainCliDispatch:
-    """main() validates flag combinations and dispatches to the right serve fn."""
-
-    def teardown_method(self) -> None:
-        from terok_sandbox.gate.server import _logger as gate_logger
-
-        gate_logger.handlers.clear()
-
-    def test_inetd_dispatches_to_serve_inetd(self, tmp_path: Path) -> None:
-        token_file = _make_token_file(tmp_path)
-        with (
-            patch(
-                "sys.argv",
-                [
-                    "terok-gate",
-                    "--base-path",
-                    str(tmp_path),
-                    "--token-file",
-                    str(token_file),
-                    "--inetd",
-                ],
-            ),
-            patch("terok_sandbox.gate.server._serve_inetd") as inetd,
-            patch("terok_sandbox.gate.server._configure_logging"),
-        ):
-            main()
-        inetd.assert_called_once()
-
-    def test_socket_path_dispatches_to_serve_foreground(self, tmp_path: Path) -> None:
-        token_file = _make_token_file(tmp_path)
-        sock_path = tmp_path / "g.sock"
-        with (
-            patch(
-                "sys.argv",
-                [
-                    "terok-gate",
-                    "--base-path",
-                    str(tmp_path),
-                    "--token-file",
-                    str(token_file),
-                    "--socket-path",
-                    str(sock_path),
-                    "--port",
-                    "9418",
-                    "--pid-file",
-                    str(tmp_path / "g.pid"),
-                ],
-            ),
-            patch("terok_sandbox.gate.server._serve_foreground") as fore,
-            patch("terok_sandbox.gate.server._configure_logging"),
-        ):
-            main()
-        fore.assert_called_once()
-        kwargs = fore.call_args.kwargs
-        assert kwargs["socket_path"] == sock_path
-        assert kwargs["port"] == 9418
-
-    def test_detach_dispatches_to_serve_daemon(self, tmp_path: Path) -> None:
-        token_file = _make_token_file(tmp_path)
-        with (
-            patch(
-                "sys.argv",
-                [
-                    "terok-gate",
-                    "--base-path",
-                    str(tmp_path),
-                    "--token-file",
-                    str(token_file),
-                    "--detach",
-                ],
-            ),
-            patch("terok_sandbox.gate.server._serve_daemon") as daemon,
-            patch("terok_sandbox.gate.server._configure_logging"),
-        ):
-            main()
-        daemon.assert_called_once()
-
-    def test_no_mode_flag_errors_out(self, tmp_path: Path) -> None:
-        """Without --inetd, --detach, or --socket-path, argparse errors."""
-        token_file = _make_token_file(tmp_path)
-        with (
-            patch(
-                "sys.argv",
-                ["terok-gate", "--base-path", str(tmp_path), "--token-file", str(token_file)],
-            ),
-            patch("terok_sandbox.gate.server._configure_logging"),
-        ):
-            with pytest.raises(SystemExit):
-                main()
-
-    def test_mutually_exclusive_modes_error_out(self, tmp_path: Path) -> None:
-        token_file = _make_token_file(tmp_path)
-        with (
-            patch(
-                "sys.argv",
-                [
-                    "terok-gate",
-                    "--base-path",
-                    str(tmp_path),
-                    "--token-file",
-                    str(token_file),
-                    "--inetd",
-                    "--detach",
-                ],
-            ),
-            patch("terok_sandbox.gate.server._configure_logging"),
-        ):
-            with pytest.raises(SystemExit):
-                main()
-
-    def test_admin_token_via_env_var(self, tmp_path: Path) -> None:
-        """admin token can come from TEROK_GATE_ADMIN_TOKEN env var as fallback."""
-        token_file = _make_token_file(tmp_path)
-        with (
-            patch(
-                "sys.argv",
-                [
-                    "terok-gate",
-                    "--base-path",
-                    str(tmp_path),
-                    "--token-file",
-                    str(token_file),
-                    "--inetd",
-                ],
-            ),
-            patch.dict("os.environ", {"TEROK_GATE_ADMIN_TOKEN": "env-admin"}),
-            patch("terok_sandbox.gate.server._serve_inetd"),
-            patch("terok_sandbox.gate.server._configure_logging"),
-            patch("terok_sandbox.gate.server.TokenStore") as store_cls,
-        ):
-            main()
-        # TokenStore should have been built with the admin token from env
-        assert store_cls.call_args.kwargs["admin_token"] == "env-admin"
-
-
-# ---------------------------------------------------------------------------
-# _run_cgi error paths via mocked Popen — regression for line 354-359, 375-377
+# _run_cgi error paths via mocked Popen
 # ---------------------------------------------------------------------------
 
 
@@ -517,10 +269,7 @@ class TestRunCgiErrors:
         """Construct a GateRequestHandler instance bound to mocked I/O."""
         from terok_sandbox.gate.server import _make_handler_class
 
-        token_file = tmp_path / "tokens.json"
-        token_file.write_text('{"good-token": {"scope": "myrepo", "task": "t1"}}')
-        store = TokenStore(token_file)
-
+        store = _SingleTokenStore("good-token", "myrepo")
         cls = _make_handler_class(tmp_path, store)
         handler = cls.__new__(cls)
         handler.headers = {}

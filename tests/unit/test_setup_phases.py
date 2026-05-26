@@ -4,9 +4,9 @@
 """Tests for the sandbox-wide setup phase functions.
 
 Covers the individual phases ``_handle_sandbox_setup`` wires together:
-prereq reporting, shield / vault / gate / clearance install, the
-shared reinstall skeleton, and the lifecycle helpers.  The aggregator
-orchestration itself is tested in ``test_setup_aggregator.py``.
+prereq reporting, shield install/uninstall, and the legacy install
+cleanup sweep.  The aggregator orchestration itself is tested in
+``test_setup_aggregator.py``.
 """
 
 from __future__ import annotations
@@ -17,19 +17,12 @@ import pytest
 
 from terok_sandbox._setup import (
     SelinuxStatus,
-    _enable_and_restart_user_unit,
-    _reinstall_systemd_service,
-    _start_managed_daemon,
-    _stop_and_uninstall,
-    run_clearance_install_phase,
-    run_clearance_uninstall_phase,
-    run_gate_install_phase,
-    run_gate_uninstall_phase,
+    run_legacy_install_cleanup_phase,
     run_prereq_report,
     run_shield_install_phase,
     run_shield_uninstall_phase,
-    run_vault_install_phase,
-    run_vault_uninstall_phase,
+    run_supervisor_install_phase,
+    run_supervisor_uninstall_phase,
 )
 from terok_sandbox.config import SandboxConfig
 
@@ -264,8 +257,8 @@ class TestShieldInstallPhase:
                 return_value=MagicMock(health="ok"),
             ),
         ):
-            assert run_shield_install_phase(root=False) is True
-        setup.assert_called_once_with(root=False, user=True)
+            assert run_shield_install_phase() is True
+        setup.assert_called_once_with()
         assert "ok" in capsys.readouterr().out
 
     def test_bypass_mode_reports_warn_but_still_ok(
@@ -279,15 +272,15 @@ class TestShieldInstallPhase:
                 return_value=MagicMock(health="bypass"),
             ),
         ):
-            assert run_shield_install_phase(root=False) is True
+            assert run_shield_install_phase() is True
         assert "WARN" in capsys.readouterr().out
 
     def test_install_raises_reports_fail(self, capsys: pytest.CaptureFixture[str]) -> None:
         with patch(
             "terok_sandbox.integrations.shield.ShieldHooks.install",
-            side_effect=RuntimeError("sudo required"),
+            side_effect=RuntimeError("install failed"),
         ):
-            assert run_shield_install_phase(root=False) is False
+            assert run_shield_install_phase() is False
         assert "FAIL" in capsys.readouterr().out
 
     def test_unhealthy_post_install_reports_fail(self, capsys: pytest.CaptureFixture[str]) -> None:
@@ -299,588 +292,354 @@ class TestShieldInstallPhase:
                 return_value=MagicMock(health="setup-needed"),
             ),
         ):
-            assert run_shield_install_phase(root=False) is False
+            assert run_shield_install_phase() is False
         assert "FAIL" in capsys.readouterr().out
 
 
-# ── Shared reinstall skeleton ────────────────────────────────────────
-
-
-class TestReinstallSystemdService:
-    """Stop → uninstall → install → verify, with both exception tuples covered."""
-
-    def test_happy_path_invokes_full_lifecycle(self, capsys: pytest.CaptureFixture[str]) -> None:
-        mgr = MagicMock()
-        mgr.get_status.return_value = MagicMock(mode="systemd", transport="tcp")
-        assert _reinstall_systemd_service(label="Vault", mgr=mgr) is True
-        mgr.stop_daemon.assert_called_once()
-        mgr.uninstall_systemd_units.assert_called_once()
-        mgr.install_systemd_units.assert_called_once()
-        mgr.ensure_reachable.assert_called_once()
-        assert "reachable" in capsys.readouterr().out
-
-    def test_install_systemexit_reports_fail(self, capsys: pytest.CaptureFixture[str]) -> None:
-        mgr = MagicMock()
-        mgr.install_systemd_units.side_effect = SystemExit("no ports")
-        assert _reinstall_systemd_service(label="Vault", mgr=mgr) is False
-        assert "FAIL" in capsys.readouterr().out
-
-    def test_install_generic_exception_reports_fail(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        mgr = MagicMock()
-        mgr.install_systemd_units.side_effect = RuntimeError("template missing")
-        assert _reinstall_systemd_service(label="Gate server", mgr=mgr) is False
-        assert "install:" in capsys.readouterr().out
-
-    def test_verify_failure_reports_installed_but_unreachable(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        mgr = MagicMock()
-        mgr.ensure_reachable.side_effect = SystemExit("connection refused")
-        assert _reinstall_systemd_service(label="Gate server", mgr=mgr) is False
-        assert "NOT reachable" in capsys.readouterr().out
-
-    def test_custom_reachable_exc_tuple_catches_narrower_error(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        """Vault's caller passes ``(VaultUnreachableError, SystemExit)`` so both types reach FAIL."""
-
-        class VaultUnreachable(RuntimeError):
-            pass
-
-        mgr = MagicMock()
-        mgr.ensure_reachable.side_effect = VaultUnreachable("socket silent")
-        ok = _reinstall_systemd_service(
-            label="Vault", mgr=mgr, reachable_exc=(VaultUnreachable, SystemExit)
-        )
-        assert ok is False
-        assert "NOT reachable" in capsys.readouterr().out
-
-    def test_stop_or_uninstall_exceptions_soft_fail(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        """Dangling daemon / unit file from a broken install is tolerated."""
-        mgr = MagicMock()
-        mgr.stop_daemon.side_effect = RuntimeError("no pid")
-        mgr.uninstall_systemd_units.side_effect = RuntimeError("no units")
-        mgr.get_status.return_value = MagicMock(mode="systemd", transport="tcp")
-        assert _reinstall_systemd_service(label="Vault", mgr=mgr) is True
-
-
-class TestStartManagedDaemon:
-    """Stop → start → verify cycle for the no-systemd code path."""
-
-    def test_happy_path_starts_and_verifies(self, capsys: pytest.CaptureFixture[str]) -> None:
-        mgr = MagicMock()
-        mgr.get_status.return_value = MagicMock(mode="daemon", transport="socket")
-        assert _start_managed_daemon(label="Vault", mgr=mgr) is True
-        mgr.stop_daemon.assert_called_once()
-        mgr.start_daemon.assert_called_once()
-        mgr.ensure_reachable.assert_called_once()
-        out = capsys.readouterr().out
-        assert "reachable" in out
-        assert "no systemd" in out
-
-    def test_start_systemexit_reports_fail(self, capsys: pytest.CaptureFixture[str]) -> None:
-        mgr = MagicMock()
-        mgr.start_daemon.side_effect = SystemExit("port busy")
-        assert _start_managed_daemon(label="Vault", mgr=mgr) is False
-        assert "port busy" in capsys.readouterr().out
-
-    def test_start_generic_exception_reports_fail(self, capsys: pytest.CaptureFixture[str]) -> None:
-        mgr = MagicMock()
-        mgr.start_daemon.side_effect = RuntimeError("crashed")
-        assert _start_managed_daemon(label="Vault", mgr=mgr) is False
-        assert "daemon start" in capsys.readouterr().out
-
-    def test_verify_failure_reports_started_but_unreachable(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        mgr = MagicMock()
-        mgr.ensure_reachable.side_effect = SystemExit("socket silent")
-        assert _start_managed_daemon(label="Vault", mgr=mgr) is False
-        assert "started but NOT reachable" in capsys.readouterr().out
-
-    def test_stop_exception_soft_fail(self, capsys: pytest.CaptureFixture[str]) -> None:
-        """A failed stop on a stale daemon doesn't prevent a fresh start."""
-        mgr = MagicMock()
-        mgr.stop_daemon.side_effect = RuntimeError("no pid")
-        mgr.get_status.return_value = MagicMock(mode="daemon", transport="tcp")
-        assert _start_managed_daemon(label="Vault", mgr=mgr) is True
-        mgr.start_daemon.assert_called_once()
-
-
-# ── Vault / gate install phase adapters ──────────────────────────────
-
-
-class TestVaultInstallPhase:
-    """Vault's entry-point wires the VaultUnreachableError exception into the reinstall skeleton."""
-
-    def test_clean_reinstall_invokes_full_lifecycle(
-        self, bare_cfg: SandboxConfig, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        from terok_sandbox.vault.daemon.lifecycle import VaultManager
-
-        status = MagicMock(mode="systemd", transport="tcp")
-        with (
-            patch.object(VaultManager, "is_systemd_available", return_value=True),
-            patch.object(VaultManager, "stop_daemon") as stop,
-            patch.object(VaultManager, "uninstall_systemd_units") as uninstall,
-            patch.object(VaultManager, "install_systemd_units") as install,
-            patch.object(VaultManager, "ensure_reachable") as verify,
-            patch.object(VaultManager, "get_status", return_value=status),
-        ):
-            assert run_vault_install_phase(bare_cfg) is True
-        stop.assert_called_once()
-        uninstall.assert_called_once()
-        install.assert_called_once()
-        verify.assert_called_once()
-        assert "reachable" in capsys.readouterr().out
-
-    def test_vault_unreachable_error_is_reported(
-        self, bare_cfg: SandboxConfig, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        """Vault's typed ``VaultUnreachableError`` reaches FAIL through the custom exc tuple."""
-        from pathlib import Path
-
-        from terok_sandbox.vault.daemon.lifecycle import VaultManager, VaultUnreachableError
-
-        unreachable = VaultUnreachableError(
-            socket_path=Path("/tmp/vault.sock"), db_path=Path("/tmp/vault.db")
-        )
-        with (
-            patch.object(VaultManager, "is_systemd_available", return_value=True),
-            patch.object(VaultManager, "stop_daemon"),
-            patch.object(VaultManager, "uninstall_systemd_units"),
-            patch.object(VaultManager, "install_systemd_units"),
-            patch.object(VaultManager, "ensure_reachable", side_effect=unreachable),
-        ):
-            assert run_vault_install_phase(bare_cfg) is False
-        assert "NOT reachable" in capsys.readouterr().out
-
-    def test_no_systemd_starts_managed_daemon(
-        self, bare_cfg: SandboxConfig, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        """On a host without user systemd, the vault is started as a managed daemon."""
-        from terok_sandbox.vault.daemon.lifecycle import VaultManager
-
-        status = MagicMock(mode="daemon", transport="socket")
-        with (
-            patch.object(VaultManager, "is_systemd_available", return_value=False),
-            patch.object(VaultManager, "stop_daemon") as stop,
-            patch.object(VaultManager, "install_systemd_units") as install,
-            patch.object(VaultManager, "start_daemon") as start,
-            patch.object(VaultManager, "ensure_reachable") as verify,
-            patch.object(VaultManager, "get_status", return_value=status),
-        ):
-            assert run_vault_install_phase(bare_cfg) is True
-        # Daemon path: ``start_daemon`` runs, ``install_systemd_units`` does not.
-        start.assert_called_once()
-        install.assert_not_called()
-        # ``stop_daemon`` still runs to clear any stale daemon.
-        stop.assert_called_once()
-        verify.assert_called_once()
-        out = capsys.readouterr().out
-        assert "no systemd" in out
-        assert "daemon" in out
-
-    def test_no_systemd_daemon_start_failure_reports_fail(
-        self, bare_cfg: SandboxConfig, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        """Daemon-start failures land on the same FAIL row as systemd-install failures."""
-        from terok_sandbox.vault.daemon.lifecycle import VaultManager
-
-        with (
-            patch.object(VaultManager, "is_systemd_available", return_value=False),
-            patch.object(VaultManager, "stop_daemon"),
-            patch.object(VaultManager, "start_daemon", side_effect=SystemExit("vault exit 1")),
-        ):
-            assert run_vault_install_phase(bare_cfg) is False
-        assert "vault exit 1" in capsys.readouterr().out
-
-
-class TestGateInstallPhase:
-    """Gate's entry-point adds the systemd-availability preflight."""
-
-    def test_systemd_unavailable_is_warning_not_failure(
-        self, bare_cfg: SandboxConfig, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        """Hosts without user systemd warn-skip the phase — gate has no daemon fallback.
-
-        The skip is intentional: the gate's inetd-style architecture has no
-        managed-daemon counterpart yet, so callers (sickbay, preflight) are
-        expected to detect ``mode="none"`` and degrade gracefully.  The
-        message names the consequence so the operator isn't left guessing
-        why a feature went missing.
-        """
-        from terok_sandbox.gate.lifecycle import GateServerManager
-
-        with patch.object(GateServerManager, "is_systemd_available", return_value=False):
-            assert run_gate_install_phase(bare_cfg) is True
-        out = capsys.readouterr().out
-        assert "WARN" in out
-        # Consequence is named, not just "skipping".
-        assert "git push channel" in out
-
-    def test_clean_reinstall_invokes_full_lifecycle(
-        self, bare_cfg: SandboxConfig, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        from terok_sandbox.gate.lifecycle import GateServerManager
-
-        status = MagicMock(mode="systemd", transport="tcp")
-        with (
-            patch.object(GateServerManager, "is_systemd_available", return_value=True),
-            patch.object(GateServerManager, "stop_daemon") as stop,
-            patch.object(GateServerManager, "uninstall_systemd_units") as uninstall,
-            patch.object(GateServerManager, "install_systemd_units") as install,
-            patch.object(GateServerManager, "ensure_reachable") as verify,
-            patch.object(GateServerManager, "get_status", return_value=status),
-        ):
-            assert run_gate_install_phase(bare_cfg) is True
-        stop.assert_called_once()
-        uninstall.assert_called_once()
-        install.assert_called_once()
-        verify.assert_called_once()
-
-
-# ── Clearance install phase ──────────────────────────────────────────
-
-
-class TestClearanceInstallPhase:
-    """Clearance phase: install the hub + verdict + notifier; soft-skip on missing import."""
-
-    def test_happy_path_installs_hub_and_notifier(self, capsys: pytest.CaptureFixture[str]) -> None:
-        with (
-            patch("terok_sandbox.integrations.clearance.HubService.install") as install_hub,
-            patch(
-                "terok_sandbox.integrations.clearance.NotifierService.install"
-            ) as install_notifier,
-            patch("terok_sandbox._setup._systemctl.run_best_effort"),
-            patch("terok_sandbox._setup._enable_and_restart_user_unit"),
-        ):
-            assert run_clearance_install_phase() is True
-        install_hub.assert_called_once()
-        install_notifier.assert_called_once()
-        out = capsys.readouterr().out
-        assert "Clearance hub" in out
-        assert "Clearance notifier" in out
-
-    def test_batched_daemon_reload_runs_once_per_unit_pair(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        """Hub install batches ``daemon-reload`` once for the hub + verdict units.
-
-        Otherwise every ``--user enable`` + ``--user restart`` cascade would
-        pay its own daemon-reload round-trip — three per install before the
-        batching fix.
-        """
-        with (
-            patch("terok_sandbox.integrations.clearance.HubService.install"),
-            patch("terok_sandbox.integrations.clearance.NotifierService.install"),
-            patch("terok_sandbox._setup._systemctl.run_best_effort") as run,
-            patch("terok_sandbox._setup._enable_and_restart_user_unit"),
-        ):
-            run_clearance_install_phase()
-        # One daemon-reload per clearance install call (hub/verdict + notifier),
-        # batched so a three-unit install doesn't pay three round-trips.
-        reloads = [call for call in run.call_args_list if call.args == ("daemon-reload",)]
-        assert len(reloads) == 2
-
-    def test_hub_failure_reports_fail(self, capsys: pytest.CaptureFixture[str]) -> None:
-        with (
-            patch(
-                "terok_sandbox.integrations.clearance.HubService.install",
-                side_effect=RuntimeError("template missing"),
-            ),
-            patch("terok_sandbox.integrations.clearance.NotifierService.install"),
-            patch("terok_sandbox._setup._systemctl.run_best_effort"),
-            patch("terok_sandbox._setup._enable_and_restart_user_unit"),
-        ):
-            assert run_clearance_install_phase() is False
-        assert "FAIL" in capsys.readouterr().out
-
-    def test_notifier_failure_does_not_flip_exit_code(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        """Notifier is non-critical — a failure WARNs without failing the phase."""
-        with (
-            patch("terok_sandbox.integrations.clearance.HubService.install"),
-            patch(
-                "terok_sandbox.integrations.clearance.NotifierService.install",
-                side_effect=RuntimeError("session bus missing"),
-            ),
-            patch("terok_sandbox._setup._systemctl.run_best_effort"),
-            patch("terok_sandbox._setup._enable_and_restart_user_unit"),
-        ):
-            assert run_clearance_install_phase() is True
-
-
-# ── Lifecycle helpers ────────────────────────────────────────────────
-
-
-class TestStopAndUninstall:
-    """Both steps soft-fail — authoritative install is next, dangling bits reported by verify."""
-
-    def test_both_succeed(self) -> None:
-        stop, uninstall = MagicMock(), MagicMock()
-        _stop_and_uninstall(stop, uninstall)
-        stop.assert_called_once()
-        uninstall.assert_called_once()
-
-    def test_stop_raises_uninstall_still_runs(self) -> None:
-        stop = MagicMock(side_effect=RuntimeError("no pid"))
-        uninstall = MagicMock()
-        _stop_and_uninstall(stop, uninstall)
-        uninstall.assert_called_once()
-
-    def test_both_raise_no_propagation(self) -> None:
-        stop = MagicMock(side_effect=RuntimeError("no pid"))
-        uninstall = MagicMock(side_effect=RuntimeError("no units"))
-        _stop_and_uninstall(stop, uninstall)  # must not raise
-
-    def test_systemexit_from_stop_is_swallowed(self) -> None:
-        """``SystemExit`` is BaseException-derived — must be caught too (issue #310).
-
-        Before this fix, a ``_systemctl.run`` raising ``SystemExit`` out
-        of ``stop`` would escape the ``suppress(Exception)`` guard and
-        block the subsequent ``install_systemd_units`` call, defeating
-        the "best-effort, never block the install that follows"
-        contract.
-        """
-        stop = MagicMock(side_effect=SystemExit("wedged unit"))
-        uninstall = MagicMock()
-        _stop_and_uninstall(stop, uninstall)  # must not raise
-        # ``uninstall`` still runs — that's the whole point: the install
-        # that follows expects a clean unit-file slate, and a wedged
-        # stop must not prevent the uninstall sweep.
-        uninstall.assert_called_once()
-
-    def test_systemexit_from_uninstall_is_swallowed(self) -> None:
-        """Symmetric coverage on the uninstall leg."""
-        stop = MagicMock()
-        uninstall = MagicMock(side_effect=SystemExit("wedged unit-file remove"))
-        _stop_and_uninstall(stop, uninstall)  # must not raise
-        stop.assert_called_once()
-
-
-class TestEnableAndRestartUserUnit:
-    """``_enable_and_restart_user_unit`` — enable + restart, no daemon-reload."""
-
-    def test_invokes_enable_then_restart_without_reload(self) -> None:
-        """Both verbs run in order; daemon-reload is the caller's batched responsibility."""
-        with patch("terok_sandbox._setup._systemctl.run_best_effort") as run:
-            _enable_and_restart_user_unit("terok-vault")
-        verbs = [call.args[0] for call in run.call_args_list]
-        assert verbs == ["enable", "restart"]
-        for call in run.call_args_list:
-            assert call.args[1] == "terok-vault"
+# The gate install-phase tests that lived here covered the retired host
+# gate systemd install.  The gate now lives in the per-container
+# supervisor and has no host-side install phase, so there is nothing to
+# exercise.
 
 
 # ── Uninstall phases ─────────────────────────────────────────────────
 
 
 class TestShieldUninstallPhase:
-    """Shield uninstall: removes hooks; reports scope in the OK line."""
+    """Shield uninstall: removes hooks from the canonical terok-owned dir."""
 
-    def test_user_scope_reports_ok(self, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_reports_ok(self, capsys: pytest.CaptureFixture[str]) -> None:
         with patch("terok_sandbox.integrations.shield.ShieldHooks.uninstall") as run:
-            assert run_shield_uninstall_phase(root=False) is True
-        run.assert_called_once_with(root=False, user=True)
-        assert "removed (user)" in capsys.readouterr().out
-
-    def test_root_scope_reports_ok(self, capsys: pytest.CaptureFixture[str]) -> None:
-        with patch("terok_sandbox.integrations.shield.ShieldHooks.uninstall") as run:
-            assert run_shield_uninstall_phase(root=True) is True
-        run.assert_called_once_with(root=True, user=False)
-        assert "removed (system)" in capsys.readouterr().out
+            assert run_shield_uninstall_phase() is True
+        run.assert_called_once_with()
+        assert "removed" in capsys.readouterr().out
 
     def test_uninstall_raises_reports_fail(self, capsys: pytest.CaptureFixture[str]) -> None:
         with patch(
             "terok_sandbox.integrations.shield.ShieldHooks.uninstall",
             side_effect=RuntimeError("hook dir missing"),
         ):
-            assert run_shield_uninstall_phase(root=False) is False
+            assert run_shield_uninstall_phase() is False
         out = capsys.readouterr().out
         assert "FAIL" in out and "hook dir missing" in out
 
 
-class TestVaultUninstallPhase:
-    """Vault uninstall: WARN-skip without systemd, FAIL on unit removal errors."""
+# The gate uninstall-phase tests that lived here covered the retired
+# host gate systemd uninstall.  The gate has no host-side install, so
+# there is no uninstall phase to exercise; the legacy sweep below
+# removes any pre-supervisor gate units.
 
-    def test_no_systemd_warns_and_returns_ok(self, capsys: pytest.CaptureFixture[str]) -> None:
-        from terok_sandbox.vault.daemon.lifecycle import VaultManager
 
-        with patch.object(VaultManager, "is_systemd_available", return_value=False):
-            assert run_vault_uninstall_phase(SandboxConfig(services_mode="socket")) is True
+class TestLegacyInstallCleanupPhase:
+    """Idempotent sweep of pre-supervisor systemd units, unit files, and sockets.
+
+    The phase is one-way: it removes hosts-side artefacts the new
+    architecture doesn't manage any more.  Soft-fail throughout so a
+    missing ``systemctl`` / missing unit / stale socket cannot abort
+    the rest of the sweep.
+    """
+
+    def test_disables_every_legacy_unit_and_removes_global_socket(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Every legacy clearance + vault unit gets a best-effort disable+stop pass."""
+        from terok_sandbox._setup import _LEGACY_SYSTEMD_UNITS
+
+        # Set XDG_RUNTIME_DIR so the global shield-events socket gets
+        # unlinked at a predictable path; place a stub file there so
+        # the unlink path is exercised.
+        runtime = tmp_path / "run"
+        runtime.mkdir()
+        legacy_sock = runtime / "terok-shield-events.sock"
+        legacy_sock.write_text("stub")
+        monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
+
+        with patch("terok_sandbox._setup._systemctl.run_best_effort") as run:
+            assert run_legacy_install_cleanup_phase() is True
+
+        targets = {call.args[2] for call in run.call_args_list if call.args[0] == "disable"}
+        for unit in _LEGACY_SYSTEMD_UNITS:
+            assert unit in targets, f"{unit} should be disabled"
+
+        # Stub socket is gone.
+        assert not legacy_sock.exists()
+
         out = capsys.readouterr().out
-        assert "WARN" in out and "systemd unavailable" in out
+        assert "Legacy install cleanup" in out
+        assert "swept" in out
 
-    def test_clean_removal_reports_ok(self, capsys: pytest.CaptureFixture[str]) -> None:
-        from terok_sandbox.vault.daemon.lifecycle import VaultManager
+    def test_idempotent_when_nothing_to_clean(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A fresh host without pre-supervisor artefacts still reports ok."""
 
-        with (
-            patch.object(VaultManager, "is_systemd_available", return_value=True),
-            patch.object(VaultManager, "uninstall_systemd_units") as un,
+        runtime = tmp_path / "run"
+        runtime.mkdir()
+        monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
+
+        with patch("terok_sandbox._setup._systemctl.run_best_effort"):
+            assert run_legacy_install_cleanup_phase() is True
+            # Re-run is also ok (idempotent).
+            assert run_legacy_install_cleanup_phase() is True
+
+        # Second invocation must not have raised over the still-absent socket.
+        assert "Legacy install cleanup" in capsys.readouterr().out
+
+    def test_missing_xdg_runtime_dir_does_not_crash(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A missing ``XDG_RUNTIME_DIR`` skips the shield-events socket sweep cleanly."""
+
+        monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+
+        with patch("terok_sandbox._setup._systemctl.run_best_effort"):
+            assert run_legacy_install_cleanup_phase() is True
+        assert "swept" in capsys.readouterr().out
+
+
+# ── Supervisor install / uninstall phases ─────────────────────────────
+
+
+class TestSupervisorInstallPhase:
+    """The supervisor-hooks install/uninstall phases frame the installer.
+
+    Each delegates to ``supervisor.install`` and reports a stage line;
+    an installer exception is caught and surfaced as a ``fail`` → False
+    so the aggregator keeps running the remaining phases.
+    """
+
+    def test_install_reports_ok(self, capsys: pytest.CaptureFixture[str]) -> None:
+        with patch("terok_sandbox.supervisor.install.install_supervisor_hooks") as install:
+            assert run_supervisor_install_phase() is True
+            install.assert_called_once_with()
+        out = capsys.readouterr().out
+        assert "Supervisor hooks" in out
+        assert "OCI hook" in out
+
+    def test_install_failure_reports_fail(self, capsys: pytest.CaptureFixture[str]) -> None:
+        with patch(
+            "terok_sandbox.supervisor.install.install_supervisor_hooks",
+            side_effect=RuntimeError("no entry point"),
         ):
-            assert run_vault_uninstall_phase(SandboxConfig(services_mode="socket")) is True
-        un.assert_called_once()
+            assert run_supervisor_install_phase() is False
+        assert "no entry point" in capsys.readouterr().out
+
+    def test_uninstall_reports_ok(self, capsys: pytest.CaptureFixture[str]) -> None:
+        with patch("terok_sandbox.supervisor.install.uninstall_supervisor_hooks") as uninstall:
+            assert run_supervisor_uninstall_phase() is True
+            uninstall.assert_called_once_with()
         assert "removed" in capsys.readouterr().out
 
-    def test_systemexit_during_removal_is_reported(
-        self, capsys: pytest.CaptureFixture[str]
+    def test_uninstall_failure_reports_fail(self, capsys: pytest.CaptureFixture[str]) -> None:
+        with patch(
+            "terok_sandbox.supervisor.install.uninstall_supervisor_hooks",
+            side_effect=OSError("permission denied"),
+        ):
+            assert run_supervisor_uninstall_phase() is False
+        assert "permission denied" in capsys.readouterr().out
+
+
+# ── Legacy sweep helpers — exercised against real tmp files ────────────
+
+
+class TestSweepLegacyUnitFiles:
+    """``_sweep_legacy_unit_files`` unlinks stray glob-matched user units."""
+
+    def test_unlinks_matching_units_and_disables_them(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A ``SystemExit`` from the manager is surfaced verbatim, not promoted."""
-        from terok_sandbox.vault.daemon.lifecycle import VaultManager
+        """Files matching the legacy globs are disabled then unlinked; others stay."""
+        from terok_sandbox._setup import _sweep_legacy_unit_files
 
-        with (
-            patch.object(VaultManager, "is_systemd_available", return_value=True),
-            patch.object(
-                VaultManager, "uninstall_systemd_units", side_effect=SystemExit("cannot disable")
-            ),
-        ):
-            assert run_vault_uninstall_phase(SandboxConfig(services_mode="socket")) is False
-        out = capsys.readouterr().out
-        assert "FAIL" in out and "cannot disable" in out
+        unit_dir = tmp_path / "units"
+        unit_dir.mkdir()
+        # Two match the legacy globs; one is an unrelated user unit.
+        matched = unit_dir / "terok-clearance-hub.service"
+        matched.write_text("[Unit]")
+        matched_vault = unit_dir / "terok-vault-socket.service"
+        matched_vault.write_text("[Unit]")
+        keep = unit_dir / "my-other.service"
+        keep.write_text("[Unit]")
 
-    def test_generic_exception_adds_uninstall_prefix(
-        self, capsys: pytest.CaptureFixture[str]
+        monkeypatch.setattr("terok_sandbox._util.systemd_user_unit_dir", lambda: unit_dir)
+        with patch("terok_sandbox._setup._systemctl.run_best_effort") as run:
+            _sweep_legacy_unit_files()
+
+        assert not matched.exists()
+        assert not matched_vault.exists()
+        assert keep.exists()
+        disabled = {c.args[2] for c in run.call_args_list if c.args[0] == "disable"}
+        assert "terok-clearance-hub.service" in disabled
+        assert "terok-vault-socket.service" in disabled
+
+    def test_unlink_oserror_does_not_abort_remaining_sweep(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Generic exceptions are prefixed ``uninstall:`` so the phase is named in the line."""
-        from terok_sandbox.vault.daemon.lifecycle import VaultManager
+        """A failed unlink (e.g. EBUSY) is swallowed so the rest of the sweep runs.
 
+        Both files match the legacy globs; the first unlink raises OSError —
+        the sweep must still attempt (and disable) the second.
+        """
+        from terok_sandbox._setup import _sweep_legacy_unit_files
+
+        unit_dir = tmp_path / "units"
+        unit_dir.mkdir()
+        (unit_dir / "terok-vault.service").write_text("[Unit]")
+        (unit_dir / "terok-vault.socket").write_text("[Unit]")
+
+        monkeypatch.setattr("terok_sandbox._util.systemd_user_unit_dir", lambda: unit_dir)
         with (
-            patch.object(VaultManager, "is_systemd_available", return_value=True),
-            patch.object(
-                VaultManager, "uninstall_systemd_units", side_effect=RuntimeError("fs busy")
-            ),
+            patch("terok_sandbox._setup._systemctl.run_best_effort") as run,
+            patch("pathlib.Path.unlink", side_effect=OSError("device or resource busy")),
         ):
-            assert run_vault_uninstall_phase(SandboxConfig(services_mode="socket")) is False
-        out = capsys.readouterr().out
-        assert "FAIL" in out and "uninstall: fs busy" in out
+            _sweep_legacy_unit_files()  # must not raise
 
+        # Both matched units still get a disable pass despite unlink raising.
+        disabled = {c.args[2] for c in run.call_args_list if c.args[0] == "disable"}
+        assert "terok-vault.service" in disabled
+        assert "terok-vault.socket" in disabled
 
-class TestGateUninstallPhase:
-    """Gate uninstall: stop daemon-mode process first, then remove units."""
+    def test_missing_unit_dir_is_a_noop(self, tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A non-existent systemd user unit dir → nothing to sweep, no crash."""
+        from terok_sandbox._setup import _sweep_legacy_unit_files
 
-    def test_daemon_mode_stopped_before_unit_removal(
-        self, capsys: pytest.CaptureFixture[str]
+        monkeypatch.setattr(
+            "terok_sandbox._util.systemd_user_unit_dir", lambda: tmp_path / "absent"
+        )
+        with patch("terok_sandbox._setup._systemctl.run_best_effort") as run:
+            _sweep_legacy_unit_files()  # must not raise
+        run.assert_not_called()
+
+    def test_unit_dir_resolution_systemexit_is_swallowed(
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from terok_sandbox.gate.lifecycle import GateServerManager, GateServerStatus
+        """A ``SystemExit`` from ``systemd_user_unit_dir`` (no XDG home) is caught."""
+        from terok_sandbox._setup import _sweep_legacy_unit_files
 
-        status = GateServerStatus(mode="daemon", running=True, port=9418)
-        with (
-            patch.object(GateServerManager, "get_status", return_value=status),
-            patch.object(GateServerManager, "stop_daemon") as stop,
-            patch.object(GateServerManager, "is_systemd_available", return_value=True),
-            patch.object(GateServerManager, "uninstall_systemd_units") as un,
-        ):
-            assert run_gate_uninstall_phase(SandboxConfig(services_mode="socket")) is True
-        stop.assert_called_once()
-        un.assert_called_once()
-        assert "removed" in capsys.readouterr().out
+        def _boom() -> object:
+            raise SystemExit("no config home")
 
-    def test_systemd_only_skips_daemon_stop(self, capsys: pytest.CaptureFixture[str]) -> None:
-        """When only systemd is active, no daemon stop happens."""
-        from terok_sandbox.gate.lifecycle import GateServerManager, GateServerStatus
+        monkeypatch.setattr("terok_sandbox._util.systemd_user_unit_dir", _boom)
+        _sweep_legacy_unit_files()  # must not raise
 
-        status = GateServerStatus(mode="systemd", running=True, port=9418)
-        with (
-            patch.object(GateServerManager, "get_status", return_value=status),
-            patch.object(GateServerManager, "stop_daemon") as stop,
-            patch.object(GateServerManager, "is_systemd_available", return_value=True),
-            patch.object(GateServerManager, "uninstall_systemd_units") as un,
-        ):
-            assert run_gate_uninstall_phase(SandboxConfig(services_mode="socket")) is True
-        stop.assert_not_called()
-        un.assert_called_once()
 
-    def test_no_systemd_skips_unit_removal(self, capsys: pytest.CaptureFixture[str]) -> None:
-        """Hosts without systemd still report ok — nothing to uninstall is not a failure."""
-        from terok_sandbox.gate.lifecycle import GateServerManager, GateServerStatus
+class TestUnlinkLegacyRuntimeSockets:
+    """``_unlink_legacy_runtime_sockets`` sweeps host-global daemon sockets."""
 
-        status = GateServerStatus(mode="none", running=False, port=None)
-        with (
-            patch.object(GateServerManager, "get_status", return_value=status),
-            patch.object(GateServerManager, "is_systemd_available", return_value=False),
-            patch.object(GateServerManager, "uninstall_systemd_units") as un,
-        ):
-            assert run_gate_uninstall_phase(SandboxConfig(services_mode="socket")) is True
-        un.assert_not_called()
-
-    def test_systemexit_during_removal_is_reported(
-        self, capsys: pytest.CaptureFixture[str]
+    def test_removes_legacy_sockets_keeps_passphrase(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from terok_sandbox.gate.lifecycle import GateServerManager, GateServerStatus
+        """The three pre-supervisor socket names go; ``vault.passphrase`` stays."""
+        from terok_sandbox._setup import _unlink_legacy_runtime_sockets
 
-        status = GateServerStatus(mode="systemd", running=True, port=9418)
-        with (
-            patch.object(GateServerManager, "get_status", return_value=status),
-            patch.object(GateServerManager, "is_systemd_available", return_value=True),
-            patch.object(
-                GateServerManager, "uninstall_systemd_units", side_effect=SystemExit("permission")
-            ),
-        ):
-            assert run_gate_uninstall_phase(SandboxConfig(services_mode="socket")) is False
-        out = capsys.readouterr().out
-        assert "FAIL" in out and "permission" in out
+        rt = tmp_path / "rt"
+        rt.mkdir()
+        for name in ("vault.sock", "ssh-agent.sock", "gate-server.sock"):
+            (rt / name).write_text("stale")
+        passphrase = rt / "vault.passphrase"
+        passphrase.write_text("live-secret")
 
-    def test_generic_exception_adds_uninstall_prefix(
-        self, capsys: pytest.CaptureFixture[str]
+        monkeypatch.setattr("terok_sandbox.paths.runtime_root", lambda: rt)
+        _unlink_legacy_runtime_sockets()
+
+        assert not (rt / "vault.sock").exists()
+        assert not (rt / "ssh-agent.sock").exists()
+        assert not (rt / "gate-server.sock").exists()
+        # Live session-tier credential must survive.
+        assert passphrase.exists()
+
+    def test_runtime_root_oserror_is_swallowed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A ``runtime_root`` OSError (no resolvable runtime dir) → soft no-op."""
+        from terok_sandbox._setup import _unlink_legacy_runtime_sockets
+
+        def _boom() -> object:
+            raise OSError("no runtime dir")
+
+        monkeypatch.setattr("terok_sandbox.paths.runtime_root", _boom)
+        _unlink_legacy_runtime_sockets()  # must not raise
+
+
+class TestUnlinkLegacyXdgDataFiles:
+    """``_unlink_legacy_xdg_data_files`` removes the pre-paths.root shield copy."""
+
+    def test_removes_stale_reader_and_prunes_empty_dirs(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from terok_sandbox.gate.lifecycle import GateServerManager, GateServerStatus
+        """The orphaned ``nflog-reader.py`` is removed; empty terok dirs pruned."""
+        from terok_sandbox._setup import _unlink_legacy_xdg_data_files
 
-        status = GateServerStatus(mode="systemd", running=True, port=9418)
-        with (
-            patch.object(GateServerManager, "get_status", return_value=status),
-            patch.object(GateServerManager, "is_systemd_available", return_value=True),
-            patch.object(
-                GateServerManager, "uninstall_systemd_units", side_effect=RuntimeError("fs busy")
-            ),
-        ):
-            assert run_gate_uninstall_phase(SandboxConfig(services_mode="socket")) is False
-        out = capsys.readouterr().out
-        assert "FAIL" in out and "uninstall: fs busy" in out
+        data_home = tmp_path / "data"
+        shield_root = data_home / "terok" / "shield"
+        shield_root.mkdir(parents=True)
+        (shield_root / "nflog-reader.py").write_text("# stale")
+        monkeypatch.setenv("XDG_DATA_HOME", str(data_home))
 
+        _unlink_legacy_xdg_data_files()
 
-class TestClearanceUninstallPhase:
-    """Clearance uninstall: soft-skip without the package, FAIL on teardown errors."""
+        assert not shield_root.exists()
+        # The now-empty ``terok`` parent is pruned too.
+        assert not (data_home / "terok").exists()
 
-    def test_clean_teardown_reports_ok(self, capsys: pytest.CaptureFixture[str]) -> None:
-        with (
-            patch("terok_sandbox.integrations.clearance.NotifierService.uninstall") as un_n,
-            patch("terok_sandbox.integrations.clearance.HubService.uninstall") as un_s,
-        ):
-            assert run_clearance_uninstall_phase() is True
-        un_n.assert_called_once()
-        un_s.assert_called_once()
-        assert "removed" in capsys.readouterr().out
+    def test_leaves_non_empty_terok_parent_intact(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A ``terok`` dir holding other files is not rmdir'd (rmdir fails soft)."""
+        from terok_sandbox._setup import _unlink_legacy_xdg_data_files
 
-    def test_import_error_skips_soft(self, capsys: pytest.CaptureFixture[str]) -> None:
-        """A host without terok_clearance installed skips rather than fails."""
-        with patch.dict("sys.modules", {"terok_sandbox.integrations.clearance": None}):
-            assert run_clearance_uninstall_phase() is True
-        out = capsys.readouterr().out
-        assert "skip" in out and "terok_clearance not installed" in out
+        data_home = tmp_path / "data"
+        terok_dir = data_home / "terok"
+        shield_root = terok_dir / "shield"
+        shield_root.mkdir(parents=True)
+        (shield_root / "nflog-reader.py").write_text("# stale")
+        sibling = terok_dir / "other"
+        sibling.mkdir()
+        monkeypatch.setenv("XDG_DATA_HOME", str(data_home))
 
-    def test_teardown_exception_reports_fail(self, capsys: pytest.CaptureFixture[str]) -> None:
-        with (
-            patch(
-                "terok_sandbox.integrations.clearance.NotifierService.uninstall",
-                side_effect=RuntimeError("unit stuck"),
-            ),
-            patch("terok_sandbox.integrations.clearance.HubService.uninstall"),
-        ):
-            assert run_clearance_uninstall_phase() is False
-        out = capsys.readouterr().out
-        assert "FAIL" in out and "unit stuck" in out
+        _unlink_legacy_xdg_data_files()
+
+        assert not shield_root.exists()
+        assert terok_dir.exists()  # non-empty → preserved
+
+    def test_absent_shield_dir_is_a_noop(self, tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """No legacy shield dir → nothing happens, no crash."""
+        from terok_sandbox._setup import _unlink_legacy_xdg_data_files
+
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "empty"))
+        _unlink_legacy_xdg_data_files()  # must not raise
 
 
-class TestClearanceInstallImportMissing:
-    """Fills the import-missing branch of `run_clearance_install_phase`."""
+class TestUnlinkLegacyShieldGlobalHooks:
+    """``_unlink_legacy_shield_global_hooks`` sweeps the master-branch hooks.d copy."""
 
-    def test_import_error_skips_soft(self, capsys: pytest.CaptureFixture[str]) -> None:
-        with patch.dict("sys.modules", {"terok_sandbox.integrations.clearance": None}):
-            assert run_clearance_install_phase() is True
-        out = capsys.readouterr().out
-        assert "skip" in out and "terok_clearance not installed" in out
+    def test_removes_only_terok_owned_files(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Terok's own scripts + descriptors go; operator-owned siblings stay."""
+        from terok_sandbox._setup import _unlink_legacy_shield_global_hooks
+
+        hooks_d = tmp_path / ".local" / "share" / "containers" / "oci" / "hooks.d"
+        hooks_d.mkdir(parents=True)
+        terok_files = (
+            "_oci_state.py",
+            "terok-shield-hook",
+            "terok-shield-createRuntime.json",
+            "terok-shield-poststop.json",
+        )
+        for name in terok_files:
+            (hooks_d / name).write_text("terok")
+        foreign = hooks_d / "someone-elses-hook.json"
+        foreign.write_text("not ours")
+
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        _unlink_legacy_shield_global_hooks()
+
+        for name in terok_files:
+            assert not (hooks_d / name).exists(), f"{name} should be swept"
+        assert foreign.exists()  # operator-owned, left alone
+
+    def test_absent_hooks_dir_is_a_noop(self, tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """No legacy hooks.d → unlink(missing_ok) makes it a clean no-op."""
+        from terok_sandbox._setup import _unlink_legacy_shield_global_hooks
+
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        _unlink_legacy_shield_global_hooks()  # must not raise

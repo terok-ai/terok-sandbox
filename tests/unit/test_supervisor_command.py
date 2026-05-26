@@ -1,0 +1,78 @@
+# SPDX-FileCopyrightText: 2026 Jiri Vyskocil
+# SPDX-License-Identifier: Apache-2.0
+
+"""Tests for the hidden ``supervisor`` CLI verb dispatcher.
+
+[`_handle_supervisor`][terok_sandbox.commands.supervisor._handle_supervisor]
+is a thin bridge: configure root logging to stderr, then
+``asyncio.run(run_supervisor(container_id, Path(sidecar_path)))`` and
+return its exit code.  The async ``run_supervisor`` itself is covered in
+``test_supervisor_run.py``; here we pin only the dispatch contract —
+args forwarded verbatim, return code propagated, logging configured.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+from terok_sandbox.commands.supervisor import SUPERVISOR_COMMANDS, _handle_supervisor
+
+
+class TestHandleSupervisor:
+    """The CLI handler bridges to ``run_supervisor`` and returns its rc."""
+
+    def test_forwards_args_and_returns_exit_code(self) -> None:
+        """``container_id`` passes through; ``sidecar_path`` becomes a ``Path``; rc propagates."""
+        captured: dict[str, object] = {}
+
+        async def _fake_run(container_id: str, sidecar_path: Path) -> int:
+            captured["container_id"] = container_id
+            captured["sidecar_path"] = sidecar_path
+            return 7
+
+        with (
+            patch("terok_sandbox.supervisor.run_supervisor", side_effect=_fake_run),
+            patch("logging.basicConfig") as basic_config,
+        ):
+            rc = _handle_supervisor("abc123", "/run/terok/sidecar/demo.json")
+
+        assert rc == 7
+        assert captured["container_id"] == "abc123"
+        assert captured["sidecar_path"] == Path("/run/terok/sidecar/demo.json")
+        assert isinstance(captured["sidecar_path"], Path)
+        # Root logging is configured so module loggers reach the wrapper's
+        # per-container stderr log file.
+        basic_config.assert_called_once()
+
+    def test_runs_under_asyncio_run(self) -> None:
+        """The coroutine is driven via ``asyncio.run`` (not awaited inline).
+
+        ``run_supervisor`` is a coroutine function, so ``patch`` swaps it for
+        an ``AsyncMock`` and calling it yields a coroutine; the handler must
+        hand that coroutine to ``asyncio.run`` rather than awaiting inline.
+        """
+        sentinel = MagicMock(name="run_supervisor")
+        with (
+            patch("terok_sandbox.supervisor.run_supervisor", new=sentinel) as run,
+            patch("terok_sandbox.commands.supervisor.asyncio.run", return_value=0) as asyncio_run,
+            patch("logging.basicConfig"),
+        ):
+            rc = _handle_supervisor("cid", "/sidecar.json")
+
+        assert rc == 0
+        run.assert_called_once_with("cid", Path("/sidecar.json"))
+        # The object asyncio.run drove is exactly what run_supervisor returned.
+        asyncio_run.assert_called_once_with(sentinel.return_value)
+
+
+class TestRegistration:
+    """The verb is registered under the hidden ``internal`` group."""
+
+    def test_single_internal_command(self) -> None:
+        assert len(SUPERVISOR_COMMANDS) == 1
+        cmd = SUPERVISOR_COMMANDS[0]
+        assert cmd.name == "supervisor"
+        assert cmd.group == "internal"
+        assert cmd.handler is _handle_supervisor
+        assert tuple(a.name for a in cmd.args) == ("container_id", "sidecar_path")

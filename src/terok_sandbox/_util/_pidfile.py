@@ -19,12 +19,11 @@ opens with ``O_NOFOLLOW`` plus a regular-file ``fstat`` check;
 short-circuit silently on every failure path — this is best-effort
 cleanup, not a critical path.
 
-Originally landed inline in [`terok_sandbox.vault.daemon.lifecycle`][terok_sandbox.vault.daemon.lifecycle]
-(PR #308) and moved here so the identical pattern in
-[`terok_sandbox.gate.lifecycle`][terok_sandbox.gate.lifecycle] can reuse it
-(issue #311).  Public names (no leading underscore) so service-lifecycle
-modules in other subpackages can import them through the standard
-``from terok_sandbox._util import …`` surface.
+Originally landed inline in the vault daemon lifecycle (PR #308) and
+moved here so other service-lifecycle paths can reuse the identical
+pattern (issue #311).  Public names (no leading underscore) so
+service-lifecycle modules in other subpackages can import them through
+the standard ``from terok_sandbox._util import …`` surface.
 """
 
 from __future__ import annotations

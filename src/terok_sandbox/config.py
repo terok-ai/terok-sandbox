@@ -87,8 +87,8 @@ def _credentials_section() -> RawCredentialsSection:
     """Return a validated ``RawCredentialsSection`` from the layered config.
 
     Cached so the two field readers below share one pydantic pass per
-    process — the daemon's per-scope-bind path re-resolves the chain
-    on every reconcile event, and each resolution previously cost two
+    process — the per-scope-bind path re-resolves the chain on every
+    bind, and without the cache each resolution would cost two
     validations.
     """
     from .config_schema import RawCredentialsSection
@@ -357,8 +357,8 @@ class SandboxConfig:
         construction paths that don't actually launch services
         (sickbay checks, config inspection, tests) — that's why it's
         opt-in rather than baked into ``__post_init__``.  The
-        consumers that *do* need real ports (``VaultManager``,
-        ``GateServerManager``, ``Sandbox``) wrap their stored cfg in
+        consumers that *do* need real ports (``ShieldManager``,
+        ``Sandbox``) wrap their stored cfg in
         ``self._cfg = self._cfg.with_resolved_ports()`` at construction
         time so downstream code never sees ``None`` for the port it
         needs.
@@ -399,16 +399,6 @@ class SandboxConfig:
     def gate_base_path(self) -> Path:
         """Return the gate server's repo base path."""
         return self.state_dir / "gate"
-
-    @property
-    def token_file_path(self) -> Path:
-        """Return the path to the gate token file."""
-        return self.state_dir / "gate" / "tokens.json"
-
-    @property
-    def pid_file_path(self) -> Path:
-        """Return the PID file path for the managed gate daemon."""
-        return self.runtime_dir / "gate-server.pid"
 
     @property
     def shield_profiles_dir(self) -> Path:
@@ -478,11 +468,11 @@ class SandboxConfig:
         no cross-package fan-out.
 
         *db_path* defaults to ``self.db_path``; callers that already
-        hold a path (typically ``VaultStatus.db_path`` for the running
-        daemon, or a test override) pass it explicitly so the open
-        targets that DB while still using this config's tier policy.
-        CLI consumers pass ``prompt_on_tty=True`` to unlock the
-        interactive fallback; daemons leave it off.
+        hold a path (a sidecar-pinned DB path, or a test override) pass
+        it explicitly so the open targets that DB while still using
+        this config's tier policy.  CLI consumers pass
+        ``prompt_on_tty=True`` to unlock the interactive fallback;
+        the per-container supervisor leaves it off.
         """
         from .vault.store.db import open_credential_db  # noqa: PLC0415
 
@@ -499,9 +489,9 @@ class SandboxConfig:
 
         *db_path* override semantics match
         [`open_credential_db`][terok_sandbox.SandboxConfig.open_credential_db].
-        The returned source flows into
-        [`VaultStatus.passphrase_source`][terok_sandbox.VaultStatus] so
-        callers don't have to second-guess the resolver.
+        The returned source lets callers (status reports, the
+        supervisor startup log) name which tier unlocked the vault
+        instead of second-guessing the resolver.
         """
         from .vault.store.db import open_credential_db_with_source  # noqa: PLC0415
 
@@ -578,11 +568,6 @@ class SandboxConfig:
         concern (terok's review CLI filters by ``scope`` / ``subject``).
         """
         return self.vault_dir / "credential_audit.jsonl"
-
-    @property
-    def gate_socket_path(self) -> Path:
-        """Return the Unix socket path for the gate server."""
-        return self.runtime_dir / "gate-server.sock"
 
     @property
     def ssh_signer_socket_path(self) -> Path:

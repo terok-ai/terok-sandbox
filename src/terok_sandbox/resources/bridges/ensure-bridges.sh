@@ -13,12 +13,14 @@
 #   3. Vault (socket leg) — in TCP mode:    /tmp/terok-vault.sock → TCP broker
 #                          (lets socket-only clients — gh, claude — reach the
 #                          broker, which is only exposed on TCP)
-#   4. Gate server       — TCP listener → host UNIX socket (git HTTP-over-socket)
+#   4. Gate server       — TCP listener → host UNIX socket (socket mode) or
+#                          host loopback TCP port (TCP mode); git HTTP either way
 #
 # Transport selection is env-var driven (set at container creation):
 #
-#   Socket mode: TEROK_VAULT_LOOPBACK_PORT=<port>, /run/terok/vault.sock mounted
-#   TCP mode:    TEROK_TOKEN_BROKER_PORT=<port>
+#   Socket mode: TEROK_VAULT_LOOPBACK_PORT=<port>, /run/terok/vault.sock mounted;
+#                TEROK_GATE_SOCKET=<path>
+#   TCP mode:    TEROK_TOKEN_BROKER_PORT=<port>, TEROK_GATE_PORT=<port>
 #
 # Uses PID files (not socket existence) to detect dead bridges — stale
 # socket files persist after process death and are unreliable sentinels.
@@ -75,9 +77,8 @@ if [[ -n "${TEROK_VAULT_LOOPBACK_PORT:-}" ]] \
 fi
 
 # ── Vault socket bridge (TCP mode) ───────────────────────────────────────
-# The broker is only reachable over TCP on the host.  gh and claude can
-# only speak HTTP-over-UNIX, so expose a local Unix socket fronted by
-# socat that pipes through to the broker.
+# Unix-socket facade for socket-only clients (gh, claude) when the broker
+# lives on host TCP.
 if [[ -n "${TEROK_TOKEN_BROKER_PORT:-}" ]] \
    && command -v socat >/dev/null 2>&1 \
    && ! _terok_bridge_alive "$_TEROK_PIDDIR/vault-socket.pid"; then
@@ -87,14 +88,48 @@ if [[ -n "${TEROK_TOKEN_BROKER_PORT:-}" ]] \
   echo $! > "$_TEROK_PIDDIR/vault-socket.pid"
 fi
 
+# ── Vault loopback bridge (TCP mode) ─────────────────────────────────────
+# Mirror of the socket-mode bridge so URL-based clients always get to
+# http://localhost:9419/v1 regardless of transport.  Per-container host
+# port comes from TEROK_TOKEN_BROKER_PORT.
+if [[ -n "${TEROK_TOKEN_BROKER_PORT:-}" ]] \
+   && [[ -n "${TEROK_VAULT_LOOPBACK_PORT:-}" ]] \
+   && command -v socat >/dev/null 2>&1 \
+   && ! _terok_bridge_alive "$_TEROK_PIDDIR/vault-loopback.pid"; then
+  socat "TCP-LISTEN:${TEROK_VAULT_LOOPBACK_PORT},bind=127.0.0.1,fork,reuseaddr" \
+    TCP:host.containers.internal:"${TEROK_TOKEN_BROKER_PORT}" &
+  echo $! > "$_TEROK_PIDDIR/vault-loopback.pid"
+fi
+
 # ── Gate server bridge (socket mode) ─────────────────────────────────────
-# In socket mode the gate HTTP server listens on a host Unix socket mounted
-# into the container.  Git needs HTTP URLs, so we bridge localhost:9418 to
-# the mounted socket.  CODE_REPO / CLONE_FROM point to http://localhost:9418/.
+# In socket mode the gate HTTP server listens on a per-container Unix socket
+# the supervisor bound inside /run/terok/.  Git needs HTTP URLs, so we bridge
+# localhost:9418 to that socket.  CODE_REPO / CLONE_FROM point to
+# http://localhost:9418/.
 if [[ -n "${TEROK_GATE_SOCKET:-}" ]] \
    && command -v socat >/dev/null 2>&1 \
    && ! _terok_bridge_alive "$_TEROK_PIDDIR/gate.pid"; then
+  # retry=/interval= make socat hold each git connection and re-attempt the
+  # backend connect until the supervisor has bound the gate socket, rather
+  # than returning an empty reply when the container clones before the gate
+  # is up.  The supervisor binds the gate early (before its vault DB open),
+  # so this usually connects on the first try.
   socat TCP-LISTEN:9418,fork,reuseaddr \
-    UNIX-CONNECT:"${TEROK_GATE_SOCKET}" &
+    UNIX-CONNECT:"${TEROK_GATE_SOCKET}",retry=30,interval=1 &
+  echo $! > "$_TEROK_PIDDIR/gate.pid"
+fi
+
+# ── Gate server bridge (TCP mode) ────────────────────────────────────────
+# In TCP mode the supervisor binds the gate on a per-container host loopback
+# port.  Mirror the socket-mode bridge so git's http://localhost:9418/ URL
+# works regardless of transport.  Per-container host port comes from
+# TEROK_GATE_PORT.
+if [[ -n "${TEROK_GATE_PORT:-}" ]] \
+   && command -v socat >/dev/null 2>&1 \
+   && ! _terok_bridge_alive "$_TEROK_PIDDIR/gate.pid"; then
+  # See the socket-mode note above: retry=/interval= wait for the
+  # supervisor's gate listener instead of failing the container's first clone.
+  socat TCP-LISTEN:9418,fork,reuseaddr \
+    TCP:host.containers.internal:"${TEROK_GATE_PORT}",retry=30,interval=1 &
   echo $! > "$_TEROK_PIDDIR/gate.pid"
 fi

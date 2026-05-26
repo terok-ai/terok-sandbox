@@ -315,6 +315,13 @@ class CredentialDB:
         ).fetchall()
         return [r[0] for r in rows]
 
+    def list_credential_sets(self) -> list[str]:
+        """Return distinct credential-set names with at least one stored credential."""
+        rows = self._conn.execute(
+            "SELECT DISTINCT credential_set FROM credentials ORDER BY credential_set"
+        ).fetchall()
+        return [r[0] for r in rows]
+
     def delete_credential(self, credential_set: str, provider: str) -> None:
         """Remove a credential entry (idempotent)."""
         self._conn.execute(
@@ -344,14 +351,12 @@ class CredentialDB:
         [`transaction()`][terok_sandbox.vault.store.db.CredentialDB.transaction]
         scope — in which case the outer block owns the commit.
         """
-        cur = self._conn.execute(
+        self._conn.execute(
             "INSERT OR IGNORE INTO ssh_keys"
             " (key_type, private_der, public_blob, comment, fingerprint)"
             " VALUES (?, ?, ?, ?, ?)",
             (key_type, private_der, public_blob, comment, fingerprint),
         )
-        if cur.rowcount:
-            self._bump_ssh_keys_version()
         if not self._in_outer_tx:
             self._conn.commit()
         row = self._conn.execute(
@@ -379,18 +384,15 @@ class CredentialDB:
         [`UnsafeCommentError`][terok_sandbox.vault.store.db.UnsafeCommentError]
         so the storage-entry-point invariant holds for this path too.
 
-        Bumps ``ssh_keys_version`` on success so the scope-socket
-        reconciler and ssh-signer drop their cached resolved-key state,
-        surfacing the new comment to subsequent ``ssh-add -L`` queries
-        from the container.
+        The new comment surfaces to subsequent ``ssh-add -L`` queries from
+        the container because the signer resolves keys fresh from the DB
+        on every request.
         """
         _require_safe_comment(comment)
         cur = self._conn.execute(
             "UPDATE ssh_keys SET comment = ? WHERE fingerprint = ?",
             (comment, fingerprint),
         )
-        if cur.rowcount:
-            self._bump_ssh_keys_version()
         if not self._in_outer_tx:
             self._conn.commit()
         return bool(cur.rowcount)
@@ -416,12 +418,10 @@ class CredentialDB:
             _require_safe_scope(scope)
         else:
             _require_user_scope(scope)
-        cur = self._conn.execute(
+        self._conn.execute(
             "INSERT OR IGNORE INTO ssh_key_assignments (scope, key_id) VALUES (?, ?)",
             (scope, key_id),
         )
-        if cur.rowcount:
-            self._bump_ssh_keys_version()
         if not self._in_outer_tx:
             self._conn.commit()
 
@@ -447,7 +447,6 @@ class CredentialDB:
                 ")",
                 (key_id, key_id),
             )
-            self._bump_ssh_keys_version()
         if not self._in_outer_tx:
             self._conn.commit()
 
@@ -500,7 +499,6 @@ class CredentialDB:
                     f")",
                     tuple(stale_ids),
                 )
-            self._bump_ssh_keys_version()
 
         # Same ``_in_outer_tx`` pattern as the rest of the write methods.
         # ``with self._conn:`` is the sqlite3 connection's own auto-commit
@@ -581,35 +579,17 @@ class CredentialDB:
         ).fetchall()
         return [r[0] for r in rows]
 
-    def ssh_keys_version(self) -> int:
-        """Return the monotonic version counter for the SSH key tables.
-
-        Bumped on every successful insert, assignment, or unassignment.
-        Readers compare against a cached value to decide whether to reload.
-        """
-        row = self._conn.execute(
-            "SELECT version FROM ssh_keys_version WHERE id = 0",
-        ).fetchone()
-        return row[0] if row else 0
-
     def count_ssh_keys(self) -> int:
         """Return the number of distinct keypairs stored in the DB.
 
         Counts ``ssh_keys`` rows (deduplicated by fingerprint) rather
         than ``ssh_key_assignments`` rows — a single key shared across
-        scopes is one stored key, not N.  Surfaces through
-        [`VaultStatus.ssh_keys_stored`][terok_sandbox.VaultStatus] so
-        TUI/CLI consumers can show a count without opening the DB
+        scopes is one stored key, not N.  Surfaces to TUI/CLI status
+        consumers so they can show a count without opening the DB
         themselves.
         """
         row = self._conn.execute("SELECT count(*) FROM ssh_keys").fetchone()
         return row[0] if row else 0
-
-    def _bump_ssh_keys_version(self) -> None:
-        """Increment the SSH key version counter."""
-        self._conn.execute(
-            "UPDATE ssh_keys_version SET version = version + 1 WHERE id = 0",
-        )
 
     # ── Phantom tokens ──────────────────────────────────────────────────
 
@@ -647,6 +627,29 @@ class CredentialDB:
             "credential_set": row[2],
             "provider": row[3],
         }
+
+    def list_tokens(self) -> list[dict]:
+        """Return every proxy-token row as a list of dicts.
+
+        Read-only inventory for operator-facing CLI inspection
+        (``terok vault list --include-tokens``).  The raw token value
+        is included so the operator can cross-reference what's actually
+        mounted into containers; callers MUST mask it before display.
+        """
+        rows = self._conn.execute(
+            "SELECT token, scope, subject, credential_set, provider"
+            " FROM proxy_tokens ORDER BY scope, subject, provider, token"
+        ).fetchall()
+        return [
+            {
+                "token": r[0],
+                "scope": r[1],
+                "subject": r[2],
+                "credential_set": r[3],
+                "provider": r[4],
+            }
+            for r in rows
+        ]
 
     def revoke_tokens(self, scope: str, subject: str) -> int:
         """Revoke every phantom token bound to ``(scope, subject)``.
@@ -714,9 +717,8 @@ def open_credential_db_with_source(
     """Same as [`open_credential_db`][terok_sandbox.vault.store.db.open_credential_db]
     but also returns which tier the passphrase came from.
 
-    Used by [`VaultStatus`][terok_sandbox.VaultStatus] so the TUI status
-    pill can label the unlocked vault by its source without re-walking
-    the chain itself.
+    Lets a TUI/CLI status display label the unlocked vault by its source
+    without re-walking the chain itself.
     """
     from .encryption import resolve_passphrase_with_source  # noqa: PLC0415
 

@@ -46,6 +46,15 @@ class TestCredentialCRUD:
         assert db.list_credentials("work") == ["claude"]
         assert db.list_credentials("empty") == []
 
+    def test_list_credential_sets(self, db: CredentialDB) -> None:
+        """list_credential_sets returns the distinct set names, sorted."""
+        assert db.list_credential_sets() == []
+        db.store_credential("work", "claude", {"k": "1"})
+        db.store_credential("default", "claude", {"k": "2"})
+        db.store_credential("default", "codex", {"k": "3"})
+        # Distinct + ORDER BY: "default" once despite two providers, sorted.
+        assert db.list_credential_sets() == ["default", "work"]
+
     def test_delete_credential(self, db: CredentialDB) -> None:
         """Deleting a credential removes it; deleting again is a no-op."""
         db.store_credential("default", "claude", {"k": "1"})
@@ -118,6 +127,37 @@ class TestTokens:
     def test_revoke_idempotent(self, db: CredentialDB) -> None:
         """Revoking tokens for a subject with none is a no-op."""
         assert db.revoke_tokens("nonexistent", "subject") == 0
+
+    def test_list_tokens_returns_full_rows(self, db: CredentialDB) -> None:
+        """list_tokens surfaces every proxy-token row (raw token + scope/subject/...).
+
+        The CLI inventory consumes this; it masks the token before
+        display, but the DB layer returns the raw value so callers can
+        cross-reference what's mounted.
+        """
+        assert db.list_tokens() == []
+        token = db.create_token("proj-a", "task-1", "default", "claude")
+        rows = db.list_tokens()
+        assert len(rows) == 1
+        assert rows[0] == {
+            "token": token,
+            "scope": "proj-a",
+            "subject": "task-1",
+            "credential_set": "default",
+            "provider": "claude",
+        }
+
+    def test_list_tokens_orders_by_scope_subject_provider(self, db: CredentialDB) -> None:
+        """Rows come back ordered by ``(scope, subject, provider)``."""
+        db.create_token("proj-b", "task-1", "default", "claude")
+        db.create_token("proj-a", "task-2", "default", "vibe")
+        db.create_token("proj-a", "task-2", "default", "claude")
+        ordering = [(r["scope"], r["subject"], r["provider"]) for r in db.list_tokens()]
+        assert ordering == [
+            ("proj-a", "task-2", "claude"),
+            ("proj-a", "task-2", "vibe"),
+            ("proj-b", "task-1", "claude"),
+        ]
 
 
 class TestTransactionAtomicity:
@@ -410,9 +450,9 @@ class TestSchemaMigration:
         ``credentials.db`` — no CLI ``terok auth`` has run yet, so the
         file either does not exist or exists as an empty sqlite3 image
         with no tables.  Without schema bootstrap, the OAuth refresh
-        loop's ``SELECT ... FROM credentials`` and the SSH reconciler's
-        ``SELECT ... FROM ssh_keys_version`` both raise
-        ``OperationalError: no such table`` and the systemd unit dies
+        loop's ``SELECT ... FROM credentials`` and the SSH signer's
+        ``SELECT ... FROM ssh_keys`` both raise
+        ``OperationalError: no such table`` and the supervisor dies
         on startup.
         """
         from terok_sandbox.vault.daemon.token_broker import _TokenDB
@@ -422,7 +462,6 @@ class TestSchemaMigration:
         token_db = _TokenDB(str(db_path))
         try:
             assert token_db.list_refreshable() == []
-            assert token_db.ssh_keys_version() == 0
             assert token_db.load_ssh_keys_for_scope("any") == []
             assert token_db.lookup_token("nonexistent") is None
         finally:
@@ -445,10 +484,7 @@ class TestSchemaMigration:
                 "credentials",
                 "ssh_keys",
                 "ssh_key_assignments",
-                "ssh_keys_version",
                 "proxy_tokens",
             } <= tables
-            (version,) = conn.execute("SELECT version FROM ssh_keys_version WHERE id=0").fetchone()
-            assert version == 0
         finally:
             conn.close()

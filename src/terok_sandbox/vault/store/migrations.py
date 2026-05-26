@@ -69,11 +69,6 @@ def ensure_credentials_schema(conn: sqlite3.Connection) -> None:
             assigned_at  TEXT    NOT NULL DEFAULT (datetime('now')),
             PRIMARY KEY (scope, key_id)
         );
-        CREATE TABLE IF NOT EXISTS ssh_keys_version (
-            id      INTEGER PRIMARY KEY CHECK (id = 0),
-            version INTEGER NOT NULL
-        );
-        INSERT OR IGNORE INTO ssh_keys_version (id, version) VALUES (0, 0);
         CREATE TABLE IF NOT EXISTS proxy_tokens (
             token          TEXT PRIMARY KEY,
             scope          TEXT NOT NULL,

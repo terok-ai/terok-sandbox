@@ -1,17 +1,19 @@
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""Long-running vault daemon — lifecycle, protocol services, audit.
+"""Per-container vault runtime — embeddable proxy, protocol services, audit.
 
-The runtime side of the vault: the process that exposes the store
-over network protocols and the manager that controls its lifecycle.
+The runtime side of the vault: the aiohttp app each per-container
+supervisor mounts to swap phantom tokens for real credentials.  Every
+container gets a fresh
+[`VaultProxy`][terok_sandbox.vault.daemon.token_broker.VaultProxy] that
+lives only as long as the container.
 
 Collaborators:
 
-- [`lifecycle`][terok_sandbox.vault.daemon.lifecycle] — [`VaultManager`][terok_sandbox.vault.daemon.lifecycle.VaultManager]:
-  start / stop / install systemd units / probe / report
-  [`VaultStatus`][terok_sandbox.vault.daemon.lifecycle.VaultStatus].
-- [`token_broker`][terok_sandbox.vault.daemon.token_broker] — aiohttp HTTP+WebSocket reverse proxy that swaps
+- [`token_broker`][terok_sandbox.vault.daemon.token_broker] —
+  [`VaultProxy`][terok_sandbox.vault.daemon.token_broker.VaultProxy]:
+  the embeddable aiohttp HTTP+WebSocket reverse proxy that swaps
   phantom tokens for real API credentials before forwarding upstream.
 - [`audit`][terok_sandbox.vault.daemon.audit] — append-only JSONL audit log for every
   credential-bearing broker request.
@@ -45,5 +47,5 @@ PHANTOM_CREDENTIALS_MARKER = "terok-proxy-phantom-token:vault-handles-real-auth"
 CODEX_SHARED_OAUTH_MARKER = "terok-proxy-codex-oauth-marker:vault-handles-real-auth"
 
 #: Unauthenticated health-check path served by the vault's token broker.
-#: Used by the server, lifecycle probes, and sickbay doctor checks.
+#: Used by the per-container vault proxy and in-container doctor checks.
 HEALTH_PATH = "/-/health"

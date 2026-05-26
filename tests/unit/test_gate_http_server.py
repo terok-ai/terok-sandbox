@@ -1,19 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for the standalone gate HTTP server."""
+"""Tests for the gate HTTP request handler (the audited core)."""
 
 from __future__ import annotations
 
 import base64
 import io
-import json
-import os
 import tempfile
-import time
 import unittest.mock
-from collections.abc import Iterator
-from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
@@ -21,31 +16,21 @@ import pytest
 
 from terok_sandbox.gate.server import (
     _ROUTE,
-    TokenStore,
     _extract_basic_auth_token,
     _make_handler_class,
     _parse_cgi_headers,
     _parse_content_length,
-    _validate_token_data,
+    _SingleTokenStore,
 )
 from tests.constants import (
     GATE_PORT,
     LOCALHOST_PEER,
-    NONEXISTENT_TOKENS_PATH,
 )
 
-VALID_TOKEN_DATA = {"validtoken": {"scope": "proj-a", "task": "1"}}
+#: Scope the single minted token is bound to in handler tests.
+VALID_SCOPE = "proj-a"
+VALID_TOKEN = "validtoken"
 SUCCESS_CGI_RESPONSE = b"Status: 200 OK\r\nContent-Type: text/plain\r\n\r\nok"
-
-
-@contextmanager
-def token_store_file(data: object | None = None) -> Iterator[Path]:
-    """Create a temporary tokens.json file and yield its path."""
-    with tempfile.TemporaryDirectory() as td:
-        token_file = Path(td) / "tokens.json"
-        if data is not None:
-            token_file.write_text(data if isinstance(data, str) else json.dumps(data))
-        yield token_file
 
 
 def make_cgi_process(
@@ -69,19 +54,13 @@ def make_request(
     token: str | None = None,
     method: str = "GET",
     extra_headers: str = "",
-    token_data: dict[str, dict[str, str]] | str | None = None,
+    scope: str = VALID_SCOPE,
+    minted_token: str = VALID_TOKEN,
 ) -> tuple[int, BaseHTTPRequestHandler]:
     """Build a fake HTTP request and return ``(status_code, handler)``."""
     with tempfile.TemporaryDirectory() as td:
         base = Path(td)
-        token_file = base / "tokens.json"
-        if isinstance(token_data, str):
-            serialized = token_data
-        else:
-            payload = VALID_TOKEN_DATA if token_data is None else token_data
-            serialized = json.dumps(payload)
-        token_file.write_text(serialized)
-        store = TokenStore(token_file)
+        store = _SingleTokenStore(minted_token, scope)
         handler_class = _make_handler_class(base, store)
 
         headers = "Host: localhost\r\n"
@@ -115,77 +94,25 @@ def make_request(
         return (responses[0] if responses else 0), handler
 
 
-class TestTokenStore:
-    """Tests for TokenStore."""
+class TestSingleTokenStore:
+    """Tests for _SingleTokenStore."""
 
     @pytest.mark.parametrize(
-        ("data", "token", "expected"),
+        ("minted", "scope", "token", "expected"),
         [
-            (VALID_TOKEN_DATA, "abc123", None),
-            (VALID_TOKEN_DATA, "validtoken", "proj-a"),
-            (["a", "b"], "a", None),
-            ("not json{{{", "any", None),
+            ("validtoken", "proj-a", "abc123", None),
+            ("validtoken", "proj-a", "validtoken", "proj-a"),
         ],
-        ids=["wrong-token", "valid-token", "non-dict-json", "corrupt-json"],
+        ids=["wrong-token", "valid-token"],
     )
     def test_validate_various_inputs(
         self,
-        data: object,
+        minted: str,
+        scope: str,
         token: str,
         expected: str | None,
     ) -> None:
-        with token_store_file(data) as token_file:
-            assert TokenStore(token_file).validate(token) == expected
-
-    def test_missing_file_returns_none(self) -> None:
-        assert TokenStore(NONEXISTENT_TOKENS_PATH).validate("any") is None
-
-    def test_mtime_reload(self) -> None:
-        """Token store reloads when file mtime changes."""
-        with token_store_file({"t1": {"scope": "p1", "task": "1"}}) as token_file:
-            store = TokenStore(token_file)
-            assert store.validate("t1") == "p1"
-
-            time.sleep(0.05)
-            token_file.write_text(json.dumps({"t2": {"scope": "p2", "task": "2"}}))
-            stat_result = token_file.stat()
-            os.utime(token_file, (stat_result.st_atime, stat_result.st_mtime + 1))
-
-            assert store.validate("t1") is None
-            assert store.validate("t2") == "p2"
-
-    def test_malformed_token_entry_skipped(self) -> None:
-        """Token entries with wrong structure are ignored."""
-        with token_store_file(
-            {"bad": "not-a-dict", "ok": {"scope": "p", "task": "1"}}
-        ) as token_file:
-            store = TokenStore(token_file)
-            assert store.validate("bad") is None
-            assert store.validate("ok") == "p"
-
-
-class TestValidateTokenData:
-    """Tests for _validate_token_data."""
-
-    def test_valid_data(self) -> None:
-        data = {"t1": {"scope": "p", "task": "1"}}
-        assert _validate_token_data(data) == data
-
-    @pytest.mark.parametrize(
-        ("data", "expected"),
-        [
-            ([1, 2], {}),
-            ("string", {}),
-            (
-                {"good": {"scope": "p", "task": "1"}, "bad": "string"},
-                {"good": {"scope": "p", "task": "1"}},
-            ),
-            ({"no_task": {"scope": "p"}, "no_scope": {"task": "1"}}, {}),
-        ],
-        ids=["non-dict-list", "non-dict-string", "skip-non-dict-values", "skip-missing-fields"],
-    )
-    def test_invalid_token_shapes(self, data: object, expected: dict[str, dict[str, str]]) -> None:
-        assert _validate_token_data(data) == expected
+        assert _SingleTokenStore(minted, scope).validate(token) == expected
 
 
 class TestExtractBasicAuthToken:
@@ -295,25 +222,6 @@ class TestRouting:
             assert match.group("path") == "/info/refs"
 
 
-class _FakeSocket:
-    """Minimal socket-like object for testing."""
-
-    def __init__(self, request_bytes: bytes) -> None:
-        self._input = io.BytesIO(request_bytes)
-        self._output = io.BytesIO()
-
-    def makefile(self, mode: str, buffering: int = -1) -> io.BytesIO:
-        """Return a file-like object for reading or writing."""
-        return self._input if "r" in mode else self._output
-
-    def getpeername(self) -> tuple[str, int]:
-        """Return a fake peer address."""
-        return LOCALHOST_PEER
-
-    def close(self) -> None:
-        """No-op close."""
-
-
 class TestAuth:
     """Tests for authentication handling."""
 
@@ -416,52 +324,3 @@ class TestAuth:
                 assert key not in cgi_env
             else:
                 assert cgi_env[key] == value
-
-
-class TestDetach:
-    """Tests for daemon (detach) mode."""
-
-    def test_child_calls_serve_forever(self) -> None:
-        """Child process (fork returns 0) should call serve_forever."""
-        from terok_sandbox.gate.server import _serve_daemon
-
-        with tempfile.TemporaryDirectory() as td:
-            mock_server = unittest.mock.Mock()
-            mock_server.serve_forever.side_effect = SystemExit(0)
-
-            with (
-                unittest.mock.patch(
-                    "terok_sandbox.gate.server._ThreadingHTTPServer",
-                    return_value=mock_server,
-                ),
-                unittest.mock.patch("terok_sandbox.gate.server.os.fork", return_value=0),
-                unittest.mock.patch("terok_sandbox.gate.server.signal.signal") as mock_signal,
-                unittest.mock.patch("terok_sandbox.gate.server.os.setsid") as mock_setsid,
-                unittest.mock.patch("terok_sandbox.gate.server.os.open", return_value=3),
-                unittest.mock.patch("terok_sandbox.gate.server.os.dup2"),
-                unittest.mock.patch("terok_sandbox.gate.server.os.close"),
-            ):
-                store = TokenStore(Path(td) / "tokens.json")
-                with pytest.raises(SystemExit):
-                    _serve_daemon(Path(td), store, GATE_PORT, None)
-
-            mock_setsid.assert_called_once()
-            mock_signal.assert_called_once()
-            mock_server.serve_forever.assert_called_once()
-
-    @unittest.mock.patch("terok_sandbox.gate.server._ThreadingHTTPServer")
-    @unittest.mock.patch("terok_sandbox.gate.server.os.fork", return_value=42)
-    def test_parent_writes_pid_file(
-        self,
-        _mock_fork: unittest.mock.Mock,
-        _mock_server_class: unittest.mock.Mock,
-    ) -> None:
-        """Parent process (fork returns child PID) should write PID file and exit."""
-        from terok_sandbox.gate.server import _serve_daemon
-
-        with tempfile.TemporaryDirectory() as td:
-            pid_file = Path(td) / "gate.pid"
-            store = TokenStore(Path(td) / "tokens.json")
-            with pytest.raises(SystemExit):
-                _serve_daemon(Path(td), store, GATE_PORT, pid_file)
-            assert pid_file.read_text() == "42"
