@@ -161,9 +161,9 @@ class TestSandbox:
     def test_shield_down_delegates(self) -> None:
         with patch("terok_sandbox.integrations.shield.ShieldManager") as Mgr:
             s = Sandbox()
-            s.shield_down("ctr", Path("/tmp/task"))
+            s.shield_down("ctr", "ctr-uuid", Path("/tmp/task"))
             Mgr.assert_called_once_with(Path("/tmp/task"), s.config)
-            Mgr.return_value.down.assert_called_once_with("ctr")
+            Mgr.return_value.down.assert_called_once_with("ctr", "ctr-uuid")
 
     def test_pre_start_args_delegates(self) -> None:
         from terok_shield import ShieldRuntime
@@ -173,7 +173,12 @@ class TestSandbox:
             s = Sandbox()
             result = s.pre_start_args("ctr", Path("/tmp/task"))
             assert result == ["--hook"]
-            Mgr.assert_called_once_with(Path("/tmp/task"), s.config, runtime=ShieldRuntime.DEFAULT)
+            Mgr.assert_called_once_with(
+                Path("/tmp/task"),
+                s.config,
+                runtime=ShieldRuntime.DEFAULT,
+                loopback_ports_override=None,
+            )
             Mgr.return_value.pre_start.assert_called_once_with("ctr")
 
     def test_pre_start_args_maps_krun_runtime_to_shield_enum(self) -> None:
@@ -184,7 +189,12 @@ class TestSandbox:
             Mgr.return_value.pre_start.return_value = ["--hook"]
             s = Sandbox()
             s.pre_start_args("ctr", Path("/tmp/task"), runtime="krun")
-            Mgr.assert_called_once_with(Path("/tmp/task"), s.config, runtime=ShieldRuntime.KRUN)
+            Mgr.assert_called_once_with(
+                Path("/tmp/task"),
+                s.config,
+                runtime=ShieldRuntime.KRUN,
+                loopback_ports_override=None,
+            )
 
     def test_stop_delegates_to_runtime_force_remove(self) -> None:
         """``Sandbox.stop`` wraps names in container handles and delegates."""

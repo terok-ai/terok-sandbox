@@ -20,10 +20,9 @@ phase writes before re-keying.
 
 from __future__ import annotations
 
-import contextlib
 import sys
 from pathlib import Path
-from typing import Any, Literal
+from typing import Literal
 
 from .._yaml import update_section as _yaml_update_section
 from ..config import SandboxConfig
@@ -578,70 +577,29 @@ def _run_credentials_setup_phase(
 ) -> bool:
     """Migrate the credentials DB to SQLCipher; no-op on already-encrypted or absent.
 
-    The vault daemon, if installed from a previous setup, holds a write
-    lock on the plaintext DB (WAL mode); quiesce it so
-    ``sqlcipher_export`` can ATTACH the source without colliding.
-    ``run_vault_install_phase`` re-installs+starts the daemon a moment
-    later, so this stop is transient by design.
-
-    On "database is locked" the phase self-heals: socket activation can
-    re-spawn the service between our stop and the migration's open, so
-    we uninstall the units to kill the trigger entirely, then retry
-    once before bailing.
+    No long-running vault daemon exists in the per-container supervisor
+    architecture — each supervisor opens the DB read-mostly for the
+    lifetime of one container, so the migration writer never contends
+    with a host-global daemon for the WAL lock.  A still-running
+    container would surface as a transient "database is locked"; the
+    operator's expected response is "delete old tasks and re-run" per
+    the no-state-preservation rule.
     """
-    from ..vault.daemon.lifecycle import VaultManager
-
     print("→ credentials", end="", flush=True)
-    mgr = VaultManager(cfg)
-    _quiesce_vault_for_migration(mgr)
     try:
         _handle_credentials_encrypt_db(
             cfg=cfg, echo_passphrase=echo_passphrase, passphrase_tier=passphrase_tier
         )
     except Exception as exc:  # noqa: BLE001
-        if not _looks_like_db_lock(exc):
-            print(f" — FAILED: {exc}")
-            return False
-        print(" — locked, auto-recovering by uninstalling vault units …", flush=True)
-        _quiesce_vault_for_migration(mgr, force_uninstall=True)
-        try:
-            _handle_credentials_encrypt_db(
-                cfg=cfg, echo_passphrase=echo_passphrase, passphrase_tier=passphrase_tier
+        print(f" — FAILED: {exc}")
+        if "database is locked" in str(exc).lower():
+            print(
+                "  Hint: a per-container supervisor still holds the DB.  Find it with:\n"
+                "    fuser -v " + str(cfg.db_path) + "\n"
+                "  stop it (delete the matching task), then re-run `terok setup`."
             )
-        except Exception as retry_exc:  # noqa: BLE001
-            print(f"  recovery FAILED: {retry_exc}")
-            if _looks_like_db_lock(retry_exc):
-                print(
-                    "  Hint: another process still holds the DB.  Find it with:\n"
-                    "    fuser -v " + str(cfg.db_path) + "\n"
-                    "  stop it, then re-run `terok setup`."
-                )
-            return False
-        print("  recovered.")
+        return False
     return True
-
-
-def _quiesce_vault_for_migration(
-    mgr: Any,
-    *,
-    force_uninstall: bool = False,
-) -> None:
-    """Best-effort quiesce of the vault daemon so it doesn't hold the DB.
-
-    ``stop_daemon`` itself is idempotent (handles both systemd-managed
-    and PID-file daemons); ``force_uninstall=True`` additionally removes
-    the unit files so socket activation can't race-respawn the service.
-    """
-    with contextlib.suppress(Exception):
-        mgr.stop_daemon()
-    if force_uninstall:
-        with contextlib.suppress(Exception):
-            mgr.uninstall_systemd_units()
-
-
-def _looks_like_db_lock(exc: BaseException) -> bool:
-    """Return ``True`` if *exc* is sqlite's "database is locked" complaint."""
-    return "database is locked" in str(exc).lower()
 
 
 #: The credentials-DB management group exposed at sandbox's top level.

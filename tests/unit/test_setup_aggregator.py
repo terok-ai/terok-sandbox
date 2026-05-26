@@ -3,10 +3,12 @@
 
 """Top-level ``sandbox setup`` and ``sandbox uninstall`` orchestration.
 
-The aggregators compose shield, vault, gate, and clearance lifecycle
-into a single bootstrap and a symmetric teardown.  Phase ordering,
-exit-code propagation, and opt-out flags are the contract under test —
-the individual phase implementations have their own tests below.
+After the per-container-supervisor refactor (May 2026) the install
+phases that remain are: legacy-install cleanup, shield hooks, the
+credentials-DB encryption phase, gate, the clearance soft-skip
+reporter, and the supervisor OCI hook chain.  The aggregator wires
+them together; the individual phase implementations live in
+``test_setup_phases.py``.
 """
 
 from __future__ import annotations
@@ -47,6 +49,10 @@ def install_spies():
             return_value=_no_selinux_concern,
         ) as prereq,
         patch(
+            "terok_sandbox.commands.sandbox.run_legacy_install_cleanup_phase",
+            return_value=True,
+        ) as legacy,
+        patch(
             "terok_sandbox.commands.sandbox.run_shield_install_phase", return_value=True
         ) as shield,
         # The credentials phase is the one non-``run_*_install_phase``
@@ -57,50 +63,43 @@ def install_spies():
         patch(
             "terok_sandbox.commands.sandbox._run_credentials_setup_phase", return_value=True
         ) as credentials,
-        patch("terok_sandbox.commands.sandbox.run_vault_install_phase", return_value=True) as vault,
         patch("terok_sandbox.commands.sandbox.run_gate_install_phase", return_value=True) as gate,
         patch(
-            "terok_sandbox.commands.sandbox.run_clearance_install_phase", return_value=True
-        ) as clearance,
+            "terok_sandbox.commands.sandbox.run_supervisor_install_phase", return_value=True
+        ) as supervisor,
     ):
         yield {
             "prereq": prereq,
+            "legacy": legacy,
             "shield": shield,
             "credentials": credentials,
-            "vault": vault,
             "gate": gate,
-            "clearance": clearance,
+            "supervisor": supervisor,
         }
 
 
 @pytest.fixture
 def uninstall_spies():
-    """Replace every ``run_*_uninstall_phase`` with a MagicMock so order is observable.
-
-    Default return ``True`` so the aggregator walks the happy path
-    unless a test overrides a phase.  Mirrors ``install_spies`` —
-    aggregator tests assert the phase contract, not the underlying
-    lifecycle handlers' internals (those have their own tests).
-    """
+    """Replace every ``run_*_uninstall_phase`` with a MagicMock so order is observable."""
     with (
+        patch(
+            "terok_sandbox.commands.sandbox.run_supervisor_uninstall_phase", return_value=True
+        ) as supervisor_uninstall,
         patch(
             "terok_sandbox.commands.sandbox.run_shield_uninstall_phase", return_value=True
         ) as shield_uninstall,
         patch(
-            "terok_sandbox.commands.sandbox.run_vault_uninstall_phase", return_value=True
-        ) as vault_uninstall,
-        patch(
             "terok_sandbox.commands.sandbox.run_gate_uninstall_phase", return_value=True
         ) as gate_uninstall,
         patch(
-            "terok_sandbox.commands.sandbox.run_clearance_uninstall_phase", return_value=True
-        ) as clearance_uninstall,
+            "terok_sandbox.commands.sandbox.run_legacy_install_cleanup_phase", return_value=True
+        ) as legacy_cleanup,
     ):
         yield {
+            "supervisor_uninstall": supervisor_uninstall,
             "shield_uninstall": shield_uninstall,
-            "vault_uninstall": vault_uninstall,
             "gate_uninstall": gate_uninstall,
-            "clearance_uninstall": clearance_uninstall,
+            "legacy_cleanup": legacy_cleanup,
         }
 
 
@@ -108,7 +107,7 @@ def uninstall_spies():
 
 
 class TestSandboxSetup:
-    """``sandbox setup`` orchestrates prereq → shield → vault → gate → clearance."""
+    """``sandbox setup`` orchestrates the install phases in fixed order."""
 
     def test_default_runs_all_phases_in_order(self, install_spies) -> None:
         from terok_sandbox._util._selinux import SelinuxCheckResult, SelinuxStatus
@@ -116,26 +115,34 @@ class TestSandboxSetup:
         order: list[str] = []
         no_selinux = SelinuxCheckResult(SelinuxStatus.NOT_APPLICABLE_TCP_MODE)
         install_spies["prereq"].side_effect = lambda _cfg: order.append("prereq") or no_selinux
+        install_spies["legacy"].side_effect = lambda: order.append("legacy") or True
         install_spies["shield"].side_effect = lambda **_: order.append("shield") or True
-        install_spies["vault"].side_effect = lambda _cfg: order.append("vault") or True
+        install_spies["credentials"].side_effect = lambda *_a, **_kw: (
+            order.append("credentials") or True
+        )
         install_spies["gate"].side_effect = lambda _cfg: order.append("gate") or True
-        install_spies["clearance"].side_effect = lambda: order.append("clearance") or True
+        install_spies["supervisor"].side_effect = lambda: order.append("supervisor") or True
 
         _handle_sandbox_setup()
 
-        assert order == ["prereq", "shield", "vault", "gate", "clearance"]
-
-    def test_root_flag_threaded_to_shield_phase(self, install_spies) -> None:
-        _handle_sandbox_setup(root=True)
-        install_spies["shield"].assert_called_once_with(root=True)
+        # Legacy cleanup runs first (so a leftover pre-supervisor unit
+        # can't fight a fresh install).  Supervisor lands last (the OCI
+        # hook should only fire once the rest of the stack is ready).
+        assert order == [
+            "prereq",
+            "legacy",
+            "shield",
+            "credentials",
+            "gate",
+            "supervisor",
+        ]
 
     @pytest.mark.parametrize(
         ("skip_kwarg", "skipped_spy"),
         [
             ("no_shield", "shield"),
-            ("no_vault", "vault"),
+            ("no_vault", "credentials"),  # --no-vault now skips the credentials phase
             ("no_gate", "gate"),
-            ("no_clearance", "clearance"),
         ],
     )
     def test_opt_out_flag_skips_exactly_its_phase(
@@ -143,18 +150,19 @@ class TestSandboxSetup:
     ) -> None:
         _handle_sandbox_setup(**{skip_kwarg: True})
         install_spies[skipped_spy].assert_not_called()
-        for key in ("shield", "vault", "gate", "clearance"):
+        # Every other install phase still fires.
+        for key in ("shield", "credentials", "gate", "supervisor", "legacy"):
             if key != skipped_spy:
                 assert install_spies[key].called, f"{key} should still run"
 
     def test_failing_phase_exits_nonzero_after_others_run(self, install_spies) -> None:
-        """A vault failure must not short-circuit the gate + clearance phases."""
-        install_spies["vault"].return_value = False
+        """A credentials failure must not short-circuit the gate / supervisor phases."""
+        install_spies["credentials"].return_value = False
         with pytest.raises(SystemExit) as exc:
             _handle_sandbox_setup()
         assert exc.value.code == 1
         install_spies["gate"].assert_called_once()
-        install_spies["clearance"].assert_called_once()
+        install_spies["supervisor"].assert_called_once()
 
     def test_happy_path_does_not_raise(self, install_spies) -> None:
         """Every phase reports ``ok=True`` → the aggregator returns normally."""
@@ -188,7 +196,7 @@ class TestSandboxSetup:
         from terok_sandbox._util._selinux import SelinuxCheckResult, SelinuxStatus
 
         install_spies["prereq"].return_value = SelinuxCheckResult(SelinuxStatus.POLICY_MISSING)
-        install_spies["vault"].return_value = False
+        install_spies["credentials"].return_value = False
 
         with pytest.raises(SystemExit) as exc:
             _handle_sandbox_setup()
@@ -202,41 +210,35 @@ class TestSandboxSetup:
 
 
 class TestSandboxUninstall:
-    """``sandbox uninstall`` runs clearance → gate → vault → shield (reverse of install)."""
+    """``sandbox uninstall`` runs the remaining phases in reverse install order."""
 
-    def test_default_uninstalls_all_four_phases(self, uninstall_spies) -> None:
+    def test_default_uninstalls_all_phases(self, uninstall_spies) -> None:
         cfg = SandboxConfig()
         _handle_sandbox_uninstall(cfg=cfg)
-        uninstall_spies["clearance_uninstall"].assert_called_once_with()
+        uninstall_spies["supervisor_uninstall"].assert_called_once_with()
         uninstall_spies["gate_uninstall"].assert_called_once_with(cfg)
-        uninstall_spies["vault_uninstall"].assert_called_once_with(cfg)
-        uninstall_spies["shield_uninstall"].assert_called_once_with(root=False)
+        uninstall_spies["shield_uninstall"].assert_called_once_with()
+        uninstall_spies["legacy_cleanup"].assert_called_once_with()
 
     def test_phases_run_in_reverse_install_order(self, uninstall_spies) -> None:
-        """Clearance first (no dependants), shield last (most disruptive to live containers)."""
+        """Supervisor first (its hook would outlive the rest), legacy cleanup last."""
         order: list[str] = []
-        uninstall_spies["clearance_uninstall"].side_effect = lambda: (
-            order.append("clearance") or True
+        uninstall_spies["supervisor_uninstall"].side_effect = lambda: (
+            order.append("supervisor") or True
         )
         uninstall_spies["gate_uninstall"].side_effect = lambda _cfg: order.append("gate") or True
-        uninstall_spies["vault_uninstall"].side_effect = lambda _cfg: order.append("vault") or True
-        uninstall_spies["shield_uninstall"].side_effect = lambda **_: order.append("shield") or True
+        uninstall_spies["shield_uninstall"].side_effect = lambda: order.append("shield") or True
+        uninstall_spies["legacy_cleanup"].side_effect = lambda: order.append("legacy") or True
 
         _handle_sandbox_uninstall()
 
-        assert order == ["clearance", "gate", "vault", "shield"]
-
-    def test_root_flag_removes_shield_hooks_system_wide(self, uninstall_spies) -> None:
-        _handle_sandbox_uninstall(root=True)
-        uninstall_spies["shield_uninstall"].assert_called_once_with(root=True)
+        assert order == ["supervisor", "gate", "shield", "legacy"]
 
     @pytest.mark.parametrize(
         ("skip_kwarg", "skipped_spy_key"),
         [
             ("no_shield", "shield_uninstall"),
-            ("no_vault", "vault_uninstall"),
             ("no_gate", "gate_uninstall"),
-            ("no_clearance", "clearance_uninstall"),
         ],
     )
     def test_opt_out_flag_skips_exactly_its_phase(
@@ -249,12 +251,12 @@ class TestSandboxUninstall:
                 assert uninstall_spies[key].called, f"{key} should still run"
 
     def test_failing_phase_does_not_abort_subsequent_phases(self, uninstall_spies) -> None:
-        """A vault uninstall that returns ``False`` must not skip shield cleanup."""
-        uninstall_spies["vault_uninstall"].return_value = False
+        """A gate uninstall that returns ``False`` must not skip shield cleanup."""
+        uninstall_spies["gate_uninstall"].return_value = False
         with pytest.raises(SystemExit):
             _handle_sandbox_uninstall()
-        # Gate ran before the failure; shield must run after the failure.
-        uninstall_spies["gate_uninstall"].assert_called_once()
+        # Supervisor ran before; shield must still run after the failure.
+        uninstall_spies["supervisor_uninstall"].assert_called_once()
         uninstall_spies["shield_uninstall"].assert_called_once()
 
     def test_all_phases_succeeding_does_not_exit_nonzero(self, uninstall_spies) -> None:
@@ -324,90 +326,10 @@ class TestHandleGateUninstall:
 
 
 class TestHandleShieldUninstall:
-    """The ``shield uninstall-hooks`` handler's user/root flag contract."""
+    """The ``shield uninstall-hooks`` handler delegates to ``ShieldHooks.uninstall``."""
 
-    def test_missing_flags_exits_with_usage_hint(self, capsys: pytest.CaptureFixture[str]) -> None:
-        with pytest.raises(SystemExit) as exc:
+    def test_delegates_to_library(self, capsys: pytest.CaptureFixture[str]) -> None:
+        with patch("terok_sandbox.integrations.shield.ShieldHooks.uninstall") as mock_run:
             _handle_shield_uninstall()
-        msg = str(exc.value)
-        assert "--root" in msg and "--user" in msg
-
-    def test_user_flag_invokes_library_uninstall(self, capsys: pytest.CaptureFixture[str]) -> None:
-        with patch("terok_sandbox.integrations.shield.ShieldHooks.uninstall") as mock_run:
-            _handle_shield_uninstall(user=True)
-        mock_run.assert_called_once_with(root=False, user=True)
-        assert "user" in capsys.readouterr().out
-
-    def test_root_flag_invokes_library_uninstall(self, capsys: pytest.CaptureFixture[str]) -> None:
-        with patch("terok_sandbox.integrations.shield.ShieldHooks.uninstall") as mock_run:
-            _handle_shield_uninstall(root=True)
-        mock_run.assert_called_once_with(root=True, user=False)
-        assert "system" in capsys.readouterr().out
-
-
-# ── Regression: socket-mode aggregator doesn't trip the tcp port guard ─────
-
-
-class TestAggregatorSocketMode:
-    """Regression: ``services.mode: socket`` + aggregator path must not raise.
-
-    Before the services-mode SSOT refactor, the aggregator's
-    ``_reinstall_systemd_service`` called ``mgr.install_systemd_units()``
-    without a ``transport`` argument.  The manager defaulted to ``tcp``
-    and tripped the ``no port is set`` guard because socket mode skips
-    port allocation.  These tests walk the install phases directly with
-    a socket-mode cfg to pin the SSOT contract: transport comes off the
-    cfg the aggregator was handed, nowhere else.
-    """
-
-    @staticmethod
-    def _socket_cfg() -> SandboxConfig:
-        # Explicit mode; explicit ``None`` ports — the exact
-        # configuration the bug triggered on.
-        return SandboxConfig(services_mode="socket")
-
-    def test_vault_install_phase_reaches_install_without_port_guard(self) -> None:
-        """Socket-mode vault install must fall through to install_systemd_units."""
-        from terok_sandbox._setup import run_vault_install_phase
-        from terok_sandbox.vault.daemon.lifecycle import VaultManager
-
-        cfg = self._socket_cfg()
-        assert cfg.token_broker_port is None and cfg.ssh_signer_port is None
-
-        with (
-            patch.object(VaultManager, "is_systemd_available", return_value=True),
-            patch.object(VaultManager, "stop_daemon"),
-            patch.object(VaultManager, "uninstall_systemd_units"),
-            patch.object(VaultManager, "install_systemd_units") as install,
-            patch.object(VaultManager, "ensure_reachable"),
-            patch.object(VaultManager, "get_status") as status,
-        ):
-            status.return_value.mode = "systemd"
-            status.return_value.transport = "socket"
-            ok = run_vault_install_phase(cfg)
-
-        assert ok is True
-        install.assert_called_once_with()  # no transport kwarg threaded in
-
-    def test_gate_install_phase_reaches_install_without_port_guard(self) -> None:
-        """Socket-mode gate install must fall through to install_systemd_units."""
-        from terok_sandbox._setup import run_gate_install_phase
-        from terok_sandbox.gate.lifecycle import GateServerManager
-
-        cfg = self._socket_cfg()
-        assert cfg.gate_port is None
-
-        with (
-            patch.object(GateServerManager, "is_systemd_available", return_value=True),
-            patch.object(GateServerManager, "stop_daemon"),
-            patch.object(GateServerManager, "uninstall_systemd_units"),
-            patch.object(GateServerManager, "install_systemd_units") as install,
-            patch.object(GateServerManager, "ensure_reachable"),
-            patch.object(GateServerManager, "get_status") as status,
-        ):
-            status.return_value.mode = "systemd"
-            status.return_value.transport = "socket"
-            ok = run_gate_install_phase(cfg)
-
-        assert ok is True
-        install.assert_called_once_with()
+        mock_run.assert_called_once_with()
+        assert "removed" in capsys.readouterr().out

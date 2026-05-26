@@ -35,38 +35,25 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 
-def _handle_shield_setup(*, root: bool = False, user: bool = False) -> None:
+def _handle_shield_setup() -> None:
     """Install OCI hooks for the shield firewall.
 
     Sandbox-specific entry point — shield's own ``setup`` verb is
-    ``standalone_only`` (its CLI argv shape needs ``--check``,
-    ``--root``, ``--user`` handling that doesn't fit a generic
-    registry handler).  This verb is the integration-friendly form.
+    ``standalone_only`` (its CLI argv shape doesn't lift cleanly into
+    a generic registry handler).  This verb is the integration-
+    friendly form.
     """
-    if not root and not user:
-        raise SystemExit(
-            "Specify --root (system-wide, uses sudo) or --user (user-local).\n"
-            "  shield install-hooks --root   # /etc/containers/oci/hooks.d\n"
-            "  shield install-hooks --user   # ~/.local/share/containers/oci/hooks.d"
-        )
     from ..integrations.shield import ShieldHooks
 
-    ShieldHooks.install(root=root, user=user)
+    ShieldHooks.install()
 
 
-def _handle_shield_uninstall(*, root: bool = False, user: bool = False) -> None:
+def _handle_shield_uninstall() -> None:
     """Remove the OCI hooks previously installed by ``shield install-hooks``."""
-    if not root and not user:
-        raise SystemExit(
-            "Specify --root (system-wide, uses sudo) or --user (user-local).\n"
-            "  shield uninstall-hooks --root   # /etc/containers/oci/hooks.d\n"
-            "  shield uninstall-hooks --user   # ~/.local/share/containers/oci/hooks.d"
-        )
     from ..integrations.shield import ShieldHooks
 
-    ShieldHooks.uninstall(root=root, user=user)
-    scope = "both system and user" if (root and user) else ("system" if root else "user")
-    print(f"Shield hooks removed from {scope} hooks director{'ies' if (root and user) else 'y'}.")
+    ShieldHooks.uninstall()
+    print("Shield hooks removed.")
 
 
 def _wrap_shield_handler(
@@ -155,19 +142,11 @@ _SANDBOX_VERBS: tuple[CommandDef, ...] = (
         name="install-hooks",
         help="Install OCI hooks for the shield firewall",
         handler=_handle_shield_setup,
-        args=(
-            ArgDef(name="--root", action="store_true", help="Install system-wide (requires sudo)"),
-            ArgDef(name="--user", action="store_true", help="Install to user hooks directory"),
-        ),
     ),
     CommandDef(
         name="uninstall-hooks",
         help="Remove OCI hooks previously installed by install-hooks",
         handler=_handle_shield_uninstall,
-        args=(
-            ArgDef(name="--root", action="store_true", help="Remove system-wide (requires sudo)"),
-            ArgDef(name="--user", action="store_true", help="Remove from user hooks directory"),
-        ),
     ),
 )
 

@@ -1,11 +1,14 @@
 # SPDX-FileCopyrightText: 2025 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for the gate's ``_git_env_with_ssh`` — three-branch policy.
+"""Tests for ``GitGate._ssh_env`` — three-branch policy + ephemeral signer.
 
-The gate prefers the vault-managed per-scope socket by default; explicit
+The gate prefers a per-instance ephemeral SSH signer (bound the first
+time ``_ssh_env`` is called and torn down with the gate); explicit
 opt-in (``use_personal_ssh=True``) falls through to the user's ambient
-SSH; with neither, [`GateAuthNotConfigured`][terok_sandbox.GateAuthNotConfigured] is raised.
+SSH; HTTPS upstreams skip SSH entirely.  When the DB has no keys
+assigned to the scope, [`GateAuthNotConfigured`][terok_sandbox.GateAuthNotConfigured]
+is raised straight from ``_EphemeralSigner.start``.
 
 The vault branch additionally pins OpenSSH so personal keys can never
 leak in and no interactive prompt can ever leak out — asserted below as
@@ -15,91 +18,94 @@ leak in and no interactive prompt can ever leak out — asserted below as
 from __future__ import annotations
 
 import socket
-import sqlite3
-from contextlib import ExitStack
+from contextlib import contextmanager
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from terok_sandbox.gate.mirror import GateAuthNotConfigured, _git_env_with_ssh
+from terok_sandbox.gate.mirror import GateAuthNotConfigured, GitGate
 
 
-def _patched_socket_path(tmp_path: Path, scope: str) -> Path:
-    """Return a tmp-path-based socket location used by the patched config."""
-    return tmp_path / f"ssh-agent-local-{scope}.sock"
+@contextmanager
+def _stub_credential_db(scopes_with_keys: list[str] | None):
+    """Stub ``SandboxConfig.open_credential_db`` to return a fake DB.
+
+    When *scopes_with_keys* is ``None`` the helper raises from
+    ``open_credential_db`` (simulating ``NoPassphraseError`` / locked
+    vault); otherwise ``list_ssh_keys_for_scope`` returns a non-empty
+    list for any scope in the set and an empty list otherwise.
+    """
+    fake_db = MagicMock()
+    fake_db.list_ssh_keys_for_scope.side_effect = lambda scope: (
+        ["fake-key"] if scopes_with_keys and scope in scopes_with_keys else []
+    )
+    if scopes_with_keys is None:
+        with patch(
+            "terok_sandbox.config.SandboxConfig.open_credential_db",
+            side_effect=RuntimeError("locked"),
+        ):
+            yield fake_db
+    else:
+        with patch(
+            "terok_sandbox.config.SandboxConfig.open_credential_db",
+            return_value=fake_db,
+        ):
+            yield fake_db
 
 
-def _bind_socket(path: Path) -> socket.socket:
-    """Bind a real Unix domain socket at *path* so ``S_ISSOCK`` is true."""
+def _bind_real_unix_socket(path: Path) -> socket.socket:
+    """Bind a real Unix domain socket at *path* — used as the signer stand-in."""
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.bind(str(path))
     return s
 
 
-def _seed_assignments_db(tmp_path: Path, scopes: list[str]) -> Path:
-    """Create a minimal ``ssh_key_assignments`` table seeded with *scopes*."""
-    db_path = tmp_path / "credentials.db"
-    conn = sqlite3.connect(str(db_path))
-    try:
-        conn.execute(
-            "CREATE TABLE ssh_key_assignments (scope TEXT NOT NULL, key_id INTEGER NOT NULL)"
-        )
-        conn.executemany(
-            "INSERT INTO ssh_key_assignments (scope, key_id) VALUES (?, ?)",
-            [(s, 1) for s in scopes],
-        )
-        conn.commit()
-    finally:
-        conn.close()
-    return db_path
-
-
-def _patch_config(tmp_path: Path, *, scopes_with_keys: list[str] | None = None):
-    """Patch ``SandboxConfig`` so the socket dir and DB both point into *tmp_path*.
-
-    When *scopes_with_keys* is ``None`` the DB file doesn't exist, which
-    forces `_db_has_keys_for_scope` down its ``sqlite3.Error`` path
-    and skips the wait-for-bind window — matching the "no keys assigned"
-    scenario.
-    """
-    db_path = (
-        _seed_assignments_db(tmp_path, scopes_with_keys)
-        if scopes_with_keys is not None
-        else tmp_path / "nonexistent.db"
-    )
-    stack = ExitStack()
-    stack.enter_context(
-        patch(
-            "terok_sandbox.config.SandboxConfig.ssh_signer_local_socket_path",
-            new=lambda self, scope: _patched_socket_path(tmp_path, scope),
-        )
-    )
-    stack.enter_context(
-        patch(
-            "terok_sandbox.config.SandboxConfig.db_path",
-            new=property(lambda self: db_path),
-        )
-    )
-    return stack
+def _make_gate(scope: str = "proj", **overrides: object) -> GitGate:
+    """Construct a ``GitGate`` with an SSH upstream and the given overrides."""
+    kwargs: dict[str, object] = {
+        "scope": scope,
+        "gate_path": Path("/tmp/test-gate.git"),  # noqa: S108 — never written
+        "upstream_url": "git@github.com:example/repo.git",
+    }
+    kwargs.update(overrides)
+    return GitGate(**kwargs)  # type: ignore[arg-type]
 
 
 class TestVaultPath:
-    """Verify the default vault-only branch."""
+    """Verify the default (ephemeral-signer) branch."""
 
-    def test_sets_env_when_socket_present(self, tmp_path: Path) -> None:
-        """With a vault socket in place, env steers git at the vault."""
-        sock_path = _patched_socket_path(tmp_path, "proj")
-        sock = _bind_socket(sock_path)
+    def test_starts_signer_and_pins_ssh_options(self, tmp_path: Path) -> None:
+        """When the DB has keys, ``_ssh_env`` binds a signer and pins OpenSSH at it."""
+        sock_path = tmp_path / "agent.sock"
+        bound_sock = _bind_real_unix_socket(sock_path)
+
+        from terok_sandbox.gate.mirror import _EphemeralSigner
+
+        fake_signer = _EphemeralSigner.__new__(_EphemeralSigner)
+        object.__setattr__(fake_signer, "socket_path", sock_path)
+        object.__setattr__(fake_signer, "_tmpdir", None)
+        object.__setattr__(fake_signer, "_thread", None)
+        object.__setattr__(fake_signer, "_loop", None)
+        object.__setattr__(fake_signer, "_server", None)
+
         try:
-            with _patch_config(tmp_path):
-                env = _git_env_with_ssh(scope="proj")
+            with (
+                _stub_credential_db(scopes_with_keys=["proj"]),
+                patch.object(_EphemeralSigner, "start", return_value=fake_signer) as mock_start,
+            ):
+                gate = _make_gate()
+                env = gate._ssh_env()
+                # Second call must reuse the same signer — no re-bind churn.
+                env2 = gate._ssh_env()
         finally:
-            sock.close()
+            bound_sock.close()
 
+        assert mock_start.call_count == 1
         assert env["SSH_AUTH_SOCK"] == str(sock_path)
+        assert env2["SSH_AUTH_SOCK"] == str(sock_path)
         cmd = env["GIT_SSH_COMMAND"]
-        # Vault agent is the pinned identity source.
+        # Ephemeral signer is the pinned identity source.
         assert f"IdentityAgent={sock_path}" in cmd
         assert "IdentityFile=none" in cmd
         # User's ~/.ssh/config must not influence auth.
@@ -111,86 +117,77 @@ class TestVaultPath:
         # would leave ssh with no identities at all.
         assert "IdentitiesOnly=yes" not in cmd
 
-    def test_non_socket_file_is_rejected(self, tmp_path: Path) -> None:
-        """A regular file at the socket path must not pass the guard."""
-        _patched_socket_path(tmp_path, "proj").touch()
-        with _patch_config(tmp_path), pytest.raises(GateAuthNotConfigured):
-            _git_env_with_ssh(scope="proj")
-
-    def test_raises_when_socket_missing_and_no_opt_in(self, tmp_path: Path) -> None:
-        """Without a vault socket and without opt-in, refuse to run."""
-        with _patch_config(tmp_path), pytest.raises(GateAuthNotConfigured) as excinfo:
-            _git_env_with_ssh(scope="nowhere")
+    def test_raises_when_db_has_no_keys(self) -> None:
+        """No DB rows for the scope → ``GateAuthNotConfigured`` immediately."""
+        with (
+            _stub_credential_db(scopes_with_keys=[]),
+            pytest.raises(GateAuthNotConfigured) as excinfo,
+        ):
+            _make_gate(scope="nowhere")._ssh_env()
         assert "nowhere" in str(excinfo.value)
         assert "ssh-init" in str(excinfo.value)
         assert "use-personal-ssh" in str(excinfo.value)
 
-
-class TestBindRaceWindow:
-    """Verify the grace window for the reconciler to bind a fresh socket."""
-
-    def test_waits_for_socket_when_db_says_scope_has_keys(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Socket missing but DB shows keys → poll until socket appears."""
-        sock_path = _patched_socket_path(tmp_path, "proj")
-
-        ticks: list[int] = []
-        sockets: list[socket.socket] = []
-
-        def fake_sleep(_delay: float) -> None:
-            # On the third poll, the reconciler "binds" the socket.
-            ticks.append(1)
-            if len(ticks) == 3:
-                sockets.append(_bind_socket(sock_path))
-
-        monkeypatch.setattr("terok_sandbox.gate.mirror.time.sleep", fake_sleep)
-
-        try:
-            with _patch_config(tmp_path, scopes_with_keys=["proj"]):
-                env = _git_env_with_ssh(scope="proj")
-        finally:
-            for s in sockets:
-                s.close()
-
-        assert env["SSH_AUTH_SOCK"] == str(sock_path)
-        assert len(ticks) >= 3  # proved we actually waited
-
-    def test_no_wait_when_db_has_no_keys(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Socket missing and DB empty → raise immediately, no waiting."""
-        slept: list[float] = []
-        monkeypatch.setattr("terok_sandbox.gate.mirror.time.sleep", slept.append)
-
-        with _patch_config(tmp_path, scopes_with_keys=[]), pytest.raises(GateAuthNotConfigured):
-            _git_env_with_ssh(scope="proj")
-
-        assert slept == []  # no grace window when nothing's assigned
+    def test_raises_when_vault_locked(self) -> None:
+        """``open_credential_db`` raises → ``GateAuthNotConfigured`` (fail-soft)."""
+        with _stub_credential_db(scopes_with_keys=None), pytest.raises(GateAuthNotConfigured):
+            _make_gate()._ssh_env()
 
 
 class TestPersonalOptIn:
     """Verify ``use_personal_ssh=True`` leaves the env alone."""
 
-    def test_returns_untouched_env(self, tmp_path: Path) -> None:
+    def test_returns_untouched_env(self) -> None:
         """Opt-in: no GIT_SSH_COMMAND injected, SSH_AUTH_SOCK not forced."""
         import os
 
-        with _patch_config(tmp_path):
-            env = _git_env_with_ssh(scope="anything", use_personal_ssh=True)
+        env = _make_gate(use_personal_ssh=True)._ssh_env()
 
         assert env.get("SSH_AUTH_SOCK") == os.environ.get("SSH_AUTH_SOCK")
         assert "GIT_SSH_COMMAND" not in env or env["GIT_SSH_COMMAND"] == os.environ.get(
             "GIT_SSH_COMMAND", ""
         )
 
-    def test_opt_in_wins_even_when_socket_exists(self, tmp_path: Path) -> None:
-        """Opt-in bypasses the vault socket entirely."""
-        sock = _bind_socket(_patched_socket_path(tmp_path, "proj"))
-        try:
-            with _patch_config(tmp_path):
-                env = _git_env_with_ssh(scope="proj", use_personal_ssh=True)
-        finally:
-            sock.close()
+    def test_opt_in_does_not_start_signer(self, tmp_path: Path) -> None:
+        """Opt-in bypasses the ephemeral signer entirely — no DB read either."""
+        from terok_sandbox.gate.mirror import _EphemeralSigner
 
-        assert "GIT_SSH_COMMAND" not in env or "IdentityFile=none" not in env["GIT_SSH_COMMAND"]
+        with patch.object(_EphemeralSigner, "start") as mock_start:
+            _make_gate(use_personal_ssh=True)._ssh_env()
+
+        mock_start.assert_not_called()
+
+
+class TestHttpsUpstream:
+    """HTTPS upstreams skip the SSH machinery entirely."""
+
+    def test_https_upstream_skips_signer(self) -> None:
+        """An ``https://`` upstream gets an unmodified env — no signer bound."""
+        from terok_sandbox.gate.mirror import _EphemeralSigner
+
+        with patch.object(_EphemeralSigner, "start") as mock_start:
+            env = _make_gate(upstream_url="https://github.com/example/repo.git")._ssh_env()
+
+        mock_start.assert_not_called()
+        assert "GIT_SSH_COMMAND" not in env
+
+
+class TestSignerLifecycle:
+    """``close()`` and ``__del__`` tear the signer down idempotently."""
+
+    def test_close_stops_signer_once(self) -> None:
+        """``close()`` calls ``signer.stop()`` once and clears the handle."""
+        from terok_sandbox.gate.mirror import _EphemeralSigner
+
+        fake_signer = _EphemeralSigner.__new__(_EphemeralSigner)
+        object.__setattr__(fake_signer, "socket_path", Path("/tmp/x"))  # noqa: S108
+        stops: list[int] = []
+        object.__setattr__(fake_signer, "stop", lambda: stops.append(1))
+
+        gate = _make_gate()
+        gate._signer = fake_signer
+        gate.close()
+        gate.close()  # idempotent
+
+        assert stops == [1]
+        assert gate._signer is None

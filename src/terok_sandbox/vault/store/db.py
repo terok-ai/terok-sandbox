@@ -315,6 +315,13 @@ class CredentialDB:
         ).fetchall()
         return [r[0] for r in rows]
 
+    def list_credential_sets(self) -> list[str]:
+        """Return distinct credential-set names with at least one stored credential."""
+        rows = self._conn.execute(
+            "SELECT DISTINCT credential_set FROM credentials ORDER BY credential_set"
+        ).fetchall()
+        return [r[0] for r in rows]
+
     def delete_credential(self, credential_set: str, provider: str) -> None:
         """Remove a credential entry (idempotent)."""
         self._conn.execute(
@@ -647,6 +654,29 @@ class CredentialDB:
             "credential_set": row[2],
             "provider": row[3],
         }
+
+    def list_tokens(self) -> list[dict]:
+        """Return every proxy-token row as a list of dicts.
+
+        Read-only inventory for operator-facing CLI inspection
+        (``terok vault list --include-tokens``).  The raw token value
+        is included so the operator can cross-reference what's actually
+        mounted into containers; callers MUST mask it before display.
+        """
+        rows = self._conn.execute(
+            "SELECT token, scope, subject, credential_set, provider"
+            " FROM proxy_tokens ORDER BY scope, subject, provider"
+        ).fetchall()
+        return [
+            {
+                "token": r[0],
+                "scope": r[1],
+                "subject": r[2],
+                "credential_set": r[3],
+                "provider": r[4],
+            }
+            for r in rows
+        ]
 
     def revoke_tokens(self, scope: str, subject: str) -> int:
         """Revoke every phantom token bound to ``(scope, subject)``.

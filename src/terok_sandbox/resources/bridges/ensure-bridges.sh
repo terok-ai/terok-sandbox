@@ -75,9 +75,8 @@ if [[ -n "${TEROK_VAULT_LOOPBACK_PORT:-}" ]] \
 fi
 
 # ── Vault socket bridge (TCP mode) ───────────────────────────────────────
-# The broker is only reachable over TCP on the host.  gh and claude can
-# only speak HTTP-over-UNIX, so expose a local Unix socket fronted by
-# socat that pipes through to the broker.
+# Unix-socket facade for socket-only clients (gh, claude) when the broker
+# lives on host TCP.
 if [[ -n "${TEROK_TOKEN_BROKER_PORT:-}" ]] \
    && command -v socat >/dev/null 2>&1 \
    && ! _terok_bridge_alive "$_TEROK_PIDDIR/vault-socket.pid"; then
@@ -85,6 +84,19 @@ if [[ -n "${TEROK_TOKEN_BROKER_PORT:-}" ]] \
   socat UNIX-LISTEN:/tmp/terok-vault.sock,fork \
     TCP:host.containers.internal:"${TEROK_TOKEN_BROKER_PORT}" &
   echo $! > "$_TEROK_PIDDIR/vault-socket.pid"
+fi
+
+# ── Vault loopback bridge (TCP mode) ─────────────────────────────────────
+# Mirror of the socket-mode bridge so URL-based clients always get to
+# http://localhost:9419/v1 regardless of transport.  Per-container host
+# port comes from TEROK_TOKEN_BROKER_PORT.
+if [[ -n "${TEROK_TOKEN_BROKER_PORT:-}" ]] \
+   && [[ -n "${TEROK_VAULT_LOOPBACK_PORT:-}" ]] \
+   && command -v socat >/dev/null 2>&1 \
+   && ! _terok_bridge_alive "$_TEROK_PIDDIR/vault-loopback.pid"; then
+  socat "TCP-LISTEN:${TEROK_VAULT_LOOPBACK_PORT},bind=127.0.0.1,fork,reuseaddr" \
+    TCP:host.containers.internal:"${TEROK_TOKEN_BROKER_PORT}" &
+  echo $! > "$_TEROK_PIDDIR/vault-loopback.pid"
 fi
 
 # ── Gate server bridge (socket mode) ─────────────────────────────────────

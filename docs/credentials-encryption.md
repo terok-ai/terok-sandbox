@@ -73,23 +73,22 @@ trusted workstation, then `pass git push` to your sync remote and
 `pass git pull` on the data-center host — the encrypted store sits in
 the same repo your dotfiles already follow.
 
-Diagnostics from the helper land in the vault journal:
-
-```bash
-journalctl --user -u terok-vault -n 50
-# look for: "passphrase_command 'pass' exited 1: <stderr>"
-```
+Diagnostics from the helper land in the per-container supervisor logs
+(``$XDG_STATE_HOME/terok/logs/<container-id>.log``); look for lines
+like ``passphrase_command 'pass' exited 1: <stderr>``.  There's no
+long-running vault daemon any more — every container's supervisor
+walks the passphrase chain when it spawns.
 
 ## Day-to-day
 
 ```bash
-terok-sandbox vault unlock   # asks for the passphrase, writes the
-                             #   session file, restarts the daemon
-
-terok-sandbox vault lock     # removes the session file, stops the daemon
+terok-sandbox vault unlock   # writes the session-unlock tmpfs file
+terok-sandbox vault lock     # removes the session-unlock tmpfs file
 ```
 
-`vault unlock` is normally run once per boot.
+`vault unlock` is normally run once per boot.  The next supervisor to
+start picks the freshly-resolved passphrase up automatically; no
+daemon restart is needed because there is no daemon.
 
 ## Picking a tier at setup
 

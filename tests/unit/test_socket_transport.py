@@ -201,28 +201,11 @@ class TestCreateUnixServer:
 # ── Gate lifecycle: socket reachability ──────────────────────────────────
 
 
-class TestWaitForUnixSocket:
-    """Verify the _wait_for_unix_socket retry loop."""
-
-    def test_returns_true_for_immediate_listener(self, tmp_path: Path) -> None:
-        """Succeeds immediately when the socket is already listening."""
-        from terok_sandbox.vault.daemon.lifecycle import VaultManager
-
-        sock_path = tmp_path / "test.sock"
-        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        srv.bind(str(sock_path))
-        srv.listen(1)
-        try:
-            assert VaultManager._wait_for_unix_socket(sock_path, timeout=1.0) is True
-        finally:
-            srv.close()
-
-    def test_returns_false_on_timeout(self, tmp_path: Path) -> None:
-        """Returns False when socket never appears within timeout."""
-        from terok_sandbox.vault.daemon.lifecycle import VaultManager
-
-        missing = tmp_path / "missing.sock"
-        assert VaultManager._wait_for_unix_socket(missing, timeout=0.3) is False
+# Earlier in this file, ``TestProbeUnixSocket`` already covers the same
+# helper directly — the vault-lifecycle wrapper variant lived here when
+# ``VaultManager._wait_for_unix_socket`` provided a retry loop on top
+# of the probe.  That wrapper is gone; the underlying-helper tests
+# remain authoritative.
 
 
 class TestGateSocketReachability:
@@ -504,30 +487,10 @@ class TestGateMainPortDefault:
         assert kwargs["port"] == 9418
 
 
-# ── Vault: SSH signer mutual exclusion ───────────────────────────────────
-
-
-class TestSSHSignerMutualExclusion:
-    """Verify --ssh-signer-port and --ssh-signer-socket-path are mutually exclusive."""
-
-    def test_rejects_both_port_and_socket(self) -> None:
-        """Passing both --ssh-signer-port and --ssh-signer-socket-path is an error."""
-        with unittest.mock.patch(
-            "sys.argv",
-            [
-                "terok-vault",
-                "--socket-path=/tmp/terok-testing/proxy.sock",
-                "--db-path=/tmp/terok-testing/db",
-                "--routes-file=/tmp/terok-testing/routes.json",
-                "--ssh-signer-port=18732",
-                "--ssh-signer-socket-path=/tmp/terok-testing/ssh.sock",
-                "--ssh-keys-file=/tmp/terok-testing/keys.json",
-            ],
-        ):
-            from terok_sandbox.vault.daemon.token_broker import main as vault_main
-
-            with pytest.raises(SystemExit):
-                vault_main()
+# The ``--ssh-signer-port`` / ``--ssh-signer-socket-path`` mutual
+# exclusion test that lived here tested the deleted ``terok-vault``
+# standalone CLI.  The supervisor wires VaultProxy directly so the
+# argparse mutex no longer has a runtime equivalent.
 
 
 class TestInstallSystemdPortGuards:
@@ -578,43 +541,11 @@ class TestInstallSystemdPortGuards:
             # proves the port guard did not fire for socket-mode installs.
             GateServerManager().install_systemd_units()
 
-    def test_vault_tcp_install_without_port_raises(self) -> None:
-        """cfg.services_mode='tcp' + token_broker_port=None → refuses to render."""
-        from terok_sandbox.vault.daemon.lifecycle import VaultManager
-
-        mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
-
-        mock_cfg.with_resolved_ports.return_value = mock_cfg
-        mock_cfg.services_mode = "tcp"
-        mock_cfg.token_broker_port = None
-        mock_cfg.ssh_signer_port = 18732
-        with unittest.mock.patch.object(
-            VaultManager,
-            "__init__",
-            lambda self, cfg=None: setattr(self, "_cfg", mock_cfg),
-        ):
-            mgr = VaultManager()
-            with pytest.raises(SystemExit, match="no port is set"):
-                mgr.install_systemd_units()
-
-    def test_vault_tcp_install_without_ssh_signer_port_raises(self) -> None:
-        """Same guard fires when only ssh_signer_port is unset."""
-        from terok_sandbox.vault.daemon.lifecycle import VaultManager
-
-        mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
-
-        mock_cfg.with_resolved_ports.return_value = mock_cfg
-        mock_cfg.services_mode = "tcp"
-        mock_cfg.token_broker_port = 18731
-        mock_cfg.ssh_signer_port = None
-        with unittest.mock.patch.object(
-            VaultManager,
-            "__init__",
-            lambda self, cfg=None: setattr(self, "_cfg", mock_cfg),
-        ):
-            mgr = VaultManager()
-            with pytest.raises(SystemExit, match="no port is set"):
-                mgr.install_systemd_units()
+    # The vault systemd install path (``VaultManager.install_systemd_units``)
+    # and its "no port is set" guard are gone — the per-container
+    # supervisor instantiates ``VaultProxy`` directly with explicit
+    # bind targets, so the host-side port-guard test from the previous
+    # architecture no longer maps onto any live code path.
 
 
 class TestServicesModeSSOT:

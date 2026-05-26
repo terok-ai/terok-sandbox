@@ -105,23 +105,13 @@ class TestCLIBasics:
         assert "install-hooks" in combined
         assert "status" in combined
 
-    def test_shield_install_hooks_requires_scope_flag(self) -> None:
-        """``shield install-hooks`` with no flag surfaces CLI-specific hints.
-
-        The library function ([`terok_sandbox.integrations.shield.run_setup`][terok_sandbox.integrations.shield.run_setup]) raises
-        ``ValueError`` on invalid combos — the CLI layer is what maps it to
-        actionable ``install-hooks --root/--user`` remediation text.
-        """
+    def test_shield_install_hooks_delegates(self) -> None:
+        """``shield install-hooks`` calls ``ShieldHooks.install()`` — no scope flags."""
         from terok_sandbox.commands import _handle_shield_setup
 
-        try:
+        with patch("terok_sandbox.integrations.shield.ShieldHooks.install") as install:
             _handle_shield_setup()
-        except SystemExit as exc:
-            message = str(exc)
-            assert "--root" in message and "--user" in message
-            assert "shield install-hooks" in message
-        else:  # pragma: no cover — defensive: must SystemExit
-            raise AssertionError("_handle_shield_setup should have raised SystemExit")
+        install.assert_called_once_with()
 
     def test_gate_no_subcommand_shows_help(self) -> None:
         out, _, _ = _run_cli("gate")
@@ -136,13 +126,13 @@ class TestCLIBasics:
 class TestShieldCLI:
     """Verify shield subcommand dispatch."""
 
-    def test_install_hooks_user_delegates_to_shield_hooks_install(self) -> None:
-        """``shield install-hooks --user`` reaches ``ShieldHooks.install(user=True)``."""
+    def test_install_hooks_delegates_to_shield_hooks_install(self) -> None:
+        """``shield install-hooks`` reaches ``ShieldHooks.install()``."""
         from terok_sandbox.commands import _handle_shield_setup
 
         with patch("terok_sandbox.integrations.shield.ShieldHooks.install") as install:
-            _handle_shield_setup(user=True)
-        install.assert_called_once_with(root=False, user=True)
+            _handle_shield_setup()
+        install.assert_called_once_with()
 
     def test_shield_status_runs(self) -> None:
         """``shield status`` resolves through shield's own registry handler.

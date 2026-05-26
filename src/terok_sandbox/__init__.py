@@ -7,8 +7,8 @@ Delegates to domain subsystems:
 
 - [`gate`][terok_sandbox.gate] — authenticated git serving: HTTP server, token CRUD, upstream
   mirror management, systemd/daemon lifecycle.
-- [`vault`][terok_sandbox.vault] — secret injection: token broker with phantom credentials,
-  SSH signing proxy, SQLite credential store, systemd/daemon lifecycle.
+- [`vault`][terok_sandbox.vault] — secret injection: per-container token broker with
+  phantom credentials, SSH signing proxy, SQLite credential store.
 - [`shield`][terok_sandbox.integrations.shield] — egress firewall adapter (delegates to terok-shield).
 - [`runtime`][terok_sandbox.runtime] — Podman CLI wrapper (state queries, GPU, log streaming).
 - [`sandbox`][terok_sandbox.sandbox] — facade composing the above behind [`SandboxConfig`][terok_sandbox.SandboxConfig].
@@ -68,6 +68,7 @@ from .integrations.shield import (
     check_environment,
     resolve_container_state_dir,
 )
+from .launch import PerContainerResources, allocate_per_container_resources
 from .port_registry import claim_port, release_port
 from .runtime import (
     DEFAULT_GUEST_SSHD_PORT,
@@ -85,7 +86,6 @@ from .runtime import (
 from .sandbox import READY_MARKER, LifecycleHooks, RunSpec, Sandbox, Sharing, VolumeSpec
 from .setup_stamp import SetupVerdict, installed_versions, needs_setup, read_stamp, stamp_path
 from .vault.daemon import CODEX_SHARED_OAUTH_MARKER, PHANTOM_CREDENTIALS_MARKER
-from .vault.daemon.lifecycle import VaultManager, VaultStatus, VaultUnreachableError
 from .vault.ssh.keypair import ensure_infra_keypair, public_line_of
 from .vault.ssh.manager import SSHInitResult, SSHManager
 from .vault.store.db import CredentialDB
@@ -124,10 +124,9 @@ __all__ = [
     # Lifecycle managers
     "GateServerManager",
     "GateServerStatus",
+    "PerContainerResources",
     "TokenStore",
-    "VaultManager",
-    "VaultStatus",
-    "VaultUnreachableError",
+    "allocate_per_container_resources",
     # Runtime + facade
     "ContainerRuntime",
     "DEFAULT_GUEST_SSHD_PORT",

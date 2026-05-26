@@ -463,21 +463,18 @@ def _save_ports(state_dir: Path, ports: dict[str, int]) -> None:
 # ---------------------------------------------------------------------------
 
 _LISTEN_RE = re.compile(r"^ListenStream=127\.0\.0\.1:(\d+)", re.MULTILINE)
-_SSH_PORT_RE = re.compile(r"--ssh-signer-port[= ](\d+)")
 
-_PROXY_SOCKET_UNIT = "terok-vault.socket"
-_PROXY_SERVICE_UNIT = "terok-vault.service"
 _GATE_SOCKET_UNIT = "terok-gate.socket"
 
 
 def _read_installed_ports() -> dict[str, int]:
     """Read ports from installed systemd unit files (ground truth).
 
-    Parses the **rendered** (installed) unit files — not templates — so
-    the returned ports are exactly what the running services are
-    configured to use.  This is authoritative: if a unit file says
-    ``ListenStream=127.0.0.1:18701``, port 18701 belongs to us
-    regardless of what ``_is_port_free()`` reports.
+    Parses the **rendered** (installed) gate socket unit — the only
+    surviving systemd unit after the per-container-supervisor refactor.
+    Vault token-broker / SSH-signer ports used to come from the
+    ``terok-vault*`` units, but those are per-container now and have no
+    global unit file to read.
 
     Returns a dict mapping service keys to ports.  Missing or
     unreadable unit files are silently skipped — the caller falls back
@@ -492,20 +489,10 @@ def _read_installed_ports() -> dict[str, int]:
 
     ports: dict[str, int] = {}
 
-    # Gate port: ListenStream in gate socket unit
+    # Gate port: ListenStream in gate socket unit (only surviving global unit).
     gate_socket = unit_dir / _GATE_SOCKET_UNIT
     if port := _parse_listen_port(gate_socket):
         ports[SERVICE_GATE] = port
-
-    # Token broker port: ListenStream in vault socket unit
-    proxy_socket = unit_dir / _PROXY_SOCKET_UNIT
-    if port := _parse_listen_port(proxy_socket):
-        ports[SERVICE_PROXY] = port
-
-    # SSH signer port: --ssh-signer-port in vault service unit
-    proxy_service = unit_dir / _PROXY_SERVICE_UNIT
-    if port := _parse_ssh_signer_port(proxy_service):
-        ports[SERVICE_SSH_AGENT] = port
 
     return ports
 
@@ -517,19 +504,6 @@ def _parse_listen_port(unit_path: Path) -> int | None:
     except OSError:
         return None
     match = _LISTEN_RE.search(text)
-    if match:
-        port = int(match.group(1))
-        return port if 1 <= port <= 65535 else None
-    return None
-
-
-def _parse_ssh_signer_port(unit_path: Path) -> int | None:
-    """Extract the SSH signer port from the vault service ExecStart line."""
-    try:
-        text = unit_path.read_text()
-    except OSError:
-        return None
-    match = _SSH_PORT_RE.search(text)
     if match:
         port = int(match.group(1))
         return port if 1 <= port <= 65535 else None

@@ -30,7 +30,6 @@ from terok_sandbox.vault.daemon.token_broker import (
     _refresh_all,
     _requested_websocket_protocols,
     _RouteTable,
-    _run_multi,
     _TokenDB,
 )
 from terok_sandbox.vault.store.db import CredentialDB
@@ -1526,102 +1525,7 @@ class TestServerDisconnectRetry:
             assert await resp.text() == "Upstream disconnected"
 
 
-# ── _run_multi site selection ────────────────────────────────────────────
-
-
-class TestRunMultiSiteSelection:
-    """Verify _run_multi uses inherited sockets or creates its own listeners."""
-
-    @staticmethod
-    def _make_app(tmp_path: Path) -> web.Application:
-        """Build a minimal app with required keys."""
-        routes_file = tmp_path / "routes.json"
-        routes_file.write_text("{}")
-        db = CredentialDB(tmp_path / "creds.db", passphrase="test")
-        db.close()
-        return _build_app(
-            routes_path=str(routes_file),
-            db_path=str(tmp_path / "creds.db"),
-        )
-
-    @pytest.mark.asyncio
-    async def test_systemd_inherited_sockets(self, tmp_path: Path) -> None:
-        """When _systemd_sockets returns both FDs, SockSite is used for each."""
-        import asyncio
-        import socket as _socket
-        from unittest.mock import patch
-
-        app = self._make_app(tmp_path)
-        mock_unix = MagicMock(spec=_socket.socket)
-        mock_tcp = MagicMock(spec=_socket.socket)
-        sock_sites: list = []
-
-        class _TrackingSockSite:
-            def __init__(self, runner, sock, **kw):
-                sock_sites.append(sock)
-
-            async def start(self):
-                pass
-
-        with (
-            patch(
-                "terok_sandbox.vault.daemon.token_broker._systemd_sockets",
-                return_value=(mock_unix, mock_tcp),
-            ),
-            patch("aiohttp.web_runner.SockSite", _TrackingSockSite),
-        ):
-            task = asyncio.create_task(
-                _run_multi(app, sock_path=str(tmp_path / "vault.sock"), port=18731)
-            )
-            await asyncio.sleep(0.05)
-            task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await task
-
-        assert mock_unix in sock_sites
-        assert mock_tcp in sock_sites
-
-    @pytest.mark.asyncio
-    async def test_daemon_mode_creates_own_listeners(self, tmp_path: Path) -> None:
-        """When _systemd_sockets returns (None, None), SockSite (Unix) and TCPSite are used."""
-        import asyncio
-        import socket
-        from unittest.mock import patch
-
-        app = self._make_app(tmp_path)
-        used_sites: list[str] = []
-
-        class _TrackingSockSite:
-            def __init__(self, runner, sock, **kw):
-                kind = "unix" if sock.family == socket.AF_UNIX else "sock"
-                used_sites.append(f"{kind}:{sock.getsockname()}")
-                sock.close()  # prevent leak — we don't actually serve here
-
-            async def start(self):
-                pass
-
-        class _TrackingTCPSite:
-            def __init__(self, runner, host, port, **kw):
-                used_sites.append(f"tcp:{host}:{port}")
-
-            async def start(self):
-                pass
-
-        with (
-            patch(
-                "terok_sandbox.vault.daemon.token_broker._systemd_sockets",
-                return_value=(None, None),
-            ),
-            patch("aiohttp.web_runner.SockSite", _TrackingSockSite),
-            patch("aiohttp.web_runner.TCPSite", _TrackingTCPSite),
-        ):
-            task = asyncio.create_task(
-                _run_multi(app, sock_path=str(tmp_path / "vault.sock"), port=18731)
-            )
-            await asyncio.sleep(0.05)
-            task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await task
-
-        assert any(s.startswith("unix:") for s in used_sites)
-        assert any("tcp:127.0.0.1:18731" in s for s in used_sites)
+# The ``_run_multi`` standalone-daemon site selection (systemd-inherited
+# sockets vs. self-bound listeners) is gone after the per-container-
+# supervisor refactor — ``VaultProxy.start()`` owns the listener
+# bring-up now and tests for that path live in ``test_vault_proxy.py``.

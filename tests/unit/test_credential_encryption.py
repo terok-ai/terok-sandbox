@@ -1549,78 +1549,50 @@ class TestVaultUnlockLock:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Happy path: prompt, write tmpfs file, bounce the daemon."""
-        from unittest.mock import MagicMock
 
         from terok_sandbox.commands import _handle_vault_unlock
 
         cfg = _make_cfg(tmp_path)
         _scripted_tty_prompt(monkeypatch, "freshly-typed")
-        mgr = MagicMock()
-        mgr.is_daemon_running.return_value = True
-        monkeypatch.setattr("terok_sandbox.vault.daemon.lifecycle.VaultManager", lambda _cfg: mgr)
-
         _handle_vault_unlock(cfg=cfg)
 
         assert cfg.vault_passphrase_file.read_text().rstrip("\n") == "freshly-typed"
         assert (cfg.vault_passphrase_file.stat().st_mode & 0o777) == 0o600
-        mgr.stop_daemon.assert_called_once()
-        mgr.start_daemon.assert_called_once()
 
     def test_unlock_skips_restart_when_daemon_not_running(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """No daemon running → file is written, restart is not attempted, message printed."""
-        from unittest.mock import MagicMock
 
         from terok_sandbox.commands import _handle_vault_unlock
 
         cfg = _make_cfg(tmp_path)
         _scripted_tty_prompt(monkeypatch, "freshly-typed")
-        mgr = MagicMock()
-        mgr.is_daemon_running.return_value = False
-        monkeypatch.setattr("terok_sandbox.vault.daemon.lifecycle.VaultManager", lambda _cfg: mgr)
-
         _handle_vault_unlock(cfg=cfg)
-
-        mgr.stop_daemon.assert_not_called()
-        mgr.start_daemon.assert_not_called()
 
     def test_lock_removes_file_and_stops_daemon(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Lock path: delete tmpfs file, stop daemon — symmetric to unlock."""
-        from unittest.mock import MagicMock
 
         from terok_sandbox.commands import _handle_vault_lock
 
         cfg = _make_cfg(tmp_path)
         cfg.vault_passphrase_file.parent.mkdir(parents=True, exist_ok=True)
         cfg.vault_passphrase_file.write_text("stale\n")
-        mgr = MagicMock()
-        mgr.is_daemon_running.return_value = True
-        monkeypatch.setattr("terok_sandbox.vault.daemon.lifecycle.VaultManager", lambda _cfg: mgr)
-
         _handle_vault_lock(cfg=cfg)
 
         assert not cfg.vault_passphrase_file.exists()
-        mgr.stop_daemon.assert_called_once()
 
     def test_lock_is_idempotent_when_already_locked(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Already-locked state (no file, no daemon) is a clean no-op."""
-        from unittest.mock import MagicMock
 
         from terok_sandbox.commands import _handle_vault_lock
 
         cfg = _make_cfg(tmp_path)
-        mgr = MagicMock()
-        mgr.is_daemon_running.return_value = False
-        monkeypatch.setattr("terok_sandbox.vault.daemon.lifecycle.VaultManager", lambda _cfg: mgr)
-
         _handle_vault_lock(cfg=cfg)  # must not raise
-
-        mgr.stop_daemon.assert_not_called()
 
     def test_lock_warns_when_non_session_tiers_active(
         self,
@@ -1629,7 +1601,6 @@ class TestVaultUnlockLock:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         """Plain ``lock`` with keyring / passphrase_command / config tiers warns about silent auto-unlock."""
-        from unittest.mock import MagicMock
 
         from terok_sandbox.commands import _handle_vault_lock
 
@@ -1639,10 +1610,6 @@ class TestVaultUnlockLock:
             passphrase="from-config",
             passphrase_command="pass show terok-sandbox/vault",
         )
-        mgr = MagicMock()
-        mgr.is_daemon_running.return_value = False
-        monkeypatch.setattr("terok_sandbox.vault.daemon.lifecycle.VaultManager", lambda _cfg: mgr)
-
         _handle_vault_lock(cfg=cfg)
 
         err = capsys.readouterr().err
@@ -1658,16 +1625,11 @@ class TestVaultUnlockLock:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """``lock --forget`` removes the keyring entry and clears config.yml."""
-        from unittest.mock import MagicMock
 
         from terok_sandbox import config as _config
         from terok_sandbox.commands import _handle_vault_lock
 
         cfg = _make_cfg(tmp_path, use_keyring=True, passphrase="from-config")
-        mgr = MagicMock()
-        mgr.is_daemon_running.return_value = False
-        monkeypatch.setattr("terok_sandbox.vault.daemon.lifecycle.VaultManager", lambda _cfg: mgr)
-
         forget_calls: dict[str, int] = {"n": 0}
 
         def _forget() -> bool:
@@ -1696,16 +1658,11 @@ class TestVaultUnlockLock:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """``lock --forget`` removes ``credentials.passphrase_command`` so the next start can't auto-resolve via the helper."""
-        from unittest.mock import MagicMock
 
         from terok_sandbox import config as _config
         from terok_sandbox.commands import _handle_vault_lock
 
         cfg = _make_cfg(tmp_path, passphrase_command="pass show terok-sandbox/vault")
-        mgr = MagicMock()
-        mgr.is_daemon_running.return_value = False
-        monkeypatch.setattr("terok_sandbox.vault.daemon.lifecycle.VaultManager", lambda _cfg: mgr)
-
         user_config = tmp_path / "config.yml"
         user_config.write_text(
             "credentials:\n  passphrase_command: pass show terok-sandbox/vault\n"
@@ -1728,14 +1685,10 @@ class TestVaultUnlockLock:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         """Forget on a configured-but-empty keyring is success (not a hard failure)."""
-        from unittest.mock import MagicMock
 
         from terok_sandbox.commands import _handle_vault_lock
 
         cfg = _make_cfg(tmp_path, use_keyring=True)
-        mgr = MagicMock()
-        mgr.is_daemon_running.return_value = False
-        monkeypatch.setattr("terok_sandbox.vault.daemon.lifecycle.VaultManager", lambda _cfg: mgr)
         # Helper returns False on missing entry (keyring.delete_password raises);
         # the readback then confirms the entry really is absent.
         monkeypatch.setattr(
@@ -1757,14 +1710,10 @@ class TestVaultUnlockLock:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A residual entry after a failed delete means --forget couldn't honour its contract."""
-        from unittest.mock import MagicMock
 
         from terok_sandbox.commands import _handle_vault_lock
 
         cfg = _make_cfg(tmp_path, use_keyring=True)
-        mgr = MagicMock()
-        mgr.is_daemon_running.return_value = False
-        monkeypatch.setattr("terok_sandbox.vault.daemon.lifecycle.VaultManager", lambda _cfg: mgr)
         # Helper claimed failure AND the entry is still there: real backend rejection.
         monkeypatch.setattr(
             "terok_sandbox.vault.store.encryption.forget_passphrase_in_keyring",
@@ -1784,18 +1733,12 @@ class TestVaultUnlockLock:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """``lock --forget`` deletes the systemd-creds blob so the next daemon start can't auto-unlock from it."""
-        from unittest.mock import MagicMock
 
         from terok_sandbox.commands import _handle_vault_lock
 
         cfg = _make_cfg(tmp_path)
         cfg.vault_systemd_creds_file.parent.mkdir(parents=True, exist_ok=True)
         cfg.vault_systemd_creds_file.write_bytes(b"sealed-blob")
-
-        mgr = MagicMock()
-        mgr.is_daemon_running.return_value = False
-        monkeypatch.setattr("terok_sandbox.vault.daemon.lifecycle.VaultManager", lambda _cfg: mgr)
-
         _handle_vault_lock(cfg=cfg, forget=True)
 
         assert not cfg.vault_systemd_creds_file.exists()
@@ -1806,18 +1749,12 @@ class TestVaultUnlockLock:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A permissions / IO error on the sealed credential bubbles to SystemExit, not a traceback."""
-        from unittest.mock import MagicMock
 
         from terok_sandbox.commands import _handle_vault_lock
 
         cfg = _make_cfg(tmp_path)
         cfg.vault_systemd_creds_file.parent.mkdir(parents=True, exist_ok=True)
         cfg.vault_systemd_creds_file.write_bytes(b"sealed-blob")
-
-        mgr = MagicMock()
-        mgr.is_daemon_running.return_value = False
-        monkeypatch.setattr("terok_sandbox.vault.daemon.lifecycle.VaultManager", lambda _cfg: mgr)
-
         # Target only the sealed-credential unlink so any other Path.unlink
         # call inside the handler (e.g. ``cfg.vault_passphrase_file`` clearing
         # in another branch) keeps its real behaviour and the test stays
@@ -1841,18 +1778,12 @@ class TestVaultUnlockLock:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         """Plain ``lock`` with a sealed credential warns — that tier auto-unlocks on next start."""
-        from unittest.mock import MagicMock
 
         from terok_sandbox.commands import _handle_vault_lock
 
         cfg = _make_cfg(tmp_path)
         cfg.vault_systemd_creds_file.parent.mkdir(parents=True, exist_ok=True)
         cfg.vault_systemd_creds_file.write_bytes(b"sealed-blob")
-
-        mgr = MagicMock()
-        mgr.is_daemon_running.return_value = False
-        monkeypatch.setattr("terok_sandbox.vault.daemon.lifecycle.VaultManager", lambda _cfg: mgr)
-
         _handle_vault_lock(cfg=cfg)
 
         err = capsys.readouterr().err
@@ -2073,10 +2004,6 @@ class TestVaultToKeyring:
         monkeypatch.setattr(
             "terok_sandbox.vault.store.encryption.store_passphrase_in_keyring", store
         )
-        mgr = MagicMock()
-        mgr.is_daemon_running.return_value = False
-        monkeypatch.setattr("terok_sandbox.vault.daemon.lifecycle.VaultManager", lambda _cfg: mgr)
-
         handle_vault_to_keyring(cfg=cfg)
 
         store.assert_called_once_with("current-pw")
@@ -2168,14 +2095,7 @@ class TestVaultToKeyring:
             "terok_sandbox.vault.store.encryption.store_passphrase_in_keyring",
             MagicMock(return_value=True),
         )
-        mgr = MagicMock()
-        mgr.is_daemon_running.return_value = True
-        monkeypatch.setattr("terok_sandbox.vault.daemon.lifecycle.VaultManager", lambda _cfg: mgr)
-
         handle_vault_to_keyring(cfg=cfg)
-
-        mgr.stop_daemon.assert_called_once()
-        mgr.start_daemon.assert_called_once()
 
     def test_propagates_wrong_passphrase_as_systemexit(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2223,134 +2143,16 @@ class TestVaultDestroyPassphrase:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The verb is a thin wrapper; assert the destructive flow runs (sealed credential removed)."""
-        from unittest.mock import MagicMock
 
         from terok_sandbox.commands import _handle_vault_destroy_passphrase
 
         cfg = _make_cfg(tmp_path)
         cfg.vault_systemd_creds_file.parent.mkdir(parents=True, exist_ok=True)
         cfg.vault_systemd_creds_file.write_bytes(b"sealed-blob")
-        mgr = MagicMock()
-        mgr.is_daemon_running.return_value = False
-        monkeypatch.setattr("terok_sandbox.vault.daemon.lifecycle.VaultManager", lambda _cfg: mgr)
-
         _handle_vault_destroy_passphrase(cfg=cfg)
 
         # The destructive ``forget=True`` flow ran — sealed credential gone.
         assert not cfg.vault_systemd_creds_file.exists()
-
-
-class TestCredentialsSetupPhaseDaemonHandling:
-    """The credentials phase must stop a live daemon so migration doesn't race."""
-
-    def test_daemon_is_unconditionally_quiesced_before_migration(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """``stop_daemon`` runs every time — not gated by the PID-file probe.
-
-        ``is_daemon_running`` is PID-file only and reports False for
-        systemd-managed daemons; gating on it (as we initially did)
-        silently skipped the load-bearing stop on real installs.
-        """
-        from unittest.mock import MagicMock
-
-        from terok_sandbox.commands import _run_credentials_setup_phase
-
-        cfg = _make_cfg(tmp_path)
-        mgr = MagicMock()
-        # Mimic the systemd shape: no PID file → is_daemon_running False
-        # — and we still expect stop_daemon to fire.
-        mgr.is_daemon_running.return_value = False
-        monkeypatch.setattr("terok_sandbox.vault.daemon.lifecycle.VaultManager", lambda _cfg: mgr)
-        # Force the chooser path with an explicit ``[s]``.  Default is now
-        # keyring; this test doesn't actually depend on which tier wins,
-        # but pinning it makes the test deterministic across hosts.
-        _disable_systemd_creds(monkeypatch)
-        _patch_dev_tty(monkeypatch)
-        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
-        responses = iter(["s\n"])
-        monkeypatch.setattr("sys.stdin.readline", lambda: next(responses))
-        monkeypatch.setattr("prompt_toolkit.prompt", lambda *_a, **_kw: "")
-
-        assert _run_credentials_setup_phase(cfg) is True
-        mgr.stop_daemon.assert_called_once()
-        mgr.uninstall_systemd_units.assert_not_called()  # not needed on happy path
-
-    def test_locked_db_triggers_auto_recovery_and_succeeds(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        """Socket-activation respawn race → uninstall units + retry → success."""
-        from unittest.mock import MagicMock
-
-        from terok_sandbox.commands import credentials as commands
-
-        cfg = _make_cfg(tmp_path)
-        attempts = {"n": 0}
-
-        def _migrate(**_kw: object) -> None:
-            attempts["n"] += 1
-            if attempts["n"] == 1:
-                raise RuntimeError("database is locked")
-            # Second call (after auto-uninstall) succeeds.
-
-        monkeypatch.setattr(commands, "_handle_credentials_encrypt_db", _migrate)
-        mgr = MagicMock()
-        monkeypatch.setattr("terok_sandbox.vault.daemon.lifecycle.VaultManager", lambda _cfg: mgr)
-
-        assert commands._run_credentials_setup_phase(cfg) is True
-        assert attempts["n"] == 2
-        mgr.uninstall_systemd_units.assert_called_once()
-        assert "auto-recovering" in capsys.readouterr().out
-
-    def test_locked_db_after_recovery_bails_with_fuser_hint(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        """If the lock persists after uninstall, surface the ``fuser`` diagnostic."""
-        from unittest.mock import MagicMock
-
-        from terok_sandbox.commands import credentials as commands
-
-        def _always_locked(**_kw: object) -> None:
-            raise RuntimeError("database is locked")
-
-        monkeypatch.setattr(commands, "_handle_credentials_encrypt_db", _always_locked)
-        monkeypatch.setattr(
-            "terok_sandbox.vault.daemon.lifecycle.VaultManager", lambda _cfg: MagicMock()
-        )
-
-        cfg = _make_cfg(tmp_path)
-        assert commands._run_credentials_setup_phase(cfg) is False
-        out = capsys.readouterr().out
-        assert "recovery FAILED" in out
-        assert f"fuser -v {cfg.db_path}" in out
-
-    def test_non_lock_error_bails_immediately_no_recovery(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        """Unrelated migration errors must NOT trigger auto-uninstall."""
-        from unittest.mock import MagicMock
-
-        from terok_sandbox.commands import credentials as commands
-
-        def _boom(**_kw: object) -> None:
-            raise RuntimeError("disk is on fire")
-
-        monkeypatch.setattr(commands, "_handle_credentials_encrypt_db", _boom)
-        mgr = MagicMock()
-        monkeypatch.setattr("terok_sandbox.vault.daemon.lifecycle.VaultManager", lambda _cfg: mgr)
-
-        assert commands._run_credentials_setup_phase(_make_cfg(tmp_path)) is False
-        mgr.uninstall_systemd_units.assert_not_called()
-        assert "disk is on fire" in capsys.readouterr().out
 
 
 class TestPersistModeChoice:

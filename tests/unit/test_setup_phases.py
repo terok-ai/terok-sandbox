@@ -17,19 +17,15 @@ import pytest
 
 from terok_sandbox._setup import (
     SelinuxStatus,
-    _enable_and_restart_user_unit,
     _reinstall_systemd_service,
     _start_managed_daemon,
     _stop_and_uninstall,
-    run_clearance_install_phase,
-    run_clearance_uninstall_phase,
     run_gate_install_phase,
     run_gate_uninstall_phase,
+    run_legacy_install_cleanup_phase,
     run_prereq_report,
     run_shield_install_phase,
     run_shield_uninstall_phase,
-    run_vault_install_phase,
-    run_vault_uninstall_phase,
 )
 from terok_sandbox.config import SandboxConfig
 
@@ -264,8 +260,8 @@ class TestShieldInstallPhase:
                 return_value=MagicMock(health="ok"),
             ),
         ):
-            assert run_shield_install_phase(root=False) is True
-        setup.assert_called_once_with(root=False, user=True)
+            assert run_shield_install_phase() is True
+        setup.assert_called_once_with()
         assert "ok" in capsys.readouterr().out
 
     def test_bypass_mode_reports_warn_but_still_ok(
@@ -279,15 +275,15 @@ class TestShieldInstallPhase:
                 return_value=MagicMock(health="bypass"),
             ),
         ):
-            assert run_shield_install_phase(root=False) is True
+            assert run_shield_install_phase() is True
         assert "WARN" in capsys.readouterr().out
 
     def test_install_raises_reports_fail(self, capsys: pytest.CaptureFixture[str]) -> None:
         with patch(
             "terok_sandbox.integrations.shield.ShieldHooks.install",
-            side_effect=RuntimeError("sudo required"),
+            side_effect=RuntimeError("install failed"),
         ):
-            assert run_shield_install_phase(root=False) is False
+            assert run_shield_install_phase() is False
         assert "FAIL" in capsys.readouterr().out
 
     def test_unhealthy_post_install_reports_fail(self, capsys: pytest.CaptureFixture[str]) -> None:
@@ -299,7 +295,7 @@ class TestShieldInstallPhase:
                 return_value=MagicMock(health="setup-needed"),
             ),
         ):
-            assert run_shield_install_phase(root=False) is False
+            assert run_shield_install_phase() is False
         assert "FAIL" in capsys.readouterr().out
 
 
@@ -411,93 +407,7 @@ class TestStartManagedDaemon:
         mgr.start_daemon.assert_called_once()
 
 
-# ── Vault / gate install phase adapters ──────────────────────────────
-
-
-class TestVaultInstallPhase:
-    """Vault's entry-point wires the VaultUnreachableError exception into the reinstall skeleton."""
-
-    def test_clean_reinstall_invokes_full_lifecycle(
-        self, bare_cfg: SandboxConfig, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        from terok_sandbox.vault.daemon.lifecycle import VaultManager
-
-        status = MagicMock(mode="systemd", transport="tcp")
-        with (
-            patch.object(VaultManager, "is_systemd_available", return_value=True),
-            patch.object(VaultManager, "stop_daemon") as stop,
-            patch.object(VaultManager, "uninstall_systemd_units") as uninstall,
-            patch.object(VaultManager, "install_systemd_units") as install,
-            patch.object(VaultManager, "ensure_reachable") as verify,
-            patch.object(VaultManager, "get_status", return_value=status),
-        ):
-            assert run_vault_install_phase(bare_cfg) is True
-        stop.assert_called_once()
-        uninstall.assert_called_once()
-        install.assert_called_once()
-        verify.assert_called_once()
-        assert "reachable" in capsys.readouterr().out
-
-    def test_vault_unreachable_error_is_reported(
-        self, bare_cfg: SandboxConfig, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        """Vault's typed ``VaultUnreachableError`` reaches FAIL through the custom exc tuple."""
-        from pathlib import Path
-
-        from terok_sandbox.vault.daemon.lifecycle import VaultManager, VaultUnreachableError
-
-        unreachable = VaultUnreachableError(
-            socket_path=Path("/tmp/vault.sock"), db_path=Path("/tmp/vault.db")
-        )
-        with (
-            patch.object(VaultManager, "is_systemd_available", return_value=True),
-            patch.object(VaultManager, "stop_daemon"),
-            patch.object(VaultManager, "uninstall_systemd_units"),
-            patch.object(VaultManager, "install_systemd_units"),
-            patch.object(VaultManager, "ensure_reachable", side_effect=unreachable),
-        ):
-            assert run_vault_install_phase(bare_cfg) is False
-        assert "NOT reachable" in capsys.readouterr().out
-
-    def test_no_systemd_starts_managed_daemon(
-        self, bare_cfg: SandboxConfig, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        """On a host without user systemd, the vault is started as a managed daemon."""
-        from terok_sandbox.vault.daemon.lifecycle import VaultManager
-
-        status = MagicMock(mode="daemon", transport="socket")
-        with (
-            patch.object(VaultManager, "is_systemd_available", return_value=False),
-            patch.object(VaultManager, "stop_daemon") as stop,
-            patch.object(VaultManager, "install_systemd_units") as install,
-            patch.object(VaultManager, "start_daemon") as start,
-            patch.object(VaultManager, "ensure_reachable") as verify,
-            patch.object(VaultManager, "get_status", return_value=status),
-        ):
-            assert run_vault_install_phase(bare_cfg) is True
-        # Daemon path: ``start_daemon`` runs, ``install_systemd_units`` does not.
-        start.assert_called_once()
-        install.assert_not_called()
-        # ``stop_daemon`` still runs to clear any stale daemon.
-        stop.assert_called_once()
-        verify.assert_called_once()
-        out = capsys.readouterr().out
-        assert "no systemd" in out
-        assert "daemon" in out
-
-    def test_no_systemd_daemon_start_failure_reports_fail(
-        self, bare_cfg: SandboxConfig, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        """Daemon-start failures land on the same FAIL row as systemd-install failures."""
-        from terok_sandbox.vault.daemon.lifecycle import VaultManager
-
-        with (
-            patch.object(VaultManager, "is_systemd_available", return_value=False),
-            patch.object(VaultManager, "stop_daemon"),
-            patch.object(VaultManager, "start_daemon", side_effect=SystemExit("vault exit 1")),
-        ):
-            assert run_vault_install_phase(bare_cfg) is False
-        assert "vault exit 1" in capsys.readouterr().out
+# ── Gate install phase adapter ───────────────────────────────
 
 
 class TestGateInstallPhase:
@@ -542,78 +452,6 @@ class TestGateInstallPhase:
         uninstall.assert_called_once()
         install.assert_called_once()
         verify.assert_called_once()
-
-
-# ── Clearance install phase ──────────────────────────────────────────
-
-
-class TestClearanceInstallPhase:
-    """Clearance phase: install the hub + verdict + notifier; soft-skip on missing import."""
-
-    def test_happy_path_installs_hub_and_notifier(self, capsys: pytest.CaptureFixture[str]) -> None:
-        with (
-            patch("terok_sandbox.integrations.clearance.HubService.install") as install_hub,
-            patch(
-                "terok_sandbox.integrations.clearance.NotifierService.install"
-            ) as install_notifier,
-            patch("terok_sandbox._setup._systemctl.run_best_effort"),
-            patch("terok_sandbox._setup._enable_and_restart_user_unit"),
-        ):
-            assert run_clearance_install_phase() is True
-        install_hub.assert_called_once()
-        install_notifier.assert_called_once()
-        out = capsys.readouterr().out
-        assert "Clearance hub" in out
-        assert "Clearance notifier" in out
-
-    def test_batched_daemon_reload_runs_once_per_unit_pair(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        """Hub install batches ``daemon-reload`` once for the hub + verdict units.
-
-        Otherwise every ``--user enable`` + ``--user restart`` cascade would
-        pay its own daemon-reload round-trip — three per install before the
-        batching fix.
-        """
-        with (
-            patch("terok_sandbox.integrations.clearance.HubService.install"),
-            patch("terok_sandbox.integrations.clearance.NotifierService.install"),
-            patch("terok_sandbox._setup._systemctl.run_best_effort") as run,
-            patch("terok_sandbox._setup._enable_and_restart_user_unit"),
-        ):
-            run_clearance_install_phase()
-        # One daemon-reload per clearance install call (hub/verdict + notifier),
-        # batched so a three-unit install doesn't pay three round-trips.
-        reloads = [call for call in run.call_args_list if call.args == ("daemon-reload",)]
-        assert len(reloads) == 2
-
-    def test_hub_failure_reports_fail(self, capsys: pytest.CaptureFixture[str]) -> None:
-        with (
-            patch(
-                "terok_sandbox.integrations.clearance.HubService.install",
-                side_effect=RuntimeError("template missing"),
-            ),
-            patch("terok_sandbox.integrations.clearance.NotifierService.install"),
-            patch("terok_sandbox._setup._systemctl.run_best_effort"),
-            patch("terok_sandbox._setup._enable_and_restart_user_unit"),
-        ):
-            assert run_clearance_install_phase() is False
-        assert "FAIL" in capsys.readouterr().out
-
-    def test_notifier_failure_does_not_flip_exit_code(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        """Notifier is non-critical — a failure WARNs without failing the phase."""
-        with (
-            patch("terok_sandbox.integrations.clearance.HubService.install"),
-            patch(
-                "terok_sandbox.integrations.clearance.NotifierService.install",
-                side_effect=RuntimeError("session bus missing"),
-            ),
-            patch("terok_sandbox._setup._systemctl.run_best_effort"),
-            patch("terok_sandbox._setup._enable_and_restart_user_unit"),
-        ):
-            assert run_clearance_install_phase() is True
 
 
 # ── Lifecycle helpers ────────────────────────────────────────────────
@@ -664,100 +502,26 @@ class TestStopAndUninstall:
         stop.assert_called_once()
 
 
-class TestEnableAndRestartUserUnit:
-    """``_enable_and_restart_user_unit`` — enable + restart, no daemon-reload."""
-
-    def test_invokes_enable_then_restart_without_reload(self) -> None:
-        """Both verbs run in order; daemon-reload is the caller's batched responsibility."""
-        with patch("terok_sandbox._setup._systemctl.run_best_effort") as run:
-            _enable_and_restart_user_unit("terok-vault")
-        verbs = [call.args[0] for call in run.call_args_list]
-        assert verbs == ["enable", "restart"]
-        for call in run.call_args_list:
-            assert call.args[1] == "terok-vault"
-
-
 # ── Uninstall phases ─────────────────────────────────────────────────
 
 
 class TestShieldUninstallPhase:
-    """Shield uninstall: removes hooks; reports scope in the OK line."""
+    """Shield uninstall: removes hooks from the canonical terok-owned dir."""
 
-    def test_user_scope_reports_ok(self, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_reports_ok(self, capsys: pytest.CaptureFixture[str]) -> None:
         with patch("terok_sandbox.integrations.shield.ShieldHooks.uninstall") as run:
-            assert run_shield_uninstall_phase(root=False) is True
-        run.assert_called_once_with(root=False, user=True)
-        assert "removed (user)" in capsys.readouterr().out
-
-    def test_root_scope_reports_ok(self, capsys: pytest.CaptureFixture[str]) -> None:
-        with patch("terok_sandbox.integrations.shield.ShieldHooks.uninstall") as run:
-            assert run_shield_uninstall_phase(root=True) is True
-        run.assert_called_once_with(root=True, user=False)
-        assert "removed (system)" in capsys.readouterr().out
+            assert run_shield_uninstall_phase() is True
+        run.assert_called_once_with()
+        assert "removed" in capsys.readouterr().out
 
     def test_uninstall_raises_reports_fail(self, capsys: pytest.CaptureFixture[str]) -> None:
         with patch(
             "terok_sandbox.integrations.shield.ShieldHooks.uninstall",
             side_effect=RuntimeError("hook dir missing"),
         ):
-            assert run_shield_uninstall_phase(root=False) is False
+            assert run_shield_uninstall_phase() is False
         out = capsys.readouterr().out
         assert "FAIL" in out and "hook dir missing" in out
-
-
-class TestVaultUninstallPhase:
-    """Vault uninstall: WARN-skip without systemd, FAIL on unit removal errors."""
-
-    def test_no_systemd_warns_and_returns_ok(self, capsys: pytest.CaptureFixture[str]) -> None:
-        from terok_sandbox.vault.daemon.lifecycle import VaultManager
-
-        with patch.object(VaultManager, "is_systemd_available", return_value=False):
-            assert run_vault_uninstall_phase(SandboxConfig(services_mode="socket")) is True
-        out = capsys.readouterr().out
-        assert "WARN" in out and "systemd unavailable" in out
-
-    def test_clean_removal_reports_ok(self, capsys: pytest.CaptureFixture[str]) -> None:
-        from terok_sandbox.vault.daemon.lifecycle import VaultManager
-
-        with (
-            patch.object(VaultManager, "is_systemd_available", return_value=True),
-            patch.object(VaultManager, "uninstall_systemd_units") as un,
-        ):
-            assert run_vault_uninstall_phase(SandboxConfig(services_mode="socket")) is True
-        un.assert_called_once()
-        assert "removed" in capsys.readouterr().out
-
-    def test_systemexit_during_removal_is_reported(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        """A ``SystemExit`` from the manager is surfaced verbatim, not promoted."""
-        from terok_sandbox.vault.daemon.lifecycle import VaultManager
-
-        with (
-            patch.object(VaultManager, "is_systemd_available", return_value=True),
-            patch.object(
-                VaultManager, "uninstall_systemd_units", side_effect=SystemExit("cannot disable")
-            ),
-        ):
-            assert run_vault_uninstall_phase(SandboxConfig(services_mode="socket")) is False
-        out = capsys.readouterr().out
-        assert "FAIL" in out and "cannot disable" in out
-
-    def test_generic_exception_adds_uninstall_prefix(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        """Generic exceptions are prefixed ``uninstall:`` so the phase is named in the line."""
-        from terok_sandbox.vault.daemon.lifecycle import VaultManager
-
-        with (
-            patch.object(VaultManager, "is_systemd_available", return_value=True),
-            patch.object(
-                VaultManager, "uninstall_systemd_units", side_effect=RuntimeError("fs busy")
-            ),
-        ):
-            assert run_vault_uninstall_phase(SandboxConfig(services_mode="socket")) is False
-        out = capsys.readouterr().out
-        assert "FAIL" in out and "uninstall: fs busy" in out
 
 
 class TestGateUninstallPhase:
@@ -843,44 +607,68 @@ class TestGateUninstallPhase:
         assert "FAIL" in out and "uninstall: fs busy" in out
 
 
-class TestClearanceUninstallPhase:
-    """Clearance uninstall: soft-skip without the package, FAIL on teardown errors."""
+class TestLegacyInstallCleanupPhase:
+    """Idempotent sweep of pre-supervisor systemd units, unit files, and sockets.
 
-    def test_clean_teardown_reports_ok(self, capsys: pytest.CaptureFixture[str]) -> None:
-        with (
-            patch("terok_sandbox.integrations.clearance.NotifierService.uninstall") as un_n,
-            patch("terok_sandbox.integrations.clearance.HubService.uninstall") as un_s,
-        ):
-            assert run_clearance_uninstall_phase() is True
-        un_n.assert_called_once()
-        un_s.assert_called_once()
-        assert "removed" in capsys.readouterr().out
+    The phase is one-way: it removes hosts-side artefacts the new
+    architecture doesn't manage any more.  Soft-fail throughout so a
+    missing ``systemctl`` / missing unit / stale socket cannot abort
+    the rest of the sweep.
+    """
 
-    def test_import_error_skips_soft(self, capsys: pytest.CaptureFixture[str]) -> None:
-        """A host without terok_clearance installed skips rather than fails."""
-        with patch.dict("sys.modules", {"terok_sandbox.integrations.clearance": None}):
-            assert run_clearance_uninstall_phase() is True
+    def test_disables_every_legacy_unit_and_removes_global_socket(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Every legacy clearance + vault unit gets a best-effort disable+stop pass."""
+        from terok_sandbox._setup import _LEGACY_SYSTEMD_UNITS
+
+        # Set XDG_RUNTIME_DIR so the global shield-events socket gets
+        # unlinked at a predictable path; place a stub file there so
+        # the unlink path is exercised.
+        runtime = tmp_path / "run"
+        runtime.mkdir()
+        legacy_sock = runtime / "terok-shield-events.sock"
+        legacy_sock.write_text("stub")
+        monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
+
+        with patch("terok_sandbox._setup._systemctl.run_best_effort") as run:
+            assert run_legacy_install_cleanup_phase() is True
+
+        targets = {call.args[2] for call in run.call_args_list if call.args[0] == "disable"}
+        for unit in _LEGACY_SYSTEMD_UNITS:
+            assert unit in targets, f"{unit} should be disabled"
+
+        # Stub socket is gone.
+        assert not legacy_sock.exists()
+
         out = capsys.readouterr().out
-        assert "skip" in out and "terok_clearance not installed" in out
+        assert "Legacy install cleanup" in out
+        assert "swept" in out
 
-    def test_teardown_exception_reports_fail(self, capsys: pytest.CaptureFixture[str]) -> None:
-        with (
-            patch(
-                "terok_sandbox.integrations.clearance.NotifierService.uninstall",
-                side_effect=RuntimeError("unit stuck"),
-            ),
-            patch("terok_sandbox.integrations.clearance.HubService.uninstall"),
-        ):
-            assert run_clearance_uninstall_phase() is False
-        out = capsys.readouterr().out
-        assert "FAIL" in out and "unit stuck" in out
+    def test_idempotent_when_nothing_to_clean(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A fresh host without pre-supervisor artefacts still reports ok."""
 
+        runtime = tmp_path / "run"
+        runtime.mkdir()
+        monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
 
-class TestClearanceInstallImportMissing:
-    """Fills the import-missing branch of `run_clearance_install_phase`."""
+        with patch("terok_sandbox._setup._systemctl.run_best_effort"):
+            assert run_legacy_install_cleanup_phase() is True
+            # Re-run is also ok (idempotent).
+            assert run_legacy_install_cleanup_phase() is True
 
-    def test_import_error_skips_soft(self, capsys: pytest.CaptureFixture[str]) -> None:
-        with patch.dict("sys.modules", {"terok_sandbox.integrations.clearance": None}):
-            assert run_clearance_install_phase() is True
-        out = capsys.readouterr().out
-        assert "skip" in out and "terok_clearance not installed" in out
+        # Second invocation must not have raised over the still-absent socket.
+        assert "Legacy install cleanup" in capsys.readouterr().out
+
+    def test_missing_xdg_runtime_dir_does_not_crash(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A missing ``XDG_RUNTIME_DIR`` skips the shield-events socket sweep cleanly."""
+
+        monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+
+        with patch("terok_sandbox._setup._systemctl.run_best_effort"):
+            assert run_legacy_install_cleanup_phase() is True
+        assert "swept" in capsys.readouterr().out

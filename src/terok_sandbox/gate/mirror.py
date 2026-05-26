@@ -30,20 +30,27 @@ Value types returned by ``GitGate`` methods:
 - [`GateStalenessInfo`][terok_sandbox.gate.mirror.GateStalenessInfo] — frozen comparison of gate HEAD vs upstream HEAD
 """
 
+from __future__ import annotations
+
+import asyncio
+import contextlib
 import logging
 import os
 import re
 import shlex
 import shutil
-import sqlite3
 import stat
 import subprocess  # nosec B404 — driving git for upstream mirror operations
-import time
+import tempfile
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import TypedDict
+from typing import TYPE_CHECKING, TypedDict
+
+if TYPE_CHECKING:
+    from ..config import SandboxConfig
 
 
 class GateAuthNotConfigured(RuntimeError):
@@ -181,6 +188,7 @@ class GitGate:
         self._use_personal_ssh = use_personal_ssh
         self._validate_gate_fn = validate_gate_fn
         self._clone_cache_base = Path(clone_cache_base) if clone_cache_base else None
+        self._signer: _EphemeralSigner | None = None
 
     @property
     def cache_path(self) -> Path | None:
@@ -192,14 +200,51 @@ class GitGate:
 
         HTTPS upstreams don't use SSH at all, so we hand git an unmodified
         env in that case — fetching `GateAuthNotConfigured` on an HTTPS
-        project would be absurd.
+        project would be absurd.  For SSH upstreams the ephemeral signer
+        is lazy-started on first call and reused for the gate's lifetime.
         """
         if not is_ssh_url(self._upstream_url):
             return os.environ.copy()
-        return _git_env_with_ssh(
-            scope=self._scope,
-            use_personal_ssh=self._use_personal_ssh,
+        if self._use_personal_ssh:
+            return os.environ.copy()  # let the user's ambient SSH handle it
+        if self._signer is None:
+            self._signer = _EphemeralSigner.start(self._scope)
+        env = os.environ.copy()
+        env["SSH_AUTH_SOCK"] = str(self._signer.socket_path)
+        env["GIT_SSH_COMMAND"] = shlex.join(
+            [
+                "ssh",
+                "-F",
+                "/dev/null",
+                "-o",
+                f"IdentityAgent={self._signer.socket_path}",
+                "-o",
+                "IdentityFile=none",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "StrictHostKeyChecking=no",
+            ]
         )
+        return env
+
+    def close(self) -> None:
+        """Stop the ephemeral signer this gate started, if any.
+
+        Idempotent.  Long-lived processes (the TUI) should call this
+        explicitly so the signer thread and temp socket don't outlive
+        the gate's last use.
+        """
+        if self._signer is not None:
+            self._signer.stop()
+            self._signer = None
+
+    def __del__(self) -> None:
+        """Best-effort signer teardown on GC."""
+        try:
+            self.close()
+        except Exception:  # noqa: BLE001 — __del__ never raises
+            pass
 
     def _validate_gate(self) -> None:
         """Run the injected gate validation callback, if any."""
@@ -539,110 +584,123 @@ def is_ssh_url(url: str | None) -> bool:
 # ---------- Private helpers ----------
 
 
-_SOCKET_BIND_WAIT_SECONDS = 4.0
-"""Client-side tolerance for the daemon's reconciler to bind a fresh scope socket.
-
-Roughly two of the reconciler's own poll ticks
-(`terok_sandbox.vault.ssh.scope_sockets._POLL_INTERVAL_SECONDS`) — enough to
-absorb one full miss plus the next bind attempt.
-"""
-
-_SOCKET_POLL_INTERVAL = 0.1
-"""How often `_wait_for_socket` rechecks while inside the grace window."""
+_SIGNER_BIND_TIMEOUT_S = 5.0
+_SIGNER_STOP_TIMEOUT_S = 5.0
 
 
-def _git_env_with_ssh(*, scope: str, use_personal_ssh: bool = False) -> dict:
-    """Return a subprocess env for *scope*'s git operations.
+@dataclass(frozen=True)
+class _EphemeralSigner:
+    """A host-local SSH-agent signer bound for a single ``GitGate`` lifetime.
 
-    Three branches:
-
-    - **Vault-only (default).**  The per-scope vault agent is the sole
-      identity source.  ``GIT_SSH_COMMAND`` pins OpenSSH to the vault
-      socket (``IdentityAgent=<sock>``), ignores the user's
-      ``~/.ssh/config`` (``-F /dev/null``), suppresses default
-      ``~/.ssh/id_*`` (``IdentityFile=none``), and forbids interactive
-      prompts (``BatchMode=yes``).  This combination guarantees the
-      user's personal keys are never offered *and* no passphrase,
-      host-key, or password prompt can ever leak out to the caller's
-      terminal — auth either succeeds from the vault or fails cleanly.
-    - **Personal-SSH opt-in.**  ``use_personal_ssh=True`` returns the
-      process env unmodified so OpenSSH behaves normally (user's loaded
-      agent, ``~/.ssh/config``, default ``~/.ssh/id_*`` files, and any
-      passphrase prompts go through the user's ambient askpass / tty).
-      This branch is *either-or* with the vault — personal opt-in
-      bypasses the vault entirely; it is not additive.
-    - **Unconfigured.**  No vault socket and no opt-in — raise
-      [`GateAuthNotConfigured`][terok_sandbox.gate.mirror.GateAuthNotConfigured] so the CLI layer can surface the
-      two remediation paths.
+    An asyncio loop running on a daemon background thread hosts
+    [`start_ssh_signer_local`][terok_sandbox.vault.ssh.signer.start_ssh_signer_local];
+    the caller reads ``socket_path`` and points OpenSSH at it via
+    ``IdentityAgent``.
     """
-    from ..config import SandboxConfig
 
-    env = os.environ.copy()
-    if use_personal_ssh:
-        return env  # let the user's ambient SSH handle it
+    socket_path: Path
+    _tmpdir: tempfile.TemporaryDirectory
+    _thread: threading.Thread
+    _loop: asyncio.AbstractEventLoop
+    _server: asyncio.Server
 
-    cfg = SandboxConfig()
-    sock = cfg.ssh_signer_local_socket_path(scope)
+    @classmethod
+    def start(cls, scope: str) -> _EphemeralSigner:
+        """Bind a fresh signer for *scope*; raise ``GateAuthNotConfigured`` if no keys."""
+        from ..config import SandboxConfig
+        from ..vault.ssh.signer import start_ssh_signer_local
 
-    # The vault daemon's reconciler binds the per-scope socket on a short
-    # poll interval, so a ``gate-sync`` fired right after ``ssh-init`` /
-    # ``ssh-import`` can race the bind.  If the DB already says this scope
-    # owns keys, give the daemon a bounded grace window to catch up before
-    # declaring it unconfigured.
-    if not _is_unix_socket(sock) and _db_has_keys_for_scope(cfg.db_path, scope):
-        _wait_for_socket(sock, _SOCKET_BIND_WAIT_SECONDS)
-    if not _is_unix_socket(sock):
-        raise GateAuthNotConfigured(scope)
+        cfg = SandboxConfig()
+        if not _db_has_keys_for_scope(cfg, scope):
+            raise GateAuthNotConfigured(scope)
 
-    env["SSH_AUTH_SOCK"] = str(sock)
-    env["GIT_SSH_COMMAND"] = shlex.join(
-        [
-            "ssh",
-            "-F",
-            "/dev/null",
-            "-o",
-            f"IdentityAgent={sock}",
-            "-o",
-            "IdentityFile=none",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "StrictHostKeyChecking=no",
-        ]
-    )
-    return env
+        tmpdir = tempfile.TemporaryDirectory(prefix="terok-gate-signer-")
+        socket_path = Path(tmpdir.name) / "agent.sock"
+        loop = asyncio.new_event_loop()
+        ready = threading.Event()
+        server_box: list[asyncio.Server] = []
+        start_error: list[BaseException] = []
 
+        async def _start() -> None:
+            """Bind the signer; serve forever until the loop is stopped."""
+            try:
+                server = await start_ssh_signer_local(
+                    scope=scope, socket_path=socket_path, db_path=str(cfg.db_path)
+                )
+            except BaseException as exc:  # noqa: BLE001 — surface bind failure
+                start_error.append(exc)
+                ready.set()
+                return
+            server_box.append(server)
+            ready.set()
+            async with server:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await server.serve_forever()
 
-def _wait_for_socket(path: Path, timeout: float) -> None:
-    """Block up to *timeout* seconds for *path* to become a Unix socket."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if _is_unix_socket(path):
+        def _run_loop() -> None:
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(_start())
+            finally:
+                loop.close()
+
+        thread = threading.Thread(target=_run_loop, daemon=True, name=f"terok-signer-{scope}")
+        thread.start()
+        if not ready.wait(timeout=_SIGNER_BIND_TIMEOUT_S):
+            tmpdir.cleanup()
+            raise RuntimeError(
+                f"ephemeral SSH signer for scope {scope!r} did not bind within "
+                f"{_SIGNER_BIND_TIMEOUT_S}s"
+            )
+        if start_error:
+            thread.join(timeout=_SIGNER_STOP_TIMEOUT_S)
+            tmpdir.cleanup()
+            raise RuntimeError(
+                f"ephemeral SSH signer for scope {scope!r} failed to bind: {start_error[0]}"
+            ) from start_error[0]
+        return cls(
+            socket_path=socket_path,
+            _tmpdir=tmpdir,
+            _thread=thread,
+            _loop=loop,
+            _server=server_box[0],
+        )
+
+    def stop(self) -> None:
+        """Close the server, drain the asyncio loop, remove the temp dir."""
+        if not self._thread.is_alive():
+            self._tmpdir.cleanup()
             return
-        time.sleep(_SOCKET_POLL_INTERVAL)
+        # call_soon_threadsafe schedules ``server.close()`` on the
+        # server's own loop — calling it directly across threads is UB.
+        self._loop.call_soon_threadsafe(self._server.close)
+        self._thread.join(timeout=_SIGNER_STOP_TIMEOUT_S)
+        self._tmpdir.cleanup()
 
 
-def _db_has_keys_for_scope(db_path: Path, scope: str) -> bool:
-    """Return ``True`` iff *scope* owns at least one row in ``ssh_key_assignments``.
+def _db_has_keys_for_scope(cfg: SandboxConfig, scope: str) -> bool:
+    """Return ``True`` iff *scope* has at least one assigned SSH key.
 
-    Opens the DB read-only via the ``file:?mode=ro`` URI so a missing DB
-    file raises cleanly instead of being auto-created as a side effect.
-    Any ``sqlite3.Error`` — missing file, missing table, locked DB —
-    collapses to ``False`` so the caller falls straight through to
-    [`GateAuthNotConfigured`][terok_sandbox.gate.mirror.GateAuthNotConfigured] instead of hanging.
+    Opens the credentials DB through
+    [`open_credential_db`][terok_sandbox.SandboxConfig.open_credential_db]
+    so SQLCipher's passphrase chain is honoured — a raw ``sqlite3.connect``
+    would read ciphertext, hit ``sqlite3.Error``, and return ``False`` for
+    every scope on an encrypted vault.  Any exception (no passphrase
+    available, no DB file, schema not yet bootstrapped) collapses to
+    ``False`` so the caller surfaces
+    [`GateAuthNotConfigured`][terok_sandbox.gate.mirror.GateAuthNotConfigured]
+    with its actionable two-door hint instead of leaking a stack trace.
     """
     try:
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-        try:
-            row = conn.execute(
-                "SELECT 1 FROM ssh_key_assignments WHERE scope = ? LIMIT 1",
-                (scope,),
-            ).fetchone()
-        finally:
-            conn.close()
-    except sqlite3.Error:
+        db = cfg.open_credential_db(prompt_on_tty=True)
+    except Exception:  # noqa: BLE001 — fail-soft to the friendly GateAuthNotConfigured
         return False
-    return row is not None
+    try:
+        return bool(db.list_ssh_keys_for_scope(scope))
+    except Exception:  # noqa: BLE001 — same rationale (e.g. schema not bootstrapped)
+        return False
+    finally:
+        db.close()
 
 
 def _is_unix_socket(path: Path) -> bool:

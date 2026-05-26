@@ -200,36 +200,40 @@ def test_shield_state_is_reexported() -> None:
 # ── ShieldManager delegation to the underlying Shield ───────────────────
 
 
-@pytest.mark.parametrize(
-    ("method_name", "delegated_call", "expected"),
-    [
-        pytest.param("up", ("up", "ctr"), None, id="up"),
-        pytest.param("quarantine", ("quarantine", "ctr"), None, id="quarantine"),
-        pytest.param("state", ("state", "ctr"), ShieldState.UP, id="state"),
-    ],
-)
-def test_manager_methods_delegate_to_shield(
-    method_name: str,
-    delegated_call: tuple[str, str],
-    expected: object,
-) -> None:
-    """Each manager method forwards to the corresponding ``Shield`` method."""
+def test_manager_up_forwards_name_and_id() -> None:
+    """``ShieldManager.up`` plumbs (container, container_id) into the Shield."""
     mock_shield = make_mock_shield()
     manager = ShieldManager(MOCK_TASK_DIR)
     with patch.object(ShieldManager, "shield", new=mock_shield):
-        result = getattr(manager, method_name)("ctr")
-    getattr(mock_shield, delegated_call[0]).assert_called_once_with(delegated_call[1])
-    if expected is not None:
-        assert result == expected
+        manager.up("ctr", "ctr-uuid")
+    mock_shield.up.assert_called_once_with("ctr", "ctr-uuid")
+
+
+def test_manager_quarantine_forwards_to_shield() -> None:
+    """``ShieldManager.quarantine`` is the panic path — name only."""
+    mock_shield = make_mock_shield()
+    manager = ShieldManager(MOCK_TASK_DIR)
+    with patch.object(ShieldManager, "shield", new=mock_shield):
+        manager.quarantine("ctr")
+    mock_shield.quarantine.assert_called_once_with("ctr")
+
+
+def test_manager_state_returns_shield_state() -> None:
+    """``ShieldManager.state`` reports what ``Shield.state`` returned."""
+    mock_shield = make_mock_shield()
+    manager = ShieldManager(MOCK_TASK_DIR)
+    with patch.object(ShieldManager, "shield", new=mock_shield):
+        assert manager.state("ctr") == ShieldState.UP
+    mock_shield.state.assert_called_once_with("ctr")
 
 
 def test_manager_down_passes_allow_all() -> None:
-    """``ShieldManager.down`` forwards ``allow_all=True`` to the underlying Shield."""
+    """``ShieldManager.down`` forwards ``container_id`` + ``allow_all=True`` to the underlying Shield."""
     mock_shield = make_mock_shield()
     manager = ShieldManager(MOCK_TASK_DIR)
     with patch.object(ShieldManager, "shield", new=mock_shield):
-        manager.down("ctr", allow_all=True)
-    mock_shield.down.assert_called_once_with("ctr", allow_all=True)
+        manager.down("ctr", "ctr-uuid", allow_all=True)
+    mock_shield.down.assert_called_once_with("ctr", "ctr-uuid", allow_all=True)
 
 
 def test_manager_pre_start_threads_runtime_into_shield() -> None:
@@ -273,7 +277,7 @@ def test_bypass_makes_down_and_up_noops(method_name: str) -> None:
     mock_shield = MagicMock(spec=Shield)
     manager = ShieldManager(MOCK_TASK_DIR, SandboxConfig(shield_bypass=True))
     with patch.object(ShieldManager, "shield", new=mock_shield):
-        getattr(manager, method_name)("ctr")
+        getattr(manager, method_name)("ctr", "ctr-uuid")
     mock_shield.up.assert_not_called()
     mock_shield.down.assert_not_called()
 
@@ -358,77 +362,20 @@ def test_pre_start_converts_shield_needs_setup_to_system_exit() -> None:
 # ── ShieldHooks (host-wide installer) ───────────────────────────────────
 
 
-@pytest.mark.parametrize(
-    ("kwargs", "expected_calls"),
-    [
-        pytest.param({}, None, id="missing-flags"),
-        pytest.param({"user": True}, [("user",)], id="user-only"),
-        pytest.param({"root": True}, [("system",)], id="root-only"),
-        pytest.param({"root": True, "user": True}, [("user",), ("system",)], id="both-scopes"),
-    ],
-)
-def test_shield_hooks_install_dispatches_per_scope(
-    kwargs: dict[str, bool],
-    expected_calls: list[tuple[str]] | None,
-) -> None:
-    """``ShieldHooks.install`` calls the matching ``HooksInstaller`` factories."""
-    with (
-        patch("terok_sandbox.integrations.shield.HooksInstaller.user") as user_factory,
-        patch("terok_sandbox.integrations.shield.HooksInstaller.system") as system_factory,
-    ):
-        if expected_calls is None:
-            with pytest.raises(ValueError, match="root=True or user=True"):
-                ShieldHooks.install(**kwargs)
-            user_factory.assert_not_called()
-            system_factory.assert_not_called()
-            return
-        ShieldHooks.install(**kwargs)
-        factories = {"user": user_factory, "system": system_factory}
-        invoked = {scope for (scope,) in expected_calls}
-        for scope in invoked:
-            factories[scope].assert_called_once()
-            factories[scope].return_value.install.assert_called_once()
-        # Non-selected scopes must not be touched — guards against
-        # accidentally installing into both scopes when only one flag
-        # was set.
-        for scope in set(factories) - invoked:
-            factories[scope].assert_not_called()
+def test_shield_hooks_install_delegates() -> None:
+    """``ShieldHooks.install`` builds a ``HooksInstaller`` and calls ``install``."""
+    with patch("terok_sandbox.integrations.shield.HooksInstaller") as installer_cls:
+        ShieldHooks.install()
+        installer_cls.assert_called_once_with()
+        installer_cls.return_value.install.assert_called_once()
 
 
-@pytest.mark.parametrize(
-    ("kwargs", "expected_calls"),
-    [
-        pytest.param({}, None, id="missing-flags"),
-        pytest.param({"user": True}, [("user",)], id="user-only"),
-        pytest.param({"root": True}, [("system",)], id="root-only"),
-        pytest.param({"root": True, "user": True}, [("user",), ("system",)], id="both-scopes"),
-    ],
-)
-def test_shield_hooks_uninstall_dispatches_per_scope(
-    kwargs: dict[str, bool],
-    expected_calls: list[tuple[str]] | None,
-) -> None:
-    """``ShieldHooks.uninstall`` calls the matching ``HooksInstaller`` factories."""
-    with (
-        patch("terok_sandbox.integrations.shield.HooksInstaller.user") as user_factory,
-        patch("terok_sandbox.integrations.shield.HooksInstaller.system") as system_factory,
-    ):
-        if expected_calls is None:
-            with pytest.raises(ValueError, match="root=True or user=True"):
-                ShieldHooks.uninstall(**kwargs)
-            user_factory.assert_not_called()
-            system_factory.assert_not_called()
-            return
-        ShieldHooks.uninstall(**kwargs)
-        factories = {"user": user_factory, "system": system_factory}
-        invoked = {scope for (scope,) in expected_calls}
-        for scope in invoked:
-            factories[scope].assert_called_once()
-            factories[scope].return_value.uninstall.assert_called_once()
-        # Non-selected scopes must not be touched — same guard as the
-        # install path above.
-        for scope in set(factories) - invoked:
-            factories[scope].assert_not_called()
+def test_shield_hooks_uninstall_delegates() -> None:
+    """``ShieldHooks.uninstall`` builds a ``HooksInstaller`` and calls ``uninstall``."""
+    with patch("terok_sandbox.integrations.shield.HooksInstaller") as installer_cls:
+        ShieldHooks.uninstall()
+        installer_cls.assert_called_once_with()
+        installer_cls.return_value.uninstall.assert_called_once()
 
 
 # ── Session helpers ─────────────────────────────────────────────────────
@@ -454,15 +401,15 @@ def test_watch_session_delegates_to_run_watch(mock_run_watch: MagicMock) -> None
 
 
 def test_install_then_uninstall_round_trip(tmp_path: Path) -> None:
-    """``HooksInstaller.user().install()`` + ``.uninstall()`` round-trip leaves no residue."""
+    """``HooksInstaller(target_dir).install() + .uninstall()`` leaves no residue."""
     from terok_shield import HooksInstaller
 
-    hooks_dir = tmp_path / "hooks.d"
-    installer = HooksInstaller(target_dir=hooks_dir)
+    target_dir = tmp_path / "hooks"
+    installer = HooksInstaller(target_dir=target_dir)
     installer.install()
-    assert hooks_dir.is_dir()
-    assert any(hooks_dir.iterdir())
+    assert target_dir.is_dir()
+    assert any(target_dir.iterdir())
     installer.uninstall()
     # The directory itself is left in place (other tools may share it);
     # only our files are gone.
-    assert list(hooks_dir.iterdir()) == []
+    assert list(target_dir.iterdir()) == []

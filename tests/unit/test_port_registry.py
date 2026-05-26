@@ -16,7 +16,6 @@ from terok_sandbox.port_registry import (
     PortRegistry,
     _is_port_free,
     _parse_listen_port,
-    _parse_ssh_signer_port,
     _save_ports,
 )
 
@@ -368,17 +367,6 @@ class TestParseListenPort:
         unit.write_text("[Socket]\nListenStream=127.0.0.1:18750\nAccept=yes\n")
         assert _parse_listen_port(unit) == 18750
 
-    def test_extracts_port_from_vault_socket(self, tmp_path: Path) -> None:
-        """Parses TCP ListenStream from vault socket (ignores Unix socket line)."""
-        unit = tmp_path / "terok-vault.socket"
-        unit.write_text(
-            "[Socket]\n"
-            "ListenStream=/run/user/1000/terok/vault.sock\n"
-            "SocketMode=0600\n"
-            "ListenStream=127.0.0.1:18751\n"
-        )
-        assert _parse_listen_port(unit) == 18751
-
     def test_missing_file_returns_none(self, tmp_path: Path) -> None:
         """Non-existent unit file → None."""
         assert _parse_listen_port(tmp_path / "nonexistent.socket") is None
@@ -397,42 +385,6 @@ class TestParseListenPort:
 
         unit.write_text("[Socket]\nListenStream=127.0.0.1:99999\n")
         assert _parse_listen_port(unit) is None
-
-
-class TestParseSshSignerPort:
-    """Tests for _parse_ssh_signer_port (vault service unit)."""
-
-    def test_extracts_ssh_signer_port(self, tmp_path: Path) -> None:
-        """Parses --ssh-signer-port from ExecStart line."""
-        unit = tmp_path / "terok-vault.service"
-        unit.write_text(
-            "[Service]\n"
-            "ExecStart=/usr/bin/python3 -m terok_sandbox.vault.daemon.token_broker "
-            "--port=18751 --ssh-signer-port=18752 --db-path=/tmp/db\n"
-        )
-        assert _parse_ssh_signer_port(unit) == 18752
-
-    def test_equals_separator(self, tmp_path: Path) -> None:
-        """--ssh-signer-port=PORT (equals sign) is parsed."""
-        unit = tmp_path / "svc.service"
-        unit.write_text("ExecStart=cmd --ssh-signer-port=19000\n")
-        assert _parse_ssh_signer_port(unit) == 19000
-
-    def test_space_separator(self, tmp_path: Path) -> None:
-        """--ssh-signer-port PORT (space) is parsed."""
-        unit = tmp_path / "svc.service"
-        unit.write_text("ExecStart=cmd --ssh-signer-port 19000\n")
-        assert _parse_ssh_signer_port(unit) == 19000
-
-    def test_missing_file_returns_none(self, tmp_path: Path) -> None:
-        """Non-existent service file -> None."""
-        assert _parse_ssh_signer_port(tmp_path / "nonexistent.service") is None
-
-    def test_no_flag_returns_none(self, tmp_path: Path) -> None:
-        """Service file without --ssh-signer-port -> None."""
-        unit = tmp_path / "svc.service"
-        unit.write_text("ExecStart=cmd --port=18751\n")
-        assert _parse_ssh_signer_port(unit) is None
 
 
 class TestInstalledPortReclaim:
