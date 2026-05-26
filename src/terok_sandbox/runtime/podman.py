@@ -710,8 +710,9 @@ class PodmanLogStream:
 class PodmanPortReservation:
     """Holds a TCP port open until released.
 
-    Bind on construction; port number exposed via [`port`][terok_sandbox.GateServerStatus.port].  Caller is
-    responsible for closing (directly via [`close`][terok_sandbox.runtime.podman.PodmanLogStream.close] or via ``with``).
+    Bind on construction; the reserved port number is exposed via the
+    ``port`` attribute.  Caller is responsible for closing (directly via
+    [`close`][terok_sandbox.runtime.podman.PodmanLogStream.close] or via ``with``).
     """
 
     def __init__(self, host: str = "127.0.0.1") -> None:

@@ -101,9 +101,9 @@ def stage_end(marker: Marker, detail: str = "") -> None:
     parentheses on the marker line; the remainder is emitted as an
     indented continuation block underneath.  This guards against
     callers passing exception ``str()`` whose help text spans several
-    lines (e.g. ``VaultUnreachableError`` carries paths and remediation
-    hints) — without the split, the dotted-column layout smears across
-    the log and the closing paren lands on the last line of help text.
+    lines (e.g. a ``SystemExit`` carrying paths and remediation hints)
+    — without the split, the dotted-column layout smears across the
+    log and the closing paren lands on the last line of help text.
     """
     head, tail = _split_detail(detail)
     suffix = f" ({head})" if head else ""

@@ -3,10 +3,13 @@
 
 """Sandbox-wide setup / uninstall — single-call bootstrap of the full stack.
 
-Composes shield + vault + gate + clearance install phases into one
-idempotent ``setup`` verb and the symmetric teardown verb.  Each phase
-runs its own stop → uninstall → install → verify cycle so a re-run after
-a pipx upgrade guarantees the on-disk units pick up the new code.
+Composes the supervisor OCI hooks + shield hooks + gate install phases
+plus the credentials-DB encryption phase into one idempotent ``setup``
+verb and the symmetric teardown verb.  Each phase runs its own
+idempotent install cycle so a re-run after a pipx upgrade picks up the
+new code.  A one-shot legacy cleanup phase runs first to sweep systemd
+units / sockets installed by pre-supervisor versions.
+
 Higher-level frontends (``terok setup``, ``terok-executor setup``) reuse
 this so they install everything in one call.
 """
@@ -18,15 +21,12 @@ import dataclasses
 from .._setup import (
     EXIT_MANUAL_STEP_NEEDED,
     print_selinux_install_hint,
-    run_clearance_install_phase,
-    run_clearance_uninstall_phase,
-    run_gate_install_phase,
-    run_gate_uninstall_phase,
+    run_legacy_install_cleanup_phase,
     run_prereq_report,
     run_shield_install_phase,
     run_shield_uninstall_phase,
-    run_vault_install_phase,
-    run_vault_uninstall_phase,
+    run_supervisor_install_phase,
+    run_supervisor_uninstall_phase,
 )
 from .._util._selinux import SelinuxStatus
 from ..config import SandboxConfig, credentials_passphrase, credentials_use_keyring
@@ -36,37 +36,33 @@ from .credentials import _run_credentials_setup_phase
 
 def _handle_sandbox_setup(
     *,
-    root: bool = False,
     no_shield: bool = False,
     no_vault: bool = False,
-    no_gate: bool = False,
-    no_clearance: bool = False,
     echo_passphrase: bool = False,
     passphrase_tier: str | None = None,
     cfg: SandboxConfig | None = None,
 ) -> None:
-    """Install shield + vault + gate + clearance in one idempotent bootstrap.
+    """Install supervisor hooks + shield in one idempotent bootstrap.
 
-    Runs a prereq report first (host binaries, firewall binaries,
-    SELinux — report-only, never blocks).  Then each service phase
-    does the full stop → uninstall → install → verify cycle so a
-    re-run after a pipx upgrade guarantees the running units pick up
-    the new code, not just the rewritten on-disk files.  Clearance is
-    installed when ``terok_clearance`` is importable; headless hosts
-    skip it silently.  Exits non-zero if any mandatory phase fails —
-    the clearance phase is optional by design.
+    Runs the legacy-install cleanup phase first to sweep systemd units
+    and sockets installed by pre-supervisor versions (including the
+    retired host gate units), then a prereq report (host binaries,
+    firewall binaries, SELinux — report-only, never blocks).  Each
+    service phase does its own idempotent install cycle.  Exits non-zero
+    if any mandatory phase fails.
 
     On success, writes ``setup.stamp`` with the currently-installed
     package versions — the TUI's startup probe reads it to decide
     whether to nudge the user toward setup.
 
+    The git gate now lives in each container's supervisor, so there is
+    no host-side gate install phase.
+
     Args:
-        root: Install shield hooks system-wide (requires sudo); vault
-            and gate stay per-user.
         no_shield: Skip the shield install phase.
-        no_vault: Skip the vault install phase.
-        no_gate: Skip the gate install phase.
-        no_clearance: Skip the clearance (hub + verdict + notifier) phase.
+        no_vault: Skip the credentials-DB encryption phase (per-container
+            vault has no host-side install of its own; the flag controls
+            credentials provisioning only).
         echo_passphrase: Print any auto-generated vault passphrase to
             stdout in addition to ``/dev/tty``.  Required for
             non-interactive bootstraps (CI, Ansible) that need to
@@ -93,10 +89,8 @@ def _handle_sandbox_setup(
     # the shield install land its hooks and only blow up several phases
     # later when the credentials provisioning rejected the tier — leaving
     # a half-installed sandbox that's harder to back out of than to
-    # re-attempt cleanly.  When ``--no-vault`` is set, the credentials
-    # phase is skipped so the tier value is irrelevant and we don't
-    # validate it (passing the kwarg in that mode would be a documented
-    # quirk; refusing here would just block the no-vault escape hatch).
+    # re-attempt cleanly.  When ``--no-vault`` is set the credentials
+    # phase is skipped so the tier value is irrelevant.
     if passphrase_tier is not None and not no_vault:
         _validate_passphrase_tier(passphrase_tier)
 
@@ -105,11 +99,15 @@ def _handle_sandbox_setup(
     print("Services:")
 
     failed = False
+    # Sweep pre-supervisor systemd units / sockets before any new install
+    # phase runs.  Idempotent + soft-fail throughout, so a clean host or
+    # a re-run on an already-upgraded host pays only a few syscalls.
+    failed |= not run_legacy_install_cleanup_phase()
     if not no_shield:
-        failed |= not run_shield_install_phase(root=root)
-    # Credentials DB migration runs *before* vault — the daemon needs a
-    # decryptable DB to start.  After the credentials phase we refresh
-    # the credential fields on ``cfg`` so the vault phase sees the tier
+        failed |= not run_shield_install_phase()
+    # Credentials DB migration runs *before* the per-container vault
+    # will need it.  After the credentials phase we refresh the
+    # credential fields on ``cfg`` so any downstream phase sees the tier
     # choice the operator just made; ``dataclasses.replace`` preserves
     # any non-default paths the caller (e.g. terok-executor) constructed
     # the config with.
@@ -122,11 +120,18 @@ def _handle_sandbox_setup(
             credentials_passphrase=credentials_passphrase(),
             credentials_use_keyring=credentials_use_keyring(),
         )
-        failed |= not run_vault_install_phase(cfg)
-    if not no_gate:
-        failed |= not run_gate_install_phase(cfg)
-    if not no_clearance:
-        failed |= not run_clearance_install_phase()
+    # The git gate now lives in each container's supervisor — no host-side
+    # install phase.  Clearance has nothing to install on the host anymore — every
+    # container's supervisor composes the hub + verdict + notifier
+    # inline.  The legacy clearance unit files are removed by the
+    # ``Legacy install cleanup`` phase that ran above.
+    # Supervisor hooks land last so a half-installed prereq doesn't leave
+    # a fire-able OCI hook pointing at a non-existent ``terok-sandbox``
+    # binary.  The phase soft-fails when the entry point can't be
+    # resolved (operator forgot to activate their venv) — that's a
+    # deferable error that doesn't justify ``raise SystemExit`` from a
+    # setup re-run.
+    failed |= not run_supervisor_install_phase()
 
     # Re-surface the SELinux install command at the bottom of output
     # so it isn't scrolled away by service install banners.  Sandbox#854.
@@ -182,41 +187,41 @@ def _validate_passphrase_tier(tier: str) -> None:
 
 def _handle_sandbox_uninstall(
     *,
-    root: bool = False,
     no_shield: bool = False,
-    no_vault: bool = False,
-    no_gate: bool = False,
-    no_clearance: bool = False,
     cfg: SandboxConfig | None = None,
 ) -> None:
     """Tear down the stack in reverse install order.
 
-    Losing gate/vault mid-flight is recoverable, but losing shield
-    hooks while containers are live is the most disruptive — shield
-    goes last so live containers stay firewalled as long as possible.
-    Clearance has no dependants so it goes first.
+    Losing supervisor hooks mid-flight is recoverable, but losing shield
+    hooks while containers are live is the most disruptive — shield goes
+    last so live containers stay firewalled as long as possible.
 
     Best-effort across phases: a failing phase reports the error and
     the next phase runs anyway, so a partial-install teardown still
     removes what it can instead of leaving orphans behind.  Exits
     non-zero only after every phase has had its attempt.
+
+    The git gate has no host-side install, so there is no gate uninstall
+    phase — the legacy sweep removes any pre-supervisor gate units.
     """
     from ..setup_stamp import clear_stamp
 
-    if cfg is None:
-        cfg = SandboxConfig()
+    # ``cfg`` is accepted for handler-dispatch uniformity but unused: the
+    # teardown phases discover their own paths and take no config.
+    del cfg
 
     print("Services:")
 
     failed = False
-    if not no_clearance:
-        failed |= not run_clearance_uninstall_phase()
-    if not no_gate:
-        failed |= not run_gate_uninstall_phase(cfg)
-    if not no_vault:
-        failed |= not run_vault_uninstall_phase(cfg)
+    # Supervisor hooks come down first so a slow uninstall on lower
+    # layers can't surprise-fire a still-installed OCI hook.
+    failed |= not run_supervisor_uninstall_phase()
     if not no_shield:
-        failed |= not run_shield_uninstall_phase(root=root)
+        failed |= not run_shield_uninstall_phase()
+    # Legacy-install sweep also runs at uninstall so a host that's
+    # being decommissioned doesn't leave pre-supervisor systemd units
+    # behind for a future operator to puzzle over.
+    failed |= not run_legacy_install_cleanup_phase()
 
     if clear_stamp():
         print("→ setup stamp removed")
@@ -227,21 +232,14 @@ def _handle_sandbox_uninstall(
 SETUP_COMMANDS: tuple[CommandDef, ...] = (
     CommandDef(
         name="setup",
-        help="Install shield hooks + vault + gate in one step",
+        help="Install supervisor hooks + shield hooks in one step",
         handler=_handle_sandbox_setup,
         args=(
-            ArgDef(
-                name="--root",
-                action="store_true",
-                help="Install shield hooks system-wide (requires sudo); vault and gate stay per-user",
-            ),
             ArgDef(name="--no-shield", action="store_true", help="Skip shield install"),
-            ArgDef(name="--no-vault", action="store_true", help="Skip vault install"),
-            ArgDef(name="--no-gate", action="store_true", help="Skip gate install"),
             ArgDef(
-                name="--no-clearance",
+                name="--no-vault",
                 action="store_true",
-                help="Skip clearance hub/verdict/notifier install",
+                help="Skip the credentials-DB encryption phase",
             ),
             ArgDef(
                 name="--echo-passphrase",
@@ -268,23 +266,9 @@ SETUP_COMMANDS: tuple[CommandDef, ...] = (
     ),
     CommandDef(
         name="uninstall",
-        help="Remove shield hooks + vault + gate in one step",
+        help="Remove supervisor hooks + shield hooks in one step",
         handler=_handle_sandbox_uninstall,
-        args=(
-            ArgDef(
-                name="--root",
-                action="store_true",
-                help="Remove shield hooks from the system hooks directory (requires sudo)",
-            ),
-            ArgDef(name="--no-shield", action="store_true", help="Skip shield uninstall"),
-            ArgDef(name="--no-vault", action="store_true", help="Skip vault uninstall"),
-            ArgDef(name="--no-gate", action="store_true", help="Skip gate uninstall"),
-            ArgDef(
-                name="--no-clearance",
-                action="store_true",
-                help="Skip clearance hub/verdict/notifier uninstall",
-            ),
-        ),
+        args=(ArgDef(name="--no-shield", action="store_true", help="Skip shield uninstall"),),
     ),
 )
 

@@ -35,7 +35,6 @@ from .runtime.podman import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
-    from .gate.lifecycle import GateServerStatus
     from .runtime import ContainerRemoveResult
     from .vault.ssh.manager import SSHManager
 
@@ -73,6 +72,11 @@ SAFE_ANNOTATION_KEYS: frozenset[str] = frozenset(
         # has an OCI fallback in crun-krun so no analogous annotation
         # is needed for ``--memory``.  See ``man crun-krun(1)``.
         "krun.cpus",
+        # Absolute path to the per-container supervisor sidecar JSON.
+        # Triggers the supervisor OCI hook (matched by ``when.annotations``
+        # in the hook descriptor) and tells the hook where to find the
+        # sidecar — one anchor, no XDG guessing.
+        "terok.sandbox.sidecar",
     }
 )
 """OCI annotation keys allowed on
@@ -110,6 +114,14 @@ class LifecycleHooks:
 
     post_stop: Callable[[], None] | None = None
     """Fired after the container exits (caller responsibility)."""
+
+
+#: In-container loopback port the gate socat bridge listens on (matches
+#: ``TCP-LISTEN:9418`` in ``ensure-bridges.sh``).  The bridge forwards it to
+#: the supervisor's per-container gate socket (socket mode) or host TCP port
+#: (TCP mode), so the gate URL the container sees uses this fixed port in
+#: both modes — never a host address.
+_CONTAINER_GATE_PORT = 9418
 
 
 class Sharing:
@@ -164,6 +176,17 @@ class VolumeSpec:
     Used to layer immutable views on top of writable directory mounts —
     e.g. exposing a credential file to the agent while preventing it from
     overwriting the host-side phantom token.
+    """
+
+    live: bool = False
+    """When True, this volume is bind-mounted even in sealed mode.
+
+    Service plumbing (per-container vault/ssh-agent socket dir, gate
+    socket, sourced-at-runtime bridge scripts) must be live: sealed-mode
+    ``podman cp`` would snapshot an empty dir on the container side and
+    the supervisor's later-bound sockets would never appear inside.
+    Operator state (workspace, agent config) leaves this False so
+    sealed mode gets fresh copies as designed.
     """
 
     def to_mount_arg(self) -> str:
@@ -245,6 +268,18 @@ class RunSpec:
     Declared as ``Mapping`` so callers can pass plain ``dict``s;
     ``__post_init__`` snapshots into a ``MappingProxyType`` so the
     frozen-dataclass guarantee holds against caller mutation.
+    """
+
+    loopback_ports: tuple[int, ...] = ()
+    """Per-container host ports shield's nft rules must allow.
+
+    Empty falls back to the cfg-resolved
+    ``(gate_port, token_broker_port, ssh_signer_port)`` triple
+    (legacy / single-daemon shape).  The per-container launch path
+    passes ``(gate_port, per_container.token_broker_port,
+    per_container.ssh_signer_port)`` so shield allows the actual
+    ports the supervisor binds — without this override, shield
+    blocks the per-container broker/signer with "No route to host".
     """
 
     def __post_init__(self) -> None:
@@ -354,35 +389,37 @@ class Sandbox:
 
     # -- Gate ---------------------------------------------------------------
 
-    def ensure_gate(self) -> None:
-        """Verify the gate server is running; raise ``SystemExit`` if not."""
-        from .gate.lifecycle import GateServerManager
+    def mint_gate_token(self) -> str:
+        """Mint a fresh per-container gate token.
 
-        GateServerManager(self._cfg).ensure_reachable()
+        The gate now lives in each container's supervisor; the token
+        travels to the container via the sidecar and is validated
+        in-process, so there is nothing to persist.
+        """
+        from .gate.tokens import mint_gate_token
 
-    def create_token(self, scope: str, task_id: str) -> str:
-        """Create a task-scoped gate access token."""
-        from .gate.tokens import TokenStore
-
-        return TokenStore(self._cfg).create(scope, task_id)
+        return mint_gate_token()
 
     def gate_url(self, repo_path: Path, token: str) -> str:
-        """Build an HTTP URL for gate access to *repo_path*."""
-        port = self._cfg.gate_port
-        base = self._cfg.gate_base_path
-        rel = repo_path.relative_to(base).as_posix()
-        return f"http://{token}@host.containers.internal:{port}/{rel}"
+        """Build the in-container HTTP URL for gate access to *repo_path*.
 
-    def gate_status(self) -> GateServerStatus:
-        """Return the current gate server status."""
-        from .gate.lifecycle import GateServerManager
-
-        return GateServerManager(self._cfg).get_status()
+        Always uses the fixed loopback bridge port (see
+        `_CONTAINER_GATE_PORT`): the container reaches the per-container
+        gate through the socat bridge in both transport modes, so the URL
+        carries no host address (``gate_port`` is ``None`` in socket mode).
+        """
+        rel = repo_path.relative_to(self._cfg.gate_base_path).as_posix()
+        return f"http://{token}@localhost:{_CONTAINER_GATE_PORT}/{rel}"
 
     # -- Shield -------------------------------------------------------------
 
     def pre_start_args(
-        self, container: str, task_dir: Path, *, runtime: str | None = None
+        self,
+        container: str,
+        task_dir: Path,
+        *,
+        runtime: str | None = None,
+        loopback_ports: tuple[int, ...] = (),
     ) -> list[str]:
         """Return extra podman args for shield integration.
 
@@ -390,18 +427,29 @@ class Sandbox:
         [`ShieldRuntime.from_runtime_name`][terok_shield.ShieldRuntime.from_runtime_name]
         so shield picks the right dnsmasq bind for the krun guest's
         isolated loopback.
+
+        *loopback_ports* overrides shield's cfg-derived allowlist
+        with per-container ports (see ``RunSpec.loopback_ports``).
         """
         from .integrations.shield import ShieldManager, ShieldRuntime
 
         return ShieldManager(
-            task_dir, self._cfg, runtime=ShieldRuntime.from_runtime_name(runtime)
+            task_dir,
+            self._cfg,
+            runtime=ShieldRuntime.from_runtime_name(runtime),
+            loopback_ports_override=loopback_ports or None,
         ).pre_start(container)
 
-    def shield_down(self, container: str, task_dir: Path) -> None:
-        """Remove shield rules for a container (allow all egress)."""
+    def shield_down(self, container: str, container_id: str, task_dir: Path) -> None:
+        """Remove shield rules for a container (allow all egress).
+
+        *container* is the operator-facing podman name (audit-log key);
+        *container_id* is the full podman UUID — terok-shield's per-
+        container hub socket is keyed on it.  Both are mandatory.
+        """
         from .integrations.shield import ShieldManager
 
-        ShieldManager(task_dir, self._cfg).down(container)
+        ShieldManager(task_dir, self._cfg).down(container, container_id)
 
     # -- Container launch ---------------------------------------------------
     #
@@ -441,7 +489,12 @@ class Sandbox:
             cmd += bypass_network_args(self._cfg.gate_port)
         else:
             try:
-                cmd += self.pre_start_args(spec.container_name, spec.task_dir, runtime=spec.runtime)
+                cmd += self.pre_start_args(
+                    spec.container_name,
+                    spec.task_dir,
+                    runtime=spec.runtime,
+                    loopback_ports=spec.loopback_ports,
+                )
             except SystemExit:
                 raise  # ShieldNeedsSetup; let the caller handle it
             except (OSError, FileNotFoundError) as exc:
@@ -468,10 +521,13 @@ class Sandbox:
         if spec.extra_args:
             cmd += list(spec.extra_args)
 
-        # Sealed containers receive their directories via podman cp, not mounts.
-        if not spec.sealed:
-            for vol in spec.volumes:
-                cmd += ["-v", vol.to_mount_arg()]
+        # Sealed: operator state gets copied; ``live`` service plumbing
+        # (sockets, sourced bridge scripts) stays a bind mount so the
+        # supervisor's later-bound sockets appear inside the container.
+        for vol in spec.volumes:
+            if spec.sealed and not vol.live:
+                continue
+            cmd += ["-v", vol.to_mount_arg()]
 
         for k, v in spec.env.items():
             cmd += ["-e", f"{k}={v}"]
@@ -514,9 +570,22 @@ class Sandbox:
         """
         if spec.sealed:
             self.create(spec, hooks=hooks)
-            present = tuple(v for v in spec.volumes if v.host_path.exists())
-            self._ensure_parents(spec.container_name, present)
-            for vol in present:
+            # ``live`` volumes are bind-mounted (handled by _build_cmd);
+            # only the rest get copied in here.
+            present = tuple(v for v in spec.volumes if not v.live and v.host_path.exists())
+            # Drop overlay file mounts (a file landing inside a sibling
+            # dir mount); the dir-copy already wrote them, and podman cp
+            # refuses to overwrite.
+            dir_targets = tuple(v.container_path for v in present if v.host_path.is_dir())
+
+            def _under_dir_mount(path: str) -> bool:
+                return any(path == d or path.startswith(d.rstrip("/") + "/") for d in dir_targets)
+
+            effective = tuple(
+                v for v in present if v.host_path.is_dir() or not _under_dir_mount(v.container_path)
+            )
+            self._ensure_parents(spec.container_name, effective)
+            for vol in effective:
                 self.copy_to(spec.container_name, vol.host_path, vol.container_path)
             self.start(spec.container_name, hooks=hooks)
             return
@@ -564,11 +633,16 @@ class Sandbox:
         Injects a tar archive containing directory entries for every
         ancestor of every volume target, so subsequent ``copy_to`` calls
         succeed regardless of the container image layout.
+
+        File volumes (``host_path.is_file()``) only get their *parents*
+        created — pre-creating the target as a directory would force
+        ``copy_to`` to land the file inside it, not replace it.
         """
         dirs: set[str] = set()
         for vol in volumes:
             target = PurePosixPath(vol.container_path)
-            dirs.add(str(target).lstrip("/"))
+            if vol.host_path.is_dir():
+                dirs.add(str(target).lstrip("/"))
             for ancestor in target.parents:
                 if str(ancestor) != "/":
                     dirs.add(str(ancestor).lstrip("/"))

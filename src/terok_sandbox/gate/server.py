@@ -1,38 +1,33 @@
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""Standalone HTTP gate server wrapping ``git http-backend`` with token auth.
+"""HTTP gate component wrapping ``git http-backend`` with token auth.
 
-Launched as a separate process — equivalent to ``git daemon`` — so it
-can be supervised independently by systemd and its audit-log lines
-carry their own process identity.
+Composed by the per-container supervisor as one of its services.  The
+gate serves a single task's repo out of the shared per-project bare
+mirror, gated on a single minted token.
 
 Token validation:
     Each request must carry HTTP Basic Auth with the token as the username
-    (password is ignored).  The token is looked up in a JSON file mapping
-    tokens to credential scopes.  The requested repo must match the token's scope.
+    (password is ignored).  The supervisor minted exactly one token for the
+    task this container serves; the requested repo must match the token's
+    scope.
 
-Modes:
-    --inetd        Handle one request on an inherited socket (fd 0), then exit.
-                   Used by systemd ``Accept=yes`` socket activation.
-    --detach       Bind, fork, accept loop in child.  Daemon fallback.
-    --socket-path  Foreground mode on a Unix socket (and optionally TCP).
-                   Used by systemd ``Type=simple`` service units and socket mode.
+Transport:
+    The supervisor binds the gate on a per-container Unix socket inside
+    ``container_runtime_dir`` (= the in-container ``/run/terok``) in socket
+    mode, or on a per-container ``127.0.0.1`` TCP port in TCP mode.
 """
 
 from __future__ import annotations
 
-import argparse
 import base64
-import json
 import logging
 import os
 import re
-import signal
 import socket
 import stat
 import subprocess  # nosec B404 — spawning git http-backend (CGI)
-import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -44,7 +39,7 @@ from .._util._selinux import socket_selinux_context
 _logger = logging.getLogger("terok-gate")
 
 # ---------------------------------------------------------------------------
-# Token store — inlined read-only logic, no terok imports
+# Token store — single-token validation, no terok imports
 # ---------------------------------------------------------------------------
 
 _ROUTE = re.compile(
@@ -53,74 +48,36 @@ _ROUTE = re.compile(
 )
 
 _CGI_WAIT_TIMEOUT = 30
-_LISTEN_ADDR = "127.0.0.1"
-_DEFAULT_PORT = 9418
-
-
-def _validate_token_data(data: object) -> dict[str, dict[str, str]]:
-    """Filter parsed JSON to only valid ``{token: {scope, task}}`` entries."""
-    if not isinstance(data, dict):
-        return {}
-    return {
-        tok: info
-        for tok, info in data.items()
-        if isinstance(tok, str)
-        and isinstance(info, dict)
-        and isinstance(info.get("scope"), str)
-        and isinstance(info.get("task"), str)
-    }
 
 
 _ADMIN_WILDCARD = "*"
-"""Sentinel returned by [`TokenStore.validate`][terok_sandbox.gate.server.TokenStore.validate] for admin tokens."""
+"""Sentinel a token store may return to grant access to **all** repos.
+
+The per-container gate never mints an admin token, but the request
+handler still honours the sentinel so the audited routing logic is
+unchanged from the host-daemon era.
+"""
 
 
-class TokenStore:
-    """Read-only view of ``tokens.json`` with lazy reload on mtime change."""
+class _SingleTokenStore:
+    """Validate requests against the one token the supervisor minted.
 
-    def __init__(self, token_file: Path, *, admin_token: str | None = None) -> None:
-        """Initialize with the path to the tokens JSON file.
+    The per-container gate serves a single task, so there is no
+    ``tokens.json`` file to read: the supervisor passes the minted token
+    and its scope directly.  ``validate`` returns the scope iff the
+    presented token matches, mirroring the file-backed store's contract
+    so [`_make_handler_class`][terok_sandbox.gate.server._make_handler_class]
+    needs no changes.
+    """
 
-        When *admin_token* is set, it grants access to **all** repos,
-        bypassing the per-task scope restriction.  Intended for host-level
-        access in containerised deployments.
-        """
-        self._path = token_file
-        self._mtime_ns: int = 0
-        self._tokens: dict[str, dict[str, str]] = {}
-        self._admin_token = admin_token
-
-    def _maybe_reload(self) -> None:
-        """Reload the token file if its mtime has changed."""
-        try:
-            st = self._path.stat()
-        except OSError:
-            self._tokens = {}
-            self._mtime_ns = 0
-            return
-        if st.st_mtime_ns != self._mtime_ns:
-            try:
-                data = json.loads(self._path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                data = None
-            self._tokens = _validate_token_data(data)
-            self._mtime_ns = st.st_mtime_ns
+    def __init__(self, token: str, scope: str) -> None:
+        """Bind the store to the single *token* and its *scope*."""
+        self._token = token
+        self._scope = scope
 
     def validate(self, token: str) -> str | None:
-        """Return scope if *token* is valid, else ``None``.
-
-        Returns `_ADMIN_WILDCARD` (``"*"``) for admin tokens,
-        granting access to any repo.  Reloads the token file when its
-        mtime changes.
-        """
-        if self._admin_token and token == self._admin_token:
-            return _ADMIN_WILDCARD
-        self._maybe_reload()
-        info = self._tokens.get(token)
-        if info is None:
-            return None
-        scope = info.get("scope")
-        return scope if isinstance(scope, str) else None
+        """Return the scope if *token* matches the minted token, else ``None``."""
+        return self._scope if token == self._token else None
 
 
 # ---------------------------------------------------------------------------
@@ -260,7 +217,9 @@ def _stream_response_body(stdout: IO[bytes], wfile: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _make_handler_class(base_path: Path, token_store: TokenStore) -> type[BaseHTTPRequestHandler]:
+def _make_handler_class(
+    base_path: Path, token_store: _SingleTokenStore
+) -> type[BaseHTTPRequestHandler]:
     """Create a request handler class bound to the given base_path and token_store."""
 
     class GateRequestHandler(BaseHTTPRequestHandler):
@@ -427,82 +386,6 @@ class _UnixThreadingHTTPServer(_ThreadingHTTPServer):
 
 
 # ---------------------------------------------------------------------------
-# Inetd mode: handle one request on an inherited socket
-# ---------------------------------------------------------------------------
-
-
-def _serve_inetd(base_path: Path, token_store: TokenStore) -> None:
-    """Handle a single HTTP request on the inherited socket (fd 0), then exit."""
-    handler_class = _make_handler_class(base_path, token_store)
-
-    # systemd Accept=yes passes the connected socket as fd 0 (stdin)
-    conn = socket.fromfd(0, socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        rfile = conn.makefile("rb", buffering=0)
-        wfile = conn.makefile("wb", buffering=0)
-
-        handler = handler_class.__new__(handler_class)
-        handler.request = conn
-        handler.client_address = conn.getpeername()
-        handler.server = type("FakeServer", (), {"server_name": "localhost", "server_port": 0})()
-        # ``SocketIO`` vs ``BufferedIOBase`` is a stdlib stubs detail —
-        # ``makefile`` is documented to return the raw ``SocketIO`` when
-        # ``buffering=0`` and the handler reads it through the same byte API.
-        handler.rfile = rfile  # type: ignore[assignment]
-        handler.wfile = wfile  # type: ignore[assignment]
-        # ``BaseHTTPRequestHandler.raw_requestline`` is set on every request
-        # by ``handle_one_request`` at runtime; typeshed leaves it off the
-        # class surface so the explicit attribute write on this manual path
-        # needs a suppression.
-        handler.raw_requestline = rfile.readline(65537)  # type: ignore[attr-defined]
-        if handler.raw_requestline and handler.parse_request():  # type: ignore[attr-defined]
-            method = getattr(handler, f"do_{handler.command}", None)
-            if method:
-                method()
-            else:
-                handler.send_error(501, "Unsupported method")
-        wfile.flush()
-    finally:
-        conn.close()
-
-
-# ---------------------------------------------------------------------------
-# Daemon mode: bind, fork, accept loop
-# ---------------------------------------------------------------------------
-
-
-def _serve_daemon(
-    base_path: Path,
-    token_store: TokenStore,
-    port: int,
-    pid_file: Path | None,
-    bind: str = _LISTEN_ADDR,
-) -> None:
-    """Bind socket, fork, write PID file, run accept loop in child."""
-    handler_class = _make_handler_class(base_path, token_store)
-    server = _ThreadingHTTPServer((bind, port), handler_class)
-
-    pid = os.fork()
-    if pid > 0:
-        # Parent: write child PID and exit
-        if pid_file:
-            pid_file.parent.mkdir(parents=True, exist_ok=True)
-            pid_file.write_text(str(pid))
-        sys.exit(0)
-
-    # Child: detach
-    os.setsid()
-    devnull = os.open(os.devnull, os.O_RDWR)
-    os.dup2(devnull, 0)
-    os.dup2(devnull, 1)
-    os.dup2(devnull, 2)
-    os.close(devnull)
-
-    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
-    server.serve_forever()
-
-
-# ---------------------------------------------------------------------------
 # Unix socket server factory
 # ---------------------------------------------------------------------------
 
@@ -547,139 +430,77 @@ def _create_unix_server(
 
 
 # ---------------------------------------------------------------------------
-# Foreground mode: socket and/or TCP
+# GateServer component
 # ---------------------------------------------------------------------------
 
 
-def _serve_foreground(
-    base_path: Path,
-    token_store: TokenStore,
-    *,
-    socket_path: Path | None = None,
-    port: int | None = None,
-    bind: str = _LISTEN_ADDR,
-    pid_file: Path | None = None,
-) -> None:
-    """Run the gate server in the foreground with socket and/or TCP listeners."""
-    handler_class = _make_handler_class(base_path, token_store)
-    servers: list[HTTPServer] = []
+class GateServer:
+    """Per-container git gate, composed by the supervisor alongside the vault.
 
-    if socket_path:
-        unix_server = _create_unix_server(handler_class, socket_path)
-        servers.append(unix_server)
-        _logger.info("Listening on %s", socket_path)
+    Serves the task's repo out of the shared per-project bare mirror at
+    *mirror_root*, gated on the single *token* (scoped to *scope*).
+    Binds either a per-container Unix socket (*socket_path*) or a
+    per-container ``127.0.0.1`` TCP port (*host* + *port*); exactly one
+    transport must be supplied.
 
-    if port is not None:
-        tcp_server = _ThreadingHTTPServer((bind, port), handler_class)
-        servers.append(tcp_server)
-        _logger.info("Listening on %s:%d", bind, port)
-
-    if not servers:
-        raise RuntimeError("At least one of --socket-path or --port is required")
-
-    if pid_file:
-        pid_file.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(
-            str(pid_file),
-            os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0),
-            0o600,
-        )
-        try:
-            os.write(fd, str(os.getpid()).encode())
-        finally:
-            os.close(fd)
-
-    def _shutdown(*_: object) -> None:
-        for srv in servers:
-            srv.shutdown()
-
-    signal.signal(signal.SIGTERM, _shutdown)
-    signal.signal(signal.SIGINT, _shutdown)
-
-    threads = [threading.Thread(target=srv.serve_forever, daemon=True) for srv in servers]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-
-
-def _configure_logging(*, daemon: bool) -> None:
-    """Set up logging for the gate server.
-
-    In inetd mode, logs go to stderr (captured by systemd journal).
-    In daemon mode, logs go to syslog so they survive the stdio redirect.
+    Stateless and self-contained — the only terok dependency is the
+    SELinux socket-labelling helper the Unix listener needs.
     """
-    if daemon:
-        from logging.handlers import SysLogHandler
 
-        handler: logging.Handler = SysLogHandler(address="/dev/log")
-        handler.setFormatter(logging.Formatter("terok-gate: %(message)s"))
-    else:
-        handler = logging.StreamHandler(sys.stderr)
-        handler.setFormatter(logging.Formatter("%(message)s"))
-    _logger.addHandler(handler)
-    _logger.setLevel(logging.WARNING)
+    def __init__(
+        self,
+        *,
+        mirror_root: Path,
+        token: str,
+        scope: str,
+        socket_path: Path | None = None,
+        host: str | None = None,
+        port: int | None = None,
+    ) -> None:
+        """Bind the gate's configuration; ``start`` brings the listener up."""
+        self._mirror_root = mirror_root
+        self._token = token
+        self._scope = scope
+        self._socket_path = socket_path
+        self._host = host
+        self._port = port
+        self._server: HTTPServer | None = None
+        self._thread: threading.Thread | None = None
 
+    async def start(self) -> None:
+        """Bind the listener and serve it on a daemon thread."""
+        import asyncio
 
-def main() -> None:
-    """Parse CLI args and run the gate server in the selected mode."""
-    parser = argparse.ArgumentParser(
-        prog="terok-gate",
-        description="HTTP gate server for git repos with token authentication",
-    )
-    parser.add_argument("--base-path", required=True, help="Root directory for git repos")
-    parser.add_argument("--token-file", required=True, help="Path to tokens.json")
-    parser.add_argument("--port", type=int, default=None, help="TCP listen port (default: none)")
-    parser.add_argument(
-        "--bind",
-        default=_LISTEN_ADDR,
-        help=f"Address to bind to (default: {_LISTEN_ADDR}). "
-        "Use 0.0.0.0 to accept connections from outside.",
-    )
-    parser.add_argument(
-        "--socket-path",
-        default=None,
-        help="Unix socket path to listen on (foreground mode)",
-    )
-    parser.add_argument("--inetd", action="store_true", help="Handle one request on fd 0, exit")
-    parser.add_argument("--detach", action="store_true", help="Fork and run as daemon")
-    parser.add_argument("--pid-file", default=None, help="PID file path")
-    parser.add_argument(
-        "--admin-token",
-        default=None,
-        help="Admin token granting access to all repos. "
-        "Falls back to TEROK_GATE_ADMIN_TOKEN env var.",
-    )
-
-    args = parser.parse_args()
-    exclusive = sum([args.inetd, args.detach, bool(args.socket_path)])
-    if exclusive > 1:
-        parser.error("--inetd, --detach, and --socket-path are mutually exclusive modes")
-    _configure_logging(daemon=args.detach)
-
-    admin_token = args.admin_token or os.environ.get("TEROK_GATE_ADMIN_TOKEN")
-    base_path = Path(args.base_path)
-    token_store = TokenStore(Path(args.token_file), admin_token=admin_token)
-
-    if args.inetd:
-        _serve_inetd(base_path, token_store)
-    elif args.socket_path:
-        pid_file = Path(args.pid_file) if args.pid_file else None
-        _serve_foreground(
-            base_path,
-            token_store,
-            socket_path=Path(args.socket_path),
-            port=args.port,
-            bind=args.bind,
-            pid_file=pid_file,
+        handler = _make_handler_class(
+            self._mirror_root, _SingleTokenStore(self._token, self._scope)
         )
-    elif args.detach:
-        pid_file = Path(args.pid_file) if args.pid_file else None
-        _serve_daemon(base_path, token_store, args.port or _DEFAULT_PORT, pid_file, bind=args.bind)
-    else:
-        parser.error("One of --inetd, --detach, or --socket-path is required")
+        if self._socket_path is not None:
+            server: HTTPServer = await asyncio.get_running_loop().run_in_executor(
+                None, _create_unix_server, handler, self._socket_path
+            )
+        elif self._host and self._port:
+            server = _ThreadingHTTPServer((self._host, self._port), handler)
+        else:
+            raise ValueError("GateServer needs either socket_path or host+port")
+        self._server = server
+        self._thread = threading.Thread(target=server.serve_forever, daemon=True, name="terok-gate")
+        self._thread.start()
+
+    async def stop(self) -> None:
+        """Stop the listener and join the serving thread.
+
+        ``shutdown()`` blocks until the accept loop exits, so it runs in
+        an executor rather than inline on the event loop — calling it on
+        the loop thread would deadlock.
+        """
+        import asyncio
+
+        if self._server is None:
+            return
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self._server.shutdown)
+        self._server.server_close()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+        self._server = None
+        self._thread = None

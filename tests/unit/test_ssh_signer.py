@@ -563,10 +563,17 @@ class TestKeyCacheErrorRecovery:
 
 
 class TestDBKeyCache:
-    """Verify the version-counter cache behaviour."""
+    """Verify the (now cacheless) resolver behaviour.
 
-    def test_second_call_same_version_hits_cache(self, tmp_path: Path) -> None:
-        """When ``ssh_keys_version`` is unchanged, the cache returns the prior slot."""
+    The per-container-supervisor refactor dropped the in-memory cache
+    on the signer side so ``terok auth`` writes propagate on the very
+    next sign — see [`_DBKeyCache`][terok_sandbox.vault.ssh.signer._DBKeyCache]'s
+    docstring for the rationale.  The class name is kept for API
+    stability; these tests pin the new "always fresh" contract.
+    """
+
+    def test_consecutive_calls_each_query_the_db(self, tmp_path: Path) -> None:
+        """No-cache contract: each ``get`` hits the DB, no slot-identity reuse."""
         from terok_sandbox.vault.ssh.signer import _DBKeyCache
 
         db_path = tmp_path / "vault.db"
@@ -576,11 +583,14 @@ class TestDBKeyCache:
         cache = _DBKeyCache(db)
         first = cache.get("proj")
         second = cache.get("proj")
-        assert second is first  # same list object — cache hit
+        # Same content, fresh list instances on each call.
+        assert first is not second
+        assert len(first) == len(second) == 1
+        assert first[0][1] == second[0][1]
         db.close()
 
-    def test_version_bump_reloads(self, tmp_path: Path) -> None:
-        """A new ``assign_ssh_key`` bumps the version and invalidates the cached slot."""
+    def test_new_key_is_visible_on_next_call(self, tmp_path: Path) -> None:
+        """A fresh ``assign_ssh_key`` is reflected on the very next ``get``."""
         from terok_sandbox.vault.ssh.signer import _DBKeyCache
 
         db_path = tmp_path / "vault.db"
@@ -589,9 +599,9 @@ class TestDBKeyCache:
 
         cache = _DBKeyCache(db)
         before = cache.get("proj")
-        _seed_key(db, "proj", comment="second")  # bumps ssh_keys_version
+        _seed_key(db, "proj", comment="second")
         after = cache.get("proj")
-        assert after is not before
+        assert len(before) == 1
         assert len(after) == 2
         db.close()
 

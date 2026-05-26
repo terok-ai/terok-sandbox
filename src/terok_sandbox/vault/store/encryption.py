@@ -45,8 +45,8 @@ _PASSPHRASE_COMMAND_TIMEOUT_S = 30.0
 
 _logger = logging.getLogger(__name__)
 
-#: Closed set of tier labels — feeds [`VaultStatus.passphrase_source`][terok_sandbox.VaultStatus]
-#: and the setup-chooser's
+#: Closed set of tier labels — feeds the vault status display's
+#: passphrase-source label and the setup-chooser's
 #: [`SetupTier`][terok_sandbox.commands.credentials.SetupTier] subset.
 PassphraseSource = Literal[
     "session-file",
@@ -115,9 +115,8 @@ def resolve_passphrase_with_source(
     for the tier semantics.  Both elements of the tuple are ``None``
     when no tier had a passphrase.
 
-    The source half is what feeds
-    [`VaultStatus.passphrase_source`][terok_sandbox.VaultStatus] and the
-    TUI status pill — keep the labels stable, callers dispatch on them.
+    The source half feeds a TUI/CLI status display — keep the labels
+    stable, callers dispatch on them.
     """
     # Truthy checks throughout: an empty string anywhere in the chain
     # is SQLCipher's no-encryption sentinel; treat it as "not present"

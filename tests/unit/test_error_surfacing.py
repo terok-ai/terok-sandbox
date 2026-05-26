@@ -306,16 +306,13 @@ class TestCountCommitsRange:
 
 def _make_log_handler() -> object:
     """Create a GateRequestHandler instance for log_message testing."""
-    import json
     import tempfile
 
-    from terok_sandbox.gate.server import TokenStore, _make_handler_class
+    from terok_sandbox.gate.server import _make_handler_class, _SingleTokenStore
 
     td = tempfile.mkdtemp()
     base = Path(td)
-    token_file = base / "tokens.json"
-    token_file.write_text(json.dumps({}))
-    store = TokenStore(token_file)
+    store = _SingleTokenStore("terok-g-tok", "proj")
     handler_class = _make_handler_class(base, store)
 
     handler = handler_class.__new__(handler_class)
@@ -392,28 +389,10 @@ class TestStopTaskContainersLogging:
         assert results[0].error == "podman not found"
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 2d. vault_lifecycle — DB read failure logging
-# ═══════════════════════════════════════════════════════════════════════════
-
-
-class TestVaultStatusDbFailure:
-    """Verify get_vault_status' behaviour when the credential DB can't be read."""
-
-    def test_decrypt_failure_marks_vault_locked(self, tmp_path: Path) -> None:
-        """A file that fails to decrypt surfaces as ``locked`` — the actionable signal."""
-        from terok_sandbox import SandboxConfig
-        from terok_sandbox.vault.daemon.lifecycle import VaultManager
-
-        cfg = SandboxConfig(state_dir=tmp_path)
-        # Bytes that aren't a SQLCipher-encrypted DB: HMAC check fails ⇒
-        # WrongPassphraseError ⇒ ``locked`` rather than a generic warning.
-        cfg.db_path.parent.mkdir(parents=True, exist_ok=True)
-        cfg.db_path.write_text("not a sqlite db")
-
-        status = VaultManager(cfg).get_status()
-        assert status.locked is True
-        assert status.credentials_stored == ()
+# The VaultManager.get_status() coverage that lived here is gone with
+# the per-container-supervisor refactor (May 2026) — VaultStatus and
+# VaultManager no longer exist.  Per-container supervisors open the
+# SQLCipher DB directly and surface failures via their own logging.
 
 
 class TestGateHandlerLogMessage:

@@ -17,9 +17,9 @@ keywords = ["podman", "containers", "sandbox", "security", "isolation"]
 requires-python = ">=3.12,<4.0"
 dynamic = ["version", "classifiers"]
 dependencies = [
-    "terok-util @ https://github.com/terok-ai/terok-util/releases/download/v0.0.2a1/terok_util-0.0.2a1-py3-none-any.whl",
-    "terok-shield @ https://github.com/terok-ai/terok-shield/releases/download/v0.6.42a9/terok_shield-0.6.42a9-py3-none-any.whl",
-    "terok-clearance @ https://github.com/terok-ai/terok-clearance/releases/download/v0.6.14a7/terok_clearance-0.6.14a7-py3-none-any.whl",
+    "terok-util @ git+https://github.com/sliwowitz/terok-util.git@feat/per-container-supervisor-v2",
+    "terok-shield @ git+https://github.com/sliwowitz/terok-shield.git@feat/per-container-supervisor-v2",
+    "terok-clearance @ git+https://github.com/sliwowitz/terok-clearance.git@feat/per-container-supervisor-v2",
     "platformdirs>=4.10.0",
     "aiohttp>=3.9",
     "cryptography>=46.0.7",
@@ -42,8 +42,13 @@ Security = "https://github.com/terok-ai/terok-sandbox/security/policy"
 
 [project.scripts]
 terok-sandbox = "terok_sandbox.cli:main"
-terok-gate = "terok_sandbox.gate.server:main"
-terok-vault = "terok_sandbox.vault.daemon.token_broker:main"
+
+[tool.poetry.dependencies]
+# Pinned to the sliwowitz fork's ``feat/per-container-supervisor`` branch
+# for the per-container-supervisor refactor.  The release script rewrites
+# these back to terok-ai wheels at PR-merge time.
+terok-shield = { git = "https://github.com/sliwowitz/terok-shield.git", branch = "feat/per-container-supervisor-v2" }
+terok-clearance = { git = "https://github.com/sliwowitz/terok-clearance.git", branch = "feat/per-container-supervisor-v2" }
 
 [tool.poetry]
 classifiers = [

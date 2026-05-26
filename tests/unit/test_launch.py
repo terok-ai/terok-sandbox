@@ -84,7 +84,7 @@ class TestCompose:
                 "terok_sandbox.integrations.shield.ShieldManager.pre_start",
                 return_value=["--annotation=t-s=1"],
             ),
-            patch("terok_sandbox.gate.tokens.TokenStore.create", return_value="terok-g-abc"),
+            patch("terok_sandbox.launch.mint_gate_token", return_value="terok-g-abc"),
             patch(
                 "terok_sandbox.vault.store.db.CredentialDB.create_token",
                 return_value="terok-p-xyz",
@@ -95,24 +95,32 @@ class TestCompose:
         assert plan.gate and plan.broker and plan.ssh
         # Bridge resources mount
         assert CONTAINER_BRIDGES_DIR in joined
-        # Vault socket mount
-        assert "/run/terok/vault.sock" in joined
+        # Per-container runtime dir mounted at /run/terok/ (the supervisor
+        # binds vault.sock + ssh-agent.sock + gate-server.sock inside it).
+        assert ":/run/terok" in joined
+        assert "/run/myc" in joined  # host-side dir name = container name
         assert f"TEROK_VAULT_LOOPBACK_PORT={LOOPBACK_VAULT_PORT}" in joined
-        # Gate socket + token
-        assert "/run/terok/gate-server.sock" in joined
+        # Gate socket env + token (the socket is bound by the supervisor
+        # inside the per-container dir mount — no separate -v sub-mount).
+        assert "TEROK_GATE_SOCKET=/run/terok/gate-server.sock" in joined
         assert "TEROK_GATE_TOKEN=terok-g-abc" in joined
-        # SSH signer socket + token
-        assert "/run/terok/ssh-agent.sock" in joined
+        # The gate socket is NOT a -v sub-mount anymore.
+        assert not any(a == "-v" and "gate-server.sock" in args[i + 1] for i, a in enumerate(args))
+        # SSH signer env var (the socket itself is bound by the supervisor
+        # inside the per-container dir mount above).
+        assert "TEROK_SSH_SIGNER_SOCKET=/run/terok/ssh-agent.sock" in joined
         assert "TEROK_SSH_SIGNER_TOKEN=terok-p-xyz" in joined
-        # Name flag
-        assert args[-2:] == ["--name", "myc"]
+        # Name flag (followed by the supervisor sidecar annotation)
+        assert "--name" in args and "myc" in args
+        annotation_value = next(a for a in args if a.startswith("terok.sandbox.sidecar="))
+        assert "/sidecar/myc.json" in annotation_value
 
     def test_full_wiring_with_scope_tcp_mode(self, tmp_path: Path) -> None:
-        """TCP mode emits port env vars instead of socket mounts."""
+        """TCP mode emits per-container port env vars instead of socket mounts."""
         cfg = _make_cfg(tmp_path, services_mode="tcp")
         with (
             patch("terok_sandbox.integrations.shield.ShieldManager.pre_start", return_value=[]),
-            patch("terok_sandbox.gate.tokens.TokenStore.create", return_value="terok-g-abc"),
+            patch("terok_sandbox.launch.mint_gate_token", return_value="terok-g-abc"),
             patch(
                 "terok_sandbox.vault.store.db.CredentialDB.create_token",
                 return_value="terok-p-xyz",
@@ -120,9 +128,15 @@ class TestCompose:
         ):
             args, _ = compose("myc", cfg=cfg, shield=False, gate=True, broker=True, scope="proj")
         joined = " ".join(args)
-        assert "TEROK_TOKEN_BROKER_PORT=18001" in joined
-        assert "TEROK_SSH_SIGNER_PORT=18002" in joined
-        assert "TEROK_GATE_PORT=18000" in joined
+        # Broker/signer/gate ports are now per-container (via bind(0)), not
+        # the singleton cfg.* ports.  Just check the envs are present with
+        # SOME numeric value.
+        import re
+
+        assert re.search(r"TEROK_TOKEN_BROKER_PORT=\d+", joined)
+        assert re.search(r"TEROK_SSH_SIGNER_PORT=\d+", joined)
+        assert re.search(r"TEROK_GATE_PORT=\d+", joined)
+        assert "TEROK_GATE_TOKEN=terok-g-abc" in joined
         assert "/run/terok/vault.sock" not in joined
 
     def test_no_shield_skips_shield_pre_start(self, tmp_path: Path) -> None:
@@ -173,26 +187,30 @@ class TestMetaAndCleanup:
         with (
             patch("terok_sandbox.integrations.shield.ShieldManager.pre_start", return_value=[]),
             patch("terok_sandbox.integrations.shield.ShieldManager.down") as down,
-            patch("terok_sandbox.gate.tokens.TokenStore.create", return_value="terok-g-abc"),
+            patch("terok_sandbox.launch._resolve_container_id", return_value="ctr-uuid"),
+            patch("terok_sandbox.launch.mint_gate_token", return_value="terok-g-abc"),
             patch(
                 "terok_sandbox.vault.store.db.CredentialDB.create_token",
                 return_value="terok-p-xyz",
             ),
             patch("terok_sandbox.vault.store.db.CredentialDB.revoke_tokens", return_value=2),
-            patch("terok_sandbox.gate.tokens.TokenStore.revoke_for_task", return_value=None),
         ):
             compose("myc", cfg=cfg, shield=True, gate=True, broker=True, scope="proj")
             assert cleanup("myc", cfg=cfg) is True
             assert cleanup("myc", cfg=cfg) is False
-            down.assert_called_once()  # only the first cleanup invokes shield.down
+            down.assert_called_once_with("myc", "ctr-uuid")  # container UUID is plumbed through
 
-    def test_cleanup_revokes_tokens_for_container_as_subject(self, tmp_path: Path) -> None:
-        """Cleanup uses container name as the subject when revoking."""
+    def test_cleanup_revokes_vault_tokens_for_container_as_subject(self, tmp_path: Path) -> None:
+        """Cleanup uses container name as the subject when revoking vault tokens.
+
+        The gate token has no on-disk store anymore (revocation = supervisor
+        death), so cleanup only revokes the vault broker/SSH tokens.
+        """
         cfg = _make_cfg(tmp_path)
         with (
             patch("terok_sandbox.integrations.shield.ShieldManager.pre_start", return_value=[]),
             patch("terok_sandbox.integrations.shield.ShieldManager.down"),
-            patch("terok_sandbox.gate.tokens.TokenStore.create", return_value="terok-g-abc"),
+            patch("terok_sandbox.launch.mint_gate_token", return_value="terok-g-abc"),
             patch(
                 "terok_sandbox.vault.store.db.CredentialDB.create_token",
                 return_value="terok-p-xyz",
@@ -200,14 +218,10 @@ class TestMetaAndCleanup:
             patch(
                 "terok_sandbox.vault.store.db.CredentialDB.revoke_tokens", return_value=2
             ) as revoke_db,
-            patch(
-                "terok_sandbox.gate.tokens.TokenStore.revoke_for_task", return_value=None
-            ) as revoke_gate,
         ):
             compose("myc", cfg=cfg, shield=True, gate=True, broker=True, scope="proj")
             cleanup("myc", cfg=cfg)
         revoke_db.assert_called_with("proj", "myc")
-        revoke_gate.assert_called_with("proj", "myc")
 
     def test_cleanup_warns_when_locked_vault_skips_revocation(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -219,12 +233,11 @@ class TestMetaAndCleanup:
         with (
             patch("terok_sandbox.integrations.shield.ShieldManager.pre_start", return_value=[]),
             patch("terok_sandbox.integrations.shield.ShieldManager.down"),
-            patch("terok_sandbox.gate.tokens.TokenStore.create", return_value="terok-g-abc"),
+            patch("terok_sandbox.launch.mint_gate_token", return_value="terok-g-abc"),
             patch(
                 "terok_sandbox.vault.store.db.CredentialDB.create_token",
                 return_value="terok-p-xyz",
             ),
-            patch("terok_sandbox.gate.tokens.TokenStore.revoke_for_task", return_value=None),
         ):
             compose("myc", cfg=cfg, shield=True, gate=True, broker=True, scope="proj")
             with patch(
@@ -237,32 +250,30 @@ class TestMetaAndCleanup:
         assert "NoPassphraseError" in err
         assert "vault unlock" in err
 
-    def test_ssh_mint_failure_rolls_back_gate_token(self, tmp_path: Path) -> None:
-        """A locked vault during SSH-token minting must not leak the gate token.
+    def test_ssh_mint_failure_does_not_write_sidecar(self, tmp_path: Path) -> None:
+        """A locked vault during SSH-token minting aborts compose before the sidecar.
 
-        Pre-fix: ``compose`` raised before ``_write_meta``; cleanup() had
-        no meta to read and the gate token stayed in ``TokenStore``.
+        The gate token now lives only in-process (no on-disk store), so a
+        failed launch leaks nothing to revoke — compose simply raises and
+        ``_write_meta`` / ``_write_sidecar`` never run.
         """
         from terok_sandbox.vault.store.db import NoPassphraseError
 
         cfg = _make_cfg(tmp_path)
         with (
             patch("terok_sandbox.integrations.shield.ShieldManager.pre_start", return_value=[]),
-            patch(
-                "terok_sandbox.gate.tokens.TokenStore.create", return_value="terok-g-abc"
-            ) as gate_create,
+            patch("terok_sandbox.launch.mint_gate_token", return_value="terok-g-abc") as gate_mint,
             patch(
                 "terok_sandbox.config.SandboxConfig.open_credential_db",
                 side_effect=NoPassphraseError("locked"),
             ),
-            patch(
-                "terok_sandbox.gate.tokens.TokenStore.revoke_for_task", return_value=None
-            ) as revoke_gate,
         ):
             with pytest.raises(NoPassphraseError):
                 compose("myc", cfg=cfg, shield=False, gate=True, broker=False, scope="proj")
-            gate_create.assert_called_once_with("proj", "myc")
-            revoke_gate.assert_called_once_with("proj", "myc")
+            gate_mint.assert_called_once_with()
+        # No sidecar / meta was written because compose raised first.
+        assert not (run_state_dir(cfg, "myc") / "meta.json").exists()
+        assert not (cfg.state_dir / "sidecar" / "myc.json").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -428,7 +439,8 @@ class TestHandlers:
             _handle_prepare("myc", output_json=True, cfg=cfg)
         out = capsys.readouterr().out.strip()
         parsed = json.loads(out)
-        assert parsed[-2:] == ["--name", "myc"]
+        assert "--name" in parsed and "myc" in parsed
+        assert any(a.startswith("terok.sandbox.sidecar=") for a in parsed)
 
     def test_cleanup_handler_idempotent(
         self, tmp_path: Path, capsys: pytest.CaptureFixture
@@ -553,8 +565,12 @@ class TestEdgeCases:
         cfg = _make_cfg(tmp_path)
         with patch("terok_sandbox.integrations.shield.ShieldManager.pre_start", return_value=[]):
             compose("myc", cfg=cfg, shield=True, gate=False, broker=False, scope=None)
-        with patch(
-            "terok_sandbox.integrations.shield.ShieldManager.down", side_effect=OSError("nft gone")
+        with (
+            patch(
+                "terok_sandbox.integrations.shield.ShieldManager.down",
+                side_effect=OSError("nft gone"),
+            ),
+            patch("terok_sandbox.launch._resolve_container_id", return_value="ctr-uuid"),
         ):
             assert cleanup("myc", cfg=cfg) is True
         # State dir gone even though shield.down failed.
@@ -574,12 +590,20 @@ class TestEdgeCases:
         """Trailing `-v` with no value is skipped."""
         reject_managed_volumes(["-v"])
 
+    def test_reject_managed_volumes_blocks_runtime_dir_and_subpaths(self) -> None:
+        """Mounts over ``CONTAINER_RUNTIME_DIR`` (or any descendant) are rejected."""
+        from terok_sandbox.config import CONTAINER_RUNTIME_DIR
+
+        for target in (CONTAINER_RUNTIME_DIR, f"{CONTAINER_RUNTIME_DIR}/anything"):
+            with pytest.raises(SystemExit, match="managed by terok-sandbox"):
+                reject_managed_volumes(["-v", f"/tmp/x:{target}"])
+
     def test_cleanup_db_missing_does_not_crash(self, tmp_path: Path) -> None:
         """A missing credential DB at cleanup time is treated as already-revoked."""
         cfg = _make_cfg(tmp_path)
         with (
             patch("terok_sandbox.integrations.shield.ShieldManager.pre_start", return_value=[]),
-            patch("terok_sandbox.gate.tokens.TokenStore.create", return_value="t"),
+            patch("terok_sandbox.launch.mint_gate_token", return_value="t"),
             patch("terok_sandbox.vault.store.db.CredentialDB.create_token", return_value="p"),
         ):
             compose("myc", cfg=cfg, shield=True, gate=True, broker=True, scope="proj")
@@ -590,7 +614,6 @@ class TestEdgeCases:
                 "terok_sandbox.config.SandboxConfig.open_credential_db",
                 side_effect=OSError("db file vanished"),
             ),
-            patch("terok_sandbox.gate.tokens.TokenStore.revoke_for_task"),
         ):
             assert cleanup("myc", cfg=cfg) is True
 

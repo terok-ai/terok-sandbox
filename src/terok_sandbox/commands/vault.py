@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""Vault-daemon CLI verbs — daemon lifecycle plus the ``vault passphrase`` subverbs.
+"""Vault passphrase CLI verbs — session unlock / lock plus passphrase management.
 
 The unlock/lock pair drives the session-tier slot of the SQLCipher
 passphrase resolution chain: ``unlock`` lands a passphrase on the
@@ -21,12 +21,19 @@ under ``vault passphrase``:
 - ``vault passphrase destroy`` clears every persistent tier so the
   vault becomes irrecoverable without an external copy of the
   passphrase.
+
+The per-container-supervisor refactor (May 2026) removed the
+host-global vault daemon — each container now mounts its own
+short-lived [`VaultProxy`][terok_sandbox.vault.daemon.token_broker.VaultProxy]
+that resolves the passphrase on demand.  ``vault unlock`` / ``vault
+lock`` therefore only manage the passphrase tier; restarting any
+running supervisor process is the operator's job (delete the matching
+task — per the no-state-preservation rule).
 """
 
 from __future__ import annotations
 
 import sys
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from terok_util import sanitize_tty
@@ -39,96 +46,9 @@ if TYPE_CHECKING:
     from ..vault.store.systemd_creds import KeyMode
 
 
-def _handle_vault_start() -> None:
-    """Start the vault daemon."""
-    from ..vault.daemon.lifecycle import VaultManager
-
-    mgr = VaultManager()
-    if mgr.get_status().running:
-        print("Vault is already running.")
-        return
-    mgr.start_daemon()
-    print("Vault started.")
-
-
-def _handle_vault_stop() -> None:
-    """Stop the vault daemon."""
-    from ..vault.daemon.lifecycle import VaultManager
-
-    mgr = VaultManager()
-    if not mgr.is_daemon_running():
-        print("Vault is not running.")
-        return
-    mgr.stop_daemon()
-    print("Vault stopped.")
-
-
-def _handle_vault_status() -> None:
-    """Show vault status."""
-    from ..vault.daemon.lifecycle import VaultManager
-
-    status = VaultManager().get_status()
-    state = "running" if status.running else "stopped"
-    print(f"Status: {state}")
-    print(f"Socket: {sanitize_tty(str(status.socket_path))}")
-    print(f"DB:     {sanitize_tty(str(status.db_path))}")
-    print(
-        f"Routes: {sanitize_tty(str(status.routes_path))} ({status.routes_configured} configured)"
-    )
-    if status.credentials_stored:
-        print(f"Credentials: {', '.join(sanitize_tty(c) for c in status.credentials_stored)}")
-    else:
-        print("Credentials: none stored")
-    if status.plaintext_passphrase_path is not None:
-        _print_plaintext_passphrase_warning(status.plaintext_passphrase_path)
-
-
-def _print_plaintext_passphrase_warning(path: Path) -> None:
-    """Stderr WARNING that the vault passphrase lives in plaintext on disk.
-
-    Fires whenever ``credentials.passphrase`` is configured, regardless
-    of which tier actually unlocked this call — the file is a passive
-    re-unlock vector and operators deserve to know it's there.
-    """
-    use_color = sys.stderr.isatty()
-    red = "\033[1;31m" if use_color else ""
-    reset = "\033[0m" if use_color else ""
-    print(
-        f"{red}WARNING: vault passphrase stored in plaintext at {sanitize_tty(str(path))}{reset}\n"
-        f"{red}         accept on-disk plaintext as your trust boundary,"
-        f" or migrate to keyring/systemd-creds.{reset}",
-        file=sys.stderr,
-    )
-
-
-def _handle_vault_install() -> None:
-    """Install and start systemd socket activation for the vault."""
-    from ..vault.daemon.lifecycle import VaultManager
-
-    mgr = VaultManager()
-    if not mgr.is_systemd_available():
-        print("Error: systemd user services are not available on this host.")
-        raise SystemExit(1)
-    mgr.install_systemd_units()
-    print("Vault installed via systemd socket activation.")
-
-
-def _handle_vault_uninstall() -> None:
-    """Remove vault systemd units."""
-    from ..vault.daemon.lifecycle import VaultManager
-
-    mgr = VaultManager()
-    if not mgr.is_systemd_available():
-        print("Error: systemd user services are not available. Nothing to uninstall.")
-        raise SystemExit(1)
-    mgr.uninstall_systemd_units()
-    print("Vault systemd units removed.")
-
-
 def _handle_vault_unlock(*, cfg: SandboxConfig | None = None) -> None:
-    """Write the credentials-DB passphrase to the session-unlock tmpfs file; restart the daemon."""
+    """Write the credentials-DB passphrase to the session-unlock tmpfs file."""
     from .._yaml import write_secret_text
-    from ..vault.daemon.lifecycle import VaultManager
     from ..vault.store.encryption import prompt_passphrase
 
     if cfg is None:
@@ -137,20 +57,12 @@ def _handle_vault_unlock(*, cfg: SandboxConfig | None = None) -> None:
     write_secret_text(cfg.vault_passphrase_file, prompt_passphrase() + "\n")
     print(f"→ wrote passphrase to {cfg.vault_passphrase_file} (RAM-backed, cleared on reboot)")
 
-    mgr = VaultManager(cfg)
-    if mgr.is_daemon_running():
-        mgr.stop_daemon()
-        mgr.start_daemon()
-        print("→ vault daemon restarted")
-    else:
-        print("→ vault daemon is not running; start it with `terok-sandbox vault start`")
-
 
 def _forget_config_tier_updates(cfg: SandboxConfig) -> dict[str, object | None]:
     """Return the config-section patch ``vault passphrase destroy`` should apply.
 
     Both fields are auto-resolution wirings — leaving either would let
-    the daemon re-unlock on next socket activation and defeat the lock.
+    a future supervisor re-unlock from disk and defeat the destroy.
     """
     updates: dict[str, object | None] = {}
     if cfg.credentials_passphrase:
@@ -161,19 +73,17 @@ def _forget_config_tier_updates(cfg: SandboxConfig) -> dict[str, object | None]:
 
 
 def _handle_vault_lock(*, cfg: SandboxConfig | None = None, forget: bool = False) -> None:
-    """Delete the session-unlock tmpfs file and stop the vault daemon.
+    """Delete the session-unlock tmpfs file.
 
     By default this only clears the *session* tier; any of keyring,
     ``credentials.passphrase``, ``credentials.passphrase_command``, or a
-    sealed systemd-creds credential can re-unlock the daemon at the next
-    socket activation — and the operator may not realise that's not
-    "locked".  Pass ``forget=True`` (CLI:
+    sealed systemd-creds credential can re-unlock the next supervisor
+    that starts.  Pass ``forget=True`` (CLI:
     ``terok-sandbox vault passphrase destroy``) to also remove the
     keyring entry, clear those config keys from ``config.yml``, and
-    delete the sealed systemd-creds credential so the next daemon start
-    *must* have an explicit ``vault unlock``.
+    delete the sealed systemd-creds credential so the next supervisor
+    start *must* have an explicit ``vault unlock``.
     """
-    from ..vault.daemon.lifecycle import VaultManager
     from ..vault.store.encryption import forget_passphrase_in_keyring
 
     if cfg is None:
@@ -200,7 +110,8 @@ def _handle_vault_lock(*, cfg: SandboxConfig | None = None, forget: bool = False
                 print("→ keyring entry already absent")
             else:
                 raise SystemExit(
-                    "failed to clear keyring entry; daemon may still auto-unlock from keyring"
+                    "failed to clear keyring entry;"
+                    " future supervisors may still auto-unlock from keyring"
                 )
         config_updates = _forget_config_tier_updates(cfg)
         if config_updates:
@@ -244,15 +155,10 @@ def _handle_vault_lock(*, cfg: SandboxConfig | None = None, forget: bool = False
         if active:
             print(
                 f"warning: non-session passphrase tiers still active ({', '.join(active)});"
-                " the daemon may auto-unlock on next socket activation.\n"
+                " the next supervisor may auto-unlock from one of them.\n"
                 "         Use `terok-sandbox vault passphrase destroy` to clear them too.",
                 file=sys.stderr,
             )
-
-    mgr = VaultManager(cfg)
-    if mgr.is_daemon_running():
-        mgr.stop_daemon()
-        print("→ vault daemon stopped")
 
 
 #: CLI verbs for ``vault seal --key=``, mapped to systemd-creds' own
@@ -273,14 +179,12 @@ def handle_vault_seal(*, cfg: SandboxConfig | None = None, key: str = "auto") ->
 
     Adds the systemd-creds tier to the resolution chain: machine-bound
     (TPM2 + host key, or either alone), survives reboot, no OS
-    keyring required.  After sealing, the daemon resolves the
-    passphrase via ``systemd-creds decrypt`` on every start — no
-    operator interaction needed at boot, no plaintext-on-disk.
+    keyring required.  After sealing, every new supervisor resolves the
+    passphrase via ``systemd-creds decrypt`` on start — no operator
+    interaction needed at boot, no plaintext-on-disk.
 
     Requires an already-resolvable passphrase — typically from a fresh
-    ``vault unlock`` in the current session.  Doesn't touch other tiers
-    or restart the daemon; the new tier is picked up on the next chain
-    walk.
+    ``vault unlock`` in the current session.
     """
     from ..vault.store import systemd_creds
     from ..vault.store.encryption import WrongPassphraseError
@@ -316,7 +220,10 @@ def handle_vault_seal(*, cfg: SandboxConfig | None = None, key: str = "auto") ->
         raise SystemExit(str(exc)) from exc
 
     print(f"→ sealed passphrase to {cfg.vault_systemd_creds_file} (--with-key={key_mode})")
-    print("  the resolution chain will pick this up on the next daemon start; no restart required")
+    print(
+        "  the resolution chain will pick this up the next time a supervisor"
+        " starts; no restart required"
+    )
 
 
 def handle_vault_to_keyring(*, cfg: SandboxConfig | None = None) -> None:
@@ -325,15 +232,13 @@ def handle_vault_to_keyring(*, cfg: SandboxConfig | None = None) -> None:
     Resolves the passphrase via the chain (or prompts as a last resort),
     writes it to the keyring, flips ``credentials.use_keyring`` to true
     in ``config.yml``, clears any plaintext ``credentials.passphrase`` /
-    ``credentials.passphrase_command`` wiring, removes the session-file
-    and sealed systemd-creds copies, and restarts the daemon so the
-    next chain walk hits keyring.
+    ``credentials.passphrase_command`` wiring, and removes the
+    session-file and sealed systemd-creds copies.
 
     The validate-before-destroy ordering is deliberate: if the keyring
     write fails, the source tier is still intact.
     """
     from .. import config as _config
-    from ..vault.daemon.lifecycle import VaultManager
     from ..vault.store.encryption import (
         WrongPassphraseError,
         store_passphrase_in_keyring,
@@ -381,12 +286,6 @@ def handle_vault_to_keyring(*, cfg: SandboxConfig | None = None) -> None:
         if stale.exists():
             stale.unlink()
             print(f"→ removed {sanitize_tty(str(stale))}")
-
-    mgr = VaultManager(cfg)
-    if mgr.is_daemon_running():
-        mgr.stop_daemon()
-        mgr.start_daemon()
-        print("→ vault daemon restarted")
 
 
 def _handle_vault_passphrase_reveal(
@@ -508,13 +407,143 @@ def _handle_vault_passphrase_acknowledge(*, cfg: SandboxConfig | None = None) ->
     print("recovery key marked as saved.")
 
 
+def _handle_vault_list(
+    *,
+    cfg: SandboxConfig | None = None,
+    include_tokens: bool = False,
+    as_json: bool = False,
+) -> None:
+    """List every credential row in the vault (and optionally proxy tokens).
+
+    Read-only inspection.  Secret values never leave the DB: only field
+    *names* are surfaced for credential payloads and only an 8-char
+    prefix of each proxy token.  Locked-vault failures surface as a
+    one-line error pointing at ``vault unlock``.
+    """
+    import json
+
+    if cfg is None:
+        cfg = SandboxConfig()
+
+    try:
+        db = cfg.open_credential_db(prompt_on_tty=True)
+    except (Exception, SystemExit) as exc:  # noqa: BLE001 — bubble out as a friendly message
+        print(f"vault unreachable: {type(exc).__name__}: {exc}", file=sys.stderr)
+        print(
+            "hint: run `terok-sandbox vault unlock` if the passphrase isn't provisioned.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2) from exc
+
+    try:
+        credentials: list[dict[str, object]] = []
+        for credential_set in db.list_credential_sets():
+            for provider in db.list_credentials(credential_set):
+                payload = db.load_credential(credential_set, provider) or {}
+                credentials.append(
+                    {
+                        "credential_set": credential_set,
+                        "provider": provider,
+                        "type": str(payload.get("type") or "—"),
+                        "fields": sorted(k for k in payload if k != "type"),
+                    }
+                )
+        tokens = db.list_tokens() if include_tokens else []
+    finally:
+        db.close()
+
+    if as_json:
+        out: dict[str, object] = {"credentials": credentials}
+        if include_tokens:
+            out["tokens"] = [
+                {
+                    "token_prefix": _mask_token(row["token"]),
+                    "scope": row["scope"],
+                    "subject": row["subject"],
+                    "credential_set": row["credential_set"],
+                    "provider": row["provider"],
+                }
+                for row in tokens
+            ]
+        print(json.dumps(out, indent=2))
+        return
+
+    _print_credentials_table(credentials)
+    if include_tokens:
+        print()
+        _print_tokens_table(tokens)
+
+
+def _mask_token(token: str) -> str:
+    """Return a display-safe prefix of *token* — keeps the ``terok-p-`` namespace + 8 random chars."""
+    if token.startswith("terok-p-"):
+        return token[: len("terok-p-") + 8] + "…"
+    return token[:8] + "…"
+
+
+def _print_credentials_table(rows: list[dict[str, object]]) -> None:
+    """Render credentials inventory as a fixed-width table to stdout.
+
+    Every cell flows through [`sanitize_tty`][terok_util.sanitize_tty] —
+    credential-set / provider / field names originate in the on-disk
+    vault DB which is operator-writable, so a hostile value injecting
+    ANSI escapes or BEL would otherwise hit the operator's terminal
+    directly.
+    """
+    if not rows:
+        print("(no credentials stored)")
+        return
+    headers = ("credential_set", "provider", "type", "fields")
+    formatted = [
+        (
+            sanitize_tty(str(r["credential_set"])),
+            sanitize_tty(str(r["provider"])),
+            sanitize_tty(str(r["type"])),
+            sanitize_tty(", ".join(r["fields"])) if r["fields"] else "—",  # type: ignore[arg-type]
+        )
+        for r in rows
+    ]
+    widths = [max(len(h), *(len(row[i]) for row in formatted)) for i, h in enumerate(headers)]
+    print("  ".join(h.ljust(widths[i]) for i, h in enumerate(headers)))
+    print("  ".join("-" * w for w in widths))
+    for row in formatted:
+        print("  ".join(row[i].ljust(widths[i]) for i in range(len(headers))))
+
+
+def _print_tokens_table(rows: list[dict]) -> None:
+    """Render proxy-token inventory as a fixed-width table, with masked tokens.
+
+    Cells are sanitised — see [`_print_credentials_table`][terok_sandbox.commands.vault._print_credentials_table].
+    """
+    if not rows:
+        print("(no proxy tokens issued)")
+        return
+    print("proxy tokens (token values masked):")
+    headers = ("token", "scope", "subject", "credential_set", "provider")
+    formatted = [
+        (
+            sanitize_tty(_mask_token(str(r["token"]))),
+            sanitize_tty(str(r["scope"])),
+            sanitize_tty(str(r["subject"])),
+            sanitize_tty(str(r["credential_set"])),
+            sanitize_tty(str(r["provider"])),
+        )
+        for r in rows
+    ]
+    widths = [max(len(h), *(len(row[i]) for row in formatted)) for i, h in enumerate(headers)]
+    print("  ".join(h.ljust(widths[i]) for i, h in enumerate(headers)))
+    print("  ".join("-" * w for w in widths))
+    for row in formatted:
+        print("  ".join(row[i].ljust(widths[i]) for i in range(len(headers))))
+
+
 def _handle_vault_destroy_passphrase(*, cfg: SandboxConfig | None = None) -> None:
     """Clear every persistent passphrase tier — the destructive lock.
 
     Removes the session file, keyring entry, sealed systemd-creds
-    credential, and plaintext ``config.yml`` fields, then stops the
-    daemon.  The vault becomes unrecoverable unless the operator has an
-    external copy of the passphrase.
+    credential, and plaintext ``config.yml`` fields.  The vault becomes
+    unrecoverable unless the operator has an external copy of the
+    passphrase.
 
     See [`_handle_vault_lock`][terok_sandbox.commands.vault._handle_vault_lock]
     — this is its ``forget=True`` mode, exposed as a distinct verb so
@@ -595,7 +624,7 @@ _PASSPHRASE_GROUP = CommandDef(
 
 #: The vault command group exposed at the package's top level — a
 #: single [`CommandDef`][terok_util.cli_types.CommandDef] whose
-#: ``children`` are the daemon-lifecycle verbs plus the nested
+#: ``children`` are the session passphrase verbs plus the nested
 #: ``passphrase`` group.  Consumers wire the whole subtree via
 #: [`CommandTree`][terok_util.cli_types.CommandTree]; the structural
 #: nesting is what makes ``vault passphrase X`` work without manual
@@ -603,33 +632,8 @@ _PASSPHRASE_GROUP = CommandDef(
 VAULT_COMMANDS: tuple[CommandDef, ...] = (
     CommandDef(
         name="vault",
-        help="Vault management",
+        help="Vault passphrase management",
         children=(
-            CommandDef(
-                name="start",
-                help="Start the vault daemon",
-                handler=_handle_vault_start,
-            ),
-            CommandDef(
-                name="stop",
-                help="Stop the vault daemon",
-                handler=_handle_vault_stop,
-            ),
-            CommandDef(
-                name="status",
-                help="Show vault status",
-                handler=_handle_vault_status,
-            ),
-            CommandDef(
-                name="install",
-                help="Install systemd socket activation",
-                handler=_handle_vault_install,
-            ),
-            CommandDef(
-                name="uninstall",
-                help="Remove systemd units",
-                handler=_handle_vault_uninstall,
-            ),
             CommandDef(
                 name="unlock",
                 help="Provision the credentials-DB passphrase for this session (tmpfs file)",
@@ -637,8 +641,26 @@ VAULT_COMMANDS: tuple[CommandDef, ...] = (
             ),
             CommandDef(
                 name="lock",
-                help="Remove the session-unlock tmpfs file and stop the vault daemon",
+                help="Remove the session-unlock tmpfs file",
                 handler=_handle_vault_lock,
+            ),
+            CommandDef(
+                name="list",
+                help="Inventory stored credentials (and optionally proxy tokens)",
+                handler=_handle_vault_list,
+                args=(
+                    ArgDef(
+                        name="--include-tokens",
+                        action="store_true",
+                        help="Also show proxy-token rows (token values are masked)",
+                    ),
+                    ArgDef(
+                        name="--json",
+                        dest="as_json",
+                        action="store_true",
+                        help="Machine-readable JSON output",
+                    ),
+                ),
             ),
             _PASSPHRASE_GROUP,
         ),

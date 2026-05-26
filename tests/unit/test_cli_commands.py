@@ -60,7 +60,7 @@ class TestCommandRegistry:
     def test_gate_subverbs_present(self) -> None:
         gate = COMMANDS.find_at(("gate",))
         names = {c.name for c in gate.children}
-        assert {"start", "stop", "status"} <= names
+        assert {"path"} <= names
 
     def test_shield_subverbs_present(self) -> None:
         shield = COMMANDS.find_at(("shield",))
@@ -105,28 +105,17 @@ class TestCLIBasics:
         assert "install-hooks" in combined
         assert "status" in combined
 
-    def test_shield_install_hooks_requires_scope_flag(self) -> None:
-        """``shield install-hooks`` with no flag surfaces CLI-specific hints.
-
-        The library function ([`terok_sandbox.integrations.shield.run_setup`][terok_sandbox.integrations.shield.run_setup]) raises
-        ``ValueError`` on invalid combos — the CLI layer is what maps it to
-        actionable ``install-hooks --root/--user`` remediation text.
-        """
+    def test_shield_install_hooks_delegates(self) -> None:
+        """``shield install-hooks`` calls ``ShieldHooks.install()`` — no scope flags."""
         from terok_sandbox.commands import _handle_shield_setup
 
-        try:
+        with patch("terok_sandbox.integrations.shield.ShieldHooks.install") as install:
             _handle_shield_setup()
-        except SystemExit as exc:
-            message = str(exc)
-            assert "--root" in message and "--user" in message
-            assert "shield install-hooks" in message
-        else:  # pragma: no cover — defensive: must SystemExit
-            raise AssertionError("_handle_shield_setup should have raised SystemExit")
+        install.assert_called_once_with()
 
     def test_gate_no_subcommand_shows_help(self) -> None:
         out, _, _ = _run_cli("gate")
-        combined = out.lower()
-        assert "start" in combined or "stop" in combined
+        assert "path" in out.lower()
 
     def test_ssh_no_subcommand_shows_help(self) -> None:
         out, _, _ = _run_cli("ssh")
@@ -136,13 +125,13 @@ class TestCLIBasics:
 class TestShieldCLI:
     """Verify shield subcommand dispatch."""
 
-    def test_install_hooks_user_delegates_to_shield_hooks_install(self) -> None:
-        """``shield install-hooks --user`` reaches ``ShieldHooks.install(user=True)``."""
+    def test_install_hooks_delegates_to_shield_hooks_install(self) -> None:
+        """``shield install-hooks`` reaches ``ShieldHooks.install()``."""
         from terok_sandbox.commands import _handle_shield_setup
 
         with patch("terok_sandbox.integrations.shield.ShieldHooks.install") as install:
-            _handle_shield_setup(user=True)
-        install.assert_called_once_with(root=False, user=True)
+            _handle_shield_setup()
+        install.assert_called_once_with()
 
     def test_shield_status_runs(self) -> None:
         """``shield status`` resolves through shield's own registry handler.
@@ -188,125 +177,23 @@ class TestHandlerCfgSignatures:
             assert "cfg" in sig.parameters, f"{cmd.handler.__name__} missing cfg param"
 
 
-class TestGateHandlerCfgPassthrough:
-    """Verify gate handlers propagate cfg to downstream functions."""
+class TestGatePathVerb:
+    """Verify the read-only ``gate path`` verb prints the mirror's file:// URL."""
 
-    def test_gate_start_passes_cfg_to_systemd(self) -> None:
-        """_handle_gate_start propagates cfg to install_systemd_units."""
+    def test_prints_file_url_under_gate_base(self, capsys, tmp_path) -> None:
         from terok_sandbox import SandboxConfig
-        from terok_sandbox.commands import _handle_gate_start
-        from terok_sandbox.gate.lifecycle import GateServerManager
+        from terok_sandbox.commands import _handle_gate_path
 
-        with (
-            patch.object(GateServerManager, "is_systemd_available", return_value=True),
-            patch.object(GateServerManager, "install_systemd_units") as mock_install,
-        ):
-            _handle_gate_start(cfg=SandboxConfig(services_mode="socket"))
-        mock_install.assert_called_once()
+        cfg = SandboxConfig(state_dir=tmp_path / "state")
+        _handle_gate_path(project="myproj", cfg=cfg)
+        out = capsys.readouterr().out.strip()
+        expected = (cfg.gate_base_path / "myproj.git").as_uri()
+        assert out == expected
+        assert out.startswith("file://")
 
-    def test_gate_start_daemon_passes_cfg(self) -> None:
-        """_handle_gate_start propagates cfg to start_daemon in daemon mode."""
-        from terok_sandbox import SandboxConfig
-        from terok_sandbox.commands import _handle_gate_start
-        from terok_sandbox.gate.lifecycle import GateServerManager
-
-        with (
-            patch.object(GateServerManager, "is_systemd_available", return_value=False),
-            patch.object(GateServerManager, "start_daemon") as mock_start,
-        ):
-            _handle_gate_start(port=1234, cfg=SandboxConfig(services_mode="socket"))
-        mock_start.assert_called_once_with(port=1234)
-
-    def test_gate_stop_systemd_passes_cfg(self) -> None:
-        """_handle_gate_stop propagates cfg through the systemd branch."""
-        from terok_sandbox import SandboxConfig
-        from terok_sandbox.commands import _handle_gate_stop
-        from terok_sandbox.gate.lifecycle import GateServerManager, GateServerStatus
-
-        mock_status = GateServerStatus(mode="systemd", running=True, port=9418)
-        with (
-            patch.object(GateServerManager, "get_status", return_value=mock_status),
-            patch.object(GateServerManager, "uninstall_systemd_units") as m_uninstall,
-        ):
-            _handle_gate_stop(cfg=SandboxConfig(services_mode="socket"))
-        m_uninstall.assert_called_once()
-
-    def test_gate_stop_daemon_passes_cfg(self) -> None:
-        """_handle_gate_stop propagates cfg through the daemon branch."""
-        from terok_sandbox import SandboxConfig
-        from terok_sandbox.commands import _handle_gate_stop
-        from terok_sandbox.gate.lifecycle import GateServerManager, GateServerStatus
-
-        mock_status = GateServerStatus(mode="daemon", running=True, port=9418)
-        with (
-            patch.object(GateServerManager, "get_status", return_value=mock_status),
-            patch.object(GateServerManager, "stop_daemon") as m_stop,
-        ):
-            _handle_gate_stop(cfg=SandboxConfig(services_mode="socket"))
-        m_stop.assert_called_once()
-
-    def test_gate_status_passes_cfg(self) -> None:
-        """_handle_gate_status propagates cfg to all downstream calls."""
-        from terok_sandbox import SandboxConfig
-        from terok_sandbox.commands import _handle_gate_status
-        from terok_sandbox.gate.lifecycle import GateServerManager, GateServerStatus
-
-        mock_status = GateServerStatus(mode="none", running=False, port=9418)
-        with (
-            patch.object(GateServerManager, "get_status", return_value=mock_status),
-            patch.object(
-                GateServerManager,
-                "gate_base_path",
-                new_callable=lambda: property(lambda s: "/t/gate"),
-            ),
-            patch.object(GateServerManager, "check_units_outdated", return_value=None),
-        ):
-            _handle_gate_status(cfg=SandboxConfig(services_mode="socket"))
-
-    def test_gate_status_prints_hint_on_outdated(self) -> None:
-        """_handle_gate_status appends CLI-specific remediation hint to stderr."""
-        from terok_sandbox.commands import _handle_gate_status
-        from terok_sandbox.gate.lifecycle import GateServerManager, GateServerStatus
-
-        mock_status = GateServerStatus(mode="systemd", running=True, port=9418)
-        stderr = StringIO()
-        with (
-            patch.object(GateServerManager, "get_status", return_value=mock_status),
-            patch.object(
-                GateServerManager,
-                "gate_base_path",
-                new_callable=lambda: property(lambda s: "/t/gate"),
-            ),
-            patch.object(
-                GateServerManager,
-                "check_units_outdated",
-                return_value="Systemd units are outdated (installed v1, expected v4).",
-            ),
-            patch("sys.stderr", stderr),
-        ):
-            _handle_gate_status()
-        output = stderr.getvalue()
-        assert "outdated" in output
-        assert "terok-sandbox gate start" in output
-
-
-class TestGateCLI:
-    """Verify gate subcommand dispatch."""
-
-    def test_gate_status_runs(self) -> None:
-        from terok_sandbox.gate.lifecycle import GateServerManager, GateServerStatus
-
-        mock_status = GateServerStatus(mode="none", running=False, port=9418)
-        with (
-            patch.object(GateServerManager, "get_status", return_value=mock_status),
-            patch.object(
-                GateServerManager,
-                "gate_base_path",
-                new_callable=lambda: property(lambda s: "/tmp/gate"),
-            ),
-            patch.object(GateServerManager, "check_units_outdated", return_value=None),
-        ):
-            out, _, rc = _run_cli("gate", "status")
+    def test_gate_path_via_cli(self) -> None:
+        """``gate path <project>`` resolves through the CLI and prints the URL."""
+        out, _, rc = _run_cli("gate", "path", "myproj")
         assert rc == 0
-        assert "none" in out
-        assert "9418" in out
+        assert out.strip().startswith("file://")
+        assert "myproj.git" in out

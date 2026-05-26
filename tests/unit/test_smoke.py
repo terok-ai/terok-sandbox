@@ -27,8 +27,8 @@ def test_import_gate():
     """Gate subpackage is importable."""
     from terok_sandbox.gate import server
 
-    assert hasattr(server, "main")
-    assert hasattr(server, "TokenStore")
+    assert hasattr(server, "GateServer")
+    assert hasattr(server, "_SingleTokenStore")
 
 
 def test_import_paths():
@@ -82,22 +82,22 @@ def test_import_runtime():
     assert isinstance(runtime.Image, type)
 
 
-def test_import_gate_lifecycle():
-    """Gate lifecycle module is importable."""
-    from terok_sandbox.gate.lifecycle import GateServerManager
+def test_import_gate_server():
+    """GateServer component is importable and constructible."""
+    from pathlib import Path
 
-    mgr = GateServerManager()
-    assert callable(mgr.get_status)
-    assert callable(mgr.is_systemd_available)
+    from terok_sandbox.gate.server import GateServer
+
+    gate = GateServer(mirror_root=Path("/tmp"), token="t", scope="p", port=1234, host="127.0.0.1")
+    assert callable(gate.start)
+    assert callable(gate.stop)
 
 
 def test_import_gate_tokens():
-    """Gate tokens module is importable."""
-    from terok_sandbox.gate.tokens import TokenStore
+    """Gate tokens module exposes the minter."""
+    from terok_sandbox.gate.tokens import mint_gate_token
 
-    store = TokenStore()
-    assert callable(store.create)
-    assert callable(store.revoke_for_task)
+    assert mint_gate_token().startswith("terok-g-")
 
 
 def test_import_ssh():

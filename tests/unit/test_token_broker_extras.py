@@ -1,16 +1,20 @@
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for token broker: argparse + main(), refresh-loop error handling,
-``_run_multi`` socket validation, edge cases in handler + OAuth refresh.
+"""Tests for token broker: refresh-loop error handling, ``_TokenDB`` chain logging,
+edge cases in handler + OAuth refresh.
+
+The standalone-daemon entry point (``main()`` + ``_run_multi``) was
+removed in the per-container-supervisor refactor (May 2026); the
+remaining tests cover the embeddable pieces (`_TokenDB`, `_handle_request`,
+`_refresh_loop`, `_do_oauth_refresh`) that the supervisor mounts via
+[`VaultProxy`][terok_sandbox.vault.daemon.token_broker.VaultProxy].
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-import socket as _socket
-import stat
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -24,9 +28,7 @@ from terok_sandbox.vault.daemon.token_broker import (
     _build_app,  # noqa: PLC2701
     _do_oauth_refresh,  # noqa: PLC2701
     _refresh_loop,  # noqa: PLC2701
-    _run_multi,  # noqa: PLC2701
     _TokenDB,  # noqa: PLC2701
-    main,
 )
 from terok_sandbox.vault.store.db import CredentialDB
 
@@ -179,121 +181,12 @@ class TestRefreshLoop:
 
 
 # ---------------------------------------------------------------------------
-# _run_multi: socket validation paths
+# _TokenDB: passphrase-chain logging on construction
 # ---------------------------------------------------------------------------
 
 
-def _bare_app() -> web.Application:
-    """Return an app with no on_startup handlers (so AppRunner.setup() is cheap)."""
-    return web.Application()
-
-
-@pytest.mark.asyncio
-class TestRunMultiSocketValidation:
-    """``_run_multi`` validates the requested socket path before binding."""
-
-    async def test_refuses_regular_file_at_socket_path(self, tmp_path: Path) -> None:
-        # Plant a regular file where the socket would go
-        sock_path = tmp_path / "vault.sock"
-        sock_path.write_text("not-a-socket")
-
-        with pytest.raises(RuntimeError, match="non-socket"):
-            await _run_multi(
-                _bare_app(),
-                sock_path=str(sock_path),
-                port=None,
-            )
-
-    async def test_refuses_in_use_socket(self, tmp_path: Path) -> None:
-        """If a real listener already holds the socket, _run_multi refuses."""
-        sock_path = tmp_path / "vault.sock"
-        srv = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
-        srv.bind(str(sock_path))
-        srv.listen(1)
-        try:
-            assert stat.S_ISSOCK(sock_path.lstat().st_mode)
-            with pytest.raises(RuntimeError, match="already in use"):
-                await _run_multi(
-                    _bare_app(),
-                    sock_path=str(sock_path),
-                    port=None,
-                )
-        finally:
-            srv.close()
-
-
-# ---------------------------------------------------------------------------
-# main() — argparse + dispatch
-# ---------------------------------------------------------------------------
-
-
-def _argv_basics(tmp_path: Path) -> list[str]:
-    """Return a minimal valid argv for terok-vault main()."""
-    db = tmp_path / "creds.db"
-    CredentialDB(db, passphrase="test").close()
-    routes = tmp_path / "routes.json"
-    routes.write_text("{}")
-    return [
-        "terok-vault",
-        f"--socket-path={tmp_path / 'vault.sock'}",
-        f"--db-path={db}",
-        f"--routes-file={routes}",
-    ]
-
-
-class TestMainCli:
-    """main() validates flag combinations and writes the pid file."""
-
-    def test_dispatches_to_run_multi(self, tmp_path: Path) -> None:
-        with (
-            patch("sys.argv", _argv_basics(tmp_path)),
-            patch("terok_sandbox.vault.daemon.token_broker.asyncio.run") as run,
-        ):
-            main()
-        run.assert_called_once()
-
-    def test_writes_pid_file(self, tmp_path: Path) -> None:
-        pidfile = tmp_path / "vault.pid"
-        argv = _argv_basics(tmp_path) + [f"--pid-file={pidfile}"]
-        with (
-            patch("sys.argv", argv),
-            patch("terok_sandbox.vault.daemon.token_broker.asyncio.run"),
-        ):
-            main()
-        import os
-
-        assert int(pidfile.read_text()) == os.getpid()
-
-    def test_log_file_handler_used(self, tmp_path: Path) -> None:
-        log = tmp_path / "vault.log"
-        argv = _argv_basics(tmp_path) + [f"--log-file={log}", "--log-level=DEBUG"]
-        with (
-            patch("sys.argv", argv),
-            patch("terok_sandbox.vault.daemon.token_broker.asyncio.run"),
-            patch("terok_sandbox.vault.daemon.token_broker.logging.basicConfig") as basic_config,
-        ):
-            main()
-        kwargs = basic_config.call_args.kwargs
-        # FileHandler appended (not a StreamHandler)
-        import logging
-
-        assert any(isinstance(h, logging.FileHandler) for h in kwargs["handlers"])
-
-    def test_ssh_signer_port_and_socket_mutually_exclusive(self, tmp_path: Path) -> None:
-        argv = _argv_basics(tmp_path) + [
-            "--ssh-signer-port=18732",
-            "--ssh-signer-socket-path=/tmp/terok-testing/ssh.sock",
-            "--ssh-keys-file=/tmp/terok-testing/keys.json",
-        ]
-        with patch("sys.argv", argv):
-            with pytest.raises(SystemExit):
-                main()
-
-    def test_unknown_flag_is_an_error(self, tmp_path: Path) -> None:
-        """A legacy flag like the old ``--ssh-keys-file`` is rejected by argparse."""
-        argv = _argv_basics(tmp_path) + ["--ssh-keys-file=/tmp/nope.json"]
-        with patch("sys.argv", argv), pytest.raises(SystemExit):
-            main()
+class TestTokenDBPassphraseChainLogging:
+    """``_TokenDB.__init__`` logs the resolved tier and bails on an empty chain."""
 
     def test_logs_resolved_passphrase_tier(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
@@ -344,62 +237,6 @@ class TestMainCli:
             with pytest.raises(NoPassphraseError):
                 _TokenDB(str(tmp_path / "absent.db"))
         assert any("no tier resolved" in rec.getMessage() for rec in caplog.records)
-
-    def test_invalid_log_level_falls_back_to_info(self, tmp_path: Path) -> None:
-        """Unknown --log-level value falls through to logging.INFO."""
-        argv = _argv_basics(tmp_path) + ["--log-level=NOTALEVEL"]
-        with (
-            patch("sys.argv", argv),
-            patch("terok_sandbox.vault.daemon.token_broker.asyncio.run"),
-            patch("terok_sandbox.vault.daemon.token_broker.logging.basicConfig") as basic_config,
-        ):
-            main()
-        import logging
-
-        assert basic_config.call_args.kwargs["level"] == logging.INFO
-
-    def test_keyboard_interrupt_caught_silently(self, tmp_path: Path) -> None:
-        with (
-            patch("sys.argv", _argv_basics(tmp_path)),
-            patch(
-                "terok_sandbox.vault.daemon.token_broker.asyncio.run", side_effect=KeyboardInterrupt
-            ),
-        ):
-            main()  # must not raise
-
-    def test_systemexit_caught_silently(self, tmp_path: Path) -> None:
-        with (
-            patch("sys.argv", _argv_basics(tmp_path)),
-            patch("terok_sandbox.vault.daemon.token_broker.asyncio.run", side_effect=SystemExit(0)),
-        ):
-            main()  # must not raise
-
-
-# ---------------------------------------------------------------------------
-# _tcp_port validator (defined inside main)
-# ---------------------------------------------------------------------------
-
-
-class TestTcpPortValidator:
-    """The argparse port validator rejects out-of-range numbers."""
-
-    def test_rejects_zero(self, tmp_path: Path) -> None:
-        argv = _argv_basics(tmp_path) + ["--port=0"]
-        with patch("sys.argv", argv):
-            with pytest.raises(SystemExit):
-                main()
-
-    def test_rejects_too_large(self, tmp_path: Path) -> None:
-        argv = _argv_basics(tmp_path) + ["--port=70000"]
-        with patch("sys.argv", argv):
-            with pytest.raises(SystemExit):
-                main()
-
-    def test_rejects_non_integer(self, tmp_path: Path) -> None:
-        argv = _argv_basics(tmp_path) + ["--port=abc"]
-        with patch("sys.argv", argv):
-            with pytest.raises(SystemExit):
-                main()
 
 
 # ---------------------------------------------------------------------------

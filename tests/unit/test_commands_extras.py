@@ -1,9 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for command handlers: gate-stop branches, vault install/uninstall,
-shield-status setup hint, doctor, and SSH key removal helpers.
-"""
+"""Tests for command handlers: doctor and SSH key removal helpers."""
 
 from __future__ import annotations
 
@@ -15,25 +13,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from terok_sandbox.commands import (
-    _handle_doctor,
-    _handle_gate_stop,
-    _handle_vault_install,
-    _handle_vault_uninstall,
-)
+from terok_sandbox.commands import _handle_doctor
 from terok_sandbox.config import SandboxConfig
 from terok_sandbox.doctor import CheckVerdict, DoctorCheck
-from terok_sandbox.gate.lifecycle import GateServerManager, GateServerStatus
-from terok_sandbox.vault.daemon.lifecycle import VaultManager
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _gate_status(mode: str) -> GateServerStatus:
-    """Build a minimal GateServerStatus with the given mode."""
-    return GateServerStatus(mode=mode, running=False, port=9418)
 
 
 def _make_cfg(tmp_path: Path) -> SandboxConfig:
@@ -46,79 +32,20 @@ def _make_cfg(tmp_path: Path) -> SandboxConfig:
     )
 
 
-# ---------------------------------------------------------------------------
-# _handle_gate_stop "not running" branch (line 106)
-# ---------------------------------------------------------------------------
+# The gate-stop / shield-status handler tests that lived here covered the
+# retired host gate daemon and a hand-rolled shield-status verb that no
+# longer exist; sandbox consumes shield's registry verb directly now.
 
 
-class TestHandleGateStopNotRunning:
-    """When status.mode is neither 'systemd' nor 'daemon', print the idle message."""
-
-    def test_prints_not_running(self, capsys: pytest.CaptureFixture[str]) -> None:
-        with patch.object(GateServerManager, "get_status", return_value=_gate_status("none")):
-            _handle_gate_stop()
-        out = capsys.readouterr().out
-        assert "not running" in out
-
-
-# Shield-status hint test moved to terok-shield's own suite — sandbox no
-# longer hand-rolls _handle_shield_status; it consumes shield's
-# registry verb directly via CommandTree.
+# The per-container-supervisor refactor (May 2026) removed the
+# host-global vault daemon, so ``vault install`` / ``vault uninstall``
+# are gone too — the surrounding install/uninstall tests live in
+# test_setup_phases.py for the supervisor / shield / gate / legacy
+# cleanup phases that remain.
 
 
 # ---------------------------------------------------------------------------
-# _handle_vault_install / _handle_vault_uninstall — systemd-unavailable branch
-# ---------------------------------------------------------------------------
-
-
-class TestHandleVaultInstall:
-    """Installer fails loudly when the systemd user session is unavailable."""
-
-    def test_install_systemd_unavailable_exits_1(self, capsys: pytest.CaptureFixture[str]) -> None:
-        with patch.object(VaultManager, "is_systemd_available", return_value=False):
-            with pytest.raises(SystemExit) as exc:
-                _handle_vault_install()
-        assert exc.value.code == 1
-        assert "systemd" in capsys.readouterr().out
-
-    def test_install_systemd_available_calls_install(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        with (
-            patch.object(VaultManager, "is_systemd_available", return_value=True),
-            patch.object(VaultManager, "install_systemd_units") as install,
-        ):
-            _handle_vault_install()
-        install.assert_called_once()
-        assert "installed" in capsys.readouterr().out.lower()
-
-
-class TestHandleVaultUninstall:
-    """Uninstaller mirrors install: fail loudly when systemd missing."""
-
-    def test_uninstall_systemd_unavailable_exits_1(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        with patch.object(VaultManager, "is_systemd_available", return_value=False):
-            with pytest.raises(SystemExit) as exc:
-                _handle_vault_uninstall()
-        assert exc.value.code == 1
-        assert "Nothing to uninstall" in capsys.readouterr().out
-
-    def test_uninstall_systemd_available_calls_uninstall(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        with (
-            patch.object(VaultManager, "is_systemd_available", return_value=True),
-            patch.object(VaultManager, "uninstall_systemd_units") as un,
-        ):
-            _handle_vault_uninstall()
-        un.assert_called_once()
-        assert "removed" in capsys.readouterr().out.lower()
-
-
-# ---------------------------------------------------------------------------
-# _handle_doctor — the largest uncovered chunk (lines 975-1023)
+# _handle_doctor — the largest uncovered chunk
 # ---------------------------------------------------------------------------
 
 
@@ -146,7 +73,7 @@ def _doctor_patches(
     *,
     subprocess_side_effect: object = None,
 ) -> Iterator[MagicMock]:
-    """Patch ``sandbox_doctor_checks``, ``subprocess.run``, and VaultManager ports.
+    """Patch ``sandbox_doctor_checks`` and ``subprocess.run``.
 
     Yields the ``subprocess.run`` mock so tests can inspect calls or override
     return_value.  By default the mock returns a successful CompletedProcess.
@@ -170,8 +97,6 @@ def _doctor_patches(
             return_value=benign_recovery_check,
         ),
         patch("subprocess.run") as run,
-        patch.object(VaultManager, "token_broker_port", new=1),
-        patch.object(VaultManager, "ssh_signer_port", new=2),
     ):
         if subprocess_side_effect is not None:
             run.side_effect = subprocess_side_effect

@@ -171,15 +171,6 @@ depends_on = [
     "terok_sandbox.vault.daemon.token_broker",
 ]
 
-[[modules]]
-path = "terok_sandbox.vault.ssh.scope_sockets"
-layer = "foundation"
-depends_on = [
-    "terok_sandbox.vault.ssh.signer",
-    "terok_sandbox.vault.store.db",
-    "terok_sandbox.config",
-]
-
 # Vault.daemon — the long-running process: lifecycle, broker, audit.
 [[modules]]
 path = "terok_sandbox.vault.daemon"
@@ -202,20 +193,14 @@ path = "terok_sandbox.vault.daemon.audit"
 layer = "foundation"
 depends_on = []
 
-# VaultStatus dataclass + VaultUnreachableError exception — the vocabulary
-# every renderer (sandbox CLI, executor, terok TUI, doctor) builds against.
-[[modules]]
-path = "terok_sandbox.vault.daemon.status"
-layer = "foundation"
-depends_on = ["terok_sandbox.vault.store.encryption"]
-
-# Gate standalone HTTP server — zero internal imports
+# Gate HTTP server component (GateServer) — composed by the supervisor;
+# only internal import is the SELinux socket-labelling helper (foundation).
 [[modules]]
 path = "terok_sandbox.gate.server"
 layer = "foundation"
 depends_on = []
 
-# Gate package root — same-layer dep on gate.server (__main__.py re-export)
+# Gate package root
 [[modules]]
 path = "terok_sandbox.gate"
 layer = "foundation"
@@ -245,19 +230,11 @@ path = "terok_sandbox.integrations.clearance"
 layer = "core"
 depends_on = []
 
-# Gate token CRUD
+# Gate token minter — no internal imports
 [[modules]]
 path = "terok_sandbox.gate.tokens"
-layer = "core"
+layer = "foundation"
 depends_on = []
-
-# Gate server lifecycle — same-layer dep on gate.tokens
-[[modules]]
-path = "terok_sandbox.gate.lifecycle"
-layer = "core"
-depends_on = [
-    "terok_sandbox.gate.tokens",
-]
 
 # Vault SSH manager — user-facing SSHManager façade over the store
 # and the keypair primitives.
@@ -276,14 +253,6 @@ depends_on = []
 path = "terok_sandbox.gate.mirror"
 layer = "core"
 depends_on = []
-
-# Vault daemon lifecycle (start/stop, systemd units, status probes).
-# ``status`` is implicitly imported from a lower layer (foundation),
-# so no explicit dep is needed.
-[[modules]]
-path = "terok_sandbox.vault.daemon.lifecycle"
-layer = "core"
-depends_on = ["terok_sandbox.vault.daemon"]
 
 # ── Surface ────────────────────────────────────────────────
 # Orchestration + CLI.  Core and foundation imports are implicit.
@@ -311,6 +280,7 @@ depends_on = [
     "terok_sandbox.commands.sandbox",
     "terok_sandbox.commands.shield",
     "terok_sandbox.commands.ssh",
+    "terok_sandbox.commands.supervisor",
     "terok_sandbox.commands.vault",
 ]
 
@@ -366,6 +336,36 @@ depends_on = [
     "terok_sandbox.launch",
 ]
 
+[[modules]]
+path = "terok_sandbox.commands.supervisor"
+layer = "surface"
+depends_on = [
+    "terok_sandbox.supervisor",
+]
+
+# ── Supervisor — per-container service composition (in-process). ────
+# Pulls together VaultProxy + ClearanceHub + VerdictServer + the
+# desktop notifier; reaches across the integrations adapters to keep
+# the cross-package import surface contained.
+[[modules]]
+path = "terok_sandbox.supervisor"
+layer = "core"
+depends_on = [
+    "terok_sandbox.supervisor.main",
+    "terok_sandbox.integrations.shield",
+    "terok_sandbox.paths",
+]
+
+[[modules]]
+path = "terok_sandbox.supervisor.main"
+layer = "core"
+depends_on = [
+    "terok_sandbox.integrations.clearance",
+    "terok_sandbox.vault.daemon.token_broker",
+    "terok_sandbox.vault.ssh.signer",
+    "terok_sandbox._util._selinux",
+]
+
 # Round-trip YAML writer for setup-time config.yml edits.
 [[modules]]
 path = "terok_sandbox._yaml"
@@ -417,5 +417,6 @@ path = "terok_sandbox"
 layer = "surface"
 depends_on = [
     "terok_sandbox.commands",
+    "terok_sandbox.launch",
     "terok_sandbox.sandbox",
 ]

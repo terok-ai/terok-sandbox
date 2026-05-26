@@ -410,9 +410,9 @@ class TestSchemaMigration:
         ``credentials.db`` — no CLI ``terok auth`` has run yet, so the
         file either does not exist or exists as an empty sqlite3 image
         with no tables.  Without schema bootstrap, the OAuth refresh
-        loop's ``SELECT ... FROM credentials`` and the SSH reconciler's
-        ``SELECT ... FROM ssh_keys_version`` both raise
-        ``OperationalError: no such table`` and the systemd unit dies
+        loop's ``SELECT ... FROM credentials`` and the SSH signer's
+        ``SELECT ... FROM ssh_keys`` both raise
+        ``OperationalError: no such table`` and the supervisor dies
         on startup.
         """
         from terok_sandbox.vault.daemon.token_broker import _TokenDB
@@ -422,7 +422,6 @@ class TestSchemaMigration:
         token_db = _TokenDB(str(db_path))
         try:
             assert token_db.list_refreshable() == []
-            assert token_db.ssh_keys_version() == 0
             assert token_db.load_ssh_keys_for_scope("any") == []
             assert token_db.lookup_token("nonexistent") is None
         finally:
@@ -445,10 +444,7 @@ class TestSchemaMigration:
                 "credentials",
                 "ssh_keys",
                 "ssh_key_assignments",
-                "ssh_keys_version",
                 "proxy_tokens",
             } <= tables
-            (version,) = conn.execute("SELECT version FROM ssh_keys_version WHERE id=0").fetchone()
-            assert version == 0
         finally:
             conn.close()
