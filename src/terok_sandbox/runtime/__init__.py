@@ -19,7 +19,7 @@ from .krun_transport import (
     podman_port_resolver,
 )
 from .null import NullRuntime
-from .podman import GpuConfigError, PodmanRuntime
+from .podman import GpuConfigError, PodmanRuntime, check_gpu_available
 from .protocol import (
     Container,
     ContainerRemoveResult,
@@ -56,4 +56,6 @@ __all__ = [
     "DEFAULT_SSH_USER",
     # Error types that remain public
     "GpuConfigError",
+    # GPU/CDI probes
+    "check_gpu_available",
 ]

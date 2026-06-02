@@ -16,6 +16,7 @@ replace ``Sandbox.run`` when Phase 3 lands).
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import re
 import select
@@ -44,7 +45,8 @@ _CDI_HINT = (
     "See: https://podman-desktop.io/docs/podman/gpu"
 )
 
-_CDI_ERROR_PATTERNS = ("cdi.k8s.io", "nvidia.com/gpu", "CDI")
+_NVIDIA_GPU_KIND = "nvidia.com/gpu"
+_CDI_ERROR_PATTERNS = ("cdi.k8s.io", _NVIDIA_GPU_KIND, "CDI")
 
 
 class GpuConfigError(RuntimeError):
@@ -72,6 +74,57 @@ def check_gpu_error(exc: subprocess.CalledProcessError) -> None:
     if any(pat in stderr for pat in _CDI_ERROR_PATTERNS):
         msg = f"Container launch failed (GPU misconfiguration):\n{stderr.strip()}\n\n{_CDI_HINT}"
         raise GpuConfigError(msg) from exc
+
+
+_CDI_DEFAULT_DIRS: tuple[Path, ...] = (Path("/etc/cdi"), Path("/var/run/cdi"))
+
+
+def _cdi_spec_paths() -> list[Path]:
+    """Return CDI spec file paths podman is configured to scan.
+
+    Asks podman first (so a custom ``cdi_spec_dirs`` in
+    ``containers.conf`` is honoured) and falls back to the documented
+    default directories when podman is absent or its info template
+    doesn't expose ``Host.CDISpecs`` (older versions).
+    """
+    try:
+        proc = subprocess.run(  # nosec B603 B607 — podman CLI invocation matches existing pattern in this module
+            ["podman", "info", "--format", "{{json .Host.CDISpecs}}"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        )
+        listed = json.loads(proc.stdout or "null") or []
+        if listed:
+            return [Path(p) for p in listed]
+    except (
+        FileNotFoundError,
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+        json.JSONDecodeError,
+    ):
+        pass
+    return [f for d in _CDI_DEFAULT_DIRS if d.is_dir() for f in d.iterdir() if f.is_file()]
+
+
+def check_gpu_available() -> bool:
+    """Return ``True`` when a CDI spec declares the ``nvidia.com/gpu`` kind.
+
+    Wizards call this to decide whether to offer the NVIDIA base image;
+    the on-launch [`check_gpu_error`][terok_sandbox.runtime.podman.check_gpu_error]
+    path is the authoritative one and stays in place.  Any failure
+    (missing podman, missing CDI dirs, unreadable spec) collapses to
+    ``False`` so callers can treat this as a pure yes/no signal.
+    """
+    return any(_NVIDIA_GPU_KIND in _safe_read(p) for p in _cdi_spec_paths())
+
+
+def _safe_read(path: Path) -> str:
+    try:
+        return path.read_text(errors="replace")
+    except OSError:
+        return ""
 
 
 _SENSITIVE_KEY_RE = re.compile(r"(?i)(KEY|TOKEN|SECRET|API|PASSWORD|PRIVATE)")
@@ -108,7 +161,7 @@ def gpu_run_args(*, enabled: bool = False) -> list[str]:
         return []
     return [
         "--device",
-        "nvidia.com/gpu=all",
+        f"{_NVIDIA_GPU_KIND}=all",
         "-e",
         "NVIDIA_VISIBLE_DEVICES=all",
         "-e",

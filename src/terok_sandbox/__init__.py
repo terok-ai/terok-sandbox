@@ -80,6 +80,7 @@ from .runtime import (
     NullRuntime,
     PodmanRuntime,
     TcpSSHTransport,
+    check_gpu_available,
     podman_port_resolver,
 )
 from .sandbox import READY_MARKER, LifecycleHooks, RunSpec, Sandbox, Sharing, VolumeSpec
@@ -144,6 +145,7 @@ __all__ = [
     "Sharing",
     "TcpSSHTransport",
     "VolumeSpec",
+    "check_gpu_available",
     "podman_port_resolver",
     # Shield (sandbox-side policy classes; the egress-firewall layer lives in terok-shield)
     "EnvironmentCheck",
