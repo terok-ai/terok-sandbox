@@ -34,6 +34,13 @@ from terok_util.config_stack import ConfigScope
 
 from ._stage import bold, red, stage_line, yellow
 from ._util import BestEffortLogger
+from ._util._apparmor import (
+    AppArmorCheckResult,
+    AppArmorStatus,
+    check_status as check_apparmor_status,
+    install_command as apparmor_install_command,
+    install_script_path as apparmor_install_script,
+)
 from ._util._selinux import (
     SelinuxCheckResult,
     SelinuxStatus,
@@ -189,6 +196,13 @@ __all__ = [
     "check_selinux_status",
     "selinux_install_command",
     "selinux_install_script",
+    # AppArmor (dnsmasq DNS-tier profile addendum; granular probes stay
+    # in ``_util._apparmor``).
+    "AppArmorCheckResult",
+    "AppArmorStatus",
+    "check_apparmor_status",
+    "apparmor_install_command",
+    "apparmor_install_script",
     # CLI + cross-package utilities
     "BestEffortLogger",
     "CommandTree",

@@ -28,11 +28,18 @@ from __future__ import annotations
 import contextlib
 import shutil
 from collections.abc import Callable, Iterable
+from pathlib import Path
 from typing import Any
 
 from ._exit_codes import EXIT_MANUAL_STEP_NEEDED
 from ._stage import stage_line as _stage_line
 from ._util import _systemctl
+from ._util._apparmor import (
+    AppArmorCheckResult,
+    AppArmorStatus,
+    check_status as check_apparmor_status,
+    install_command as apparmor_install_command,
+)
 from ._util._selinux import (
     SelinuxCheckResult,
     SelinuxStatus,
@@ -45,6 +52,7 @@ from ._util._selinux import (
 __all__ = ["EXIT_MANUAL_STEP_NEEDED"]
 from .config import SandboxConfig
 from .integrations.shield import BinaryCheck
+from .paths import namespace_state_dir
 
 _HOST_BINARIES: tuple[str, ...] = ("podman", "git", "ssh-keygen")
 
@@ -66,6 +74,7 @@ def run_prereq_report(cfg: SandboxConfig) -> SelinuxCheckResult:
     _report_firewall_binaries()
     if cfg.experimental:
         _report_krun_binaries()
+    _report_apparmor()
     return _report_selinux(cfg)
 
 
@@ -161,6 +170,53 @@ def print_selinux_install_hint(result: SelinuxCheckResult) -> None:
     print()
     print("  yq -yi '.services.mode = \"tcp\"' ~/.config/terok/config.yml")
     print("  terok-sandbox setup")
+    print()
+
+
+def _apparmor_state_root() -> Path:
+    """The conventional sandbox-live root the AppArmor rules must permit.
+
+    Matches terok's default ``sandbox_live_dir()``; terok passes its own
+    resolved root (honouring overrides) when it renders the command in
+    sickbay.
+    """
+    return namespace_state_dir("sandbox-live")
+
+
+def _report_apparmor() -> AppArmorCheckResult:
+    """Print AppArmor dnsmasq-profile status; silent when not applicable.
+
+    Mirrors `_report_selinux` for the per-container dnsmasq AppArmor
+    addendum.  Non-fatal: a missing addendum only degrades the DNS tier
+    (shield falls back to dig), so this never blocks or sets an exit code.
+    """
+    result = check_apparmor_status()
+    if result.status is AppArmorStatus.NOT_APPLICABLE:
+        return result
+    with _stage_line("AppArmor profile") as s:
+        if result.status is AppArmorStatus.OK:
+            s.ok("installed")
+        else:
+            s.missing(f"install: {apparmor_install_command(_apparmor_state_root())}")
+    return result
+
+
+def print_apparmor_install_hint() -> None:
+    """Print the AppArmor addendum install command at end of setup, if needed.
+
+    No-op unless the dnsmasq profile addendum is missing.  Rendered last
+    (alongside the SELinux hint) so the command isn't scrolled away.
+    """
+    if check_apparmor_status().status is not AppArmorStatus.PROFILE_MISSING:
+        return
+    print()
+    print("─ AppArmor profile recommended ────────────────────────────────")
+    print("dnsmasq is AppArmor-confined here; without the terok addendum the")
+    print("per-container DNS drops to the dig tier (no live IP-rotation).")
+    print()
+    print("Install the addendum (keeps dnsmasq otherwise confined):")
+    print()
+    print(f"  {apparmor_install_command(_apparmor_state_root())}")
     print()
 
 
