@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import ctypes
+import errno
 import unittest.mock
 from pathlib import Path
 
@@ -62,6 +63,10 @@ def _mock_libselinux(
 
     lib.getsockcreatecon.side_effect = _fake_get
     lib.freecon.return_value = None
+    # Default to a *current* policy: the supervisor's container_runtime_t
+    # rule is present (selinux_check_access → 0 = allowed).  Stale-policy
+    # tests override this to -1 + an errno.
+    lib.selinux_check_access.return_value = 0
     return lib
 
 
@@ -141,6 +146,47 @@ class TestIsPolicyInstalled:
         """No libselinux.so.1 → no way to tell, treat as not installed."""
         with unittest.mock.patch("ctypes.CDLL", side_effect=OSError("missing")):
             assert is_policy_installed() is False
+
+
+class TestSupervisorSocketRuleLoaded:
+    """The probe that tells a current (v1.1) policy from a stale (v1.0) one."""
+
+    def test_rule_present_returns_true(self) -> None:
+        """selinux_check_access → 0 (allowed) means the supervisor rule is loaded."""
+        lib = _mock_libselinux()
+        lib.selinux_check_access.return_value = 0
+        with unittest.mock.patch("ctypes.CDLL", return_value=lib):
+            assert _selinux.is_supervisor_socket_rule_loaded() is True
+        scon, tcon, tclass, perm, _aux = lib.selinux_check_access.call_args.args
+        assert b"container_runtime_t" in scon
+        assert b"terok_socket_t" in tcon
+        assert tclass == b"unix_stream_socket"
+        assert perm == b"create"
+
+    def test_rule_denied_returns_false(self) -> None:
+        """selinux_check_access → -1 with EACCES means the rule is absent (stale v1.0)."""
+        lib = _mock_libselinux()
+        lib.selinux_check_access.return_value = -1
+        with (
+            unittest.mock.patch("ctypes.CDLL", return_value=lib),
+            unittest.mock.patch("ctypes.get_errno", return_value=errno.EACCES),
+        ):
+            assert _selinux.is_supervisor_socket_rule_loaded() is False
+
+    def test_other_errno_returns_none(self) -> None:
+        """A non-EACCES errno (e.g. EINVAL: container_runtime_t undefined) → can't tell → None."""
+        lib = _mock_libselinux()
+        lib.selinux_check_access.return_value = -1
+        with (
+            unittest.mock.patch("ctypes.CDLL", return_value=lib),
+            unittest.mock.patch("ctypes.get_errno", return_value=errno.EINVAL),
+        ):
+            assert _selinux.is_supervisor_socket_rule_loaded() is None
+
+    def test_libselinux_missing_returns_none(self) -> None:
+        """No libselinux → no opinion (must not be read as 'stale')."""
+        with unittest.mock.patch("ctypes.CDLL", side_effect=OSError("missing")):
+            assert _selinux.is_supervisor_socket_rule_loaded() is None
 
 
 # ---------- libselinux availability ----------
@@ -389,6 +435,40 @@ class TestCheckStatus:
         with (
             unittest.mock.patch("terok_sandbox._util._selinux._ENFORCE_PATH", enforce),
             unittest.mock.patch("ctypes.CDLL", return_value=lib),
+        ):
+            result = check_status(services_mode="socket")
+        assert result.status is SelinuxStatus.OK
+
+    def test_outdated_when_type_present_but_rule_absent(self, tmp_path: Path) -> None:
+        """Type loaded but the supervisor's container_runtime_t rule isn't → POLICY_OUTDATED."""
+        enforce = tmp_path / "enforce"
+        enforce.write_text("1\n")
+        lib = _mock_libselinux()
+        lib.security_check_context.return_value = 0  # type present (v1.0 loaded)
+        lib.selinux_check_access.return_value = -1  # supervisor rule absent
+        which_map = {"semodule": "/usr/sbin/semodule"}
+        with (
+            unittest.mock.patch("terok_sandbox._util._selinux._ENFORCE_PATH", enforce),
+            unittest.mock.patch("ctypes.CDLL", return_value=lib),
+            unittest.mock.patch("ctypes.get_errno", return_value=errno.EACCES),
+            unittest.mock.patch("shutil.which", side_effect=which_map.get),
+        ):
+            result = check_status(services_mode="socket")
+        assert result.status is SelinuxStatus.POLICY_OUTDATED
+        # carries the rebuild prerequisites, same as POLICY_MISSING
+        assert result.missing_policy_tools == ("checkmodule", "semodule_package")
+
+    def test_ok_when_rule_state_indeterminate(self, tmp_path: Path) -> None:
+        """An indeterminate probe (None) must not be read as stale → stays OK."""
+        enforce = tmp_path / "enforce"
+        enforce.write_text("1\n")
+        lib = _mock_libselinux()
+        lib.security_check_context.return_value = 0
+        lib.selinux_check_access.return_value = -1
+        with (
+            unittest.mock.patch("terok_sandbox._util._selinux._ENFORCE_PATH", enforce),
+            unittest.mock.patch("ctypes.CDLL", return_value=lib),
+            unittest.mock.patch("ctypes.get_errno", return_value=errno.EINVAL),
         ):
             result = check_status(services_mode="socket")
         assert result.status is SelinuxStatus.OK

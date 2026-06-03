@@ -143,12 +143,13 @@ def _handle_sandbox_setup(
 
     if failed:
         raise SystemExit(1)
-    if selinux_result.status is SelinuxStatus.POLICY_MISSING:
+    if selinux_result.status in (SelinuxStatus.POLICY_MISSING, SelinuxStatus.POLICY_OUTDATED):
         # All install phases succeeded but the host still can't reach
-        # the sockets without the policy — setup is functionally
-        # incomplete.  Exit 5 ("manual host configuration needed") so
-        # scripts and the TUI can distinguish this from a phase failure
-        # and offer the specific remediation.
+        # the sockets without the policy — missing entirely, or a stale
+        # revision lacking the supervisor's rule.  Either way setup is
+        # functionally incomplete: exit 5 ("manual host configuration
+        # needed") so scripts and the TUI can distinguish this from a
+        # phase failure and offer the specific remediation.
         raise SystemExit(EXIT_MANUAL_STEP_NEEDED)
 
     stamp = write_stamp()

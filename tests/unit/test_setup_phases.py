@@ -17,6 +17,7 @@ import pytest
 
 from terok_sandbox._setup import (
     SelinuxStatus,
+    print_selinux_install_hint,
     run_legacy_install_cleanup_phase,
     run_prereq_report,
     run_shield_install_phase,
@@ -141,6 +142,7 @@ class TestPrereqReport:
         ("status", "detail_fragment"),
         [
             (SelinuxStatus.POLICY_MISSING, "install:"),
+            (SelinuxStatus.POLICY_OUTDATED, "rebuild:"),
             (SelinuxStatus.LIBSELINUX_MISSING, "libselinux.so.1"),
         ],
     )
@@ -396,6 +398,27 @@ class TestLegacyInstallCleanupPhase:
             assert run_legacy_install_cleanup_phase() is True
         assert "swept" in capsys.readouterr().out
 
+    def test_unlink_oserror_is_swallowed(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A permission/IO error while unlinking a stale artefact never aborts the sweep.
+
+        Every ``_unlink_legacy_*`` helper guards its ``unlink`` with a
+        soft ``except OSError`` — a read-only runtime dir (or a racing
+        removal) must not stop the phase from finishing.
+        """
+        runtime = tmp_path / "run"
+        runtime.mkdir()
+        monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "share"))
+
+        with (
+            patch("terok_sandbox._setup._systemctl.run_best_effort"),
+            patch("pathlib.Path.unlink", side_effect=OSError("planted")),
+        ):
+            assert run_legacy_install_cleanup_phase() is True
+        assert "swept" in capsys.readouterr().out
+
 
 # ── Supervisor install / uninstall phases ─────────────────────────────
 
@@ -643,3 +666,21 @@ class TestUnlinkLegacyShieldGlobalHooks:
 
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
         _unlink_legacy_shield_global_hooks()  # must not raise
+
+
+class TestSelinuxOutdatedReporting:
+    """The end-of-setup banner explains a stale (outdated) terok_socket policy.
+
+    The stage-line branch is covered by ``TestPrereqReport`` above; this
+    pins the supervisor-era ``print_selinux_install_hint`` banner added
+    with the Fedora 44 fixes.
+    """
+
+    def test_install_hint_banner_for_outdated_policy(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The banner names the stale policy and the rebuild command."""
+        print_selinux_install_hint(MagicMock(status=SelinuxStatus.POLICY_OUTDATED))
+        out = capsys.readouterr().out
+        assert "predates the per-container" in out
+        assert "Rebuild the policy" in out

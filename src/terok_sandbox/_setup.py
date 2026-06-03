@@ -136,6 +136,8 @@ def _report_selinux(cfg: SandboxConfig) -> SelinuxCheckResult:
                 s.ok("installed")
             case SelinuxStatus.POLICY_MISSING:
                 s.missing(f"install: {selinux_install_command()}")
+            case SelinuxStatus.POLICY_OUTDATED:
+                s.missing(f"outdated — rebuild: {selinux_install_command()}")
             case SelinuxStatus.LIBSELINUX_MISSING:
                 s.missing("libselinux.so.1 not loadable")
     return result
@@ -154,14 +156,20 @@ def print_selinux_install_hint(result: SelinuxCheckResult) -> None:
     install command landed mid-output and scrolled out of view by the
     time the install banner printed at the bottom.
     """
-    if result.status is not SelinuxStatus.POLICY_MISSING:
+    if result.status not in (SelinuxStatus.POLICY_MISSING, SelinuxStatus.POLICY_OUTDATED):
         return
+    outdated = result.status is SelinuxStatus.POLICY_OUTDATED
     print()
     print("─ SELinux policy required ─────────────────────────────────────")
-    print("Socket-transport services need the terok_socket_t policy to be")
-    print("loaded; without it, containers can't reach the host sockets.")
+    if outdated:
+        print("The loaded terok_socket policy predates the per-container")
+        print("supervisor and is missing the rule it binds its sockets with;")
+        print("rebuild it so the supervisor can serve the vault / gate / ssh.")
+    else:
+        print("Socket-transport services need the terok_socket_t policy to be")
+        print("loaded; without it, containers can't reach the host sockets.")
     print()
-    print("Install the policy (recommended):")
+    print("Rebuild the policy (recommended):" if outdated else "Install the policy (recommended):")
     print()
     print(f"  {selinux_install_command()}")
     print()
