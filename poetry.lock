@@ -3421,13 +3421,14 @@ url = "https://github.com/terok-ai/terok-clearance/releases/download/v0.6.14a7/t
 
 [[package]]
 name = "terok-shield"
-version = "0.6.42a9"
+version = "0.6.42a10"
 description = "nftables-based egress firewalling for Podman containers"
 optional = false
 python-versions = ">=3.12,<4.0"
 groups = ["main"]
-files = []
-develop = false
+files = [
+    {file = "terok_shield-0.6.42a10-py3-none-any.whl", hash = "sha256:fedb948bb7fa2dd063b03056675679f11af89f9a188438f4ebc27a8e52abbc7a"},
+]
 
 [package.dependencies]
 pydantic = ">=2.0"
@@ -3435,10 +3436,8 @@ PyYAML = ">=6.0"
 terok_util = {url = "https://github.com/terok-ai/terok-util/releases/download/v0.0.2a1/terok_util-0.0.2a1-py3-none-any.whl"}
 
 [package.source]
-type = "git"
-url = "https://github.com/sliwowitz/terok-shield.git"
-reference = "feat/apparmor-dnsmasq-profile"
-resolved_reference = "dba9e1808dd4a737565e55cdd9ea69e60606b453"
+type = "url"
+url = "https://github.com/terok-ai/terok-shield/releases/download/v0.6.42a10/terok_shield-0.6.42a10-py3-none-any.whl"
 
 [[package]]
 name = "terok-util"
@@ -3857,4 +3856,4 @@ propcache = ">=0.2.1"
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<4.0"
-content-hash = "44cb8e7b97521c1e5b6f0e1d591a1c15dbfe91a6128b499afe7217bf902b8896"
+content-hash = "1905118719525ab9e6904a157058640260269ca04172f449d73110f1a5e1e209"
