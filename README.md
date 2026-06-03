@@ -1,5 +1,13 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://terok-ai.github.io/terok/terok-logo-w.svg">
+    <img src="https://terok-ai.github.io/terok/terok-logo-b.svg" alt="terok-sandbox" width="120">
+  </picture>
+</p>
+
 # terok-sandbox
 
+[![PyPI](https://img.shields.io/pypi/v/terok-sandbox)](https://pypi.org/project/terok-sandbox/)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![REUSE status](https://api.reuse.software/badge/github.com/terok-ai/terok-sandbox)](https://api.reuse.software/info/github.com/terok-ai/terok-sandbox)
 [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=terok-ai_terok-sandbox&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=terok-ai_terok-sandbox)
@@ -8,7 +16,7 @@ The hardened-Podman runtime — terok-sandbox launches per-task containers with 
 a gated git server.
 
 <p align="center">
-  <img src="docs/architecture.svg" alt="terok ecosystem — terok-sandbox sits between the per-task launcher and the firewall it installs">
+  <img src="https://terok-ai.github.io/terok/img/architecture.svg" alt="terok ecosystem — terok-sandbox sits between the per-task launcher and the firewall it installs">
 </p>
 
 ## What it provides
