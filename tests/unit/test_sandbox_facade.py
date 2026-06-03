@@ -140,30 +140,17 @@ class TestSandbox:
         assert "my-project" in url
         assert url.startswith("http://")
 
-    def test_ensure_gate_delegates(self) -> None:
-        from terok_sandbox.gate.lifecycle import GateServerManager
-
-        with patch.object(GateServerManager, "ensure_reachable") as mock:
-            s = Sandbox()
-            s.ensure_gate()
-            mock.assert_called_once()
-
-    def test_gate_status_delegates(self) -> None:
-        from terok_sandbox.gate.lifecycle import GateServerManager, GateServerStatus
-
-        mock_status = GateServerStatus(mode="none", running=False, port=9418)
-        with patch.object(GateServerManager, "get_status", return_value=mock_status) as mock:
-            s = Sandbox()
-            result = s.gate_status()
-            assert result == mock_status
-            mock.assert_called_once()
+    def test_mint_gate_token(self) -> None:
+        s = Sandbox()
+        token = s.mint_gate_token()
+        assert token.startswith("terok-g-")
 
     def test_shield_down_delegates(self) -> None:
         with patch("terok_sandbox.integrations.shield.ShieldManager") as Mgr:
             s = Sandbox()
-            s.shield_down("ctr", Path("/tmp/task"))
+            s.shield_down("ctr", "ctr-uuid", Path("/tmp/task"))
             Mgr.assert_called_once_with(Path("/tmp/task"), s.config)
-            Mgr.return_value.down.assert_called_once_with("ctr")
+            Mgr.return_value.down.assert_called_once_with("ctr", "ctr-uuid")
 
     def test_pre_start_args_delegates(self) -> None:
         from terok_shield import ShieldRuntime
@@ -173,7 +160,12 @@ class TestSandbox:
             s = Sandbox()
             result = s.pre_start_args("ctr", Path("/tmp/task"))
             assert result == ["--hook"]
-            Mgr.assert_called_once_with(Path("/tmp/task"), s.config, runtime=ShieldRuntime.DEFAULT)
+            Mgr.assert_called_once_with(
+                Path("/tmp/task"),
+                s.config,
+                runtime=ShieldRuntime.DEFAULT,
+                loopback_ports_override=None,
+            )
             Mgr.return_value.pre_start.assert_called_once_with("ctr")
 
     def test_pre_start_args_maps_krun_runtime_to_shield_enum(self) -> None:
@@ -184,7 +176,12 @@ class TestSandbox:
             Mgr.return_value.pre_start.return_value = ["--hook"]
             s = Sandbox()
             s.pre_start_args("ctr", Path("/tmp/task"), runtime="krun")
-            Mgr.assert_called_once_with(Path("/tmp/task"), s.config, runtime=ShieldRuntime.KRUN)
+            Mgr.assert_called_once_with(
+                Path("/tmp/task"),
+                s.config,
+                runtime=ShieldRuntime.KRUN,
+                loopback_ports_override=None,
+            )
 
     def test_stop_delegates_to_runtime_force_remove(self) -> None:
         """``Sandbox.stop`` wraps names in container handles and delegates."""
@@ -647,13 +644,22 @@ class TestSandboxSealed:
 
         mock_copy.assert_not_called()
 
-    def test_ensure_parents_creates_directory_tree(self) -> None:
-        """_ensure_parents injects a tar with all ancestor directories."""
+    def test_ensure_parents_creates_directory_tree(self, tmp_path: Path) -> None:
+        """_ensure_parents injects a tar with all ancestor directories.
+
+        Uses real directories as host_path so the dir-target detection
+        works (file volumes skip pre-creating the target itself — see
+        the matching unit on file-volume behaviour).
+        """
         import tarfile as _tarfile
 
+        host_a = tmp_path / "a"
+        host_a.mkdir()
+        host_b = tmp_path / "b"
+        host_b.mkdir()
         volumes = (
-            VolumeSpec(Path("/a"), "/home/dev/.config/gh"),
-            VolumeSpec(Path("/b"), "/workspace"),
+            VolumeSpec(host_a, "/home/dev/.config/gh"),
+            VolumeSpec(host_b, "/workspace"),
         )
 
         with patch.object(Sandbox, "_exec_podman") as mock_exec:
@@ -676,6 +682,30 @@ class TestSandboxSealed:
             for m in tar.getmembers():
                 assert m.isdir()
                 assert m.uid == 1000
+
+    def test_ensure_parents_skips_file_target_itself(self, tmp_path: Path) -> None:
+        """File volume targets are NOT pre-created as directories.
+
+        For a file-shaped host path like ``/tmp/foo.sh`` landing at
+        ``/run/terok/bridge.sh``, only ``run/terok`` should appear in
+        the tar — pre-creating ``run/terok/bridge.sh`` as a directory
+        would make the later ``copy_to`` land *inside* it.
+        """
+        import tarfile as _tarfile
+
+        host_file = tmp_path / "bridge.sh"
+        host_file.write_text("#!/bin/sh\n")
+        volumes = (VolumeSpec(host_file, "/run/terok/bridge.sh"),)
+
+        with patch.object(Sandbox, "_exec_podman") as mock_exec:
+            Sandbox()._ensure_parents("ctr", volumes)
+
+        tar_bytes = mock_exec.call_args[1]["input"]
+        with _tarfile.open(fileobj=__import__("io").BytesIO(tar_bytes), mode="r") as tar:
+            names = sorted(m.name for m in tar.getmembers())
+            assert "run" in names
+            assert "run/terok" in names
+            assert "run/terok/bridge.sh" not in names
 
     def test_ensure_parents_noop_for_empty_volumes(self) -> None:
         """_ensure_parents does nothing when there are no volumes."""

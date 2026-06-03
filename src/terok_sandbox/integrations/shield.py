@@ -18,8 +18,8 @@ Two classes carry the sandbox-side policy layer over terok-shield:
   host-wide OCI hooks installer, scoped to the root/user dual-scope
   flag pair the ``terok setup`` and ``terok-sandbox`` CLIs expose.
   Delegates to terok-shield's [`HooksInstaller`][terok_shield.HooksInstaller]
-  for the actual file writes — sandbox no longer carries a private
-  ``_HOOK_FILES`` mirror of the on-disk install layout.
+  for the actual file writes; terok-shield owns the on-disk install
+  layout, so sandbox carries no private mirror of it.
 """
 
 from __future__ import annotations
@@ -41,6 +41,13 @@ from terok_shield import (
 )
 from terok_shield.container import (
     resolve_state_dir as resolve_container_state_dir,  # noqa: F401 — re-exported
+)
+
+# ``ensure_user_hooks_dir_configured`` lives behind shield's lazy ``__getattr__``
+# (so the package's top-level import stays light); pull it from the owning
+# submodule for a concrete callable type.
+from terok_shield.hooks.install import (
+    ensure_user_hooks_dir_configured,  # noqa: F401 — re-exported with concrete type
 )
 
 # Several symbols are exposed via the top-level ``terok_shield.__getattr__``
@@ -96,6 +103,7 @@ class ShieldManager:
         cfg: SandboxConfig | None = None,
         *,
         runtime: ShieldRuntime = ShieldRuntime.DEFAULT,
+        loopback_ports_override: tuple[int, ...] | None = None,
     ) -> None:
         """Bind the manager to a task directory and shield configuration.
 
@@ -105,10 +113,17 @@ class ShieldManager:
         the guest can reach via passt).  Callers that drive the launch
         path map their runtime string (``RunSpec.runtime``) to the
         enum.
+
+        *loopback_ports_override* replaces the cfg-derived
+        ``(gate_port, token_broker_port, ssh_signer_port)`` triple — the
+        per-container launch path passes the freshly-allocated broker
+        and signer ports so shield's nft rules allow the actual host
+        ports the supervisor binds.
         """
         self._task_dir = task_dir
         self._cfg = cfg or SandboxConfig()
         self._runtime = runtime
+        self._loopback_ports_override = loopback_ports_override
 
     @property
     def state_dir(self) -> Path:
@@ -134,12 +149,20 @@ class ShieldManager:
         private-range reject (#156 regression follow-up).
         """
         resolved = self._cfg.with_resolved_ports()
-        # Socket-mode transports emit no loopback traffic; filter ``None`` so
-        # the nftables rule generator only sees ports that actually exist.
-        loopback = tuple(
-            p
-            for p in (resolved.gate_port, resolved.token_broker_port, resolved.ssh_signer_port)
-            if p is not None
+        # ``loopback_ports_override`` wins when set (the per-container
+        # launch path's freshly-allocated broker/signer ports).  Falls
+        # back to the cfg-resolved triple for callers that haven't been
+        # plumbed through yet.  Socket-mode transports emit no loopback
+        # traffic; filter ``None`` so the nft rule generator only sees
+        # ports that actually exist.
+        loopback = (
+            self._loopback_ports_override
+            if self._loopback_ports_override is not None
+            else tuple(
+                p
+                for p in (resolved.gate_port, resolved.token_broker_port, resolved.ssh_signer_port)
+                if p is not None
+            )
         )
         config = ShieldConfig(
             state_dir=self.state_dir,
@@ -171,20 +194,30 @@ class ShieldManager:
         except ShieldNeedsSetup as exc:
             raise SystemExit(str(exc)) from None
 
-    def up(self, container: str) -> None:
-        """Set shield to deny-all mode for a running container."""
-        if self.bypass:
-            return
-        self.shield.up(container)
+    def up(self, container: str, container_id: str) -> None:
+        """Set shield to deny-all mode for a running container.
 
-    def down(self, container: str, *, allow_all: bool = False) -> None:
-        """Set shield to bypass mode (allow egress) for a running container.
-
-        When *allow_all* is True, also permits private-range (RFC 1918) traffic.
+        *container* is the operator-facing podman name (audit-log key);
+        *container_id* is the full podman UUID — terok-shield's per-
+        container hub socket is keyed on it.  Both are mandatory:
+        terok-shield removed the global-hub fallback in
+        ``feat/per-container-supervisor``.
         """
         if self.bypass:
             return
-        self.shield.down(container, allow_all=allow_all)
+        self.shield.up(container, container_id)
+
+    def down(self, container: str, container_id: str, *, allow_all: bool = False) -> None:
+        """Set shield to bypass mode (allow egress) for a running container.
+
+        *container* / *container_id* — see
+        [`up`][terok_sandbox.integrations.shield.ShieldManager.up].  When
+        *allow_all* is True, also permits private-range (RFC 1918)
+        traffic.
+        """
+        if self.bypass:
+            return
+        self.shield.down(container, container_id, allow_all=allow_all)
 
     # ── Non-bypassable operations ───────────────────────
 
@@ -268,46 +301,31 @@ class ShieldManager:
 class ShieldHooks:
     """Host-wide OCI hooks installer — no task context.
 
-    Wraps terok-shield's [`HooksInstaller`][terok_shield.HooksInstaller]
-    in the root/user dual-scope flag pattern the sandbox setup CLI
-    exposes: a single ``ShieldHooks.install(root=…, user=…)`` call
-    can target one or both scopes, mirroring the symmetric
-    ``ShieldHooks.uninstall`` path.
+    Thin pass-through to terok-shield's
+    [`HooksInstaller`][terok_shield.HooksInstaller].  Kept as a class
+    so the sandbox setup aggregator can swap it out in tests without
+    poking around terok-shield internals.
     """
 
     @staticmethod
-    def install(*, root: bool = False, user: bool = False) -> None:
+    def install() -> None:
         """Install global OCI hooks for shield egress firewalling.
 
         Global hooks are required on all podman versions to survive
-        container stop/start cycles (terok-shield#122).  At least one
-        of *root* or *user* must be true; passing both installs into
-        both scopes so callers that want system-wide and per-user
-        coverage can do it in a single call.
-
-        Raises [`ValueError`][ValueError] when neither flag is true.
+        container stop/start cycles (terok-shield#122).  Single
+        layout: scripts, ballast, and JSON descriptors all land in
+        ``namespace_state_dir("shield") / "hooks"``;
+        ``containers.conf`` is patched to register that path.
         """
-        if not root and not user:
-            raise ValueError("ShieldHooks.install requires either root=True or user=True")
-        if user:
-            HooksInstaller.user().install()
-        if root:
-            HooksInstaller.system().install()
+        HooksInstaller().install()
 
     @staticmethod
-    def uninstall(*, root: bool = False, user: bool = False) -> None:
+    def uninstall() -> None:
         """Remove the global OCI hooks [`install`][terok_sandbox.integrations.shield.ShieldHooks.install] writes.
 
-        At least one of *root* or *user* must be true; passing both is
-        valid and removes hooks from both scopes.  Missing files are
-        tolerated so the uninstaller is idempotent.
+        Idempotent — missing files are tolerated.
         """
-        if not root and not user:
-            raise ValueError("ShieldHooks.uninstall requires either root=True or user=True")
-        if user:
-            HooksInstaller.user().uninstall()
-        if root:
-            HooksInstaller.system().uninstall()
+        HooksInstaller().uninstall()
 
 
 # ── Bypass-aware environment probe (no task context) ────

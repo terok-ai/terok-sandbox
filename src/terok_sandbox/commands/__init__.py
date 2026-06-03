@@ -15,8 +15,8 @@ Per-subsystem modules:
   (composes shield + vault + gate + clearance into one verb).
 - [`gate`][terok_sandbox.commands.gate] — gate server lifecycle.
 - [`shield`][terok_sandbox.commands.shield] — egress-firewall hooks.
-- [`vault`][terok_sandbox.commands.vault] — vault daemon + the
-  unlock/lock/seal trio that drives the SQLCipher passphrase chain.
+- [`vault`][terok_sandbox.commands.vault] — vault passphrase verbs
+  (the unlock/lock/seal trio that drives the SQLCipher chain).
 - [`ssh`][terok_sandbox.commands.ssh] — SSH-key CRUD against the
   credentials DB.
 - [`doctor`][terok_sandbox.commands.doctor] — host-side health checks.
@@ -42,14 +42,7 @@ from .credentials import (
     _run_credentials_setup_phase,
 )
 from .doctor import DOCTOR_COMMANDS, _handle_doctor
-from .gate import (
-    GATE_COMMANDS,
-    _handle_gate_install,
-    _handle_gate_start,
-    _handle_gate_status,
-    _handle_gate_stop,
-    _handle_gate_uninstall,
-)
+from .gate import GATE_COMMANDS, _handle_gate_path
 from .launch import LAUNCH_COMMANDS, _handle_cleanup, _handle_prepare, _handle_run
 from .sandbox import SETUP_COMMANDS, _handle_sandbox_setup, _handle_sandbox_uninstall
 from .shield import (
@@ -74,18 +67,14 @@ from .ssh import (
     _print_key_table,
     _validate_scope_name,
 )
+from .supervisor import SUPERVISOR_COMMANDS, _handle_supervisor
 from .vault import (
     VAULT_COMMANDS,
     _forget_config_tier_updates,
     _handle_vault_destroy_passphrase,
-    _handle_vault_install,
+    _handle_vault_list,
     _handle_vault_lock,
-    _handle_vault_start,
-    _handle_vault_status,
-    _handle_vault_stop,
-    _handle_vault_uninstall,
     _handle_vault_unlock,
-    _print_plaintext_passphrase_warning,
     handle_vault_seal,
     handle_vault_to_keyring,
 )
@@ -108,6 +97,7 @@ COMMANDS: CommandTree = CommandTree(
     + CREDENTIALS_COMMANDS
     + LAUNCH_COMMANDS
     + DOCTOR_COMMANDS
+    + SUPERVISOR_COMMANDS
 )
 
 
@@ -126,6 +116,7 @@ __all__ = [
     "SETUP_COMMANDS",
     "SHIELD_COMMANDS",
     "SSH_COMMANDS",
+    "SUPERVISOR_COMMANDS",
     "VAULT_COMMANDS",
     # Handlers re-exported for testing and out-of-tree consumers (terok
     # frontends sometimes call them directly).  The underscore prefix
@@ -139,11 +130,7 @@ __all__ = [
     "_handle_cleanup",
     "_handle_credentials_encrypt_db",
     "_handle_doctor",
-    "_handle_gate_install",
-    "_handle_gate_start",
-    "_handle_gate_status",
-    "_handle_gate_stop",
-    "_handle_gate_uninstall",
+    "_handle_gate_path",
     "_handle_prepare",
     "_handle_run",
     "_handle_sandbox_setup",
@@ -158,21 +145,17 @@ __all__ = [
     "_handle_ssh_pub",
     "_handle_ssh_remove",
     "_handle_ssh_rename",
+    "_handle_supervisor",
     "_handle_vault_destroy_passphrase",
-    "_handle_vault_install",
+    "_handle_vault_list",
     "_handle_vault_lock",
     "handle_vault_seal",
-    "_handle_vault_start",
-    "_handle_vault_status",
-    "_handle_vault_stop",
     "handle_vault_to_keyring",
-    "_handle_vault_uninstall",
     "_handle_vault_unlock",
     "_key_id_from_row",
     "_open_db",
     "_persist_mode_choice",
     "_print_key_table",
-    "_print_plaintext_passphrase_warning",
     "_provision_passphrase",
     "_run_credentials_setup_phase",
     "_validate_scope_name",

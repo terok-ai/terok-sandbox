@@ -22,9 +22,15 @@ from terok_sandbox.config import SandboxConfig
 from terok_sandbox.launch import (
     CONTAINER_BRIDGES_DIR,
     LOOPBACK_VAULT_PORT,
+    PerContainerResources,
     WiringPlan,
     _find_podman,
     _read_meta,
+    _resolve_container_id,
+    _rollback_compose_state,
+    _validate_container_name,
+    _write_sidecar,  # noqa: PLC2701 — internal under test
+    allocate_per_container_resources,
     bridges_resource_dir,
     cleanup,
     compose,
@@ -84,7 +90,7 @@ class TestCompose:
                 "terok_sandbox.integrations.shield.ShieldManager.pre_start",
                 return_value=["--annotation=t-s=1"],
             ),
-            patch("terok_sandbox.gate.tokens.TokenStore.create", return_value="terok-g-abc"),
+            patch("terok_sandbox.launch.mint_gate_token", return_value="terok-g-abc"),
             patch(
                 "terok_sandbox.vault.store.db.CredentialDB.create_token",
                 return_value="terok-p-xyz",
@@ -95,24 +101,32 @@ class TestCompose:
         assert plan.gate and plan.broker and plan.ssh
         # Bridge resources mount
         assert CONTAINER_BRIDGES_DIR in joined
-        # Vault socket mount
-        assert "/run/terok/vault.sock" in joined
+        # Per-container runtime dir mounted at /run/terok/ (the supervisor
+        # binds vault.sock + ssh-agent.sock + gate-server.sock inside it).
+        assert ":/run/terok" in joined
+        assert "/run/myc" in joined  # host-side dir name = container name
         assert f"TEROK_VAULT_LOOPBACK_PORT={LOOPBACK_VAULT_PORT}" in joined
-        # Gate socket + token
-        assert "/run/terok/gate-server.sock" in joined
+        # Gate socket env + token (the socket is bound by the supervisor
+        # inside the per-container dir mount — no separate -v sub-mount).
+        assert "TEROK_GATE_SOCKET=/run/terok/gate-server.sock" in joined
         assert "TEROK_GATE_TOKEN=terok-g-abc" in joined
-        # SSH signer socket + token
-        assert "/run/terok/ssh-agent.sock" in joined
+        # The gate socket is NOT a -v sub-mount anymore.
+        assert not any(a == "-v" and "gate-server.sock" in args[i + 1] for i, a in enumerate(args))
+        # SSH signer env var (the socket itself is bound by the supervisor
+        # inside the per-container dir mount above).
+        assert "TEROK_SSH_SIGNER_SOCKET=/run/terok/ssh-agent.sock" in joined
         assert "TEROK_SSH_SIGNER_TOKEN=terok-p-xyz" in joined
-        # Name flag
-        assert args[-2:] == ["--name", "myc"]
+        # Name flag (followed by the supervisor sidecar annotation)
+        assert "--name" in args and "myc" in args
+        annotation_value = next(a for a in args if a.startswith("terok.sandbox.sidecar="))
+        assert "/sidecar/myc.json" in annotation_value
 
     def test_full_wiring_with_scope_tcp_mode(self, tmp_path: Path) -> None:
-        """TCP mode emits port env vars instead of socket mounts."""
+        """TCP mode emits per-container port env vars instead of socket mounts."""
         cfg = _make_cfg(tmp_path, services_mode="tcp")
         with (
             patch("terok_sandbox.integrations.shield.ShieldManager.pre_start", return_value=[]),
-            patch("terok_sandbox.gate.tokens.TokenStore.create", return_value="terok-g-abc"),
+            patch("terok_sandbox.launch.mint_gate_token", return_value="terok-g-abc"),
             patch(
                 "terok_sandbox.vault.store.db.CredentialDB.create_token",
                 return_value="terok-p-xyz",
@@ -120,9 +134,15 @@ class TestCompose:
         ):
             args, _ = compose("myc", cfg=cfg, shield=False, gate=True, broker=True, scope="proj")
         joined = " ".join(args)
-        assert "TEROK_TOKEN_BROKER_PORT=18001" in joined
-        assert "TEROK_SSH_SIGNER_PORT=18002" in joined
-        assert "TEROK_GATE_PORT=18000" in joined
+        # Broker/signer/gate ports are now per-container (via bind(0)), not
+        # the singleton cfg.* ports.  Just check the envs are present with
+        # SOME numeric value.
+        import re
+
+        assert re.search(r"TEROK_TOKEN_BROKER_PORT=\d+", joined)
+        assert re.search(r"TEROK_SSH_SIGNER_PORT=\d+", joined)
+        assert re.search(r"TEROK_GATE_PORT=\d+", joined)
+        assert "TEROK_GATE_TOKEN=terok-g-abc" in joined
         assert "/run/terok/vault.sock" not in joined
 
     def test_no_shield_skips_shield_pre_start(self, tmp_path: Path) -> None:
@@ -173,26 +193,30 @@ class TestMetaAndCleanup:
         with (
             patch("terok_sandbox.integrations.shield.ShieldManager.pre_start", return_value=[]),
             patch("terok_sandbox.integrations.shield.ShieldManager.down") as down,
-            patch("terok_sandbox.gate.tokens.TokenStore.create", return_value="terok-g-abc"),
+            patch("terok_sandbox.launch._resolve_container_id", return_value="ctr-uuid"),
+            patch("terok_sandbox.launch.mint_gate_token", return_value="terok-g-abc"),
             patch(
                 "terok_sandbox.vault.store.db.CredentialDB.create_token",
                 return_value="terok-p-xyz",
             ),
             patch("terok_sandbox.vault.store.db.CredentialDB.revoke_tokens", return_value=2),
-            patch("terok_sandbox.gate.tokens.TokenStore.revoke_for_task", return_value=None),
         ):
             compose("myc", cfg=cfg, shield=True, gate=True, broker=True, scope="proj")
             assert cleanup("myc", cfg=cfg) is True
             assert cleanup("myc", cfg=cfg) is False
-            down.assert_called_once()  # only the first cleanup invokes shield.down
+            down.assert_called_once_with("myc", "ctr-uuid")  # container UUID is plumbed through
 
-    def test_cleanup_revokes_tokens_for_container_as_subject(self, tmp_path: Path) -> None:
-        """Cleanup uses container name as the subject when revoking."""
+    def test_cleanup_revokes_vault_tokens_for_container_as_subject(self, tmp_path: Path) -> None:
+        """Cleanup uses container name as the subject when revoking vault tokens.
+
+        The gate token has no on-disk store anymore (revocation = supervisor
+        death), so cleanup only revokes the vault broker/SSH tokens.
+        """
         cfg = _make_cfg(tmp_path)
         with (
             patch("terok_sandbox.integrations.shield.ShieldManager.pre_start", return_value=[]),
             patch("terok_sandbox.integrations.shield.ShieldManager.down"),
-            patch("terok_sandbox.gate.tokens.TokenStore.create", return_value="terok-g-abc"),
+            patch("terok_sandbox.launch.mint_gate_token", return_value="terok-g-abc"),
             patch(
                 "terok_sandbox.vault.store.db.CredentialDB.create_token",
                 return_value="terok-p-xyz",
@@ -200,14 +224,10 @@ class TestMetaAndCleanup:
             patch(
                 "terok_sandbox.vault.store.db.CredentialDB.revoke_tokens", return_value=2
             ) as revoke_db,
-            patch(
-                "terok_sandbox.gate.tokens.TokenStore.revoke_for_task", return_value=None
-            ) as revoke_gate,
         ):
             compose("myc", cfg=cfg, shield=True, gate=True, broker=True, scope="proj")
             cleanup("myc", cfg=cfg)
         revoke_db.assert_called_with("proj", "myc")
-        revoke_gate.assert_called_with("proj", "myc")
 
     def test_cleanup_warns_when_locked_vault_skips_revocation(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -219,12 +239,11 @@ class TestMetaAndCleanup:
         with (
             patch("terok_sandbox.integrations.shield.ShieldManager.pre_start", return_value=[]),
             patch("terok_sandbox.integrations.shield.ShieldManager.down"),
-            patch("terok_sandbox.gate.tokens.TokenStore.create", return_value="terok-g-abc"),
+            patch("terok_sandbox.launch.mint_gate_token", return_value="terok-g-abc"),
             patch(
                 "terok_sandbox.vault.store.db.CredentialDB.create_token",
                 return_value="terok-p-xyz",
             ),
-            patch("terok_sandbox.gate.tokens.TokenStore.revoke_for_task", return_value=None),
         ):
             compose("myc", cfg=cfg, shield=True, gate=True, broker=True, scope="proj")
             with patch(
@@ -237,32 +256,148 @@ class TestMetaAndCleanup:
         assert "NoPassphraseError" in err
         assert "vault unlock" in err
 
-    def test_ssh_mint_failure_rolls_back_gate_token(self, tmp_path: Path) -> None:
-        """A locked vault during SSH-token minting must not leak the gate token.
+    def test_ssh_mint_failure_does_not_write_sidecar(self, tmp_path: Path) -> None:
+        """A locked vault during SSH-token minting aborts compose before the sidecar.
 
-        Pre-fix: ``compose`` raised before ``_write_meta``; cleanup() had
-        no meta to read and the gate token stayed in ``TokenStore``.
+        The gate token now lives only in-process (no on-disk store), so a
+        failed launch leaks nothing to revoke — compose simply raises and
+        ``_write_meta`` / ``_write_sidecar`` never run.
         """
         from terok_sandbox.vault.store.db import NoPassphraseError
 
         cfg = _make_cfg(tmp_path)
         with (
             patch("terok_sandbox.integrations.shield.ShieldManager.pre_start", return_value=[]),
-            patch(
-                "terok_sandbox.gate.tokens.TokenStore.create", return_value="terok-g-abc"
-            ) as gate_create,
+            patch("terok_sandbox.launch.mint_gate_token", return_value="terok-g-abc") as gate_mint,
             patch(
                 "terok_sandbox.config.SandboxConfig.open_credential_db",
                 side_effect=NoPassphraseError("locked"),
             ),
-            patch(
-                "terok_sandbox.gate.tokens.TokenStore.revoke_for_task", return_value=None
-            ) as revoke_gate,
         ):
             with pytest.raises(NoPassphraseError):
                 compose("myc", cfg=cfg, shield=False, gate=True, broker=False, scope="proj")
-            gate_create.assert_called_once_with("proj", "myc")
-            revoke_gate.assert_called_once_with("proj", "myc")
+            gate_mint.assert_called_once_with()
+        # No sidecar / meta was written because compose raised first.
+        assert not (run_state_dir(cfg, "myc") / "meta.json").exists()
+        assert not (cfg.state_dir / "sidecar" / "myc.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# Sidecar write — success payload + best-effort failure handling
+# ---------------------------------------------------------------------------
+
+
+def _socket_resources(tmp_path: Path) -> PerContainerResources:
+    """A socket-mode resource bundle (no ports) rooted under *tmp_path*."""
+    return PerContainerResources(
+        container_runtime_dir=tmp_path / "run" / "myc",
+        token_broker_port=None,
+        ssh_signer_port=None,
+        gate_port=None,
+    )
+
+
+class TestWriteSidecar:
+    """``_write_sidecar`` persists the supervisor's per-container config.
+
+    Returns the absolute path on success; logs to stderr and returns
+    ``None`` on any filesystem failure (the caller fails the launch
+    closed rather than starting a container with dead endpoints).
+    """
+
+    def test_writes_socket_mode_payload(self, tmp_path: Path) -> None:
+        """Socket mode: no port keys; gate keys only when a token is wired."""
+        cfg = _make_cfg(tmp_path, services_mode="socket")
+        plan = WiringPlan(scope="proj", shield=False, gate=True, broker=True, ssh=True)
+        path = _write_sidecar(cfg, "myc", plan, _socket_resources(tmp_path), "terok-g-abc")
+        assert path == cfg.state_dir / "sidecar" / "myc.json"
+        payload = json.loads(path.read_text())
+        assert payload["container_name"] == "myc"
+        assert payload["ipc_mode"] == "socket"
+        assert payload["scope_id"] == "proj"
+        assert payload["project_id"] == "proj"  # set because gate_token + scope present
+        assert payload["gate_token"] == "terok-g-abc"
+        assert payload["gate_base_path"] == str(cfg.gate_base_path)
+        # Socket mode carries no TCP ports.
+        assert "tcp_port" not in payload
+        assert "gate_port" not in payload
+
+    def test_tcp_mode_carries_ports(self, tmp_path: Path) -> None:
+        """TCP mode records the per-container broker / signer / gate ports."""
+        cfg = _make_cfg(tmp_path, services_mode="tcp")
+        plan = WiringPlan(scope="proj", shield=False, gate=True, broker=True, ssh=True)
+        res = PerContainerResources(
+            container_runtime_dir=tmp_path / "run" / "myc",
+            token_broker_port=21001,
+            ssh_signer_port=21002,
+            gate_port=21003,
+        )
+        path = _write_sidecar(cfg, "myc", plan, res, "terok-g-abc")
+        assert path is not None
+        payload = json.loads(path.read_text())
+        assert payload["tcp_port"] == 21001
+        assert payload["ssh_signer_port"] == 21002
+        assert payload["gate_port"] == 21003
+
+    def test_no_gate_token_omits_gate_keys_and_project(self, tmp_path: Path) -> None:
+        """Without a gate token, gate keys are dropped and ``project_id`` is blank."""
+        cfg = _make_cfg(tmp_path, services_mode="socket")
+        plan = WiringPlan(scope="proj", shield=False, gate=False, broker=True, ssh=True)
+        path = _write_sidecar(cfg, "myc", plan, _socket_resources(tmp_path), None)
+        assert path is not None
+        payload = json.loads(path.read_text())
+        assert payload["project_id"] == ""
+        assert "gate_token" not in payload
+        assert "gate_base_path" not in payload
+
+    def test_mkdir_failure_returns_none(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture
+    ) -> None:
+        """A sidecar-dir mkdir OSError soft-fails to ``None`` with a stderr warning."""
+        cfg = _make_cfg(tmp_path, services_mode="socket")
+        plan = WiringPlan(scope=None, shield=True, gate=False, broker=False, ssh=False)
+        with patch("pathlib.Path.mkdir", side_effect=OSError("read-only fs")):
+            result = _write_sidecar(cfg, "myc", plan, _socket_resources(tmp_path), None)
+        assert result is None
+        assert "sidecar dir setup failed" in capsys.readouterr().err
+
+    def test_write_failure_returns_none(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture
+    ) -> None:
+        """A json.dump OSError (e.g. disk full) soft-fails to ``None`` with a warning."""
+        cfg = _make_cfg(tmp_path, services_mode="socket")
+        plan = WiringPlan(scope=None, shield=True, gate=False, broker=False, ssh=False)
+        with patch("pathlib.Path.open", side_effect=OSError("no space left")):
+            result = _write_sidecar(cfg, "myc", plan, _socket_resources(tmp_path), None)
+        assert result is None
+        assert "sidecar write failed" in capsys.readouterr().err
+
+
+class TestComposeAbortsOnSidecarFailure:
+    """A failed sidecar write rolls back compose state and aborts the launch."""
+
+    def test_sidecar_write_failure_rolls_back_and_exits(self, tmp_path: Path) -> None:
+        """``compose`` fails closed: rollback runs, then ``SystemExit`` with a hint.
+
+        A launch with no sidecar means the supervisor never starts, so the
+        container would hit dead vault/SSH/gate endpoints — better to abort
+        and unwind the minted tokens + state dirs than orphan them.
+        """
+        cfg = _make_cfg(tmp_path, services_mode="socket")
+        with (
+            patch("terok_sandbox.integrations.shield.ShieldManager.pre_start", return_value=[]),
+            patch("terok_sandbox.launch.mint_gate_token", return_value="terok-g-abc"),
+            patch(
+                "terok_sandbox.vault.store.db.CredentialDB.create_token",
+                return_value="terok-p-xyz",
+            ),
+            patch("terok_sandbox.launch._write_sidecar", return_value=None),
+            patch("terok_sandbox.launch._rollback_compose_state") as rollback,
+            pytest.raises(SystemExit) as exc,
+        ):
+            compose("myc", cfg=cfg, shield=False, gate=True, broker=True, scope="proj")
+        assert "sidecar write failed" in str(exc.value)
+        rollback.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -428,7 +563,8 @@ class TestHandlers:
             _handle_prepare("myc", output_json=True, cfg=cfg)
         out = capsys.readouterr().out.strip()
         parsed = json.loads(out)
-        assert parsed[-2:] == ["--name", "myc"]
+        assert "--name" in parsed and "myc" in parsed
+        assert any(a.startswith("terok.sandbox.sidecar=") for a in parsed)
 
     def test_cleanup_handler_idempotent(
         self, tmp_path: Path, capsys: pytest.CaptureFixture
@@ -553,8 +689,12 @@ class TestEdgeCases:
         cfg = _make_cfg(tmp_path)
         with patch("terok_sandbox.integrations.shield.ShieldManager.pre_start", return_value=[]):
             compose("myc", cfg=cfg, shield=True, gate=False, broker=False, scope=None)
-        with patch(
-            "terok_sandbox.integrations.shield.ShieldManager.down", side_effect=OSError("nft gone")
+        with (
+            patch(
+                "terok_sandbox.integrations.shield.ShieldManager.down",
+                side_effect=OSError("nft gone"),
+            ),
+            patch("terok_sandbox.launch._resolve_container_id", return_value="ctr-uuid"),
         ):
             assert cleanup("myc", cfg=cfg) is True
         # State dir gone even though shield.down failed.
@@ -574,12 +714,20 @@ class TestEdgeCases:
         """Trailing `-v` with no value is skipped."""
         reject_managed_volumes(["-v"])
 
+    def test_reject_managed_volumes_blocks_runtime_dir_and_subpaths(self) -> None:
+        """Mounts over ``CONTAINER_RUNTIME_DIR`` (or any descendant) are rejected."""
+        from terok_sandbox.config import CONTAINER_RUNTIME_DIR
+
+        for target in (CONTAINER_RUNTIME_DIR, f"{CONTAINER_RUNTIME_DIR}/anything"):
+            with pytest.raises(SystemExit, match="managed by terok-sandbox"):
+                reject_managed_volumes(["-v", f"/tmp/x:{target}"])
+
     def test_cleanup_db_missing_does_not_crash(self, tmp_path: Path) -> None:
         """A missing credential DB at cleanup time is treated as already-revoked."""
         cfg = _make_cfg(tmp_path)
         with (
             patch("terok_sandbox.integrations.shield.ShieldManager.pre_start", return_value=[]),
-            patch("terok_sandbox.gate.tokens.TokenStore.create", return_value="t"),
+            patch("terok_sandbox.launch.mint_gate_token", return_value="t"),
             patch("terok_sandbox.vault.store.db.CredentialDB.create_token", return_value="p"),
         ):
             compose("myc", cfg=cfg, shield=True, gate=True, broker=True, scope="proj")
@@ -590,7 +738,6 @@ class TestEdgeCases:
                 "terok_sandbox.config.SandboxConfig.open_credential_db",
                 side_effect=OSError("db file vanished"),
             ),
-            patch("terok_sandbox.gate.tokens.TokenStore.revoke_for_task"),
         ):
             assert cleanup("myc", cfg=cfg) is True
 
@@ -611,3 +758,195 @@ class TestEdgeCases:
             _handle_prepare("a")
             _handle_run("b", podman_args=["ubuntu"])
             _handle_cleanup("a")
+
+
+# ---------------------------------------------------------------------------
+# _validate_container_name — the launch-side path-component guard
+# ---------------------------------------------------------------------------
+
+
+class TestValidateContainerName:
+    """The name is interpolated into state + runtime dirs that get rmtree'd,
+    so it must be a single safe path component."""
+
+    def test_accepts_plain_name(self) -> None:
+        """A simple alphanumeric name passes silently."""
+        _validate_container_name("my-task-42")  # must not raise
+
+    @pytest.mark.parametrize("bad", ["", "a/b", "/abs", "..", ".", "../evil"])
+    def test_rejects_unsafe_names(self, bad: str) -> None:
+        """Empty, separator-bearing, or parent-ref names are a hard SystemExit.
+
+        Mirrors the supervisor-side ``load_sidecar`` guard — both ends
+        refuse a name that could redirect filesystem operations."""
+        with pytest.raises(SystemExit, match="unsafe container name"):
+            _validate_container_name(bad)
+
+
+# ---------------------------------------------------------------------------
+# allocate_per_container_resources — per-container dir + (TCP) ports
+# ---------------------------------------------------------------------------
+
+
+class TestAllocatePerContainerResources:
+    """Both modes get a 0700 per-container runtime dir; only TCP gets ports."""
+
+    def test_socket_mode_makes_dir_and_no_ports(self, tmp_path: Path) -> None:
+        """Socket mode: directory created mode 0700, all ports ``None``."""
+        cfg = _make_cfg(tmp_path, services_mode="socket")
+        res = allocate_per_container_resources(cfg, "myc")
+
+        assert res.container_runtime_dir == cfg.runtime_dir / "run" / "myc"
+        assert res.container_runtime_dir.is_dir()
+        assert (res.container_runtime_dir.stat().st_mode & 0o777) == 0o700
+        assert res.token_broker_port is None
+        assert res.ssh_signer_port is None
+        assert res.gate_port is None
+
+    def test_tcp_mode_allocates_three_distinct_ports(self, tmp_path: Path) -> None:
+        """TCP mode: three distinct free ports come back alongside the dir."""
+        cfg = _make_cfg(tmp_path, services_mode="tcp")
+        res = allocate_per_container_resources(cfg, "myc")
+
+        assert res.container_runtime_dir.is_dir()
+        ports = {res.token_broker_port, res.ssh_signer_port, res.gate_port}
+        assert None not in ports
+        # Allocated simultaneously against open sockets, so all three differ.
+        assert len(ports) == 3
+
+
+# ---------------------------------------------------------------------------
+# _rollback_compose_state — best-effort teardown of a half-started launch
+# ---------------------------------------------------------------------------
+
+
+class TestRollbackComposeState:
+    """When a launch aborts after minting tokens + creating dirs, the
+    rollback revokes the phantom tokens and removes the durable state."""
+
+    def test_revokes_tokens_and_removes_dirs(self, tmp_path: Path) -> None:
+        """A plan with a scope revokes the container's tokens, then rmtrees
+        both the per-container runtime dir and the state dir."""
+        from unittest.mock import MagicMock
+
+        cfg = _make_cfg(tmp_path)
+        runtime_dir = tmp_path / "run" / "myc"
+        runtime_dir.mkdir(parents=True)
+        state_dir = tmp_path / "state" / "myc"
+        state_dir.mkdir(parents=True)
+        per = PerContainerResources(
+            container_runtime_dir=runtime_dir,
+            token_broker_port=None,
+            ssh_signer_port=None,
+            gate_port=None,
+        )
+        plan = WiringPlan(scope="proj", shield=True, gate=True, broker=True, ssh=True)
+        db = MagicMock()
+
+        with patch.object(SandboxConfig, "open_credential_db", return_value=db):
+            _rollback_compose_state(cfg, "myc", plan, per, state_dir)
+
+        db.revoke_tokens.assert_called_once_with("proj", "myc")
+        db.close.assert_called_once()
+        assert not runtime_dir.exists()
+        assert not state_dir.exists()
+
+    def test_no_scope_skips_token_revocation(self, tmp_path: Path) -> None:
+        """A shield-only plan (no scope) has no tokens to revoke — the DB is
+        never opened, but the dirs are still removed."""
+        cfg = _make_cfg(tmp_path)
+        runtime_dir = tmp_path / "run" / "myc"
+        runtime_dir.mkdir(parents=True)
+        state_dir = tmp_path / "state" / "myc"
+        state_dir.mkdir(parents=True)
+        per = PerContainerResources(
+            container_runtime_dir=runtime_dir,
+            token_broker_port=None,
+            ssh_signer_port=None,
+            gate_port=None,
+        )
+        plan = WiringPlan(scope=None, shield=True, gate=False, broker=False, ssh=False)
+
+        with patch.object(SandboxConfig, "open_credential_db") as open_db:
+            _rollback_compose_state(cfg, "myc", plan, per, state_dir)
+
+        open_db.assert_not_called()
+        assert not runtime_dir.exists()
+        assert not state_dir.exists()
+
+    def test_locked_vault_does_not_crash_rollback(self, tmp_path: Path) -> None:
+        """If the vault won't open, rollback still removes the dirs (best-effort)."""
+        cfg = _make_cfg(tmp_path)
+        runtime_dir = tmp_path / "run" / "myc"
+        runtime_dir.mkdir(parents=True)
+        state_dir = tmp_path / "state" / "myc"
+        state_dir.mkdir(parents=True)
+        per = PerContainerResources(
+            container_runtime_dir=runtime_dir,
+            token_broker_port=None,
+            ssh_signer_port=None,
+            gate_port=None,
+        )
+        plan = WiringPlan(scope="proj", shield=True, gate=True, broker=False, ssh=False)
+
+        with patch.object(SandboxConfig, "open_credential_db", side_effect=RuntimeError("locked")):
+            _rollback_compose_state(cfg, "myc", plan, per, state_dir)
+
+        assert not runtime_dir.exists()
+        assert not state_dir.exists()
+
+
+# ---------------------------------------------------------------------------
+# _resolve_container_id — name → full podman UUID at cleanup time
+# ---------------------------------------------------------------------------
+
+
+class TestResolveContainerId:
+    """Resolves the operator-facing name to podman's full UUID, soft-failing
+    to ``None`` whenever podman can't answer."""
+
+    def test_returns_full_uuid_on_success(self) -> None:
+        """A successful ``podman inspect`` yields the stripped UUID."""
+        from unittest.mock import MagicMock
+
+        result = MagicMock(returncode=0, stdout="abc123def456\n")
+        with (
+            patch("terok_sandbox.launch.shutil.which", return_value="/usr/bin/podman"),
+            patch("terok_sandbox.launch.subprocess.run", return_value=result),
+        ):
+            assert _resolve_container_id("myc") == "abc123def456"
+
+    def test_returns_none_when_podman_missing(self) -> None:
+        """No podman on PATH ⇒ nothing to resolve."""
+        with patch("terok_sandbox.launch.shutil.which", return_value=None):
+            assert _resolve_container_id("myc") is None
+
+    def test_returns_none_on_subprocess_error(self) -> None:
+        """A subprocess OSError/timeout collapses to ``None``."""
+        with (
+            patch("terok_sandbox.launch.shutil.which", return_value="/usr/bin/podman"),
+            patch("terok_sandbox.launch.subprocess.run", side_effect=OSError("boom")),
+        ):
+            assert _resolve_container_id("myc") is None
+
+    def test_returns_none_on_nonzero_exit(self) -> None:
+        """A non-zero ``podman inspect`` (container already pruned) ⇒ ``None``."""
+        from unittest.mock import MagicMock
+
+        result = MagicMock(returncode=125, stdout="")
+        with (
+            patch("terok_sandbox.launch.shutil.which", return_value="/usr/bin/podman"),
+            patch("terok_sandbox.launch.subprocess.run", return_value=result),
+        ):
+            assert _resolve_container_id("myc") is None
+
+    def test_returns_none_on_empty_stdout(self) -> None:
+        """A zero exit but empty stdout (unexpected) still soft-fails to ``None``."""
+        from unittest.mock import MagicMock
+
+        result = MagicMock(returncode=0, stdout="  \n")
+        with (
+            patch("terok_sandbox.launch.shutil.which", return_value="/usr/bin/podman"),
+            patch("terok_sandbox.launch.subprocess.run", return_value=result),
+        ):
+            assert _resolve_container_id("myc") is None

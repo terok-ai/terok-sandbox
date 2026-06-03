@@ -27,12 +27,43 @@ runs.
 - **Shield install + drive** — a thin adapter that installs the
   terok-shield OCI hooks at setup time and drives the firewall at
   runtime (allow / deny / up / down).
-- **Clearance install** — wires the desktop notifier daemon
-  (terok-clearance) onto every blocked outbound connection, so the
-  operator can authorise destinations live without restarting the
-  container.
+- **Clearance composed in-supervisor** — every container gets a
+  per-container supervisor that hosts the hub, verdict server, and
+  desktop notifier in one short-lived process, spawned by an OCI
+  hook and reaped by `podman wait`.  No lingering daemons between
+  tasks; `pgrep terok` is empty when no containers are running.
 - **Setup as one call** — `sandbox_setup()` brings the whole stack up
   idempotently; `sandbox_uninstall()` undoes it.
+
+## Per-container supervisor
+
+The supervisor composes `terok-vault`, clearance-hub, verdict, and
+notifier into a single in-process composition per container.
+Lifecycle, end-to-end:
+
+1. `terok-sandbox prepare` writes a sidecar config to
+   `$XDG_STATE_HOME/terok/sidecar/<container-name>.json` and emits
+   the podman flags for the container (vault socket bind-mount,
+   shield annotations, gate token, …).
+2. The operator (or the calling orchestrator) runs `podman run`.
+3. The OCI prestart hook installed by `terok-sandbox setup` reads
+   the sidecar, then `Popen`s a stdlib-only wrapper that supervises
+   `terok-sandbox supervisor <id>` — the actual long-running asyncio
+   loop.  The wrapper restarts the supervisor up to five times on
+   non-zero exit, with exponential backoff capped at 60 s.
+4. The supervisor brings up a `VerdictServer`, `ClearanceHub`,
+   `VaultProxy` (in `socket` or `tcp` mode per the sidecar), and a
+   desktop notifier subscriber; awaits `podman wait <id>`; tears
+   them down in reverse order on container exit.
+5. The OCI poststop hook SIGTERMs the wrapper PID (recorded under
+   `$XDG_STATE_HOME/terok/pids/supervisor-<id>.pid`) and unlinks the
+   PID file.
+
+Operators don't usually invoke `terok-sandbox supervisor` directly —
+it's hidden from the main help and spawned by the hook chain — but
+running it under a debugger after `terok-sandbox prepare` is a
+supported way to step through a faulty composition without involving
+podman.
 
 ## Where it sits in the stack
 

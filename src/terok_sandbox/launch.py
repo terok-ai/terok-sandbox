@@ -19,6 +19,8 @@ import json
 import os
 import shlex
 import shutil
+import socket as _socket
+import subprocess  # nosec B404 — podman inspect helper, fixed argv
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,7 +28,7 @@ from pathlib import Path
 from terok_util import podman_userns_args
 
 from .config import CONTAINER_RUNTIME_DIR, SandboxConfig
-from .gate.tokens import TokenStore
+from .gate.tokens import mint_gate_token
 from .sandbox import Sharing, VolumeSpec
 
 # Container-side path where bridge resources are bind-mounted (runtime
@@ -59,10 +61,12 @@ SANDBOX_MANAGED_FLAGS = frozenset(
 _FLAG_ALIASES: dict[str, str] = {"--net": "--network"}
 
 # Volume mount targets sandbox emits.  A user `-v ...:<target>` that
-# overlaps any of these would shadow sandbox's mounts.
+# overlaps any of these — or any path under ``CONTAINER_RUNTIME_DIR``
+# itself — would shadow sandbox's sockets/mounts.
 _MANAGED_VOLUME_TARGETS = frozenset(
     {
         CONTAINER_BRIDGES_DIR,
+        CONTAINER_RUNTIME_DIR,
         f"{CONTAINER_RUNTIME_DIR}/vault.sock",
         f"{CONTAINER_RUNTIME_DIR}/ssh-agent.sock",
         f"{CONTAINER_RUNTIME_DIR}/gate-server.sock",
@@ -110,6 +114,90 @@ class WiringPlan:
         return self.gate or self.broker or self.ssh
 
 
+@dataclass(frozen=True)
+class PerContainerResources:
+    """Per-container socket dir + (for TCP mode) ports.
+
+    Allocated once per launch so the same values reach mount flags,
+    env vars, and the sidecar JSON the supervisor reads.  Keeps
+    concurrent containers from colliding on host-global filenames or
+    ports.
+    """
+
+    container_runtime_dir: Path
+    """Host-side directory that becomes ``/run/terok/`` inside the
+    container.  Contains the supervisor-bound ``vault.sock`` /
+    ``ssh-agent.sock``.  Created (mode 0700) before the bind mount."""
+
+    token_broker_port: int | None
+    """Per-container TCP port for the vault proxy in TCP mode; ``None``
+    in socket mode."""
+
+    ssh_signer_port: int | None
+    """Per-container TCP port for the SSH signer in TCP mode; ``None``
+    in socket mode."""
+
+    gate_port: int | None
+    """Per-container TCP port for the git gate in TCP mode; ``None``
+    in socket mode."""
+
+
+def allocate_per_container_resources(cfg: SandboxConfig, container: str) -> PerContainerResources:
+    """Compute per-container paths + (for TCP mode) ports.
+
+    Both transport modes get a per-container directory under
+    ``cfg.runtime_dir/run/<container>`` (mode 0700) that the caller
+    bind-mounts at ``/run/terok/`` inside the container.  In TCP mode,
+    two free ports are claimed via ``bind(0)`` + ``getsockname`` +
+    close so each container gets its own pair instead of fighting
+    over the singleton from ``cfg``.
+
+    The narrow window between ``bind(0)``'s close and the supervisor's
+    re-bind on the same port is an EADDRINUSE-loud failure mode, not
+    silent breakage.
+    """
+    container_runtime_dir = cfg.runtime_dir / "run" / container
+    container_runtime_dir.mkdir(parents=True, exist_ok=True)
+    container_runtime_dir.chmod(0o700)
+
+    if cfg.services_mode != "tcp":
+        return PerContainerResources(
+            container_runtime_dir=container_runtime_dir,
+            token_broker_port=None,
+            ssh_signer_port=None,
+            gate_port=None,
+        )
+
+    # Allocate all three ports against open sockets *simultaneously* —
+    # consecutive ``bind(0)`` + close pairs can legitimately hand back
+    # the same port (the kernel is free to reuse the just-freed slot
+    # before the next call) and that would crash one of the services on
+    # startup with ``EADDRINUSE``.
+    broker_port, signer_port, gate_port = _pick_free_tcp_ports(3)
+    return PerContainerResources(
+        container_runtime_dir=container_runtime_dir,
+        token_broker_port=broker_port,
+        ssh_signer_port=signer_port,
+        gate_port=gate_port,
+    )
+
+
+def _pick_free_tcp_ports(count: int) -> tuple[int, ...]:
+    """*count* distinct kernel-assigned free TCP ports.
+
+    Holds every socket bound at the same time so the kernel can't reuse
+    the same port across the ``bind(0)`` calls.
+    """
+    socks = [_socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) for _ in range(count)]
+    try:
+        for s in socks:
+            s.bind(("127.0.0.1", 0))
+        return tuple(s.getsockname()[1] for s in socks)
+    finally:
+        for s in socks:
+            s.close()
+
+
 def bridges_resource_dir() -> Path:
     """Filesystem path to the bridge resources shipped with this package."""
     return Path(__file__).resolve().parent / "resources" / "bridges"
@@ -147,6 +235,50 @@ def _read_meta(state_dir: Path) -> WiringPlan | None:
 # ---------------------------------------------------------------------------
 
 
+def _validate_container_name(container: str) -> None:
+    """Reject a container name that isn't a safe single path component.
+
+    ``container`` is interpolated into host state + runtime directory
+    paths ([`run_state_dir`][terok_sandbox.launch.run_state_dir],
+    [`allocate_per_container_resources`][terok_sandbox.launch.allocate_per_container_resources])
+    and the sidecar filename — all of which are created, chmod'd, and
+    ``rmtree``'d.  A name carrying a path separator or parent-ref could
+    redirect those filesystem operations outside their roots, so reject it
+    before anything is touched.  Mirrors the supervisor-side guard in
+    [`load_sidecar`][terok_sandbox.supervisor.main.load_sidecar].
+    """
+    if not container or "/" in container or container in (".", ".."):
+        raise SystemExit(f"unsafe container name (not a single path component): {container!r}")
+
+
+def _rollback_compose_state(
+    cfg: SandboxConfig,
+    container: str,
+    plan: WiringPlan,
+    per_container: PerContainerResources,
+    state_dir: Path,
+) -> None:
+    """Best-effort teardown of the durable state ``compose`` laid down.
+
+    Called when a launch aborts after token minting + directory creation
+    but before the container starts, so the failed attempt orphans
+    nothing: revokes the per-container phantom tokens and removes the
+    state + runtime directories.
+    """
+    if plan.scope is not None:
+        try:
+            db = cfg.open_credential_db()
+        except Exception:  # noqa: BLE001 — best-effort: nothing to revoke if the vault won't open
+            db = None
+        if db is not None:
+            try:
+                db.revoke_tokens(plan.scope, container)
+            finally:
+                db.close()
+    shutil.rmtree(per_container.container_runtime_dir, ignore_errors=True)
+    shutil.rmtree(state_dir, ignore_errors=True)
+
+
 def compose(
     container: str,
     *,
@@ -171,6 +303,8 @@ def compose(
     Raises ``SystemExit`` if shield setup is required (propagated from
     [`ShieldManager.pre_start`][terok_sandbox.integrations.shield.ShieldManager.pre_start]).
     """
+    _validate_container_name(container)
+
     from .integrations.shield import ShieldManager
 
     # Profile override flows through cfg so shield's internal builder
@@ -212,10 +346,26 @@ def compose(
 
     args: list[str] = []
 
+    # Per-container runtime resources (host-side socket dir + TCP ports).
+    # Allocated up front so shield's nft loopback-port allowlist sees
+    # the actual broker/signer ports the supervisor will later bind.
+    per_container = allocate_per_container_resources(cfg, container)
+    loopback_ports = tuple(
+        p
+        for p in (
+            per_container.gate_port,
+            per_container.token_broker_port,
+            per_container.ssh_signer_port,
+        )
+        if p is not None
+    )
+
     # Shield first — its OCI hook expects to see the annotations before
     # podman processes any of the other flags.
     if shield:
-        args += ShieldManager(state_dir, cfg).pre_start(container)
+        args += ShieldManager(
+            state_dir, cfg, loopback_ports_override=loopback_ports or None
+        ).pre_start(container)
 
     # User-namespace mapping ensures the host UID matches inside the
     # container, which both the bind-mounted sockets (0600 host-owned)
@@ -234,81 +384,150 @@ def compose(
                 CONTAINER_BRIDGES_DIR,
                 sharing=Sharing.SHARED,
                 read_only=True,
+                live=True,
             )
         )
 
-    # Vault token broker — bind-mount the vault socket (socket mode) or
-    # set the broker port env (TCP mode).  The in-container bridge script
-    # picks up whichever is set and exposes a localhost endpoint.
+    # Socket-mode: bind-mount the per-container dir at /run/terok/ so
+    # the supervisor's later-bound vault.sock / ssh-agent.sock /
+    # gate-server.sock appear inside the container at the well-known
+    # paths.  The supervisor binds all three inside this directory.
+    if cfg.services_mode == "socket" and (effective_broker or effective_ssh or effective_gate):
+        args += _volume_args(
+            VolumeSpec(
+                per_container.container_runtime_dir,
+                CONTAINER_RUNTIME_DIR,
+                sharing=Sharing.SHARED,
+                live=True,
+            )
+        )
+
+    # Vault token broker env — the in-container bridge script reads the
+    # loopback port (socket mode) or the host TCP port (TCP mode) to
+    # build its forwarder.
     if effective_broker:
         if cfg.services_mode == "socket":
-            args += _volume_args(
-                VolumeSpec(
-                    cfg.vault_socket_path,
-                    f"{CONTAINER_RUNTIME_DIR}/vault.sock",
-                    sharing=Sharing.SHARED,
-                )
-            )
             args += ["-e", f"TEROK_VAULT_LOOPBACK_PORT={LOOPBACK_VAULT_PORT}"]
-        elif cfg.token_broker_port is not None:
-            args += ["-e", f"TEROK_TOKEN_BROKER_PORT={cfg.token_broker_port}"]
+        elif per_container.token_broker_port is not None:
+            args += ["-e", f"TEROK_TOKEN_BROKER_PORT={per_container.token_broker_port}"]
 
-    # Gate — mount the gate Unix socket and plant a per-container token.
-    # The bridge script exposes the gate at http://localhost:9418/ inside
-    # the container.  TCP-mode gate is not bridged here; the user reaches
-    # it directly via host.containers.internal:<gate_port>.
+    # Gate — mint a per-container token; the gate lives in the
+    # supervisor, which binds ``gate-server.sock`` inside the already-
+    # mounted ``/run/terok/`` dir (socket mode) or a per-container
+    # loopback port (TCP mode).  The token travels only via the sidecar
+    # + the env var the in-container bridge reads.
+    gate_token: str | None = None
     if effective_gate:
-        token = TokenStore(cfg).create(scope, container)  # type: ignore[arg-type]
+        gate_token = mint_gate_token()
         if cfg.services_mode == "socket":
-            args += _volume_args(
-                VolumeSpec(
-                    cfg.gate_socket_path,
-                    f"{CONTAINER_RUNTIME_DIR}/gate-server.sock",
-                    sharing=Sharing.SHARED,
-                )
-            )
             args += ["-e", f"TEROK_GATE_SOCKET={CONTAINER_RUNTIME_DIR}/gate-server.sock"]
-        elif cfg.gate_port is not None:
-            args += ["-e", f"TEROK_GATE_PORT={cfg.gate_port}"]
-        args += ["-e", f"TEROK_GATE_TOKEN={token}"]
+        elif per_container.gate_port is not None:
+            args += ["-e", f"TEROK_GATE_PORT={per_container.gate_port}"]
+        args += ["-e", f"TEROK_GATE_TOKEN={gate_token}"]
 
-    # SSH signer — mint a phantom token, mount the signer socket (socket
-    # mode) or set the port env (TCP mode).  The in-container bridge
-    # injects the token in the agent-protocol pre-handshake and exposes
-    # a plain ``SSH_AUTH_SOCK=/tmp/ssh-agent.sock`` to user-side tools.
-    #
-    # If anything in this block raises, ``_write_meta`` further down is
-    # skipped — which means cleanup() has no plan to read and can't
-    # revoke the gate token we minted moments ago.  Roll it back here so
-    # a locked-vault failure doesn't leak an authorised gate token.
+    # SSH signer — mint a phantom token + tell the bridge how to reach
+    # the in-supervisor signer.  Socket mode: well-known in-container
+    # path (the supervisor binds it inside the per-container dir mount).
+    # TCP mode: per-container port from `bind(0)`.
     if effective_ssh:
+        # Non-interactive: launch runs under asyncio, where a prompt_toolkit
+        # passphrase prompt cannot own the loop.  A locked vault raises
+        # NoPassphraseError here — the frontend unlocks before launch.
+        db = cfg.open_credential_db(prompt_on_tty=False)
         try:
-            db = cfg.open_credential_db(prompt_on_tty=True)
-            try:
-                ssh_token = db.create_token(scope, container, scope, "ssh")
-            finally:
-                db.close()
-        except BaseException:
-            if effective_gate and scope is not None:
-                TokenStore(cfg).revoke_for_task(scope, container)
-            raise
+            ssh_token = db.create_token(scope, container, scope, "ssh")
+        finally:
+            db.close()
         args += ["-e", f"TEROK_SSH_SIGNER_TOKEN={ssh_token}"]
         if cfg.services_mode == "socket":
-            args += _volume_args(
-                VolumeSpec(
-                    cfg.ssh_signer_socket_path,
-                    f"{CONTAINER_RUNTIME_DIR}/ssh-agent.sock",
-                    sharing=Sharing.SHARED,
-                )
-            )
             args += ["-e", f"TEROK_SSH_SIGNER_SOCKET={CONTAINER_RUNTIME_DIR}/ssh-agent.sock"]
-        elif cfg.ssh_signer_port is not None:
-            args += ["-e", f"TEROK_SSH_SIGNER_PORT={cfg.ssh_signer_port}"]
+        elif per_container.ssh_signer_port is not None:
+            args += ["-e", f"TEROK_SSH_SIGNER_PORT={per_container.ssh_signer_port}"]
 
     args += ["--name", container]
 
     _write_meta(state_dir, plan)
+    sidecar_path = _write_sidecar(cfg, container, plan, per_container, gate_token)
+    if sidecar_path is None:
+        # Fail closed: a launch with no sidecar means the supervisor never
+        # starts, so the container would hit dead vault/SSH/gate endpoints.
+        # compose() has already minted phantom tokens and laid down the
+        # state + runtime dirs, so roll those back before aborting to avoid
+        # orphaning them for a container that never started.
+        _rollback_compose_state(cfg, container, plan, per_container, state_dir)
+        raise SystemExit(
+            "sidecar write failed; aborting launch (vault/SSH endpoints would be dead)"
+        )
+    args += ["--annotation", f"terok.sandbox.sidecar={sidecar_path}"]
     return args, plan
+
+
+def _write_sidecar(
+    cfg: SandboxConfig,
+    container: str,
+    plan: WiringPlan,
+    per_container: PerContainerResources,
+    gate_token: str | None,
+) -> Path | None:
+    """Persist the per-container sidecar config the supervisor reads.
+
+    Path: ``<cfg.state_dir>/sidecar/<container-name>.json``.  Returns
+    the absolute path on success — the caller emits it as the
+    ``terok.sandbox.sidecar`` OCI annotation that triggers the hook
+    and tells it where to find this file.  No XDG guessing, no
+    name-vs-id rename: one anchor, one path.
+
+    Socket paths are NOT carried in the sidecar — the supervisor
+    derives them from the container name + runtime dir via
+    [`SupervisorPaths.for_container`][terok_sandbox.supervisor.main.SupervisorPaths.for_container].
+    TCP ports ARE carried because the launch path allocates them
+    fresh per container via ``bind(0)``.
+
+    Best-effort: a write failure logs to stderr and returns ``None``;
+    the launch proceeds but the supervisor never spawns (no annotation
+    → no hook fire).
+    """
+    sidecar_dir = cfg.state_dir / "sidecar"
+    try:
+        sidecar_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        print(f"warning: sidecar dir setup failed: {exc}", file=sys.stderr)
+        return None
+
+    payload: dict[str, object] = {
+        "container_name": container,
+        "ipc_mode": cfg.services_mode,
+        "db_path": str(cfg.db_path),
+        "scope_id": plan.scope or "",
+        # The supervisor uses ``project_id`` as the gate's scope (the repo
+        # it serves is ``<project_id>.git``).  In standalone sandbox the
+        # scope *is* the repo name, so carry it here when the gate is wired.
+        "project_id": (plan.scope or "") if (gate_token and plan.scope) else "",
+        "task_id": "",
+        # The supervisor runs in crun's rootless userns where geteuid==0,
+        # so it can't re-derive runtime_dir from path resolvers.  Pin it
+        # here and read back verbatim.
+        "runtime_dir": str(cfg.runtime_dir),
+    }
+    if cfg.services_mode == "tcp":
+        payload["tcp_port"] = per_container.token_broker_port
+        payload["ssh_signer_port"] = per_container.ssh_signer_port
+        payload["gate_port"] = per_container.gate_port
+    # Gate config travels here only when the gate is actually wired; the
+    # supervisor composes the gate iff both ``gate_base_path`` and
+    # ``gate_token`` are present.
+    if gate_token:
+        payload["gate_base_path"] = str(cfg.gate_base_path)
+        payload["gate_token"] = gate_token
+
+    target = sidecar_dir / f"{container}.json"
+    try:
+        with target.open("w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2)
+    except OSError as exc:
+        print(f"warning: sidecar write failed: {exc}", file=sys.stderr)
+        return None
+    return target
 
 
 def _volume_args(vol: VolumeSpec) -> list[str]:
@@ -379,7 +598,10 @@ def reject_managed_volumes(podman_args: list[str]) -> None:
         if len(parts) < 2:
             continue
         target = parts[1]
-        if target in _MANAGED_VOLUME_TARGETS:
+        # Block exact matches plus any path under ``CONTAINER_RUNTIME_DIR``
+        # — sandbox owns that whole subtree, so a deeper user mount would
+        # still hide a freshly-bound supervisor socket.
+        if target in _MANAGED_VOLUME_TARGETS or target.startswith(f"{CONTAINER_RUNTIME_DIR}/"):
             conflicts.add(target)
     if conflicts:
         raise SystemExit(
@@ -416,10 +638,12 @@ def cleanup(container: str, *, cfg: SandboxConfig) -> bool:
     if plan is None:
         return False
 
-    # Revoke tokens before tearing down shield: a still-running container
-    # using a revoked token gets clean 401s, not stale 200s.
-    if plan.gate and plan.scope is not None:
-        TokenStore(cfg).revoke_for_task(plan.scope, container)
+    # The gate token lives only in the supervisor process (it never
+    # touched disk), so there is nothing to revoke here — the gate stops
+    # serving the moment the supervisor dies.
+    #
+    # Revoke vault tokens before tearing down shield: a still-running
+    # container using a revoked token gets clean 401s, not stale 200s.
     if (plan.broker or plan.ssh) and plan.scope is not None:
         from .vault.store.db import (  # noqa: PLC0415
             NoPassphraseError,
@@ -428,20 +652,21 @@ def cleanup(container: str, *, cfg: SandboxConfig) -> bool:
         )
 
         try:
-            db = cfg.open_credential_db(prompt_on_tty=True)
+            # Non-interactive (teardown runs under asyncio): a locked vault
+            # raises rather than prompting — handled below.
+            db = cfg.open_credential_db(prompt_on_tty=False)
         except (
             OSError,
             NoPassphraseError,
             PlaintextDBFoundError,
             WrongPassphraseError,
-            SystemExit,
         ) as exc:
-            # Cleanup is best-effort: a missing DB (OSError), a locked
+            # Cleanup is best-effort: a missing DB (OSError) or a locked
             # / unencrypted / undecryptable vault (the three credential
-            # exceptions) or a cancelled prompt (SystemExit) all collapse
-            # to "already revoked from the caller's point of view" so
-            # shield/state teardown can still proceed.  Any other
-            # RuntimeError is a real bug — let it propagate.  Warn so
+            # exceptions) all collapse to "already revoked from the
+            # caller's point of view" so shield/state teardown can still
+            # proceed.  Any other RuntimeError is a real bug — let it
+            # propagate.  Warn so
             # the operator knows the broker/SSH phantom tokens for this
             # container are still in the DB and should be cleaned up
             # after the next ``vault unlock``.
@@ -460,15 +685,61 @@ def cleanup(container: str, *, cfg: SandboxConfig) -> bool:
                 db.close()
 
     # Shield down is best-effort: when the container has already exited,
-    # the OCI poststop hook has already removed the rules.
+    # the OCI poststop hook has already removed the rules.  Resolve the
+    # full container UUID via ``podman inspect`` because terok-shield's
+    # per-container hub socket is keyed on the ID, not the name; a
+    # vanished container surfaces as a non-zero exit and we skip the
+    # call (the poststop hook handled it).
     if plan.shield:
-        try:
-            ShieldManager(state_dir, cfg).down(container)
-        except (SystemExit, OSError):
-            pass
+        container_id = _resolve_container_id(container)
+        if container_id is not None:
+            try:
+                ShieldManager(state_dir, cfg).down(container, container_id)
+            except (SystemExit, OSError):
+                pass
+
+    # Sweep the per-container sidecar file and runtime dir.  The OCI
+    # poststop hook would normally cover this, but ``terok-sandbox
+    # cleanup`` runs out-of-band from podman lifecycle (e.g.
+    # ``prepare`` without a corresponding ``podman run``).
+    (cfg.state_dir / "sidecar" / f"{container}.json").unlink(missing_ok=True)
+    shutil.rmtree(cfg.runtime_dir / "run" / container, ignore_errors=True)
 
     shutil.rmtree(state_dir, ignore_errors=True)
     return True
+
+
+def _resolve_container_id(container: str) -> str | None:
+    """Return the full podman container UUID for *container*, or ``None``.
+
+    Used at cleanup time when the caller only carries the
+    operator-facing container *name*: terok-shield's per-container hub
+    socket is keyed on the UUID, and the API surface
+    ([`ShieldManager.down`][terok_sandbox.integrations.shield.ShieldManager.down])
+    requires it explicitly.
+
+    Returns ``None`` when podman is unreachable or the container has
+    already been pruned — both states mean "nothing to ask shield to
+    tear down" because the OCI poststop hook has already fired by the
+    time the container disappears from podman's catalogue.
+    """
+    podman = shutil.which("podman")
+    if podman is None:
+        return None
+    try:
+        result = subprocess.run(  # nosec B603 — argv fully constructed
+            [podman, "inspect", "-f", "{{.Id}}", container],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    container_id = result.stdout.strip()
+    return container_id or None
 
 
 # ---------------------------------------------------------------------------

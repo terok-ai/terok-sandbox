@@ -11,6 +11,8 @@ Integration with a real ``systemd-creds`` binary is covered in
 
 from __future__ import annotations
 
+import base64
+import json
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -18,6 +20,18 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from terok_sandbox.vault.store import systemd_creds
+
+
+@pytest.fixture(autouse=True)
+def _default_non_root_euid(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin a non-root euid so ``unseal`` takes the CLI path by default.
+
+    ``unseal`` first consults ``_outer_uid_if_userns_root`` (which keys
+    on ``geteuid()``); pinning a non-root uid keeps the CLI-path tests
+    deterministic no matter which uid the suite runs under.  The
+    in-namespace-root tests override this explicitly.
+    """
+    monkeypatch.setattr("os.geteuid", lambda: 1000)
 
 
 class TestAvailability:
@@ -388,6 +402,114 @@ class TestUnseal:
             assert systemd_creds.unseal(cred) is None
 
 
+class TestUnsealUsernsRoot:
+    """In-namespace root delegates to PID 1 instead of the (doomed) CLI path."""
+
+    def test_outer_uid_detected_for_userns_root(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """uid 0 inside a userns backed by host uid 1000 → returns 1000."""
+        monkeypatch.setattr("os.geteuid", lambda: 0)
+        monkeypatch.setattr(
+            Path, "read_text", lambda _self, **_kw: "         0       1000          1\n"
+        )
+        assert systemd_creds._outer_uid_if_userns_root() == 1000
+
+    def test_real_root_is_not_userns_root(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Real root (uid 0 → 0) → None; the CLI decrypts directly as root."""
+        monkeypatch.setattr("os.geteuid", lambda: 0)
+        monkeypatch.setattr(
+            Path, "read_text", lambda _self, **_kw: "         0          0 4294967295\n"
+        )
+        assert systemd_creds._outer_uid_if_userns_root() is None
+
+    def test_non_root_is_not_userns_root(self) -> None:
+        """A non-root caller (autouse euid 1000) → None → CLI path handles it."""
+        assert systemd_creds._outer_uid_if_userns_root() is None
+
+    def test_unseal_routes_through_pid1_when_userns_root(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """userns-root unseal delegates to PID 1 and never spawns the CLI."""
+        cred = tmp_path / "v.cred"
+        cred.write_bytes(b"sealed-blob")
+        monkeypatch.setattr("os.geteuid", lambda: 0)
+        monkeypatch.setattr(Path, "read_text", lambda _self, **_kw: "0 1000 1\n")
+        with (
+            patch.object(
+                systemd_creds, "_unseal_via_pid1", return_value="pw-from-pid1"
+            ) as via_pid1,
+            patch("subprocess.run") as run,
+        ):
+            assert systemd_creds.unseal(cred) == "pw-from-pid1"
+        assert via_pid1.call_args.kwargs["uid"] == 1000
+        run.assert_not_called()
+
+    def test_via_pid1_passes_base64_cred_through(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The .cred is already Base64 — send it verbatim (no double-encoding); the reply decodes."""
+        cred = tmp_path / "v.cred"
+        sealed_b64 = base64.b64encode(b"\x00\x01sealed-bytes").decode("ascii")
+        cred.write_text(sealed_b64 + "\n")  # trailing newline, as systemd-creds writes it
+        monkeypatch.setattr(
+            "terok_sandbox.vault.store.systemd_creds._VARLINK_SOCKET", _FakeVarlinkSocket()
+        )
+        reply = {"parameters": {"data": base64.b64encode(b"my-passphrase").decode()}}
+        fake = _fake_varlink_socket(reply)
+        with patch("socket.socket", return_value=fake):
+            assert systemd_creds._unseal_via_pid1(cred, uid=1000) == "my-passphrase"
+        msg = json.loads(b"".join(c.args[0] for c in fake.sendall.call_args_list).rstrip(b"\0"))
+        assert msg["method"] == "io.systemd.Credentials.Decrypt"
+        params = msg["parameters"]
+        assert params["scope"] == "user"
+        assert params["uid"] == 1000
+        assert params["name"] == "terok-sandbox.vault-passphrase"
+        # verbatim Base64 (whitespace stripped), NOT re-encoded
+        assert params["blob"] == sealed_b64
+
+    def test_via_pid1_base64_encodes_binary_cred(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A raw-binary (non-Base64) credential is Base64-encoded before sending."""
+        cred = tmp_path / "v.cred"
+        cred.write_bytes(b"\x00\x01\x02\xffnot-base64-text")
+        monkeypatch.setattr(
+            "terok_sandbox.vault.store.systemd_creds._VARLINK_SOCKET", _FakeVarlinkSocket()
+        )
+        reply = {"parameters": {"data": base64.b64encode(b"pw").decode()}}
+        fake = _fake_varlink_socket(reply)
+        with patch("socket.socket", return_value=fake):
+            assert systemd_creds._unseal_via_pid1(cred, uid=1000) == "pw"
+        params = json.loads(b"".join(c.args[0] for c in fake.sendall.call_args_list).rstrip(b"\0"))[
+            "parameters"
+        ]
+        assert base64.b64decode(params["blob"]) == b"\x00\x01\x02\xffnot-base64-text"
+
+    def test_via_pid1_error_reply_returns_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A Varlink ``error`` member (BadScope, NameMismatch, TPM errors, …) → fail closed."""
+        cred = tmp_path / "v.cred"
+        cred.write_bytes(b"blob")
+        monkeypatch.setattr(
+            "terok_sandbox.vault.store.systemd_creds._VARLINK_SOCKET", _FakeVarlinkSocket()
+        )
+        reply = {"error": "io.systemd.Credentials.BadScope", "parameters": {}}
+        with patch("socket.socket", return_value=_fake_varlink_socket(reply)):
+            assert systemd_creds._unseal_via_pid1(cred, uid=1000) is None
+
+    def test_via_pid1_returns_none_when_socket_absent(self, tmp_path: Path) -> None:
+        """No PID 1 Varlink socket (minimal init / old systemd) → fall through cleanly."""
+        cred = tmp_path / "v.cred"
+        cred.write_bytes(b"blob")
+
+        class _NoSocket:
+            def is_socket(self) -> bool:
+                return False
+
+        with patch("terok_sandbox.vault.store.systemd_creds._VARLINK_SOCKET", _NoSocket()):
+            assert systemd_creds._unseal_via_pid1(cred, uid=1000) is None
+
+
 # ── Test helpers ────────────────────────────────────────────────────
 
 _SYSTEMD_CREDS_EXE = "/usr/bin/systemd-creds"
@@ -430,6 +552,22 @@ class _FakeVarlinkSocket:
 
     def is_socket(self) -> bool:
         return True
+
+
+def _fake_varlink_socket(reply: dict) -> MagicMock:
+    """Return a mock ``socket.socket`` that replies with *reply* (a Varlink message).
+
+    Used as ``patch("socket.socket", return_value=…)``: the mock acts as
+    its own context manager and ``recv`` yields the NUL-terminated JSON
+    reply once, then EOF.
+    """
+    payload = json.dumps(reply).encode("utf-8") + b"\0"
+    sock = MagicMock()
+    sock.__enter__.return_value = sock
+    sock.__exit__.return_value = False
+    chunks = [payload, b""]
+    sock.recv.side_effect = lambda _n: chunks.pop(0) if chunks else b""
+    return sock
 
 
 @pytest.fixture()

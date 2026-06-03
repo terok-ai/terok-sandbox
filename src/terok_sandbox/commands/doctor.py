@@ -19,13 +19,17 @@ def _handle_doctor(*, cfg: SandboxConfig | None = None) -> None:
     container.  ``host_side`` checks evaluate via Python APIs; the
     remaining checks shell out to ``probe_cmd``.  Exit code mirrors
     the worst verdict (warn = 1, error = 2).
+
+    Vault / shield port probes are skipped at this layer: the vault is
+    a per-container service composed by the supervisor, so there is no
+    host-global port to probe and "no supervisor is running" is a
+    valid resting state (no live containers).  Per-container probes
+    run from inside the container.
     """
     from ..doctor import make_recovery_acknowledged_check, sandbox_doctor_checks
-    from ..vault.daemon.lifecycle import VaultManager
 
     if cfg is None:
         cfg = SandboxConfig()
-    mgr = VaultManager(cfg)
     # The recovery-acknowledged check is a host-level concern (one
     # marker per install, not per task), so it lives outside
     # ``sandbox_doctor_checks`` to avoid duplicating it per container
@@ -33,8 +37,8 @@ def _handle_doctor(*, cfg: SandboxConfig | None = None) -> None:
     # natural caller that re-appends it.
     checks = [
         *sandbox_doctor_checks(
-            token_broker_port=mgr.token_broker_port,
-            ssh_signer_port=mgr.ssh_signer_port,
+            token_broker_port=None,  # per-container — see docstring
+            ssh_signer_port=None,
             desired_shield_state=None,  # standalone mode — no task context
         ),
         make_recovery_acknowledged_check(),

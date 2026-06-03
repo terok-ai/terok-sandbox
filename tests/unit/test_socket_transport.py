@@ -4,14 +4,12 @@
 """Tests for Unix socket transport support across services.
 
 Covers: probe_unix_socket utility, SandboxConfig socket path properties,
-gate server Unix socket factory, gate lifecycle socket reachability,
-and SSH signer Unix socket mode.
+the gate server Unix socket factory, and SSH signer Unix socket mode.
 """
 
 from __future__ import annotations
 
 import asyncio
-import shutil
 import socket
 import struct
 import unittest.mock
@@ -21,7 +19,6 @@ import pytest
 
 from terok_sandbox._util._net import harden_socket, prepare_socket_path, probe_unix_socket
 from terok_sandbox.config import SandboxConfig
-from terok_sandbox.gate.lifecycle import GateServerManager, GateServerStatus
 from terok_sandbox.vault.ssh.signer import (
     SSH_AGENT_IDENTITIES_ANSWER,
     SSH_AGENTC_REQUEST_IDENTITIES,
@@ -123,11 +120,6 @@ class TestHardenSocket:
 class TestConfigSocketPaths:
     """Verify derived socket path properties on SandboxConfig."""
 
-    def test_gate_socket_path(self) -> None:
-        """gate_socket_path returns runtime_dir / 'gate-server.sock'."""
-        cfg = SandboxConfig(runtime_dir=MOCK_RUNTIME_DIR)
-        assert cfg.gate_socket_path == MOCK_RUNTIME_DIR / "gate-server.sock"
-
     def test_ssh_signer_socket_path(self) -> None:
         """ssh_signer_socket_path returns runtime_dir / 'ssh-agent.sock'."""
         cfg = SandboxConfig(runtime_dir=MOCK_RUNTIME_DIR)
@@ -196,92 +188,6 @@ class TestCreateUnixServer:
             assert sock_path.exists()
         finally:
             server.socket.close()
-
-
-# ── Gate lifecycle: socket reachability ──────────────────────────────────
-
-
-class TestWaitForUnixSocket:
-    """Verify the _wait_for_unix_socket retry loop."""
-
-    def test_returns_true_for_immediate_listener(self, tmp_path: Path) -> None:
-        """Succeeds immediately when the socket is already listening."""
-        from terok_sandbox.vault.daemon.lifecycle import VaultManager
-
-        sock_path = tmp_path / "test.sock"
-        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        srv.bind(str(sock_path))
-        srv.listen(1)
-        try:
-            assert VaultManager._wait_for_unix_socket(sock_path, timeout=1.0) is True
-        finally:
-            srv.close()
-
-    def test_returns_false_on_timeout(self, tmp_path: Path) -> None:
-        """Returns False when socket never appears within timeout."""
-        from terok_sandbox.vault.daemon.lifecycle import VaultManager
-
-        missing = tmp_path / "missing.sock"
-        assert VaultManager._wait_for_unix_socket(missing, timeout=0.3) is False
-
-
-class TestGateSocketReachability:
-    """Verify gate lifecycle socket-mode detection."""
-
-    def test_socket_reachable_returns_daemon_running(self) -> None:
-        """get_status reports daemon/running when Unix socket is reachable."""
-        mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
-        mock_cfg.with_resolved_ports.return_value = mock_cfg
-        mock_cfg.gate_port = 9418
-        with unittest.mock.patch.object(
-            GateServerManager, "__init__", lambda self, cfg=None: setattr(self, "_cfg", mock_cfg)
-        ):
-            mgr = GateServerManager()
-            with (
-                unittest.mock.patch.object(mgr, "is_socket_installed", return_value=False),
-                unittest.mock.patch.object(mgr, "is_socket_reachable", return_value=True),
-            ):
-                status = mgr.get_status()
-        assert status == GateServerStatus(
-            mode="daemon", running=True, port=9418, transport="socket"
-        )
-
-    def test_systemd_installed_inactive_socket_reachable(self) -> None:
-        """Foreground socket server detected even when systemd units are installed but inactive."""
-        mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
-        mock_cfg.with_resolved_ports.return_value = mock_cfg
-        mock_cfg.gate_port = 9418
-        with unittest.mock.patch.object(
-            GateServerManager, "__init__", lambda self, cfg=None: setattr(self, "_cfg", mock_cfg)
-        ):
-            mgr = GateServerManager()
-            with (
-                unittest.mock.patch.object(mgr, "is_socket_installed", return_value=True),
-                unittest.mock.patch.object(mgr, "is_socket_active", return_value=False),
-                unittest.mock.patch.object(mgr, "is_daemon_running", return_value=False),
-                unittest.mock.patch.object(mgr, "is_socket_reachable", return_value=True),
-            ):
-                status = mgr.get_status()
-        assert status == GateServerStatus(
-            mode="daemon", running=True, port=9418, transport="socket"
-        )
-
-    def test_socket_not_reachable_falls_through(self) -> None:
-        """get_status falls through to daemon PID check when socket is not reachable."""
-        mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
-        mock_cfg.with_resolved_ports.return_value = mock_cfg
-        mock_cfg.gate_port = 9418
-        with unittest.mock.patch.object(
-            GateServerManager, "__init__", lambda self, cfg=None: setattr(self, "_cfg", mock_cfg)
-        ):
-            mgr = GateServerManager()
-            with (
-                unittest.mock.patch.object(mgr, "is_socket_installed", return_value=False),
-                unittest.mock.patch.object(mgr, "is_socket_reachable", return_value=False),
-                unittest.mock.patch.object(mgr, "is_daemon_running", return_value=False),
-            ):
-                status = mgr.get_status()
-        assert status == GateServerStatus(mode="none", running=False, port=9418)
 
 
 # ── SSH agent: Unix socket mode ─────────────────────────────────────────
@@ -392,229 +298,11 @@ class TestSSHSignerUnixSocket:
             await start_ssh_signer(str(tmp_path / "test.db"))
 
 
-# ── Gate server: _serve_foreground validation ────────────────────────────
-
-
-class TestServeForeground:
-    """Verify _serve_foreground argument validation."""
-
-    def test_raises_without_socket_or_port(self, tmp_path: Path) -> None:
-        """RuntimeError when neither socket_path nor port is given."""
-        from terok_sandbox.gate.server import _serve_foreground
-
-        with pytest.raises(RuntimeError, match="--socket-path or --port"):
-            _serve_foreground(tmp_path, unittest.mock.Mock())
-
-    def test_tcp_server_created(self, tmp_path: Path) -> None:
-        """TCP-only mode creates a listening server on the given port."""
-        import threading
-
-        from terok_sandbox.gate.server import _serve_foreground
-
-        def _run():
-            _serve_foreground(tmp_path, unittest.mock.Mock(), port=0)
-
-        # signal.signal() only works in the main thread — mock it out
-        with unittest.mock.patch("terok_sandbox.gate.server.signal.signal"):
-            t = threading.Thread(target=_run, daemon=True)
-            t.start()
-            import time
-
-            time.sleep(0.3)
-            assert t.is_alive()
-
-    def test_pid_file_written(self, tmp_path: Path) -> None:
-        """PID file is created when pid_file is specified."""
-        import os
-        import threading
-
-        from terok_sandbox.gate.server import _serve_foreground
-
-        pid_file = tmp_path / "gate.pid"
-        sock_path = tmp_path / "gate.sock"
-
-        def _run():
-            _serve_foreground(
-                tmp_path,
-                unittest.mock.Mock(),
-                socket_path=sock_path,
-                pid_file=pid_file,
-            )
-
-        with unittest.mock.patch("terok_sandbox.gate.server.signal.signal"):
-            t = threading.Thread(target=_run, daemon=True)
-            t.start()
-            import time
-
-            time.sleep(0.2)
-            assert pid_file.exists()
-            assert pid_file.read_text().strip() == str(os.getpid())
-
-
-# ── Gate server: CLI --port sentinel ─────────────────────────────────────
-
-
-class TestGateMainPortDefault:
-    """Verify --port default/sentinel behavior in the gate CLI."""
-
-    def test_port_default_is_none(self) -> None:
-        """Argparse default for --port is None (sentinel), not 9418."""
-
-        from terok_sandbox.gate.server import main
-
-        # Extract the parser by intercepting parse_args
-        with (
-            unittest.mock.patch(
-                "sys.argv",
-                [
-                    "terok-gate",
-                    "--base-path=/tmp/terok-testing/b",
-                    "--token-file=/tmp/terok-testing/t",
-                    "--socket-path=/tmp/terok-testing/s",
-                ],
-            ),
-            unittest.mock.patch("terok_sandbox.gate.server._serve_foreground") as mock_fg,
-        ):
-            main()
-
-        # port should be None (not provided), not 9418
-        _, kwargs = mock_fg.call_args
-        assert kwargs["port"] is None
-
-    def test_explicit_port_passed_through(self) -> None:
-        """Explicit --port 9418 is forwarded, not swallowed."""
-        with (
-            unittest.mock.patch(
-                "sys.argv",
-                [
-                    "terok-gate",
-                    "--base-path=/tmp/terok-testing/b",
-                    "--token-file=/tmp/terok-testing/t",
-                    "--socket-path=/tmp/terok-testing/s",
-                    "--port=9418",
-                ],
-            ),
-            unittest.mock.patch("terok_sandbox.gate.server._serve_foreground") as mock_fg,
-        ):
-            from terok_sandbox.gate.server import main
-
-            main()
-
-        _, kwargs = mock_fg.call_args
-        assert kwargs["port"] == 9418
-
-
-# ── Vault: SSH signer mutual exclusion ───────────────────────────────────
-
-
-class TestSSHSignerMutualExclusion:
-    """Verify --ssh-signer-port and --ssh-signer-socket-path are mutually exclusive."""
-
-    def test_rejects_both_port_and_socket(self) -> None:
-        """Passing both --ssh-signer-port and --ssh-signer-socket-path is an error."""
-        with unittest.mock.patch(
-            "sys.argv",
-            [
-                "terok-vault",
-                "--socket-path=/tmp/terok-testing/proxy.sock",
-                "--db-path=/tmp/terok-testing/db",
-                "--routes-file=/tmp/terok-testing/routes.json",
-                "--ssh-signer-port=18732",
-                "--ssh-signer-socket-path=/tmp/terok-testing/ssh.sock",
-                "--ssh-keys-file=/tmp/terok-testing/keys.json",
-            ],
-        ):
-            from terok_sandbox.vault.daemon.token_broker import main as vault_main
-
-            with pytest.raises(SystemExit):
-                vault_main()
-
-
-class TestInstallSystemdPortGuards:
-    """Verify tcp-mode installers refuse to render when the port is unset.
-
-    Prevents the class of bug where ``services.mode: socket`` (which
-    skips port allocation) reaches the tcp install path by mistake and
-    emits ``ListenStream=127.0.0.1:None`` — systemd rejects that.
-
-    Since the refactor, transport lives on ``SandboxConfig.services_mode``
-    (not a per-call kwarg), so these tests set the mode directly on the
-    mock cfg and the manager picks it up via ``self._cfg.services_mode``.
-    """
-
-    def test_gate_tcp_install_without_port_raises(self) -> None:
-        """cfg.services_mode='tcp' + gate_port=None → refuses to render."""
-        mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
-        mock_cfg.with_resolved_ports.return_value = mock_cfg
-        mock_cfg.services_mode = "tcp"
-        mock_cfg.gate_port = None
-        with unittest.mock.patch.object(
-            GateServerManager, "__init__", lambda self, cfg=None: setattr(self, "_cfg", mock_cfg)
-        ):
-            mgr = GateServerManager()
-            with pytest.raises(SystemExit, match="no gate port is set"):
-                mgr.install_systemd_units()
-
-    def test_gate_socket_install_without_port_is_fine(self, tmp_path: Path) -> None:
-        """cfg.services_mode='socket' skips the port guard — ``None`` must pass."""
-        mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
-        mock_cfg.with_resolved_ports.return_value = mock_cfg
-        mock_cfg.services_mode = "socket"
-        mock_cfg.gate_port = None
-        mock_cfg.gate_socket_path = tmp_path / "gate.sock"
-        mock_cfg.gate_base_path = tmp_path / "base"
-        with (
-            unittest.mock.patch.object(
-                GateServerManager,
-                "__init__",
-                lambda self, cfg=None: setattr(self, "_cfg", mock_cfg),
-            ),
-            unittest.mock.patch.object(
-                GateServerManager, "_systemd_unit_dir", return_value=tmp_path / "units"
-            ),
-            unittest.mock.patch("terok_sandbox._util._systemctl.run"),
-        ):
-            # Reaching the end of install_systemd_units without SystemExit
-            # proves the port guard did not fire for socket-mode installs.
-            GateServerManager().install_systemd_units()
-
-    def test_vault_tcp_install_without_port_raises(self) -> None:
-        """cfg.services_mode='tcp' + token_broker_port=None → refuses to render."""
-        from terok_sandbox.vault.daemon.lifecycle import VaultManager
-
-        mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
-
-        mock_cfg.with_resolved_ports.return_value = mock_cfg
-        mock_cfg.services_mode = "tcp"
-        mock_cfg.token_broker_port = None
-        mock_cfg.ssh_signer_port = 18732
-        with unittest.mock.patch.object(
-            VaultManager,
-            "__init__",
-            lambda self, cfg=None: setattr(self, "_cfg", mock_cfg),
-        ):
-            mgr = VaultManager()
-            with pytest.raises(SystemExit, match="no port is set"):
-                mgr.install_systemd_units()
-
-    def test_vault_tcp_install_without_ssh_signer_port_raises(self) -> None:
-        """Same guard fires when only ssh_signer_port is unset."""
-        from terok_sandbox.vault.daemon.lifecycle import VaultManager
-
-        mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
-
-        mock_cfg.with_resolved_ports.return_value = mock_cfg
-        mock_cfg.services_mode = "tcp"
-        mock_cfg.token_broker_port = 18731
-        mock_cfg.ssh_signer_port = None
-        with unittest.mock.patch.object(
-            VaultManager,
-            "__init__",
-            lambda self, cfg=None: setattr(self, "_cfg", mock_cfg),
-        ):
-            mgr = VaultManager()
-            with pytest.raises(SystemExit, match="no port is set"):
-                mgr.install_systemd_units()
+# The gate's foreground / CLI / systemd-install tests that lived here
+# covered the retired host gate daemon.  The gate now lives inside the
+# per-container supervisor (see ``test_gate_server.py`` for its
+# start→serve→stop coverage), so those host-daemon tests have no live
+# code path to exercise.
 
 
 class TestServicesModeSSOT:
@@ -651,97 +339,3 @@ class TestServicesModeSSOT:
             cfg = _SandboxConfig(services_mode="socket")
         mock_mode.assert_not_called()
         assert cfg.services_mode == "socket"
-
-    def test_manager_reads_services_mode_from_cfg(self, tmp_path: Path) -> None:
-        """``GateServerManager`` reads transport from the cfg it was handed."""
-        mock_cfg = unittest.mock.MagicMock(spec=SandboxConfig)
-        mock_cfg.with_resolved_ports.return_value = mock_cfg
-        mock_cfg.services_mode = "socket"
-        mock_cfg.gate_port = None  # deliberately unset — socket mode should not care
-        mock_cfg.gate_socket_path = tmp_path / "gate.sock"
-        mock_cfg.gate_base_path = tmp_path / "base"
-        with (
-            unittest.mock.patch.object(
-                GateServerManager,
-                "__init__",
-                lambda self, cfg=None: setattr(self, "_cfg", mock_cfg),
-            ),
-            unittest.mock.patch.object(
-                GateServerManager, "_systemd_unit_dir", return_value=tmp_path / "units"
-            ),
-            unittest.mock.patch("terok_sandbox._util._systemctl.run"),
-        ):
-            # Install completes (no port-guard SystemExit) → mode was read
-            # from the cfg the manager was handed, not from a hard-coded default.
-            GateServerManager().install_systemd_units()
-
-
-class TestGateOrphanUnitSweep:
-    """Verify ``GateServerManager._sweep_orphan_units`` — marker-based cleanup."""
-
-    @staticmethod
-    def _with_unit_dir(unit_dir):
-        return unittest.mock.patch.object(
-            GateServerManager, "_systemd_unit_dir", return_value=unit_dir
-        )
-
-    def test_legacy_marked_file_removed(self, tmp_path):
-        """A terok-gate-* file with our marker but not current name is swept."""
-        unit_dir = tmp_path / "systemd-units"
-        unit_dir.mkdir()
-        legacy = unit_dir / "terok-gate-legacy.service"
-        legacy.write_text("# terok-gate-version: 3\n[Service]\n")
-        with self._with_unit_dir(unit_dir), unittest.mock.patch("subprocess.run"):
-            GateServerManager()._sweep_orphan_units()
-        assert not legacy.exists()
-
-    def test_current_name_skipped(self, tmp_path):
-        """Current-version filenames stay for the main removal pass to handle."""
-        unit_dir = tmp_path / "systemd-units"
-        unit_dir.mkdir()
-        current = unit_dir / "terok-gate.socket"
-        current.write_text("# terok-gate-version: 7\n[Socket]\n")
-        with self._with_unit_dir(unit_dir), unittest.mock.patch("subprocess.run"):
-            GateServerManager()._sweep_orphan_units()
-        assert current.exists()
-
-    def test_foreign_file_preserved(self, tmp_path):
-        """A user-authored file matching the glob but lacking the marker is not touched."""
-        unit_dir = tmp_path / "systemd-units"
-        unit_dir.mkdir()
-        foreign = unit_dir / "terok-gate-custom.service"
-        foreign.write_text("[Service]\nExecStart=/bin/true\n")
-        with self._with_unit_dir(unit_dir), unittest.mock.patch("subprocess.run"):
-            GateServerManager()._sweep_orphan_units()
-        assert foreign.exists()
-
-    def test_non_matching_glob_preserved(self, tmp_path):
-        """Files outside our glob are never read, regardless of content."""
-        unit_dir = tmp_path / "systemd-units"
-        unit_dir.mkdir()
-        other = unit_dir / "unrelated.service"
-        other.write_text("# terok-gate-version: 99\n")
-        with self._with_unit_dir(unit_dir), unittest.mock.patch("subprocess.run"):
-            GateServerManager()._sweep_orphan_units()
-        assert other.exists()
-
-    @pytest.mark.skipif(shutil.which("systemctl") is None, reason="needs systemctl on PATH")
-    def test_disable_invoked_before_unlink(self, tmp_path):
-        """Each removed legacy unit is systemctl-disabled first (best-effort)."""
-        unit_dir = tmp_path / "systemd-units"
-        unit_dir.mkdir()
-        legacy = unit_dir / "terok-gate-legacy.service"
-        legacy.write_text("# terok-gate-version: 3\n[Service]\n")
-        with (
-            self._with_unit_dir(unit_dir),
-            unittest.mock.patch("subprocess.run") as mock_run,
-        ):
-            GateServerManager()._sweep_orphan_units()
-        disable_calls = [c.args[0] for c in mock_run.call_args_list if "disable" in c.args[0]]
-        assert any("terok-gate-legacy.service" in cmd for cmd in disable_calls)
-
-    def test_missing_unit_dir_is_a_noop(self, tmp_path):
-        """Running on a host with no user systemd dir must not error."""
-        unit_dir = tmp_path / "does-not-exist"
-        with self._with_unit_dir(unit_dir), unittest.mock.patch("subprocess.run"):
-            GateServerManager()._sweep_orphan_units()  # must not raise

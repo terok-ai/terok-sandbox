@@ -25,14 +25,22 @@ set -euo pipefail
 : "${TEROK_SSH_SIGNER_TOKEN:?missing}"
 
 # Resolve upstream target: socket takes precedence over TCP.
+#
+# retry=/interval= make socat hold each agent request and re-attempt the
+# connect until the supervisor has bound the signer, rather than failing
+# instantly when the container's first task-init clone runs before the
+# signer is up (the same readiness race the gate bridge handles).  The
+# supervisor binds the signer once its vault DB is open, so this usually
+# connects on the first try; the retry only matters during startup.
+_RETRY="retry=30,interval=1"
 if [[ -n "${TEROK_SSH_SIGNER_SOCKET:-}" ]]; then
-  TARGET="UNIX-CONNECT:${TEROK_SSH_SIGNER_SOCKET}"
+  TARGET="UNIX-CONNECT:${TEROK_SSH_SIGNER_SOCKET},${_RETRY}"
 elif [[ -n "${TEROK_SSH_SIGNER_PORT:-}" ]]; then
   [[ "${TEROK_SSH_SIGNER_PORT}" =~ ^[0-9]+$ ]] || {
     echo "TEROK_SSH_SIGNER_PORT must be numeric" >&2
     exit 2
   }
-  TARGET="TCP:host.containers.internal:${TEROK_SSH_SIGNER_PORT}"
+  TARGET="TCP:host.containers.internal:${TEROK_SSH_SIGNER_PORT},${_RETRY}"
 else
   echo "One of TEROK_SSH_SIGNER_SOCKET or TEROK_SSH_SIGNER_PORT is required" >&2
   exit 2

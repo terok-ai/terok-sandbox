@@ -56,11 +56,14 @@ systemd-creds and the CLI is the supported entry point.  Tests stub
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import functools
+import json
 import os
 import re
 import shutil
+import socket
 import subprocess  # nosec: B404 — sealed credential lifecycle requires the systemd-creds CLI
 import tempfile
 from pathlib import Path
@@ -213,6 +216,113 @@ def seal(passphrase: str, credential_path: Path, *, key_mode: KeyMode = "auto") 
         ) from exc
 
 
+def _outer_uid_if_userns_root() -> int | None:
+    """Host uid behind in-namespace uid 0, or ``None`` when not userns-root.
+
+    The per-container supervisor is spawned by terok-sandbox's OCI hook
+    inside the rootless-Podman user namespace, where the operator's host
+    uid is mapped to in-namespace uid 0.  ``systemd-creds`` keys its
+    root-vs-delegate decision on ``geteuid()``, so as in-namespace root
+    it tries to drive the host key / TPM *directly* — and fails, because
+    the mapped kernel uid can't open ``/dev/tpmrm0`` or read
+    ``credential.secret``.  Detecting that case (in-ns uid 0 backed by a
+    non-zero host uid, read from ``/proc/self/uid_map``) lets
+    [`unseal`][terok_sandbox.vault.store.systemd_creds.unseal] delegate
+    to PID 1 itself, the way a genuine non-root caller's CLI does.
+
+    Returns ``None`` for real root (uid 0 → 0) and for any non-root
+    caller — both are handled correctly by the CLI path.
+    """
+    if os.geteuid() != 0:
+        return None
+    try:
+        for line in Path("/proc/self/uid_map").read_text(encoding="ascii").splitlines():
+            inside, outside, count = (int(field) for field in line.split())
+            if inside == 0 and count >= 1 and outside != 0:
+                return outside
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+def _unseal_via_pid1(credential_path: Path, *, uid: int) -> str | None:
+    """Unseal *credential_path* by asking PID 1 over ``io.systemd.Credentials``.
+
+    The non-root ``systemd-creds`` decrypt path delegates the privileged
+    half (host key / TPM) to PID 1 over this Varlink interface; we issue
+    the same ``Decrypt`` call directly because an in-namespace-root
+    supervisor can't reach that path through the CLI — its
+    ``geteuid() == 0`` routes it down the "do it myself" branch.  PID 1
+    reads our peer over ``SO_PEERCRED`` — which the user namespace maps
+    to *uid* — and derives the same ``--user`` key the credential was
+    sealed with.
+
+    Returns the decrypted passphrase, or ``None`` on every failure mode
+    (socket absent / unreachable, Varlink error, malformed reply, empty
+    output), so the caller fails closed exactly as the CLI path does.
+    """
+    if not _VARLINK_SOCKET.is_socket():
+        return None
+    try:
+        raw = credential_path.read_bytes()
+    except OSError:
+        return None
+    # systemd-creds writes the sealed credential as Base64 text, and the
+    # Varlink ``blob`` field also wants Base64 — pass it straight through.
+    # Re-encoding would double-wrap it and the server rejects it as
+    # BadFormat.  Fall back to encoding only if ever handed raw binary.
+    try:
+        blob = "".join(raw.decode("ascii").split())
+        base64.b64decode(blob, validate=True)
+    except (ValueError, UnicodeDecodeError):
+        blob = base64.b64encode(raw).decode("ascii")
+    request = (
+        json.dumps(
+            {
+                "method": "io.systemd.Credentials.Decrypt",
+                "parameters": {
+                    "name": _CREDENTIAL_NAME,
+                    "blob": blob,
+                    "scope": "user",
+                    "uid": uid,
+                },
+            }
+        ).encode("utf-8")
+        + b"\0"
+    )
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(_UNSEAL_TIMEOUT)
+            sock.connect(str(_VARLINK_SOCKET))
+            sock.sendall(request)
+            reply = bytearray()
+            while b"\0" not in reply:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    return None
+                reply.extend(chunk)
+    except OSError:
+        return None
+    try:
+        message = json.loads(bytes(reply).split(b"\0", 1)[0])
+    except ValueError:
+        return None
+    # Varlink signals method failure with an ``error`` member (BadScope,
+    # NameMismatch, NoSuchUser, TPM errors, …); treat all as "tier
+    # unavailable" so the resolver fails closed rather than forwarding a
+    # half-formed reply.
+    if message.get("error"):
+        return None
+    data = message.get("parameters", {}).get("data")
+    if not data:
+        return None
+    try:
+        plaintext = base64.b64decode(data).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return None
+    return plaintext.rstrip("\n") or None
+
+
 def unseal(credential_path: Path) -> str | None:
     """Return the decrypted passphrase, or ``None`` if the credential isn't usable here.
 
@@ -229,9 +339,22 @@ def unseal(credential_path: Path) -> str | None:
 
     Empty decrypt output is also collapsed to ``None`` — SQLCipher's
     no-encryption sentinel must never reach the connection.
+
+    When running as in-namespace root (the rootless-Podman user
+    namespace the per-container supervisor lives in), the CLI can't
+    reach the host key / TPM, so the unseal is routed through PID 1's
+    ``io.systemd.Credentials`` Varlink interface instead — see
+    ``_outer_uid_if_userns_root``.
     """
     if not credential_path.is_file():
         return None
+    outer_uid = _outer_uid_if_userns_root()
+    if outer_uid is not None:
+        # In-namespace root: the systemd-creds CLI's geteuid()==0 branch
+        # tries the host key / TPM directly and fails (the mapped kernel
+        # uid can't open them).  Delegate to PID 1 ourselves, as the host
+        # uid it sees us as over SO_PEERCRED.
+        return _unseal_via_pid1(credential_path, uid=outer_uid)
     exe = _systemd_creds_exe()
     if exe is None:
         return None

@@ -29,7 +29,6 @@ import contextlib
 import shutil
 from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Any
 
 from ._exit_codes import EXIT_MANUAL_STEP_NEEDED
 from ._stage import stage_line as _stage_line
@@ -137,6 +136,8 @@ def _report_selinux(cfg: SandboxConfig) -> SelinuxCheckResult:
                 s.ok("installed")
             case SelinuxStatus.POLICY_MISSING:
                 s.missing(f"install: {selinux_install_command()}")
+            case SelinuxStatus.POLICY_OUTDATED:
+                s.missing(f"outdated — rebuild: {selinux_install_command()}")
             case SelinuxStatus.LIBSELINUX_MISSING:
                 s.missing("libselinux.so.1 not loadable")
     return result
@@ -155,14 +156,20 @@ def print_selinux_install_hint(result: SelinuxCheckResult) -> None:
     install command landed mid-output and scrolled out of view by the
     time the install banner printed at the bottom.
     """
-    if result.status is not SelinuxStatus.POLICY_MISSING:
+    if result.status not in (SelinuxStatus.POLICY_MISSING, SelinuxStatus.POLICY_OUTDATED):
         return
+    outdated = result.status is SelinuxStatus.POLICY_OUTDATED
     print()
     print("─ SELinux policy required ─────────────────────────────────────")
-    print("Socket-transport services need the terok_socket_t policy to be")
-    print("loaded; without it, containers can't reach the host sockets.")
+    if outdated:
+        print("The loaded terok_socket policy predates the per-container")
+        print("supervisor and is missing the rule it binds its sockets with;")
+        print("rebuild it so the supervisor can serve the vault / gate / ssh.")
+    else:
+        print("Socket-transport services need the terok_socket_t policy to be")
+        print("loaded; without it, containers can't reach the host sockets.")
     print()
-    print("Install the policy (recommended):")
+    print("Rebuild the policy (recommended):" if outdated else "Install the policy (recommended):")
     print()
     print(f"  {selinux_install_command()}")
     print()
@@ -223,13 +230,68 @@ def print_apparmor_install_hint() -> None:
 # ── Service install phases ────────────────────────────────────────────
 
 
-def run_shield_install_phase(*, root: bool) -> bool:
-    """Install shield OCI hooks — per-user or system-wide depending on *root*."""
+def run_supervisor_install_phase() -> bool:
+    """Install the OCI supervisor hook + wrapper under ``state_root()``.
+
+    Lays down (with ``state_root()`` resolved from ``paths.root`` —
+    the operator's single configured root):
+
+    * ``<state_root>/hooks/supervisor_hook.py`` + ``_supervisor_state.py``
+      — the OCI hook entrypoint and its stdlib-only ballast.
+    * ``<state_root>/hooks/terok-sandbox-supervisor-<stage>.json`` — one
+      OCI hook descriptor per stage (createRuntime + poststop).
+      ``containers.conf`` is patched at install time to list
+      ``state_root() / "hooks"`` in ``hooks_dir`` so podman scans the
+      canonical terok-owned directory.
+    * ``<state_root>/supervisor_wrapper.py`` — the restart-loop the
+      hook spawns, with the ``terok-sandbox`` argv baked in at
+      install time.
+
+    Idempotent: re-running overwrites the installed files with the
+    current package's copies.  Soft-fails on a missing
+    ``terok-sandbox`` entry point (degraded install — operator hasn't
+    sourced the venv yet).
+    """
+    from .supervisor.install import install_supervisor_hooks
+
+    with _stage_line("Supervisor hooks") as s:
+        try:
+            install_supervisor_hooks()
+        except Exception as exc:  # noqa: BLE001 — aggregator uniformity
+            s.fail(str(exc))
+            return False
+        s.ok("installed (OCI hook + wrapper)")
+        return True
+
+
+def run_supervisor_uninstall_phase() -> bool:
+    """Remove every file [`run_supervisor_install_phase`][terok_sandbox._setup.run_supervisor_install_phase] would write.
+
+    Idempotent — missing files are tolerated.  Leaves any per-
+    container PID files / log files alone; the operator can sweep
+    those manually if a wrapper crashed in a way that left state
+    behind (the wrapper's PID file is unlinked at poststop in the
+    happy path).
+    """
+    from .supervisor.install import uninstall_supervisor_hooks
+
+    with _stage_line("Supervisor hooks") as s:
+        try:
+            uninstall_supervisor_hooks()
+        except Exception as exc:  # noqa: BLE001
+            s.fail(str(exc))
+            return False
+        s.ok("removed")
+        return True
+
+
+def run_shield_install_phase() -> bool:
+    """Install shield OCI hooks into the canonical terok-owned dir."""
     from .integrations.shield import ShieldHooks, check_environment
 
     with _stage_line("Shield hooks") as s:
         try:
-            ShieldHooks.install(root=root, user=not root)
+            ShieldHooks.install()
         except Exception as exc:  # noqa: BLE001 — aggregator reports all failures uniformly
             s.fail(str(exc))
             return False
@@ -245,306 +307,240 @@ def run_shield_install_phase(*, root: bool) -> bool:
         return False
 
 
-def run_vault_install_phase(cfg: SandboxConfig) -> bool:
-    """Install the vault — systemd units when available, managed daemon otherwise.
-
-    On a systemd host this is the full stop → uninstall → install → verify
-    cycle.  On a host without ``systemctl --user`` (containers, OpenRC,
-    sysvinit) the same vault binary is started as a managed daemon — same
-    code, same transport, just a PID file instead of a unit.  The fallback
-    works because [`VaultManager.ensure_reachable`][terok_sandbox.vault.daemon.lifecycle.VaultManager.ensure_reachable] already accepts
-    ``mode="daemon"`` as a healthy state.
-    """
-    from .vault.daemon.lifecycle import VaultManager, VaultUnreachableError
-
-    mgr = VaultManager(cfg)
-    if mgr.is_systemd_available():
-        return _reinstall_systemd_service(
-            label="Vault",
-            mgr=mgr,
-            reachable_exc=(VaultUnreachableError, SystemExit),
-        )
-    return _start_managed_daemon(
-        label="Vault",
-        mgr=mgr,
-        reachable_exc=(VaultUnreachableError, SystemExit),
-    )
-
-
-def run_gate_install_phase(cfg: SandboxConfig) -> bool:
-    """Install the gate's systemd units; warn-skip on hosts without user systemd.
-
-    Unlike vault, the gate's inetd-style architecture has no managed-daemon
-    fallback — the systemd socket unit accepts each connection and spawns
-    a fresh process; without systemd the same role would need an inetd
-    shim or a permanent listen-loop that doesn't yet exist.  The skip is
-    therefore intentional: callers (`terok-executor.preflight`,
-    `terok sickbay`) check
-    [`GateServerManager.get_status`][terok_sandbox.gate.lifecycle.GateServerManager.get_status] and degrade gracefully —
-    a container without a gate is just a container without the git push
-    channel, which is exactly as secure as one with the gate.
-    """
-    from .gate.lifecycle import GateServerManager
-
-    mgr = GateServerManager(cfg)
-    if not mgr.is_systemd_available():
-        with _stage_line("Gate server") as s:
-            s.warn(
-                "systemd unavailable — git gate disabled; "
-                "containers will run without the git push channel"
-            )
-        return True
-    return _reinstall_systemd_service(label="Gate server", mgr=mgr)
-
-
-def run_clearance_install_phase() -> bool:
-    """Install the clearance hub + verdict + notifier units.
-
-    Soft-skip when ``terok_clearance`` isn't importable — headless
-    servers don't need the desktop bridge, and the sandbox shield /
-    vault / gate stack is perfectly functional without it.
-    """
-    try:
-        from .integrations.clearance import HubService, NotifierService
-    except ImportError:
-        with _stage_line("Clearance") as s:
-            s.skip("terok_clearance not installed")
-        return True
-
-    # The class factories default their argv internally — clearance owns
-    # the knowledge of which module serves its hub / notifier, so sandbox
-    # doesn't have to spell ``[sys.executable, "-m", "terok_clearance.cli.main"]``
-    # and leak that layout across the package boundary.
-    hub_ok = _install_clearance_unit_pair(
-        label="Clearance hub",
-        install_fn=HubService.install,
-        units_to_enable=HubService.UNIT_NAMES,
-    )
-    # Notifier failure is non-fatal — the hub is the critical path;
-    # the notifier only enriches desktop popups.  Return value is
-    # discarded so a notifier glitch (e.g. missing session bus on a
-    # remote SSH install) doesn't flip the aggregator's exit code.
-    _install_clearance_unit_pair(
-        label="Clearance notifier",
-        install_fn=NotifierService.install,
-        units_to_enable=NotifierService.UNIT_NAMES,
-    )
-    return hub_ok
-
-
 # ── Service uninstall phases ──────────────────────────────────────────
 
 
-def run_shield_uninstall_phase(*, root: bool) -> bool:
-    """Remove shield OCI hooks — per-user or system-wide depending on *root*."""
+def run_shield_uninstall_phase() -> bool:
+    """Remove shield OCI hooks from the canonical terok-owned dir."""
     from .integrations.shield import ShieldHooks
 
-    scope = "system" if root else "user"
     with _stage_line("Shield hooks") as s:
         try:
-            ShieldHooks.uninstall(root=root, user=not root)
+            ShieldHooks.uninstall()
         except Exception as exc:  # noqa: BLE001 — aggregator uniform error surface
             s.fail(str(exc))
             return False
-        s.ok(f"removed ({scope})")
-        return True
-
-
-def run_vault_uninstall_phase(cfg: SandboxConfig) -> bool:
-    """Remove vault systemd units; WARN-skip without a systemd user session."""
-    from .vault.daemon.lifecycle import VaultManager
-
-    mgr = VaultManager(cfg)
-    with _stage_line("Vault") as s:
-        if not mgr.is_systemd_available():
-            s.warn("systemd unavailable, skipping")
-            return True
-        try:
-            mgr.uninstall_systemd_units()
-        except SystemExit as exc:
-            s.fail(str(exc))
-            return False
-        except Exception as exc:  # noqa: BLE001
-            s.fail(f"uninstall: {exc}")
-            return False
         s.ok("removed")
         return True
 
 
-def run_gate_uninstall_phase(cfg: SandboxConfig) -> bool:
-    """Stop any stray gate daemon, then remove systemd units."""
-    from .gate.lifecycle import GateServerManager
+#: Pre-supervisor systemd user units the cleanup phase sweeps.
+_LEGACY_SYSTEMD_UNITS: tuple[str, ...] = (
+    "terok-clearance-hub.service",
+    "terok-clearance-verdict.service",
+    "terok-clearance-notifier.service",
+    "terok-vault.service",
+    "terok-vault.socket",
+    "terok-vault-socket.service",
+    "terok-gate.socket",
+    "terok-gate@.service",
+    "terok-gate-socket.service",
+)
 
-    mgr = GateServerManager(cfg)
-    with _stage_line("Gate server") as s:
-        try:
-            if mgr.get_status().mode == "daemon":
-                mgr.stop_daemon()
-            if mgr.is_systemd_available():
-                mgr.uninstall_systemd_units()
-        except SystemExit as exc:
-            s.fail(str(exc))
-            return False
-        except Exception as exc:  # noqa: BLE001
-            s.fail(f"uninstall: {exc}")
-            return False
-        s.ok("removed")
+
+def run_legacy_install_cleanup_phase() -> bool:
+    """Sweep systemd units / sockets / install paths left by pre-supervisor versions.
+
+    One-way cleanup.  Idempotent — every step soft-fails so a missing
+    ``systemctl``, an absent unit, or a stale socket cannot abort the
+    rest of the sweep.  Runs once during ``terok-sandbox setup``; the
+    per-container supervisor lifecycle never invokes it.
+
+    Sweeps:
+
+    * the legacy clearance trio (``terok-clearance-hub.service``,
+      ``terok-clearance-verdict.service``,
+      ``terok-clearance-notifier.service``) from the W5 layout;
+    * the legacy vault systemd units
+      (``terok-vault.service`` / ``terok-vault.socket`` /
+      ``terok-vault-socket.service``);
+    * the legacy gate systemd units
+      (``terok-gate.socket`` / ``terok-gate@.service`` /
+      ``terok-gate-socket.service``) now that the gate lives in the
+      per-container supervisor;
+    * any ``terok-clearance-*.service`` / ``terok-vault-*`` /
+      ``terok-gate*`` files lingering in the user's systemd unit
+      directory (catches renamed variants from prior alphas);
+    * the legacy global shield-events socket
+      (``$XDG_RUNTIME_DIR/terok-shield-events.sock``) from the
+      single-hub-socket era.
+
+    Operators upgrading from a pre-supervisor install lose access to old
+    tasks (per the hard rule: no state preservation across the
+    refactor); the cleanup is purely about removing the *host-side*
+    machinery that would fight a fresh setup for sockets / unit names.
+    """
+    with _stage_line("Legacy install cleanup") as s:
+        _disable_legacy_units(_LEGACY_SYSTEMD_UNITS)
+        _sweep_legacy_unit_files()
+        _systemctl.run_best_effort("daemon-reload")
+        _unlink_legacy_shield_events_socket()
+        _unlink_legacy_runtime_sockets()
+        _unlink_legacy_xdg_data_files()
+        _unlink_legacy_shield_global_hooks()
+        s.ok("swept (legacy units + sockets, if any)")
         return True
 
 
-def run_clearance_uninstall_phase() -> bool:
-    """Tear down the clearance hub + verdict + notifier units.
+def _disable_legacy_units(units: tuple[str, ...]) -> None:
+    """Disable + stop *units* via ``systemctl --user``, swallowing every error."""
+    for unit in units:
+        _systemctl.run_best_effort("disable", "--now", unit)
 
-    Mirrors `run_clearance_install_phase` — soft-skips when
-    ``terok_clearance`` isn't importable so a headless host's teardown
-    stays a one-liner rather than a crash.
+
+def _sweep_legacy_unit_files() -> None:
+    """Unlink stray ``terok-clearance-*`` / ``terok-vault-*`` / ``terok-gate*`` user unit files.
+
+    Catches renamed variants from prior alphas that the explicit
+    [`_LEGACY_SYSTEMD_UNITS`][terok_sandbox._setup._LEGACY_SYSTEMD_UNITS]
+    list doesn't enumerate.  Soft-fails on a missing systemd user unit
+    dir (no XDG config home, fresh tmpfs, etc.) — the legacy install
+    we're cleaning after necessarily lived in *some* unit dir, so a
+    missing one means there's nothing to sweep.
     """
     try:
-        from .integrations.clearance import HubService, NotifierService
+        from ._util import systemd_user_unit_dir
     except ImportError:
-        with _stage_line("Clearance") as s:
-            s.skip("terok_clearance not installed")
-        return True
-    with _stage_line("Clearance") as s:
-        try:
-            NotifierService.uninstall()
-            HubService.uninstall()
-        except Exception as exc:  # noqa: BLE001
-            s.fail(str(exc))
-            return False
-        s.ok("removed")
-        return True
+        return
+    try:
+        unit_dir = systemd_user_unit_dir()
+    except SystemExit:
+        return
+    if not unit_dir.is_dir():
+        return
+    for pattern in (
+        "terok-clearance-*.service",
+        "terok-vault.service",
+        "terok-vault.socket",
+        "terok-vault-*.service",
+        "terok-vault-*.socket",
+        "terok-gate*.service",
+        "terok-gate*.socket",
+    ):
+        for unit_file in unit_dir.glob(pattern):
+            # Best-effort disable in case the unit is still active; then unlink.
+            _systemctl.run_best_effort("disable", "--now", unit_file.name)
+            try:
+                unit_file.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
-# ── Shared service-install skeleton ───────────────────────────────────
+def _unlink_legacy_shield_events_socket() -> None:
+    """Remove the pre-supervisor global shield-events socket if present.
 
-
-def _reinstall_systemd_service(
-    *,
-    label: str,
-    mgr: Any,  # duck-typed manager; no shared base class across vault/gate
-    reachable_exc: tuple[type[BaseException], ...] = (SystemExit,),
-) -> bool:
-    """Run the full stop → uninstall → install → verify cycle for one service.
-
-    Shared between vault and gate because both sandbox-managed systemd
-    services follow the same lifecycle contract: a ``stop_daemon`` +
-    ``uninstall_systemd_units`` pair (best-effort), an
-    ``install_systemd_units()`` call (authoritative), and an
-    ``ensure_reachable()`` verify (fails with *reachable_exc*).  Shield
-    and clearance are different shapes so they stay inline.
+    Pre-supervisor shield emitted events into a single host-global Unix
+    socket; the per-container supervisor uses a per-container hub
+    socket instead.  Soft-fails on missing ``$XDG_RUNTIME_DIR`` or a
+    socket that has already been unlinked.
     """
-    with _stage_line(label) as s:
-        _stop_and_uninstall(mgr.stop_daemon, mgr.uninstall_systemd_units)
-        try:
-            mgr.install_systemd_units()
-        except SystemExit as exc:
-            s.fail(str(exc))
-            return False
-        except Exception as exc:  # noqa: BLE001
-            s.fail(f"install: {exc}")
-            return False
-        try:
-            mgr.ensure_reachable()
-        except reachable_exc as exc:
-            s.fail(f"installed but NOT reachable: {exc}")
-            return False
-        status = mgr.get_status()
-        s.ok(f"{status.mode or 'systemd'}, {status.transport or 'tcp'}, reachable")
-        return True
+    import os
+    from pathlib import Path
+
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
+    if not runtime_dir:
+        return
+    sock = Path(runtime_dir) / "terok-shield-events.sock"
+    try:
+        sock.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
-def _start_managed_daemon(
-    *,
-    label: str,
-    mgr: Any,  # duck-typed manager exposing stop_daemon / start_daemon / ensure_reachable
-    reachable_exc: tuple[type[BaseException], ...] = (SystemExit,),
-) -> bool:
-    """Stop any existing daemon, start a fresh one, then verify reachability.
+def _unlink_legacy_runtime_sockets() -> None:
+    """Remove the pre-supervisor host-global runtime sockets.
 
-    The no-systemd counterpart of [`_reinstall_systemd_service`][terok_sandbox._setup._reinstall_systemd_service].  Same contract
-    minus the unit-file phase: ``stop_daemon`` (best-effort), then a hard
-    ``start_daemon()`` and ``ensure_reachable()`` verify.  Status line
-    ends with "(no systemd)" so the operator can tell at a glance which
-    init path produced this service, without having to ``ps`` for it.
+    The previous architecture ran the vault broker, gate server, and
+    SSH signer as long-lived host daemons that bound named sockets at
+    ``<runtime_root>/{vault,gate-server,ssh-agent}.sock`` plus
+    ``<runtime_root>/vault.passphrase``.  Per-container supervisors
+    bind their own per-container paths now, so the leftover global
+    socket files just confuse containers that mount the runtime dir
+    wholesale (a stale ``vault.sock`` looks reachable but its AF_UNIX
+    peer is gone).  Each ``unlink`` soft-fails so a partially-cleaned
+    install still ends up clean.
     """
-    with _stage_line(label) as s:
-        # SystemExit is BaseException-derived so a plain ``suppress(Exception)``
-        # wouldn't catch a ``_systemctl.run`` bubble-up out of a wedged stop;
-        # the contract here is "best-effort, never block start_daemon".
-        with contextlib.suppress(Exception, SystemExit):
-            mgr.stop_daemon()
+    from .paths import runtime_root
+
+    try:
+        rt = runtime_root()
+    except OSError:
+        return
+    # ``vault.passphrase`` is intentionally NOT swept — it's a live
+    # session-tier credential; wiping it would re-lock the vault on
+    # every ``terok setup`` re-run.
+    # Pre-supervisor host-global socket basenames.  The current
+    # supervisor binds these names PER CONTAINER under
+    # ``<rt>/run/<container>/`` instead, so any remaining file at
+    # ``<rt>/<name>`` is left over from an older install — the gate
+    # included now that it, too, is per-container.
+    for name in ("vault.sock", "ssh-agent.sock", "gate-server.sock"):
         try:
-            mgr.start_daemon()
-        except SystemExit as exc:
-            s.fail(str(exc))
-            return False
-        except Exception as exc:  # noqa: BLE001
-            s.fail(f"daemon start: {exc}")
-            return False
-        try:
-            mgr.ensure_reachable()
-        except reachable_exc as exc:
-            s.fail(f"started but NOT reachable: {exc}")
-            return False
-        status = mgr.get_status()
-        s.ok(f"{status.mode}, {status.transport or 'tcp'}, reachable (no systemd)")
-        return True
+            (rt / name).unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
-def _install_clearance_unit_pair(
-    *, label: str, install_fn: Callable[[], object], units_to_enable: Iterable[str]
-) -> bool:
-    """Render the unit file(s), then enable + start each, reporting one stage line.
+def _unlink_legacy_xdg_data_files() -> None:
+    """Remove pre-paths.root shield script copies under ``$XDG_DATA_HOME``.
 
-    Batches ``daemon-reload`` once at the top so installing the
-    hub/verdict pair doesn't pay three sequential ``daemon-reload``
-    round-trips when it should only need one.
+    Master-branch terok-shield wrote ``nflog-reader.py`` to
+    ``$XDG_DATA_HOME/terok/shield/`` without honouring ``paths.root``.
+    The current installer puts it under
+    [`namespace_state_dir("shield")`][terok_util.paths.namespace_state_dir];
+    this sweep removes the orphaned copy so a single
+    ``terok-sandbox setup`` converges on the new layout.
+
+    Only the supervisor's specific files are unlinked — anything else
+    under those XDG dirs is left intact.
     """
-    with _stage_line(label) as s:
-        try:
-            install_fn()
-            _systemctl.run_best_effort("daemon-reload")
-            for unit in units_to_enable:
-                _enable_and_restart_user_unit(unit)
-        except Exception as exc:  # noqa: BLE001 — aggregator uniform error surface
-            s.fail(str(exc))
-            return False
-        s.ok("installed + enabled")
-        return True
+    import os
+    from pathlib import Path
+
+    data_home = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+    legacy_shield_root = Path(data_home) / "terok" / "shield"
+    if legacy_shield_root.is_dir():
+        for stale in ("nflog-reader.py",):
+            try:
+                (legacy_shield_root / stale).unlink(missing_ok=True)
+            except OSError:
+                pass
+        with contextlib.suppress(OSError):
+            legacy_shield_root.rmdir()
+        parent = legacy_shield_root.parent
+        if parent.name == "terok":
+            with contextlib.suppress(OSError):
+                parent.rmdir()
 
 
-# ── Lifecycle helpers ─────────────────────────────────────────────────
+def _unlink_legacy_shield_global_hooks() -> None:
+    """Remove the master-branch shield install at ``~/.local/share/containers/oci/hooks.d/``.
 
+    Before the single-terok-owned-dir refactor, the user-scope shield
+    install dropped both scripts and JSON descriptors into
+    ``~/.local/share/containers/oci/hooks.d/`` (podman's default
+    rootless scan path).  The current installer writes everything into
+    ``namespace_state_dir("shield") / "hooks"`` and patches
+    ``containers.conf`` to point podman there, so the old files become
+    a stale duplicate set that podman would happily fire alongside the
+    new ones.  This sweep removes them so re-running setup converges
+    on the canonical layout.
 
-def _stop_and_uninstall(stop: Callable[[], None], uninstall: Callable[[], None]) -> None:
-    """Best-effort stop + uninstall; lets ``install_systemd_units`` start fresh.
-
-    ``SystemExit`` is ``BaseException``-derived, so a plain
-    ``suppress(Exception)`` wouldn't catch a stop-time ``_systemctl.run``
-    bubble-up out of a wedged unit.  The contract here is "best-effort,
-    never block the install that follows" — extending the suppression
-    to also catch ``SystemExit`` matches that intent and the parallel
-    fix in
-    [`_start_managed_daemon`][terok_sandbox._setup._start_managed_daemon]
-    from PR #308.  Filed as #310; this is the resolution.
+    Operator-owned siblings (``.backup`` files, ``__pycache__/``) are
+    deliberately left in place — they're not ours to delete.
     """
-    with contextlib.suppress(Exception, SystemExit):
-        stop()
-    with contextlib.suppress(Exception, SystemExit):
-        uninstall()
-
-
-def _enable_and_restart_user_unit(unit: str) -> None:
-    """``systemctl --user enable`` + ``restart`` for *unit*.
-
-    ``restart`` (not ``enable --now``) matters for pipx-upgrade
-    scenarios: after ``pipx install --force terok-sandbox``, the venv
-    has fresh code but the running daemon holds the old ExecStart's
-    python process.  Restarting guarantees the new code is loaded.
-    Caller is responsible for ``daemon-reload`` — batch it once per
-    install instead of once per unit so a three-unit clearance install
-    pays one reload, not three.
-    """
-    for verb in ("enable", "restart"):
-        _systemctl.run_best_effort(verb, unit)
+    legacy_dir = Path.home() / ".local" / "share" / "containers" / "oci" / "hooks.d"
+    stale = (
+        # Role scripts + shared ballast.
+        "_oci_state.py",
+        "terok-shield-hook",
+        "terok-shield-bridge-hook",
+        # JSON descriptors.
+        "terok-shield-createRuntime.json",
+        "terok-shield-poststop.json",
+        "terok-shield-bridge-createRuntime.json",
+        "terok-shield-bridge-poststop.json",
+    )
+    for name in stale:
+        with contextlib.suppress(OSError):
+            (legacy_dir / name).unlink(missing_ok=True)

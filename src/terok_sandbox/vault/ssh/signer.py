@@ -112,26 +112,27 @@ _ResolvedKey = tuple[Ed25519PrivateKey | RSAPrivateKey, bytes, str]
 
 
 class _DBKeyCache:
-    """Caches decoded SSH keys per scope, reloading when the DB version bumps.
+    """Resolves SSH keys per scope on every call — no in-memory cache.
 
-    The DB's ``ssh_keys_version`` counter increments on every insert,
-    assignment, or unassignment.  A cached slot is valid only as long as
-    the version it was loaded at matches the current version — so
-    ``ssh-init``, ``ssh-import``, and ``ssh-remove`` all invalidate
-    transparently without a proxy restart.
+    In the per-container-supervisor model the supervisor's lifetime is
+    bounded by the container's, and ``terok auth`` changes the DB
+    asynchronously while the supervisor is running.  An in-memory
+    cache would buy negligible latency (the SQLite read is local) and
+    cost a propagation delay between an ``auth`` write and the next
+    sign — so the supervisor reads on every request.
+
+    The class name is kept for API stability; ``_DBKeyCache`` is a
+    thin resolver wrapper over ``_TokenDB`` with no cache to invalidate.
     """
 
     def __init__(self, token_db: Any) -> None:
         self._token_db = token_db
-        self._cache: dict[str, tuple[int, list[_ResolvedKey]]] = {}
 
     def get(self, scope: str) -> list[_ResolvedKey]:
-        """Return the scope's resolved keys, or ``[]`` if none are assigned."""
-        version = self._token_db.ssh_keys_version()
-        cached = self._cache.get(scope)
-        if cached and cached[0] == version:
-            return cached[1]
+        """Return the scope's resolved keys, or ``[]`` if none are assigned.
 
+        Always reads fresh from the DB — see the class docstring for why.
+        """
         resolved: list[_ResolvedKey] = []
         for record in self._token_db.load_ssh_keys_for_scope(scope):
             try:
@@ -143,8 +144,6 @@ class _DBKeyCache:
                     scope,
                     exc,
                 )
-
-        self._cache[scope] = (version, resolved)
         return resolved
 
 

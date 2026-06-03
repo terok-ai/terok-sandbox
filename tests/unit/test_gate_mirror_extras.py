@@ -16,6 +16,8 @@ from terok_sandbox.gate.mirror import (
     GitGate,
     _clone_gate_mirror,  # noqa: PLC2701
     _count_commits_range,  # noqa: PLC2701
+    _db_has_keys_for_scope,  # noqa: PLC2701
+    _EphemeralSigner,  # noqa: PLC2701
     _get_gate_branch_head,  # noqa: PLC2701
     _get_upstream_head,  # noqa: PLC2701
     _init_remoteless_gate,  # noqa: PLC2701
@@ -492,3 +494,238 @@ class TestCountCommitsRange:
             return_value=_proc(rc=128),
         ):
             assert _count_commits_range(gate, "a", "b", env={}) is None
+
+
+# ---------------------------------------------------------------------------
+# _db_has_keys_for_scope — the gate-auth pre-check
+# ---------------------------------------------------------------------------
+
+
+class TestDbHasKeysForScope:
+    """The DB pre-check fails *soft* to ``False`` so the caller can surface
+    the friendly ``GateAuthNotConfigured`` instead of a stack trace."""
+
+    def test_true_when_scope_has_keys(self) -> None:
+        """A scope with at least one assigned key returns ``True`` and closes the DB."""
+        from unittest.mock import MagicMock
+
+        db = MagicMock()
+        db.list_ssh_keys_for_scope.return_value = ["key-1"]
+        cfg = MagicMock()
+        cfg.open_credential_db.return_value = db
+
+        assert _db_has_keys_for_scope(cfg, "proj-a") is True
+        db.list_ssh_keys_for_scope.assert_called_once_with("proj-a")
+        db.close.assert_called_once()
+
+    def test_false_when_scope_has_no_keys(self) -> None:
+        """An empty key list returns ``False`` (no keys assigned to the scope)."""
+        from unittest.mock import MagicMock
+
+        db = MagicMock()
+        db.list_ssh_keys_for_scope.return_value = []
+        cfg = MagicMock()
+        cfg.open_credential_db.return_value = db
+
+        assert _db_has_keys_for_scope(cfg, "proj-a") is False
+        db.close.assert_called_once()
+
+    def test_opens_db_non_interactively(self) -> None:
+        """The pre-check never prompts: it opens with ``prompt_on_tty=False``.
+
+        It runs below the (async) gate-sync path, where a prompt_toolkit
+        passphrase prompt cannot own the running event loop — prompting
+        here is the regression that froze the TUI.  A locked vault must
+        collapse to ``False``, not pull up an interactive prompt.
+        """
+        from unittest.mock import MagicMock
+
+        db = MagicMock()
+        db.list_ssh_keys_for_scope.return_value = ["key-1"]
+        cfg = MagicMock()
+        cfg.open_credential_db.return_value = db
+
+        _db_has_keys_for_scope(cfg, "proj-a")
+        cfg.open_credential_db.assert_called_once_with(prompt_on_tty=False)
+
+    def test_false_when_db_open_raises(self) -> None:
+        """A vault that won't open (locked / missing passphrase) → ``False``.
+
+        The encrypted-vault-without-passphrase case must not leak a
+        ``sqlite3.Error``; it collapses to ``False`` so the caller raises
+        the actionable ``GateAuthNotConfigured`` hint."""
+        from unittest.mock import MagicMock
+
+        cfg = MagicMock()
+        cfg.open_credential_db.side_effect = RuntimeError("vault locked")
+
+        assert _db_has_keys_for_scope(cfg, "proj-a") is False
+
+    def test_false_when_listing_raises_but_still_closes(self) -> None:
+        """A query that raises (e.g. schema not bootstrapped) → ``False``,
+        and the DB handle is still closed in the ``finally``."""
+        from unittest.mock import MagicMock
+
+        db = MagicMock()
+        db.list_ssh_keys_for_scope.side_effect = RuntimeError("no such table")
+        cfg = MagicMock()
+        cfg.open_credential_db.return_value = db
+
+        assert _db_has_keys_for_scope(cfg, "proj-a") is False
+        db.close.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# _EphemeralSigner.stop — teardown without a live signer
+# ---------------------------------------------------------------------------
+
+
+class TestEphemeralSignerStart:
+    """``start`` binds the signer on a background loop, or fails loudly."""
+
+    def test_no_keys_for_scope_raises_gate_auth_not_configured(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A scope with no assigned SSH keys is a configuration error, not a bind."""
+        from terok_sandbox.gate.mirror import GateAuthNotConfigured
+
+        monkeypatch.setattr(
+            "terok_sandbox.gate.mirror._db_has_keys_for_scope", lambda _cfg, _scope: False
+        )
+        with patch("terok_sandbox.config.SandboxConfig"):
+            with pytest.raises(GateAuthNotConfigured):
+                _EphemeralSigner.start("proj-a")
+
+    def test_bind_failure_raises_runtime_error_and_cleans_up(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A ``start_ssh_signer_local`` that raises surfaces as a ``RuntimeError``.
+
+        The background thread captures the bind exception, the foreground
+        ``start`` joins the (now-dead) thread, cleans the temp dir, and
+        re-raises with the original cause chained.  No live loop / socket
+        is needed — the signer entry point is mocked to raise.
+        """
+        monkeypatch.setattr(
+            "terok_sandbox.gate.mirror._db_has_keys_for_scope", lambda _cfg, _scope: True
+        )
+
+        async def _boom(**_kw: object) -> object:
+            raise OSError("address already in use")
+
+        with (
+            patch("terok_sandbox.config.SandboxConfig"),
+            patch("terok_sandbox.vault.ssh.signer.start_ssh_signer_local", side_effect=_boom),
+            pytest.raises(RuntimeError, match="failed to bind"),
+        ):
+            _EphemeralSigner.start("proj-a")
+
+    def test_start_binds_then_stop_terminates_cleanly(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A successful bind serves on the background loop; ``stop`` ends it without hanging.
+
+        Drives the real thread / loop / ``serve_forever`` machinery (the
+        signer entry point is patched to return an actual bound server, so
+        no vault keys are needed).  ``stop`` schedules ``server.close`` on
+        the signer's loop — and on Python 3.12+ that *does* unblock
+        ``serve_forever``, so ``run_until_complete`` returns and the thread
+        joins instead of leaking.
+        """
+        import asyncio
+
+        monkeypatch.setattr(
+            "terok_sandbox.gate.mirror._db_has_keys_for_scope", lambda _cfg, _scope: True
+        )
+
+        async def _real_server(*, socket_path, **_kw: object) -> asyncio.AbstractServer:
+            async def _handle(_reader: object, writer: asyncio.StreamWriter) -> None:
+                writer.close()
+
+            return await asyncio.start_unix_server(_handle, path=str(socket_path))
+
+        with (
+            patch("terok_sandbox.config.SandboxConfig"),
+            patch(
+                "terok_sandbox.vault.ssh.signer.start_ssh_signer_local",
+                side_effect=_real_server,
+            ),
+        ):
+            signer = _EphemeralSigner.start("proj-a")
+            try:
+                assert signer.socket_path.exists()
+            finally:
+                signer.stop()  # must terminate the serve_forever loop, not hang
+
+        assert not signer._thread.is_alive()
+        assert not Path(signer._tmpdir.name).exists()
+
+
+class TestEphemeralSignerStop:
+    """``stop`` must clean up the temp dir on every path, even when the
+    background signer thread already exited."""
+
+    def test_stop_cleans_up_when_thread_already_dead(self, tmp_path: Path) -> None:
+        """When the signer thread is no longer alive, ``stop`` just cleans
+        the temp dir — it must not touch the (closed) loop / server."""
+        import tempfile
+        import threading
+        from unittest.mock import MagicMock
+
+        tmpdir = tempfile.TemporaryDirectory(prefix="terok-test-signer-")
+        dead_thread = threading.Thread(target=lambda: None)
+        dead_thread.start()
+        dead_thread.join()  # ensure not alive
+        loop = MagicMock()
+        signer = _EphemeralSigner(
+            socket_path=Path(tmpdir.name) / "agent.sock",
+            _tmpdir=tmpdir,
+            _thread=dead_thread,
+            _loop=loop,
+            _server=MagicMock(),
+        )
+
+        signer.stop()
+
+        # The dead-thread branch never reaches into the loop.
+        loop.call_soon_threadsafe.assert_not_called()
+        # Temp dir cleaned up (directory removed).
+        assert not Path(tmpdir.name).exists()
+
+    def test_stop_closes_live_server_via_loop_then_joins(self, tmp_path: Path) -> None:
+        """A live signer thread is shut down by scheduling ``server.close`` on its loop.
+
+        Cross-thread reach must go through ``loop.call_soon_threadsafe`` —
+        calling ``server.close()`` directly across threads is UB.  We use a
+        real (alive) thread blocked on an event so the live branch is taken,
+        then have the mocked ``call_soon_threadsafe`` release it so the
+        ``join`` returns and the temp dir is cleaned.
+        """
+        import tempfile
+        import threading
+        from unittest.mock import MagicMock
+
+        tmpdir = tempfile.TemporaryDirectory(prefix="terok-test-signer-")
+        release = threading.Event()
+        live_thread = threading.Thread(target=release.wait, daemon=True)
+        live_thread.start()
+
+        server = MagicMock()
+        loop = MagicMock()
+        # The production code schedules ``server.close`` on the loop; here we
+        # let that scheduling also unblock the worker thread so ``join`` ends.
+        loop.call_soon_threadsafe.side_effect = lambda _cb: release.set()
+
+        signer = _EphemeralSigner(
+            socket_path=Path(tmpdir.name) / "agent.sock",
+            _tmpdir=tmpdir,
+            _thread=live_thread,
+            _loop=loop,
+            _server=server,
+        )
+
+        signer.stop()
+
+        loop.call_soon_threadsafe.assert_called_once_with(server.close)
+        assert not live_thread.is_alive()
+        assert not Path(tmpdir.name).exists()

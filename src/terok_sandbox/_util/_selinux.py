@@ -29,6 +29,7 @@ All functions degrade gracefully on non-SELinux systems.
 from __future__ import annotations
 
 import ctypes
+import errno
 import shutil
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -47,6 +48,12 @@ SELINUX_SOCKET_TYPE = "terok_socket_t"
 """Custom SELinux type applied to terok service sockets."""
 
 _SELINUX_CONTEXT = f"system_u:object_r:{SELINUX_SOCKET_TYPE}:s0"
+
+#: Source context used to probe whether the loaded policy carries the
+#: per-container supervisor rule.  The supervisor binds its sockets from
+#: ``container_runtime_t`` (crun's OCI-hook domain); the v1.1 policy adds
+#: ``container_runtime_t → terok_socket_t:unix_stream_socket create``.
+_CONTAINER_RUNTIME_CONTEXT = b"system_u:system_r:container_runtime_t:s0"
 """Full SELinux context string for socket creation."""
 
 _ENFORCE_PATH = Path("/sys/fs/selinux/enforce")
@@ -91,6 +98,46 @@ def is_policy_installed() -> bool:
     if lib is None:
         return False
     return lib.security_check_context(_SELINUX_CONTEXT.encode()) == 0
+
+
+def is_supervisor_socket_rule_loaded() -> bool | None:
+    """Whether the loaded policy lets ``container_runtime_t`` create ``terok_socket_t`` sockets.
+
+    The per-container supervisor binds its sockets from
+    ``container_runtime_t`` (crun's OCI-hook domain), so this rule —
+    added in policy v1.1 — must be in the *loaded* policy or the
+    supervisor dies with ``EACCES`` on its first ``socket()``.  Probing
+    it (via libselinux's unprivileged ``selinux_check_access`` query
+    against the kernel AVC) distinguishes a stale v1.0 install (type
+    present, rule absent) from a current one — which the bare
+    type-presence check in
+    [`is_policy_installed`][terok_sandbox._util._selinux.is_policy_installed]
+    cannot see.
+
+    Returns ``True`` / ``False`` when the policy can be queried, or
+    ``None`` when it can't be determined (libselinux absent or too old,
+    or ``container_runtime_t`` undefined) — callers must treat ``None``
+    as "no opinion", never as "stale".
+    """
+    lib = _load_libselinux()
+    if lib is None:
+        return None
+    try:
+        allowed = lib.selinux_check_access(
+            _CONTAINER_RUNTIME_CONTEXT,
+            _SELINUX_CONTEXT.encode(),
+            b"unix_stream_socket",
+            b"create",
+            None,
+        )
+    except (AttributeError, ctypes.ArgumentError, OSError):
+        return None
+    if allowed == 0:
+        return True
+    # EACCES is a definitive "denied by policy" → the rule is absent.  Any
+    # other errno (e.g. EINVAL: container_runtime_t undefined) means we
+    # can't tell, so we decline to call it stale.
+    return False if ctypes.get_errno() == errno.EACCES else None
 
 
 def is_libselinux_available() -> bool:
@@ -205,6 +252,17 @@ def _load_libselinux() -> ctypes.CDLL | None:
     lib.freecon.restype = None
     lib.security_check_context.argtypes = [ctypes.c_char_p]
     lib.security_check_context.restype = ctypes.c_int
+    try:
+        lib.selinux_check_access.argtypes = [
+            ctypes.c_char_p,
+            ctypes.c_char_p,
+            ctypes.c_char_p,
+            ctypes.c_char_p,
+            ctypes.c_void_p,
+        ]
+        lib.selinux_check_access.restype = ctypes.c_int
+    except AttributeError:
+        pass  # libselinux too old for selinux_check_access — rule probe returns None
     return lib
 
 
@@ -253,6 +311,11 @@ class SelinuxStatus(Enum):
     POLICY_MISSING = "policy_missing"
     """Enforcing host, socket transport, but ``terok_socket`` module is not loaded."""
 
+    POLICY_OUTDATED = "policy_outdated"
+    """Enforcing host, socket transport, ``terok_socket`` loaded — but an
+    older revision missing the ``container_runtime_t`` rule the per-container
+    supervisor needs.  Re-running the installer rebuilds + upgrades it."""
+
     LIBSELINUX_MISSING = "libselinux_missing"
     """Policy is loaded but ``libselinux.so.1`` cannot be dlopen'd — silent-
     failure case where sockets would bind as ``unconfined_t`` regardless."""
@@ -298,4 +361,12 @@ def check_status(*, services_mode: str) -> SelinuxCheckResult:
         )
     if not is_libselinux_available():
         return SelinuxCheckResult(SelinuxStatus.LIBSELINUX_MISSING)
+    if is_supervisor_socket_rule_loaded() is False:
+        # Type is present but the supervisor's container_runtime_t rule
+        # isn't — a pre-supervisor (v1.0) policy still loaded.  Re-running
+        # the installer rebuilds it; surface the same tool prerequisites.
+        return SelinuxCheckResult(
+            SelinuxStatus.POLICY_OUTDATED,
+            missing_policy_tools=tuple(missing_policy_tools()),
+        )
     return SelinuxCheckResult(SelinuxStatus.OK)

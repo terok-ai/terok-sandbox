@@ -16,6 +16,9 @@ Collaborators:
   and [`keypair`][terok_sandbox.vault.ssh.keypair].
 - [`signer`][terok_sandbox.vault.ssh.signer] — SSH-agent protocol handler that signs git data
   using vault-stored private keys.
-- [`scope_sockets`][terok_sandbox.vault.ssh.scope_sockets] — per-scope UID-gated Unix sockets that gate-sync
-  consumes as ``SSH_AUTH_SOCK``.
+
+Host-side ``terok gate-sync`` consumers (terok / terok-executor)
+construct their own ephemeral signer over [`start_ssh_signer_local`][terok_sandbox.vault.ssh.signer.start_ssh_signer_local]
+per invocation, so the signer's lifetime is scoped to a single
+gate-sync rather than to a long-running socket directory.
 """

@@ -5,11 +5,12 @@
 
 Collaborators:
 
-- [`server`][terok_sandbox.gate.server] — standalone HTTP server wrapping ``git http-backend``
-  with per-task token auth.  Zero terok imports; runs as a separate process.
-- [`lifecycle`][terok_sandbox.gate.lifecycle] — host-side systemd socket activation and daemon
-  fallback for the gate server.
-- [`tokens`][terok_sandbox.gate.tokens] — per-task token CRUD (create, revoke, file I/O).
+- [`server`][terok_sandbox.gate.server] — the [`GateServer`][terok_sandbox.gate.server.GateServer]
+  component wrapping ``git http-backend`` with single-token auth.  Composed
+  by the per-container supervisor; zero terok imports beyond the SELinux
+  socket-labelling helper.
+- [`tokens`][terok_sandbox.gate.tokens] — [`mint_gate_token`][terok_sandbox.gate.tokens.mint_gate_token],
+  the per-task token minter.
 - [`mirror`][terok_sandbox.gate.mirror] — host-side bare git mirror (clone, sync, staleness
   detection vs upstream).
 """
