@@ -17,6 +17,7 @@ import dataclasses
 
 from .._setup import (
     EXIT_MANUAL_STEP_NEEDED,
+    print_apparmor_install_hint,
     print_selinux_install_hint,
     run_clearance_install_phase,
     run_clearance_uninstall_phase,
@@ -131,6 +132,9 @@ def _handle_sandbox_setup(
     # Re-surface the SELinux install command at the bottom of output
     # so it isn't scrolled away by service install banners.  Sandbox#854.
     print_selinux_install_hint(selinux_result)
+    # Likewise the AppArmor dnsmasq-profile addendum (non-fatal: shield
+    # falls back to the dig tier without it, so no exit-code change).
+    print_apparmor_install_hint()
 
     if failed:
         raise SystemExit(1)
