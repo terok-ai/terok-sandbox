@@ -4,13 +4,8 @@
 [![REUSE status](https://api.reuse.software/badge/github.com/terok-ai/terok-sandbox)](https://api.reuse.software/info/github.com/terok-ai/terok-sandbox)
 [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=terok-ai_terok-sandbox&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=terok-ai_terok-sandbox)
 
-The hardened-Podman runtime that powers terok.
-
-terok-sandbox launches per-task containers with a credential vault,
-a gated git server, and an installed egress firewall already in
-place — so the calling tool can hand the container an agent and a
-prompt, and the security boundary is set up before the agent ever
-runs.
+The hardened-Podman runtime — terok-sandbox launches per-task containers with a credential vault,
+a gated git server.
 
 <p align="center">
   <img src="docs/architecture.svg" alt="terok ecosystem — terok-sandbox sits between the per-task launcher and the firewall it installs">
@@ -18,27 +13,17 @@ runs.
 
 ## What it provides
 
-- **Hardened container lifecycle** — rootless Podman containers
-  launched through a single `Sandbox` facade.  No daemon, no setuid,
-  no escalation surface from the host.
-- **Credential vault** — long-lived secrets stay on the host.  The
-  container receives short-lived phantom tokens that are exchanged
-  for the real value at the moment of use, scoped per route, audited
-  per request.
-- **Per-task git gate** — a token-authenticated HTTP mirror of the
-  upstream repository.  Tasks clone and push only through the gate;
-  the operator chooses whether the gate forwards to upstream
-  automatically or only on human review.
-- **Shield install + drive** — a thin adapter that installs the
-  terok-shield OCI hooks at setup time and drives the firewall at
-  runtime (allow / deny / up / down).
+- **Hardened container lifecycle** — rootless Podman containers.
+- **Credential vault** — long-lived secrets stay in an encrypted database on the host.
+  The container receives short-lived phantom tokens and do not see the real credentials
+- **Per-task git gate** — a token-authenticated HTTP mirror of an arbitrary
+  upstream *git* repository. Tasks clone and push through the gate, and
+  the operator forwards to upstream after review.
+- **Shield firewall** — installs the [terok-shield](https://github.com/terok-ai/terok-shield) OCI hooks at setup time and drives the firewall at runtime.
 - **Clearance install** — wires the desktop notifier daemon
-  (terok-clearance) onto every blocked outbound connection, so the
-  operator can authorise destinations live without restarting the
-  container.
-- **Setup as one call** — `sandbox_setup()` brings the whole stack up
-  idempotently (services, hooks, systemd units, port reservations);
-  `sandbox_uninstall()` undoes it.
+  [terok-clearance](https://github.com/terok-ai/terok-clearance) onto blocked outbound connections, so the operator can authorise destinations live.
+- **Setup as one call** — idempotent `sandbox_setup()` installs the OCI hooks;
+  `sandbox_uninstall()` uninstalls.
 
 ## Where it sits in the stack
 
@@ -50,10 +35,6 @@ black-box "give me a hardened container."  Below it, it composes
 [terok-shield](https://github.com/terok-ai/terok-shield) for egress
 filtering and [terok-clearance](https://github.com/terok-ai/terok-clearance)
 for the operator-in-the-loop verdict path.
-
-The split exists so that callers do not need to understand
-nftables, OCI hook wiring, vault sockets, or systemd unit lifecycles
-to get a safe container.
 
 ## Public API
 

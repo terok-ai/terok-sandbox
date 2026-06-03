@@ -42,7 +42,7 @@ top-to-bottom and stops at the first hit:
 ## Headless setup (data-center terminals)
 
 For hosts reached over SSH where systemd-creds isn't available (older
-systemd, distros without the user Varlink service, shared HPC nodes
+systemd, shared cluster nodes
 with no per-user TPM), point `passphrase_command` at whichever
 credential helper the operator already trusts:
 
@@ -54,7 +54,7 @@ credentials:
 The resolver tokenises with `shlex.split` and runs
 `subprocess.run(...)` with a 30-second timeout, then strips trailing
 whitespace from stdout.  Anything that prints a passphrase on stdout
-works; ready-to-use recipes:
+works; ready-to-use recipes (🤖 guesses, not manually verified):
 
 | Backend | `passphrase_command` value |
 |---------|----------------------------|
@@ -146,22 +146,9 @@ destroy → reseed**:
 
 #### 1. Retrieve from the current tier
 
+
 ```bash
-# session-file:
-cat "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/terok/sandbox/vault.passphrase"
-
-# OS keyring (libsecret / gnome-keyring / kwallet):
-secret-tool lookup service terok-sandbox username credentials-db
-
-# systemd-creds (sealed at rest; needs the same host that sealed it):
-systemd-creds --user --name=terok-sandbox.vault-passphrase \
-  decrypt "${XDG_DATA_HOME:-$HOME/.local/share}/terok/vault/vault.passphrase.cred" -
-
-# passphrase_command (whatever the helper resolves to right now):
-sh -c "$(yq '.credentials.passphrase_command' ~/.config/terok/config.yml)"
-
-# config.yml (plaintext-on-disk):
-yq '.credentials.passphrase' ~/.config/terok/config.yml
+terok-sandbox vault passphrase reveal
 ```
 
 Keep the value somewhere safe for the duration of the swap — a
@@ -241,30 +228,7 @@ terok-sandbox setup
 After step 3 you have an empty vault — re-import your SSH keys, re-add
 provider credentials.
 
-**The mitigation is to back the passphrase up *before* you lose it.**
-On every fresh install, `terok-sandbox setup` prints the
-auto-generated passphrase once on `/dev/tty` with the line *"Write
-this down — it's your recovery key for rebuilds and other hosts."*
-Capture that into your password manager the moment you see it.  For
-non-interactive bootstraps where no TTY is present, pass
-`--echo-passphrase` to `setup` so the value also reaches stdout for
-the calling automation to store — **only** use that flag when stdout
-is going somewhere private.
-
-## Migrating a legacy plaintext DB
-
-```bash
-terok-sandbox credentials encrypt-db
-```
-
-Idempotent — re-runs on an already-encrypted DB are a no-op.
-
-A tarred snapshot of the plaintext DB is written next to the original
-as `credentials.db.plaintext-backup-<timestamp>.tar.gz` *before* the
-re-key so a failed migration still has a recovery path.  The migration
-prints a loud red warning afterwards — **delete the tarball with
-`rm` once you have verified the new encrypted DB is good**, otherwise
-your secrets stay readable on disk indefinitely.
+**Back the passphrase up *before* you lose it.**
 
 ## Doctor / sickbay
 

@@ -3,18 +3,14 @@
 The hardened-Podman runtime that powers terok.
 
 terok-sandbox launches per-task containers with a credential vault,
-a gated git server, and an installed egress firewall already in
-place — so the calling tool can hand the container an agent and a
-prompt, and the security boundary is set up before the agent ever
-runs.
+a gated git server, and egress firewall.
 
 ![terok ecosystem — terok-sandbox sits between the per-task launcher and the firewall it installs](architecture.svg)
 
 ## What it provides
 
-- **Hardened container lifecycle** — rootless Podman containers
-  launched through a single `Sandbox` facade.  No daemon, no setuid,
-  no escalation surface from the host.
+- **Hardened container lifecycle** — rootless Podman containers launched through a `Sandbox` facade,
+  services are provided by a supervisor whose lifecycle is managed by the container's OCI hooks
 - **Credential vault** — long-lived secrets stay on the host,
   [SQLCipher-encrypted at rest](credentials-encryption.md).  The
   container receives short-lived phantom tokens that are exchanged
