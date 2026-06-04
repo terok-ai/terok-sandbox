@@ -79,8 +79,6 @@ The full export list lives in
 | `terok-sandbox gate …` | Gate management subcommands |
 | `terok-sandbox shield …` | Shield install / status / direct control |
 | `terok-sandbox ssh …` | Per-container SSH key provisioning |
-| `terok-gate` | Long-running gate daemon (systemd unit entry point) |
-| `terok-vault` | Long-running vault token broker (systemd unit entry point) |
 
 ## Requirements
 
