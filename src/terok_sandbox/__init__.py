@@ -33,7 +33,6 @@ from typing import TYPE_CHECKING
 from terok_util.config_stack import ConfigScope
 
 from ._stage import bold, red, stage_line, yellow
-from ._util import BestEffortLogger
 from ._util._apparmor import (
     AppArmorCheckResult,
     AppArmorStatus,
@@ -202,7 +201,6 @@ __all__ = [
     "apparmor_install_command",
     "apparmor_install_script",
     # CLI + cross-package utilities
-    "BestEffortLogger",
     "CommandTree",
     "bold",
     "red",

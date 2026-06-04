@@ -11,13 +11,12 @@ from terok_util import (
 )
 
 from ._fs import systemd_user_unit_dir
-from ._logging import BestEffortLogger, log_debug, log_warning, warn_user
+from ._logging import log_debug, log_warning, warn_user
 from ._naming import effective_ssh_key_name
 from ._pidfile import read_pidfile_safely, unlink_pidfile_safely
 from ._templates import systemd_escape, systemd_exec_argv
 
 __all__ = [
-    "BestEffortLogger",
     "effective_ssh_key_name",
     "ensure_dir",
     "ensure_dir_writable",
