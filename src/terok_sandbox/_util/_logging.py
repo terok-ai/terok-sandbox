@@ -5,9 +5,8 @@
 
 [`BestEffortLogger`][terok_util.logging.BestEffortLogger] provides the
 implementation; this module binds it to the sandbox state log
-([`_sandbox_log_path`][terok_sandbox._util._logging._sandbox_log_path]) and
-exposes the module-level ``log_debug`` / ``log_warning`` / ``warn_user``
-shorthand that in-tree call sites use.
+(``_sandbox_log_path``) and exposes the module-level ``log_debug`` /
+``log_warning`` / ``warn_user`` shorthand that in-tree call sites use.
 """
 
 from __future__ import annotations
