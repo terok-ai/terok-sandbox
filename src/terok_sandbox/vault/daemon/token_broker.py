@@ -122,22 +122,23 @@ class _TokenDB:
     [`terok_sandbox.vault.store.db.CredentialDB`][terok_sandbox.vault.store.db.CredentialDB].
     """
 
-    def __init__(self, db_path: str) -> None:
+    def __init__(self, db_path: str, *, passphrase: str | None = None) -> None:
+        """Open *db_path*; resolve the vault passphrase unless one is supplied."""
         # check_same_thread=False is safe: this is a read-only accessor and
         # aiohttp runs handlers in a single event loop thread.
-        from terok_sandbox.config import SandboxConfig
+        from ..store.encryption import open_sqlcipher
 
-        from ..store.encryption import NoPassphraseError, open_sqlcipher
-
-        cfg = SandboxConfig()
-        # Walk the chain once and log the resolved tier — a separate
-        # diagnostic resolve would re-spawn ``passphrase_command``
-        # helpers (cloud CLIs, ``pass``, …) twice per daemon start.
-        passphrase, source = cfg.resolve_passphrase_with_source()
         if passphrase is None:
-            _logger.info("Vault passphrase: no tier resolved")
-            raise NoPassphraseError(f"no SQLCipher passphrase available for {db_path}")
-        _logger.info("Vault passphrase resolved via %s tier", source)
+            from terok_sandbox.config import SandboxConfig
+
+            from ..store.encryption import NoPassphraseError
+
+            cfg = SandboxConfig()
+            passphrase, source = cfg.resolve_passphrase_with_source()
+            if passphrase is None:
+                _logger.info("Vault passphrase: no tier resolved")
+                raise NoPassphraseError(f"no SQLCipher passphrase available for {db_path}")
+            _logger.info("Vault passphrase resolved via %s tier", source)
         self._conn = open_sqlcipher(db_path, passphrase, check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
         # Bootstrap + migrate schema here too so the vault daemon can open

@@ -426,17 +426,22 @@ async def start_ssh_signer(
     return server
 
 
-async def start_ssh_signer_local(*, scope: str, socket_path: Path, db_path: str) -> asyncio.Server:
+async def start_ssh_signer_local(
+    *, scope: str, socket_path: Path, db_path: str, passphrase: str | None = None
+) -> asyncio.Server:
     """Start a host-local SSH signer bound to a single scope.
 
     The returned server listens on a mode-0600 Unix socket; same-UID
     filesystem permissions are the whole access control.  No token
     handshake — every accepted connection immediately enters the agent
     message loop with *scope* as its fixed identity source.
+
+    A pre-resolved *passphrase* opens the vault directly, keeping the bind
+    off any slow keystore tier; ``None`` walks the resolution chain.
     """
     from ..daemon.token_broker import _TokenDB
 
-    token_db = _TokenDB(db_path)
+    token_db = _TokenDB(db_path, passphrase=passphrase)
     key_cache = _DBKeyCache(token_db)
 
     async def _on_connect(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
