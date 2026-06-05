@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -506,72 +506,50 @@ class TestDbHasKeysForScope:
     the friendly ``GateAuthNotConfigured`` instead of a stack trace."""
 
     def test_true_when_scope_has_keys(self) -> None:
-        """A scope with at least one assigned key returns ``True`` and closes the DB."""
-        from unittest.mock import MagicMock
-
+        """A scope with a key opens with the given passphrase, returns ``True``, closes."""
         db = MagicMock()
         db.list_ssh_keys_for_scope.return_value = ["key-1"]
         cfg = MagicMock()
-        cfg.open_credential_db.return_value = db
 
-        assert _db_has_keys_for_scope(cfg, "proj-a") is True
+        with patch("terok_sandbox.vault.store.db.CredentialDB", return_value=db) as ctor:
+            assert _db_has_keys_for_scope(cfg, "proj-a", "pw") is True
+
+        ctor.assert_called_once_with(cfg.db_path, passphrase="pw")
         db.list_ssh_keys_for_scope.assert_called_once_with("proj-a")
         db.close.assert_called_once()
 
     def test_false_when_scope_has_no_keys(self) -> None:
         """An empty key list returns ``False`` (no keys assigned to the scope)."""
-        from unittest.mock import MagicMock
-
         db = MagicMock()
         db.list_ssh_keys_for_scope.return_value = []
         cfg = MagicMock()
-        cfg.open_credential_db.return_value = db
 
-        assert _db_has_keys_for_scope(cfg, "proj-a") is False
+        with patch("terok_sandbox.vault.store.db.CredentialDB", return_value=db):
+            assert _db_has_keys_for_scope(cfg, "proj-a", "pw") is False
         db.close.assert_called_once()
 
-    def test_opens_db_non_interactively(self) -> None:
-        """The pre-check never prompts: it opens with ``prompt_on_tty=False``.
-
-        It runs below the (async) gate-sync path, where a prompt_toolkit
-        passphrase prompt cannot own the running event loop — prompting
-        here is the regression that froze the TUI.  A locked vault must
-        collapse to ``False``, not pull up an interactive prompt.
-        """
-        from unittest.mock import MagicMock
-
-        db = MagicMock()
-        db.list_ssh_keys_for_scope.return_value = ["key-1"]
-        cfg = MagicMock()
-        cfg.open_credential_db.return_value = db
-
-        _db_has_keys_for_scope(cfg, "proj-a")
-        cfg.open_credential_db.assert_called_once_with(prompt_on_tty=False)
-
     def test_false_when_db_open_raises(self) -> None:
-        """A vault that won't open (locked / missing passphrase) → ``False``.
+        """A vault that won't open (wrong passphrase / corrupt) → ``False``.
 
-        The encrypted-vault-without-passphrase case must not leak a
-        ``sqlite3.Error``; it collapses to ``False`` so the caller raises
-        the actionable ``GateAuthNotConfigured`` hint."""
-        from unittest.mock import MagicMock
-
+        The failure must not leak a ``sqlite3.Error``; it collapses to
+        ``False`` so the caller raises the actionable
+        ``GateAuthNotConfigured`` hint."""
         cfg = MagicMock()
-        cfg.open_credential_db.side_effect = RuntimeError("vault locked")
 
-        assert _db_has_keys_for_scope(cfg, "proj-a") is False
+        with patch(
+            "terok_sandbox.vault.store.db.CredentialDB", side_effect=RuntimeError("vault locked")
+        ):
+            assert _db_has_keys_for_scope(cfg, "proj-a", "pw") is False
 
     def test_false_when_listing_raises_but_still_closes(self) -> None:
         """A query that raises (e.g. schema not bootstrapped) → ``False``,
         and the DB handle is still closed in the ``finally``."""
-        from unittest.mock import MagicMock
-
         db = MagicMock()
         db.list_ssh_keys_for_scope.side_effect = RuntimeError("no such table")
         cfg = MagicMock()
-        cfg.open_credential_db.return_value = db
 
-        assert _db_has_keys_for_scope(cfg, "proj-a") is False
+        with patch("terok_sandbox.vault.store.db.CredentialDB", return_value=db):
+            assert _db_has_keys_for_scope(cfg, "proj-a", "pw") is False
         db.close.assert_called_once()
 
 
@@ -590,7 +568,7 @@ class TestEphemeralSignerStart:
         from terok_sandbox.gate.mirror import GateAuthNotConfigured
 
         monkeypatch.setattr(
-            "terok_sandbox.gate.mirror._db_has_keys_for_scope", lambda _cfg, _scope: False
+            "terok_sandbox.gate.mirror._db_has_keys_for_scope", lambda _cfg, _scope, _pw: False
         )
         with patch("terok_sandbox.config.SandboxConfig"):
             with pytest.raises(GateAuthNotConfigured):
@@ -607,7 +585,7 @@ class TestEphemeralSignerStart:
         is needed — the signer entry point is mocked to raise.
         """
         monkeypatch.setattr(
-            "terok_sandbox.gate.mirror._db_has_keys_for_scope", lambda _cfg, _scope: True
+            "terok_sandbox.gate.mirror._db_has_keys_for_scope", lambda _cfg, _scope, _pw: True
         )
 
         async def _boom(**_kw: object) -> object:
@@ -635,7 +613,7 @@ class TestEphemeralSignerStart:
         import asyncio
 
         monkeypatch.setattr(
-            "terok_sandbox.gate.mirror._db_has_keys_for_scope", lambda _cfg, _scope: True
+            "terok_sandbox.gate.mirror._db_has_keys_for_scope", lambda _cfg, _scope, _pw: True
         )
 
         async def _real_server(*, socket_path, **_kw: object) -> asyncio.AbstractServer:
@@ -659,6 +637,43 @@ class TestEphemeralSignerStart:
 
         assert not signer._thread.is_alive()
         assert not Path(signer._tmpdir.name).exists()
+
+    def test_passphrase_resolved_on_caller_and_forwarded(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``start`` resolves the vault passphrase itself and hands it to the signer."""
+        import asyncio
+
+        monkeypatch.setattr(
+            "terok_sandbox.gate.mirror._db_has_keys_for_scope", lambda _cfg, _scope, _pw: True
+        )
+        captured: dict[str, object] = {}
+
+        async def _real_server(
+            *, socket_path: Path, passphrase: object, **_kw: object
+        ) -> asyncio.AbstractServer:
+            captured["passphrase"] = passphrase
+
+            async def _handle(_reader: object, writer: asyncio.StreamWriter) -> None:
+                writer.close()
+
+            return await asyncio.start_unix_server(_handle, path=str(socket_path))
+
+        cfg = MagicMock()
+        cfg.resolve_passphrase.return_value = "s3kret"
+        with (
+            patch("terok_sandbox.config.SandboxConfig", return_value=cfg),
+            patch(
+                "terok_sandbox.vault.ssh.signer.start_ssh_signer_local",
+                side_effect=_real_server,
+            ),
+        ):
+            signer = _EphemeralSigner.start("proj-a")
+            try:
+                assert captured["passphrase"] == "s3kret"
+                cfg.resolve_passphrase.assert_called_once_with(prompt_on_tty=False)
+            finally:
+                signer.stop()
 
 
 class TestEphemeralSignerStop:

@@ -602,6 +602,8 @@ def is_ssh_url(url: str | None) -> bool:
 # ---------- Private helpers ----------
 
 
+# Guards only the unix-socket bind on the signer thread; passphrase
+# resolution runs on the caller (see ``_EphemeralSigner.start``).
 _SIGNER_BIND_TIMEOUT_S = 5.0
 _SIGNER_STOP_TIMEOUT_S = 5.0
 
@@ -629,7 +631,11 @@ class _EphemeralSigner:
         from ..vault.ssh.signer import start_ssh_signer_local
 
         cfg = SandboxConfig()
-        if not _db_has_keys_for_scope(cfg, scope):
+        # Resolve once on the calling thread, where waiting is free: the
+        # bind timeout below must not wrap a slow keystore tier (TPM2
+        # unseal, secret-manager CLI), and the key pre-check reuses it.
+        passphrase = cfg.resolve_passphrase(prompt_on_tty=False)
+        if passphrase is None or not _db_has_keys_for_scope(cfg, scope, passphrase):
             raise GateAuthNotConfigured(scope)
 
         tmpdir = tempfile.TemporaryDirectory(prefix="terok-gate-signer-")
@@ -643,7 +649,10 @@ class _EphemeralSigner:
             """Bind the signer; serve forever until the loop is stopped."""
             try:
                 server = await start_ssh_signer_local(
-                    scope=scope, socket_path=socket_path, db_path=str(cfg.db_path)
+                    scope=scope,
+                    socket_path=socket_path,
+                    db_path=str(cfg.db_path),
+                    passphrase=passphrase,
                 )
             except Exception as exc:  # noqa: BLE001 — surface bind failure
                 start_error.append(exc)
@@ -703,25 +712,19 @@ class _EphemeralSigner:
         self._tmpdir.cleanup()
 
 
-def _db_has_keys_for_scope(cfg: SandboxConfig, scope: str) -> bool:
+def _db_has_keys_for_scope(cfg: SandboxConfig, scope: str, passphrase: str) -> bool:
     """Return ``True`` iff *scope* has at least one assigned SSH key.
 
-    Opens the credentials DB through
-    [`open_credential_db`][terok_sandbox.SandboxConfig.open_credential_db]
-    so SQLCipher's passphrase chain is honoured — a raw ``sqlite3.connect``
-    would read ciphertext, hit ``sqlite3.Error``, and return ``False`` for
-    every scope on an encrypted vault.  Any exception (no passphrase
-    available, no DB file, schema not yet bootstrapped) collapses to
-    ``False`` so the caller surfaces
+    Opens the credentials DB with the caller's pre-resolved *passphrase*.
+    Any exception (wrong passphrase, no DB file, schema not yet
+    bootstrapped) collapses to ``False`` so the caller surfaces
     [`GateAuthNotConfigured`][terok_sandbox.gate.mirror.GateAuthNotConfigured]
     with its actionable two-door hint instead of leaking a stack trace.
     """
+    from ..vault.store.db import CredentialDB
+
     try:
-        # Non-interactive: a prompt_toolkit passphrase prompt cannot own a
-        # running event loop, and this helper sits below the async sync
-        # path.  A locked vault collapses to ``False`` → GateAuthNotConfigured;
-        # the frontend resolves the passphrase before reaching here.
-        db = cfg.open_credential_db(prompt_on_tty=False)
+        db = CredentialDB(cfg.db_path, passphrase=passphrase)
     except Exception:  # noqa: BLE001 — fail-soft to the friendly GateAuthNotConfigured
         return False
     try:

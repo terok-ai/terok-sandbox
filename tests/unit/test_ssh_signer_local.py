@@ -117,3 +117,47 @@ class TestLocalSigner:
         finally:
             server.close()
             await server.wait_closed()
+
+    async def test_supplied_passphrase_bypasses_resolution(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A supplied passphrase opens the vault without walking the resolution chain."""
+        db_path = tmp_path / "vault.db"
+        db = CredentialDB(db_path, passphrase="test")
+        kp = generate_keypair("ed25519", comment="tk-main:proj")
+        key_id = db.store_ssh_key(
+            key_type=kp.key_type,
+            private_der=kp.private_der,
+            public_blob=kp.public_blob,
+            comment=kp.comment,
+            fingerprint=kp.fingerprint,
+        )
+        db.assign_ssh_key("proj", key_id)
+        db.close()
+
+        def _no_resolve(*_a: object, **_k: object) -> object:
+            raise AssertionError("resolution chain must not run when a passphrase is given")
+
+        monkeypatch.setattr(
+            "terok_sandbox.config.SandboxConfig.resolve_passphrase_with_source", _no_resolve
+        )
+
+        sock_path = tmp_path / "ssh-agent-local-proj.sock"
+        server = await start_ssh_signer_local(
+            scope="proj", socket_path=sock_path, db_path=str(db_path), passphrase="test"
+        )
+        try:
+            reader, writer = await asyncio.open_unix_connection(str(sock_path))
+            writer.write(_build_msg(SSH_AGENTC_REQUEST_IDENTITIES))
+            await writer.drain()
+
+            msg_type, payload = await _read_response(reader)
+            assert msg_type == SSH_AGENT_IDENTITIES_ANSWER
+            (nkeys,) = struct.unpack_from(">I", payload, 0)
+            assert nkeys == 1
+
+            writer.close()
+            await writer.wait_closed()
+        finally:
+            server.close()
+            await server.wait_closed()
