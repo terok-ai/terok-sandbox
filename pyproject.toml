@@ -17,7 +17,7 @@ keywords = ["podman", "containers", "sandbox", "security", "isolation"]
 requires-python = ">=3.12,<4.0"
 dynamic = ["version", "classifiers"]
 dependencies = [
-    "terok-util>=0.1.0,<0.2.0",
+    "terok-util @ git+https://github.com/terok-ai/terok-util.git@refs/pull/16/head",
     "terok-shield>=0.7.0,<0.8.0",
     "terok-clearance>=0.7.0,<0.8.0",
     "platformdirs>=4.10.0",
