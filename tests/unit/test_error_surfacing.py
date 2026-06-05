@@ -130,8 +130,7 @@ class TestWarnUser:
         assert "WARNING: [shield] rule mismatch" in content
 
     # The stderr soft-fail branch (``print`` to a broken FD must not raise)
-    # now lives in terok-util's BestEffortLogger and is covered by
-    # terok-util's test_logging.py — the sandbox shim only delegates.
+    # lives in terok-util's BestEffortLogger, covered by its test_logging.py.
 
 
 # ═══════════════════════════════════════════════════════════════════════════

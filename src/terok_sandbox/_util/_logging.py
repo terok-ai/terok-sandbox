@@ -3,13 +3,11 @@
 
 """Sandbox's default-path logging shorthand over the shared logger.
 
-The [`BestEffortLogger`][terok_util.logging.BestEffortLogger] implementation
-lives once in terok-util, at the bottom of the dependency chain.  This module
-keeps only what is sandbox-specific: the default log path
-([`_sandbox_log_path`][terok_sandbox._util._logging._sandbox_log_path]) and the
-module-level ``log_debug`` / ``log_warning`` / ``warn_user`` shorthand that
-in-tree call sites use — they delegate to a singleton bound to the sandbox
-state log.
+[`BestEffortLogger`][terok_util.logging.BestEffortLogger] provides the
+implementation; this module binds it to the sandbox state log
+([`_sandbox_log_path`][terok_sandbox._util._logging._sandbox_log_path]) and
+exposes the module-level ``log_debug`` / ``log_warning`` / ``warn_user``
+shorthand that in-tree call sites use.
 """
 
 from __future__ import annotations
@@ -26,9 +24,8 @@ def _sandbox_log_path() -> Path:
     return user_state_path("terok-sandbox", ensure_exists=True) / "terok-sandbox.log"
 
 
-# Default singleton bound to the sandbox's own state path.  The
-# module-level shorthand below preserves the call shape every in-tree
-# call site already uses.
+# Singleton bound to the sandbox state path; the module-level shorthand
+# below delegates to it.
 _default_logger = BestEffortLogger(_sandbox_log_path)
 
 
