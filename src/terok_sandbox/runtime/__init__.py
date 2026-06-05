@@ -19,7 +19,13 @@ from .krun_transport import (
     podman_port_resolver,
 )
 from .null import NullRuntime
-from .podman import GpuConfigError, PodmanRuntime, check_gpu_available
+from .podman import (
+    ContainerEvent,
+    GpuConfigError,
+    PodmanEventStream,
+    PodmanRuntime,
+    check_gpu_available,
+)
 from .protocol import (
     Container,
     ContainerRemoveResult,
@@ -43,6 +49,9 @@ __all__ = [
     "KrunRuntime",
     "NullRuntime",
     "PodmanRuntime",
+    # Podman event stream (push-based container-state companion)
+    "ContainerEvent",
+    "PodmanEventStream",
     # Krun container handle (krun-aware login_command override)
     "KrunContainer",
     # Krun transport — protocol, fake (test), real (TCP-via-passt SSH)
