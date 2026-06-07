@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     from ..store.db import SSHKeyRecord
 
 from aiohttp import (
+    ClientResponse,
     ClientSession,
     ClientTimeout,
     ServerDisconnectedError,
@@ -474,6 +475,85 @@ async def _audit_request(
     await audit.write(entry)
 
 
+# ---------------------------------------------------------------------------
+# Response relay and redirect resolution
+# ---------------------------------------------------------------------------
+
+# Response headers relayed verbatim to the client.  The body is re-streamed,
+# so aiohttp regenerates the framing headers (content-length, content-encoding);
+# copying the upstream's would contradict the bytes actually sent.
+_FORWARDED_RESPONSE_HEADERS = ("content-type", "transfer-encoding", "cache-control")
+
+# A few provider endpoints (GitHub Actions logs/artifacts, release assets, repo
+# tarballs) answer with a 3xx to a self-authenticating storage URL on a *different*
+# host.  The container's HTTP client is pinned to this broker's socket, so it can
+# neither reach that host nor follow the hop — and the broker routes by
+# token-provider, so a replayed storage path would be rewritten back onto the
+# provider's API host.  The broker therefore resolves such redirects itself.
+_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+
+
+def _is_followable_redirect(status: int, method: str) -> bool:
+    """Whether a redirect response should be resolved inside the broker.
+
+    Only idempotent methods qualify: replaying a write body across a redirect
+    could duplicate a non-idempotent effect, so those redirects are relayed back
+    to the client untouched instead of being followed here.
+    """
+    return status in _REDIRECT_STATUSES and method.upper() in _IDEMPOTENT_METHODS
+
+
+async def _stream_upstream(
+    request: web.Request,
+    upstream: ClientResponse,
+    *,
+    token_info: dict,
+    started_at: float,
+) -> web.StreamResponse:
+    """Relay an upstream response's status, selected headers, and streamed body."""
+    resp = web.StreamResponse(status=upstream.status)
+    for hdr in _FORWARDED_RESPONSE_HEADERS:
+        if value := upstream.headers.get(hdr):
+            resp.headers[hdr] = value
+    await resp.prepare(request)
+    async for chunk in upstream.content.iter_any():
+        await resp.write(chunk)
+    await resp.write_eof()
+    await _audit_request(request, token_info, upstream.status, "ok", started_at)
+    return resp
+
+
+async def _resolve_redirect(
+    request: web.Request,
+    session: ClientSession,
+    location: str,
+    base_url: str,
+    *,
+    token_info: dict,
+    started_at: float,
+) -> web.StreamResponse:
+    """Fetch a redirect target with the injected credential dropped, then stream it.
+
+    The ``Location`` points at a self-authenticating URL on a third-party host;
+    withholding the real provider token keeps it from leaking off the provider's
+    own origin — the same rule curl and browsers apply on a cross-origin redirect.
+    aiohttp chases any further hops, bounded by its default redirect cap.
+    """
+    from urllib.parse import urljoin
+
+    target = urljoin(base_url, location)
+    follow_headers = {
+        name: request.headers[name] for name in ("accept", "user-agent") if name in request.headers
+    }
+    async with session.get(
+        target,
+        headers=follow_headers,
+        allow_redirects=True,
+        timeout=ClientTimeout(connect=10, sock_read=_UPSTREAM_READ_TIMEOUT),
+    ) as final:
+        return await _stream_upstream(request, final, token_info=token_info, started_at=started_at)
+
+
 async def _handle_request(request: web.Request) -> web.StreamResponse:
     """Authenticate, route by token, inject credentials, and forward to upstream."""
     started_at = time.monotonic()
@@ -599,20 +679,19 @@ async def _handle_request(request: web.Request) -> web.StreamResponse:
                 timeout=ClientTimeout(connect=10, sock_read=_UPSTREAM_READ_TIMEOUT),
             ) as upstream:
                 connection_established = True
-                # Build response with upstream status + headers
-                resp = web.StreamResponse(status=upstream.status)
-                # Forward selected headers
-                for hdr in ("content-type", "transfer-encoding", "cache-control"):
-                    val = upstream.headers.get(hdr)
-                    if val:
-                        resp.headers[hdr] = val
-                await resp.prepare(request)
-
-                async for chunk in upstream.content.iter_any():
-                    await resp.write(chunk)
-                await resp.write_eof()
-                await _audit_request(request, token_info, upstream.status, "ok", started_at)
-                return resp
+                location = upstream.headers.get("location")
+                if location and _is_followable_redirect(upstream.status, request.method):
+                    return await _resolve_redirect(
+                        request,
+                        session,
+                        location,
+                        str(upstream.url),
+                        token_info=token_info,
+                        started_at=started_at,
+                    )
+                return await _stream_upstream(
+                    request, upstream, token_info=token_info, started_at=started_at
+                )
         except ServerDisconnectedError:
             if not connection_established and attempt == 0 and can_retry:
                 _logger.debug("Upstream %s disconnected on pooled conn, retrying", provider)

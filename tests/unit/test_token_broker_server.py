@@ -1706,3 +1706,111 @@ class TestServerDisconnectRetry:
 # sockets vs. self-bound listeners) is gone after the per-container-
 # supervisor refactor — ``VaultProxy.start()`` owns the listener
 # bring-up now and tests for that path live in ``test_vault_proxy.py``.
+
+
+@pytest.mark.asyncio
+class TestRedirectFollowing:
+    """The broker resolves storage redirects itself, with the credential withheld.
+
+    GitHub's Actions logs/artifacts endpoints answer with a 302 to a
+    self-authenticating URL on a *different* host.  The container's client is
+    pinned to the broker socket and can't follow the hop, so the broker follows
+    it on the client's behalf — and must drop the injected provider token so it
+    never reaches the third-party storage host.
+    """
+
+    _LOG_BYTES = b"PK\x03\x04 pretend-log-archive"
+
+    @staticmethod
+    def _redirecting_upstream(seen: dict):
+        """A fake provider whose ``/logs`` 302s to its own ``/storage`` blob.
+
+        Both handlers record the ``Authorization`` they receive into *seen* so a
+        test can assert the provider hop carried the real token and the storage
+        hop carried none.
+        """
+        from aiohttp import web as _web
+
+        async def _logs(request: _web.Request) -> _web.Response:
+            """Record the auth seen, then redirect to the storage blob."""
+            seen["logs_auth"] = request.headers.get("Authorization")
+            raise _web.HTTPFound(location=str(request.url.with_path("/storage")))
+
+        async def _storage(request: _web.Request) -> _web.Response:
+            """Record the auth seen and return the archive bytes."""
+            seen["storage_auth"] = request.headers.get("Authorization")
+            return _web.Response(
+                body=TestRedirectFollowing._LOG_BYTES, content_type="application/zip"
+            )
+
+        app = _web.Application()
+        app.router.add_get("/logs", _logs)
+        app.router.add_get("/storage", _storage)
+        return app
+
+    @staticmethod
+    def _wire_broker(tmp_path: Path, upstream_port: int) -> str:
+        """Write a DB + routes pointing provider ``gh`` at the upstream; return its token."""
+        db = CredentialDB(tmp_path / "test.db", passphrase="test")
+        db.store_credential("default", "gh", {"type": "pat", "token": "gh-real-pat"})
+        token = db.create_token("proj", "t1", "default", "gh")
+        db.close()
+        routes = tmp_path / "routes.json"
+        routes.write_text(
+            json.dumps(
+                {
+                    "gh": {
+                        "upstream": f"http://127.0.0.1:{upstream_port}",
+                        "auth_header": "Authorization",
+                        "auth_prefix": "token ",
+                    }
+                }
+            )
+        )
+        return token
+
+    async def test_idempotent_redirect_followed_without_credential(self, tmp_path: Path) -> None:
+        """A GET that 302s to storage streams the final body; the hop carries no token."""
+        from aiohttp.test_utils import TestClient, TestServer
+
+        seen: dict = {"storage_auth": "unset"}
+        upstream = TestServer(self._redirecting_upstream(seen))
+        await upstream.start_server()
+        token = self._wire_broker(tmp_path, upstream.port)
+
+        broker_app = _build_app(str(tmp_path / "test.db"), str(tmp_path / "routes.json"))
+        async with TestClient(TestServer(broker_app)) as client:
+            resp = await client.get("/logs", headers={"Authorization": f"Bearer {token}"})
+            assert resp.status == 200
+            assert await resp.read() == self._LOG_BYTES
+
+        await upstream.close()
+
+        assert seen["logs_auth"] == "token gh-real-pat"  # provider hop got the real token
+        assert seen["storage_auth"] is None  # storage hop got none
+
+    async def test_non_idempotent_redirect_relayed_not_followed(self, tmp_path: Path) -> None:
+        """A POST that 302s is relayed verbatim — replaying its body could double a write."""
+        from aiohttp import web as _web
+        from aiohttp.test_utils import TestClient, TestServer
+
+        seen: dict = {"storage_auth": "unset"}
+        upstream_app = self._redirecting_upstream(seen)
+
+        async def _post_logs(request: _web.Request) -> _web.Response:
+            """A non-idempotent endpoint that also redirects to storage."""
+            raise _web.HTTPFound(location=str(request.url.with_path("/storage")))
+
+        upstream_app.router.add_post("/logs", _post_logs)
+        upstream = TestServer(upstream_app)
+        await upstream.start_server()
+        token = self._wire_broker(tmp_path, upstream.port)
+
+        broker_app = _build_app(str(tmp_path / "test.db"), str(tmp_path / "routes.json"))
+        async with TestClient(TestServer(broker_app)) as client:
+            resp = await client.post("/logs", headers={"Authorization": f"Bearer {token}"})
+            assert resp.status == 302  # relayed, not resolved
+
+        await upstream.close()
+
+        assert seen["storage_auth"] == "unset"  # storage was never reached
