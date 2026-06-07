@@ -176,3 +176,30 @@ class TestRuntimeEvents:
         stream = PodmanEventStream(PREFIX)
         stream.close()  # terminate → wait times out → kill → wait
         assert fake._waits == 2
+
+
+class TestStreamEdges:
+    """Defensive paths: process handle, empty stdout, error-swallowing close."""
+
+    def _make(self, monkeypatch: Any, fake: _FakeProc) -> PodmanEventStream:
+        monkeypatch.setattr(podman.subprocess, "Popen", lambda *a, **k: fake)
+        return PodmanEventStream(PREFIX)
+
+    def test_process_property_exposes_the_child(self, monkeypatch: Any) -> None:
+        fake = _FakeProc([])
+        assert self._make(monkeypatch, fake).process is fake
+
+    def test_next_stops_when_stdout_is_none(self, monkeypatch: Any) -> None:
+        fake = _FakeProc([])
+        fake.stdout = None  # type: ignore[assignment]
+        assert list(self._make(monkeypatch, fake)) == []
+
+    def test_close_swallows_a_stdout_close_error(self, monkeypatch: Any) -> None:
+        class _BadIO:
+            def close(self) -> None:
+                raise OSError("boom")
+
+        fake = _FakeProc([])
+        fake._returncode = 0  # already exited → skip the terminate path
+        fake.stdout = _BadIO()  # type: ignore[assignment]
+        self._make(monkeypatch, fake).close()  # must not raise
