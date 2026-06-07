@@ -26,6 +26,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
 
@@ -704,6 +705,120 @@ class PodmanLogStream:
         self._proc.stderr = None
 
 
+# ── EventStream ───────────────────────────────────────────────────────────
+
+# Container lifecycle transitions worth waking a watcher for.  Deliberately
+# excludes the noisy ``exec``/``attach`` pair that fires every time terok runs a
+# command inside a container — those don't change what a task list renders.
+_LIFECYCLE_STATUSES = frozenset(
+    {"create", "init", "start", "died", "stop", "kill", "remove", "pause", "unpause"}
+)
+
+
+@dataclass(frozen=True)
+class ContainerEvent:
+    """A single podman container lifecycle event: a name and what happened."""
+
+    name: str
+    status: str
+
+
+def _parse_event(line: str, prefix: str) -> ContainerEvent | None:
+    """Decode one ``podman events --format '{{json .}}'`` line.
+
+    Returns a [`ContainerEvent`][terok_sandbox.runtime.podman.ContainerEvent]
+    for a lifecycle change on a container named ``<prefix>-…``, or ``None`` for
+    everything else — other containers, ``exec``/``attach`` noise, or malformed
+    JSON.  Field names are read case-insensitively because podman has shipped
+    both ``Status`` and ``status`` spellings across versions.
+    """
+    try:
+        raw = json.loads(line)
+    except ValueError:  # JSONDecodeError is a ValueError subclass
+        return None
+    if (raw.get("Type") or raw.get("type")) != "container":
+        return None
+    name = raw.get("Name") or raw.get("name") or ""
+    if not name.startswith(f"{prefix}-"):
+        return None
+    status = (raw.get("Status") or raw.get("status") or "").lower()
+    if status not in _LIFECYCLE_STATUSES:
+        return None
+    return ContainerEvent(name=name, status=status)
+
+
+class PodmanEventStream:
+    """Iterator over podman container lifecycle events for a name prefix.
+
+    The push-based companion to
+    [`container_states`][terok_sandbox.runtime.podman.PodmanRuntime.container_states]:
+    wraps ``podman events --filter type=container --format '{{json .}}'`` in a
+    ``subprocess.Popen`` and yields
+    [`ContainerEvent`][terok_sandbox.runtime.podman.ContainerEvent] records whose
+    container name starts with ``<prefix>-``.  Iteration blocks between events;
+    ``close()`` (or ``__exit__``) terminates the child, which unblocks a consumer
+    thread parked in ``__next__``.
+    """
+
+    def __init__(self, prefix: str) -> None:
+        self._prefix = prefix
+        self._proc = subprocess.Popen(  # noqa: S603  # nosec B603 B607 — fixed argv; podman PATH lookup is the cross-distro contract
+            ["podman", "events", "--filter", "type=container", "--format", "{{json .}}"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+
+    @property
+    def process(self) -> subprocess.Popen:
+        """Underlying ``Popen`` handle — exposed for callers needing the fd."""
+        return self._proc
+
+    def __iter__(self) -> PodmanEventStream:
+        """Return ``self`` — iteration reads from the child's stdout."""
+        return self
+
+    def __next__(self) -> ContainerEvent:
+        """Block until the next matching lifecycle event; stop at EOF."""
+        if self._proc.stdout is None:
+            raise StopIteration
+        while True:
+            line = self._proc.stdout.readline()
+            if not line:
+                raise StopIteration
+            event = _parse_event(line.decode("utf-8", errors="replace"), self._prefix)
+            if event is not None:
+                return event
+
+    def __enter__(self) -> PodmanEventStream:
+        """Enter the context — the stream is already live."""
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        """Close the stream; terminate the child if still running."""
+        self.close()
+
+    def close(self) -> None:
+        """Terminate the ``podman events`` child and release its pipe.
+
+        Reaps the child (terminate → wait → kill fallback) and closes the
+        parent-side fd so a long-running TUI doesn't leak one per project
+        switch.  Safe to call multiple times; the second call is a no-op.
+        """
+        if self._proc.poll() is None:
+            self._proc.terminate()
+            try:
+                self._proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                self._proc.kill()
+                self._proc.wait()
+        if self._proc.stdout is not None:
+            try:
+                self._proc.stdout.close()
+            except OSError:
+                pass
+            self._proc.stdout = None
+
+
 # ── PortReservation ───────────────────────────────────────────────────────
 
 
@@ -997,6 +1112,21 @@ class PodmanRuntime:
             if len(parts) == 2:
                 result[parts[0]] = parts[1].lower()
         return result
+
+    def events(self, prefix: str) -> PodmanEventStream:
+        """Stream container lifecycle events for containers named ``<prefix>-…``.
+
+        The push-based companion to
+        [`container_states`][terok_sandbox.runtime.podman.PodmanRuntime.container_states]:
+        a long-lived ``podman events`` subscription so a watcher reacts to a
+        container starting, dying or being removed instead of polling
+        ``podman ps`` on a clock.  Returns a
+        [`PodmanEventStream`][terok_sandbox.runtime.podman.PodmanEventStream] the
+        caller iterates (typically on a worker thread) and ``close()``s when
+        done.  Backend-specific; not part of the
+        [`ContainerRuntime`][terok_sandbox.ContainerRuntime] protocol.
+        """
+        return PodmanEventStream(prefix)
 
     def container_rw_sizes(self, prefix: str) -> dict[str, int]:
         """Return ``{container_name: rw_bytes}`` for matching containers.
