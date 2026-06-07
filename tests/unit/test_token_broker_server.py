@@ -1814,3 +1814,51 @@ class TestRedirectFollowing:
         await upstream.close()
 
         assert seen["storage_auth"] == "unset"  # storage was never reached
+
+
+@pytest.mark.asyncio
+class TestResponseHeaderRelay:
+    """The broker forwards the provider's response headers, not a hand-picked few.
+
+    ``gh --paginate`` walks the ``Link`` header and clients budget against
+    ``X-RateLimit-*``; an earlier allowlist dropped both.  Only the body-framing
+    headers aiohttp regenerates for the re-streamed body are withheld.
+    """
+
+    async def test_metadata_headers_relayed_framing_withheld(self, tmp_path: Path) -> None:
+        """ETag / Link / X-RateLimit pass through; the upstream's Content-Length doesn't."""
+        from aiohttp import web as _web
+        from aiohttp.test_utils import TestClient, TestServer
+
+        async def _page(request: _web.Request) -> _web.Response:
+            """Return a body plus the metadata headers a paginating client needs."""
+            return _web.Response(
+                body=b"page-one",
+                content_type="application/json",
+                headers={
+                    "Link": '<https://example/next>; rel="next"',
+                    "ETag": '"abc123"',
+                    "X-RateLimit-Remaining": "42",
+                },
+            )
+
+        upstream_app = _web.Application()
+        upstream_app.router.add_get("/items", _page)
+        upstream = TestServer(upstream_app)
+        await upstream.start_server()
+        token = TestRedirectFollowing._wire_broker(tmp_path, upstream.port)
+
+        broker_app = _build_app(str(tmp_path / "test.db"), str(tmp_path / "routes.json"))
+        async with TestClient(TestServer(broker_app)) as client:
+            resp = await client.get("/items", headers={"Authorization": f"Bearer {token}"})
+            assert resp.status == 200
+            assert await resp.read() == b"page-one"
+            assert resp.headers["Link"] == '<https://example/next>; rel="next"'
+            assert resp.headers["ETag"] == '"abc123"'
+            assert resp.headers["X-RateLimit-Remaining"] == "42"
+            assert resp.headers["Content-Type"] == "application/json"
+            # Body framing is regenerated for the streamed response, not copied:
+            # the client gets chunked transfer with no stale Content-Length.
+            assert "Content-Length" not in resp.headers
+
+        await upstream.close()

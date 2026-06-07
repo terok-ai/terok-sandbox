@@ -35,6 +35,7 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urljoin, urlparse
 
 if TYPE_CHECKING:
     from ..store.db import SSHKeyRecord
@@ -334,8 +335,6 @@ def _select_upstream(route: dict, path: str) -> str:
 
 def _build_upstream_url(upstream_base: str, path: str, query_string: str) -> str:
     """Join an upstream base URL with the inbound request path and query."""
-    from urllib.parse import urlparse
-
     parsed = urlparse(upstream_base)
     base_path = parsed.path.rstrip("/")
     upstream_path = f"{base_path}{path}" if base_path else path
@@ -479,10 +478,17 @@ async def _audit_request(
 # Response relay and redirect resolution
 # ---------------------------------------------------------------------------
 
-# Response headers relayed verbatim to the client.  The body is re-streamed,
-# so aiohttp regenerates the framing headers (content-length, content-encoding);
-# copying the upstream's would contradict the bytes actually sent.
-_FORWARDED_RESPONSE_HEADERS = ("content-type", "transfer-encoding", "cache-control")
+# Headers the broker never relays to the client:
+#  * hop-by-hop (``_HOP_BY_HOP_HEADERS``) — per RFC 7230 a proxy must not forward them;
+#  * content-length / content-encoding — body framing aiohttp regenerates for the
+#    re-streamed (already decompressed) body, so the upstream's would mislead;
+#  * location — redirects are resolved by the broker (see ``_resolve_redirect``),
+#    never by the socket-pinned client, so a relayed Location would only dead-end.
+# Everything else — ETag, Link (``gh --paginate`` follows it), X-RateLimit-*,
+# Content-Type — is relayed verbatim so the client sees the provider's real response.
+_WITHHELD_RESPONSE_HEADERS = _HOP_BY_HOP_HEADERS | frozenset(
+    {"content-length", "content-encoding", "location"}
+)
 
 # A few provider endpoints (GitHub Actions logs/artifacts, release assets, repo
 # tarballs) answer with a 3xx to a self-authenticating storage URL on a *different*
@@ -510,11 +516,16 @@ async def _stream_upstream(
     token_info: dict,
     started_at: float,
 ) -> web.StreamResponse:
-    """Relay an upstream response's status, selected headers, and streamed body."""
+    """Relay an upstream response's status, headers, and streamed body.
+
+    Every header is forwarded except ``_WITHHELD_RESPONSE_HEADERS``.  ``add``
+    (not assignment) preserves repeated headers such as ``Set-Cookie`` and
+    multiple ``Link`` values.
+    """
     resp = web.StreamResponse(status=upstream.status)
-    for hdr in _FORWARDED_RESPONSE_HEADERS:
-        if value := upstream.headers.get(hdr):
-            resp.headers[hdr] = value
+    for name, value in upstream.headers.items():
+        if name.lower() not in _WITHHELD_RESPONSE_HEADERS:
+            resp.headers.add(name, value)
     await resp.prepare(request)
     async for chunk in upstream.content.iter_any():
         await resp.write(chunk)
@@ -539,8 +550,6 @@ async def _resolve_redirect(
     own origin — the same rule curl and browsers apply on a cross-origin redirect.
     aiohttp chases any further hops, bounded by its default redirect cap.
     """
-    from urllib.parse import urljoin
-
     target = urljoin(base_url, location)
     follow_headers = {
         name: request.headers[name] for name in ("accept", "user-agent") if name in request.headers
