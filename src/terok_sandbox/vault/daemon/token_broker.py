@@ -73,17 +73,12 @@ _WEBSOCKET_MAX_MSG_SIZE = 16 * 1024 * 1024
 _WEBSOCKET_INTERNAL_ERROR = 1011
 
 #: Idle read timeout (seconds) for a proxied upstream response — the gap between
-#: reads (for a stream, between chunks).  Mirrors codex's stream-idle budget
-#: (``DEFAULT_STREAM_IDLE_TIMEOUT_MS`` = 300_000) and is a sane default for every
-#: provider; the 10s connect timeout still detects dead upstreams fast.
-_UPSTREAM_READ_TIMEOUT = 300
-
-#: Read timeout (seconds) for a *unary* remote-compaction request
-#: (``/responses/compact``).  Unlike a stream it has no intermediate reads — the
-#: whole server-side compaction must land within one read window — so it gets
-#: codex's larger compact budget: stream-idle × ``COMPACT_REQUEST_TIMEOUT_IDLE_-
-#: MULTIPLIER`` (4).  Only codex's openai-responses backend serves this endpoint.
-_UPSTREAM_COMPACT_READ_TIMEOUT = _UPSTREAM_READ_TIMEOUT * 4
+#: reads (for a stream, between chunks; for a unary response, the wait for the
+#: whole body to land).  Set generously so the proxy is never stricter than the
+#: agent it fronts: each client enforces its own (shorter) idle timeout and gives
+#: up first, so this only bounds a silently-hung upstream the client isn't
+#: watching.  The 10s connect timeout still detects dead-on-arrival upstreams.
+_UPSTREAM_READ_TIMEOUT = 1200
 
 #: Max proxied request body (bytes).  aiohttp's default is 1 MiB; codex's remote
 #: compaction uploads the whole transcript and exceeded it (an observed 413), and
@@ -586,13 +581,6 @@ async def _handle_request(request: web.Request) -> web.StreamResponse:
     # 5. Forward and stream response
     # Read the body once (streaming body can only be consumed once).
     body = await request.read() if request.can_read_body else None
-    # Codex's remote compaction is a unary request (no intermediate reads), so it
-    # needs the longer compact budget; every other request uses the streaming idle.
-    sock_read = (
-        _UPSTREAM_COMPACT_READ_TIMEOUT
-        if rest.endswith("/responses/compact")
-        else _UPSTREAM_READ_TIMEOUT
-    )
     # Only retry idempotent methods (or those with an Idempotency-Key header) to
     # avoid replaying non-idempotent writes on stale-connection recovery.
     can_retry = (
@@ -608,7 +596,7 @@ async def _handle_request(request: web.Request) -> web.StreamResponse:
                 headers=headers,
                 data=body,
                 allow_redirects=False,
-                timeout=ClientTimeout(connect=10, sock_read=sock_read),
+                timeout=ClientTimeout(connect=10, sock_read=_UPSTREAM_READ_TIMEOUT),
             ) as upstream:
                 connection_established = True
                 # Build response with upstream status + headers

@@ -560,22 +560,18 @@ def _forwarding_env(tmp_path: Path):
 class TestForwardingPath:
     """Exercise the full request forwarding with a mock upstream."""
 
-    def test_read_timeouts_match_codex_budgets(self) -> None:
-        """Regression: the proxy read timeouts must mirror codex's own budgets.
+    def test_read_timeout_is_generous_so_proxy_never_limits(self) -> None:
+        """Regression: the proxy idle timeout must not be stricter than its clients.
 
-        codex's stream-idle budget is 300s and its remote-compaction budget is
-        stream-idle × 4 = 1200s. Compaction (``/responses/compact``) is unary —
-        one response after long server-side work, no intermediate reads — so a
-        short ``sock_read`` clips it (the original 60s did, yielding a 502). The
-        proxy must never be the limiter, so it matches codex per endpoint.
+        A short ``sock_read`` clips a long unary response (codex's whole-transcript
+        compaction with the original 60s yielded a 502). The proxy fronts agents
+        that enforce their own idle timeouts, so its budget is set generously
+        (covering codex's 1200s compaction budget) and lets the client give up
+        first rather than manufacturing failures.
         """
-        from terok_sandbox.vault.daemon.token_broker import (
-            _UPSTREAM_COMPACT_READ_TIMEOUT,
-            _UPSTREAM_READ_TIMEOUT,
-        )
+        from terok_sandbox.vault.daemon.token_broker import _UPSTREAM_READ_TIMEOUT
 
-        assert _UPSTREAM_READ_TIMEOUT >= 300
-        assert _UPSTREAM_COMPACT_READ_TIMEOUT == _UPSTREAM_READ_TIMEOUT * 4
+        assert _UPSTREAM_READ_TIMEOUT >= 1200
 
     async def test_oauth_forwards_with_bearer_and_beta(self, _forwarding_env) -> None:
         """OAuth credential forwards as Bearer + anthropic-beta header."""
