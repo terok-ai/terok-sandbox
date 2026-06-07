@@ -12,9 +12,12 @@ noise.  That decoder is where every correctness decision lives.
 
 from __future__ import annotations
 
+import io
 import json
+from typing import Any
 
-from terok_sandbox import ContainerEvent
+import terok_sandbox.runtime.podman as podman
+from terok_sandbox import ContainerEvent, PodmanEventStream
 from terok_sandbox.runtime.podman import _parse_event
 
 PREFIX = "proj"
@@ -73,3 +76,67 @@ class TestRejects:
     def test_missing_name(self) -> None:
         line = _line(Type="container", Status="start")
         assert _parse_event(line, PREFIX) is None
+
+
+class _FakeProc:
+    """A stand-in for the ``podman events`` child — replays canned stdout lines."""
+
+    def __init__(self, lines: list[bytes]) -> None:
+        self.stdout = io.BytesIO(b"".join(lines))
+        self._returncode: int | None = None
+        self.terminated = False
+
+    def poll(self) -> int | None:
+        return self._returncode
+
+    def terminate(self) -> None:
+        self.terminated = True
+        self._returncode = 0
+
+    def wait(self, timeout: float | None = None) -> int:
+        return 0
+
+    def kill(self) -> None:
+        self._returncode = -9
+
+
+class TestStream:
+    """The Popen-backed iterator yields matching events and closes cleanly."""
+
+    def _stream(self, monkeypatch: Any, lines: list[bytes]) -> tuple[PodmanEventStream, _FakeProc]:
+        fake = _FakeProc(lines)
+        monkeypatch.setattr(podman.subprocess, "Popen", lambda *a, **k: fake)
+        return PodmanEventStream(PREFIX), fake
+
+    def test_yields_matching_events_then_stops_at_eof(self, monkeypatch: Any) -> None:
+        lines = [
+            (
+                json.dumps({"Type": "container", "Name": "proj-cli-1", "Status": "start"}) + "\n"
+            ).encode(),
+            (
+                json.dumps({"Type": "container", "Name": "other-x", "Status": "start"}) + "\n"
+            ).encode(),
+            (
+                json.dumps({"Type": "container", "Name": "proj-run-2", "Status": "died"}) + "\n"
+            ).encode(),
+        ]
+        stream, _ = self._stream(monkeypatch, lines)
+        assert list(stream) == [
+            ContainerEvent("proj-cli-1", "start"),
+            ContainerEvent("proj-run-2", "died"),
+        ]
+
+    def test_close_terminates_the_child_and_is_idempotent(self, monkeypatch: Any) -> None:
+        stream, fake = self._stream(monkeypatch, [])
+        stream.close()
+        assert fake.terminated
+        stream.close()  # second call is a no-op
+
+    def test_context_manager_closes(self, monkeypatch: Any) -> None:
+        lines = [
+            (
+                json.dumps({"Type": "container", "Name": "proj-cli-1", "Status": "start"}) + "\n"
+            ).encode()
+        ]
+        with self._stream(monkeypatch, lines)[0] as stream:
+            assert next(iter(stream)) == ContainerEvent("proj-cli-1", "start")

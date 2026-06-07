@@ -734,7 +734,7 @@ def _parse_event(line: str, prefix: str) -> ContainerEvent | None:
     """
     try:
         raw = json.loads(line)
-    except (json.JSONDecodeError, ValueError):
+    except ValueError:  # JSONDecodeError is a ValueError subclass
         return None
     if (raw.get("Type") or raw.get("type")) != "container":
         return None
