@@ -417,7 +417,7 @@ class TestSchemaMigration:
                 );
                 INSERT INTO ssh_keys_version (id, version) VALUES (0, 0);
                 INSERT INTO proxy_tokens VALUES
-                    ('terok-p-aaa', 'proj', 'subj-1', 'default', 'claude');
+                    ('terok-p-aaa', 'proj', 'subj-1', 'default', 'openrouter');
             """)
             conn.execute("PRAGMA user_version = 1")
             conn.commit()
@@ -438,8 +438,42 @@ class TestSchemaMigration:
                 "scope": "proj",
                 "subject": "subj-1",
                 "credential_set": "default",
-                "provider": "claude",
+                "provider": "openrouter",
             }
+        finally:
+            db.close()
+
+    def test_v2_to_v3_rekeys_provider_names(self, tmp_path: Path) -> None:
+        """A v2 DB re-keys agent-named credentials to provider names on first open.
+
+        ``claude`` → ``anthropic``; already-provider-named entries
+        (``openrouter``) are untouched, and the credential payload survives.
+        """
+        from terok_sandbox.vault.store.encryption import open_sqlcipher
+        from terok_sandbox.vault.store.migrations import SCHEMA_VERSION
+
+        db_path = tmp_path / "v2.db"
+        db = CredentialDB(db_path, passphrase="test")
+        try:
+            db.store_credential("default", "claude", {"type": "oauth", "token": "tok"})
+            db.store_credential("default", "openrouter", {"type": "api_key", "key": "k"})
+        finally:
+            db.close()
+        # Mark the DB v2 so the next open re-runs the v2 → v3 step.
+        conn = open_sqlcipher(db_path, "test")
+        try:
+            conn.execute("PRAGMA user_version = 2")
+            conn.commit()
+        finally:
+            conn.close()
+
+        db = CredentialDB(db_path, passphrase="test")
+        try:
+            assert set(db.list_credentials("default")) == {"anthropic", "openrouter"}
+            assert db.load_credential("default", "anthropic") == {"type": "oauth", "token": "tok"}
+            assert db.load_credential("default", "claude") is None
+            (version,) = db._conn.execute("PRAGMA user_version").fetchone()
+            assert version == SCHEMA_VERSION
         finally:
             db.close()
 

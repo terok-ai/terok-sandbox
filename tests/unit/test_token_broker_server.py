@@ -408,10 +408,10 @@ def _static_marker_env(tmp_path: Path):
     """Set up DB with shared OAuth credentials and routes for static marker tests."""
     db = CredentialDB(tmp_path / "test.db", passphrase="test")
     db.store_credential(
-        "default", "claude", {"type": "oauth", "access_token": "sk-real-oauth-static"}
+        "default", "anthropic", {"type": "oauth", "access_token": "sk-real-oauth-static"}
     )
     db.store_credential(
-        "default", "codex", {"type": "oauth", "access_token": "sk-real-codex-static"}
+        "default", "openai", {"type": "oauth", "access_token": "sk-real-codex-static"}
     )
     db.close()
 
@@ -419,8 +419,8 @@ def _static_marker_env(tmp_path: Path):
     routes.write_text(
         json.dumps(
             {
-                "claude": {"upstream": "http://127.0.0.1:1", "auth_header": "dynamic"},
-                "codex": {"upstream": "http://127.0.0.1:1", "auth_header": "Authorization"},
+                "anthropic": {"upstream": "http://127.0.0.1:1", "auth_header": "dynamic"},
+                "openai": {"upstream": "http://127.0.0.1:1", "auth_header": "Authorization"},
             }
         )
     )
@@ -432,7 +432,7 @@ class TestStaticPhantomMarker:
     """Verify the static PHANTOM_CREDENTIALS_MARKER is accepted by the token broker."""
 
     async def test_static_marker_routes_to_claude(self, _static_marker_env) -> None:
-        """Static marker resolves to Claude credential (returns 502 since upstream is down)."""
+        """Static marker resolves to the anthropic credential (502 since upstream is down)."""
         from aiohttp.test_utils import TestClient, TestServer
 
         from terok_sandbox.vault.daemon import PHANTOM_CREDENTIALS_MARKER
@@ -447,7 +447,7 @@ class TestStaticPhantomMarker:
             assert resp.status == 502
 
     async def test_codex_static_marker_routes_to_codex(self, _static_marker_env) -> None:
-        """Codex shared auth.json marker resolves to the Codex credential."""
+        """Codex shared auth.json marker resolves to the openai credential."""
         from aiohttp.test_utils import TestClient, TestServer
 
         from terok_sandbox.vault.daemon import CODEX_SHARED_OAUTH_MARKER
@@ -470,7 +470,7 @@ class TestStaticPhantomMarker:
         db.close()  # empty DB
 
         routes = tmp_path / "routes.json"
-        routes.write_text(json.dumps({"claude": {"upstream": "http://127.0.0.1:1"}}))
+        routes.write_text(json.dumps({"anthropic": {"upstream": "http://127.0.0.1:1"}}))
         app = _build_app(str(tmp_path / "test.db"), str(routes))
 
         async with TestClient(TestServer(app)) as client:
@@ -494,6 +494,33 @@ class TestStaticPhantomMarker:
             assert resp.status == 401
 
 
+def test_static_markers_use_post_rename_provider_names() -> None:
+    """Static OAuth markers must resolve to provider names, not stale agent names.
+
+    The broker resolves the route off the bearer token, so every hardcoded
+    marker→provider literal shares the vocabulary the v2→v3 migration re-keyed
+    the DB and routes.json to.  A marker still pointing at a pre-rename agent
+    name (``claude``/``codex``) 404s the routed agent with
+    ``No route for provider: <name>``.  Asserting against the migration's rename
+    *keys* kills the whole class, not just the two markers that regressed.
+    """
+    from terok_sandbox.vault.daemon import (
+        CODEX_SHARED_OAUTH_MARKER,
+        PHANTOM_CREDENTIALS_MARKER,
+    )
+    from terok_sandbox.vault.daemon.token_broker import _static_oauth_token_info
+    from terok_sandbox.vault.store.migrations import _PROVIDER_RENAMES
+
+    stale_agent_names = set(_PROVIDER_RENAMES)  # {"claude", "codex", "vibe", ...}
+    for marker in (PHANTOM_CREDENTIALS_MARKER, CODEX_SHARED_OAUTH_MARKER):
+        info = _static_oauth_token_info(marker)
+        assert info is not None, f"marker {marker!r} not recognised"
+        assert info["provider"] not in stale_agent_names, (
+            f"marker {marker!r} resolves to stale agent name {info['provider']!r}; "
+            "re-key it to the provider it authenticates to"
+        )
+
+
 @pytest.fixture()
 def _forwarding_env(tmp_path: Path):
     """Set up token broker + mock upstream to test the full forwarding path."""
@@ -512,7 +539,9 @@ def _forwarding_env(tmp_path: Path):
             }
         )
 
-    upstream_app = _web.Application()
+    # Generous body cap so the mock upstream isn't the limiter — tests that send
+    # large bodies are exercising the *broker's* cap, not this echo server's.
+    upstream_app = _web.Application(client_max_size=256 * 1024 * 1024)
     upstream_app.router.add_route("*", "/{tail:.*}", _echo)
 
     db = CredentialDB(tmp_path / "test.db", passphrase="test")
@@ -530,6 +559,23 @@ def _forwarding_env(tmp_path: Path):
 @pytest.mark.asyncio
 class TestForwardingPath:
     """Exercise the full request forwarding with a mock upstream."""
+
+    def test_read_timeouts_match_codex_budgets(self) -> None:
+        """Regression: the proxy read timeouts must mirror codex's own budgets.
+
+        codex's stream-idle budget is 300s and its remote-compaction budget is
+        stream-idle × 4 = 1200s. Compaction (``/responses/compact``) is unary —
+        one response after long server-side work, no intermediate reads — so a
+        short ``sock_read`` clips it (the original 60s did, yielding a 502). The
+        proxy must never be the limiter, so it matches codex per endpoint.
+        """
+        from terok_sandbox.vault.daemon.token_broker import (
+            _UPSTREAM_COMPACT_READ_TIMEOUT,
+            _UPSTREAM_READ_TIMEOUT,
+        )
+
+        assert _UPSTREAM_READ_TIMEOUT >= 300
+        assert _UPSTREAM_COMPACT_READ_TIMEOUT == _UPSTREAM_READ_TIMEOUT * 4
 
     async def test_oauth_forwards_with_bearer_and_beta(self, _forwarding_env) -> None:
         """OAuth credential forwards as Bearer + anthropic-beta header."""
@@ -604,6 +650,81 @@ class TestForwardingPath:
             assert resp.status == 200
             body = await resp.json()
             assert body["beta"] == "oauth-2025-04-20-preview,oauth-2025-04-20"
+
+        await upstream_server.close()
+
+    async def test_oauth_phantom_via_x_api_key_forwards_as_bearer(self, _forwarding_env) -> None:
+        """A consumer that sends the phantom as ``x-api-key`` still reaches an OAuth
+        upstream correctly.
+
+        Pi's anthropic provider only switches to ``Authorization: Bearer`` when the
+        key looks like an OAuth token (``sk-ant-oat``); a vault phantom doesn't, so
+        in proxied mode Pi sends the phantom as ``x-api-key`` with no oauth beta.
+        The vault must still drop that header, set ``Authorization: Bearer <real>``
+        for the OAuth credential, and merge in the oauth beta the consumer omitted.
+        """
+        from aiohttp.test_utils import TestClient, TestServer
+
+        upstream_app, tmp_path, tokens = _forwarding_env
+        upstream_server = TestServer(upstream_app)
+        await upstream_server.start_server()
+
+        routes = tmp_path / "routes.json"
+        routes.write_text(
+            json.dumps(
+                {
+                    "claude": {
+                        "upstream": f"http://127.0.0.1:{upstream_server.port}",
+                        "auth_header": "dynamic",
+                        "oauth_extra_headers": {"anthropic-beta": "oauth-2025-04-20"},
+                    },
+                }
+            )
+        )
+
+        broker_app = _build_app(str(tmp_path / "test.db"), str(routes))
+        async with TestClient(TestServer(broker_app)) as client:
+            resp = await client.post(
+                "/v1/messages",
+                headers={
+                    "x-api-key": tokens["claude"],  # phantom via x-api-key, not Bearer
+                    "anthropic-beta": "interleaved-thinking-2025-05-14",
+                },
+                json={"model": "test"},
+            )
+            assert resp.status == 200
+            body = await resp.json()
+            assert body["auth"] == "Bearer sk-real-oauth"  # swapped to Bearer
+            assert body["x_api_key"] == ""  # consumer's phantom x-api-key dropped
+            assert "oauth-2025-04-20" in body["beta"]  # vault added the oauth beta
+            assert "interleaved-thinking-2025-05-14" in body["beta"]  # consumer's beta kept
+
+        await upstream_server.close()
+
+    async def test_body_over_aiohttp_default_is_forwarded(self, _forwarding_env) -> None:
+        """A request body larger than aiohttp's 1 MiB default is forwarded, not 413'd.
+
+        Regression: the broker app left ``client_max_size`` at aiohttp's 1 MiB
+        default, so bodies above it (codex's whole-transcript compaction was the
+        observed case) returned 413 before reaching the upstream.
+        """
+        from aiohttp.test_utils import TestClient, TestServer
+
+        upstream_app, tmp_path, tokens = _forwarding_env
+        upstream_server = TestServer(upstream_app)
+        await upstream_server.start_server()
+        routes = tmp_path / "routes.json"
+        routes.write_text(
+            json.dumps({"claude": {"upstream": f"http://127.0.0.1:{upstream_server.port}"}})
+        )
+        broker_app = _build_app(str(tmp_path / "test.db"), str(routes))
+        async with TestClient(TestServer(broker_app)) as client:
+            resp = await client.post(
+                "/v1/messages",
+                headers={"Authorization": f"Bearer {tokens['claude']}"},
+                json={"model": "test", "blob": "A" * (2 * 1024 * 1024)},  # ~2 MiB
+            )
+            assert resp.status == 200
 
         await upstream_server.close()
 

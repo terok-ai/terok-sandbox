@@ -35,7 +35,11 @@ import sqlite3
 #: * **v1 → v2** — rename ``proxy_tokens.task`` → ``proxy_tokens.subject``
 #:   to reflect the column's opaque-label semantics at the
 #:   sandbox-orchestrator boundary.
-SCHEMA_VERSION = 2
+#: * **v2 → v3** — re-key credential / phantom-token ``provider`` values from
+#:   agent names (``claude``, ``codex``, …) to the provider names they
+#:   authenticate to (``anthropic``, ``openai``, …) so one provider's
+#:   credential can serve many agents.
+SCHEMA_VERSION = 3
 
 
 def ensure_credentials_schema(conn: sqlite3.Connection) -> None:
@@ -109,6 +113,9 @@ def migrate_credential_db_schema(conn: sqlite3.Connection) -> None:
     if current < 2:
         _migrate_v1_to_v2(conn)
 
+    if current < 3:
+        _migrate_v2_to_v3(conn)
+
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.commit()
 
@@ -159,3 +166,38 @@ def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
     proxy_cols = {r[1] for r in conn.execute("PRAGMA table_info(proxy_tokens)").fetchall()}
     if "task" in proxy_cols and "subject" not in proxy_cols:
         conn.execute("ALTER TABLE proxy_tokens RENAME COLUMN task TO subject")
+
+
+#: Agent-name → provider-name re-key applied by the v2 → v3 migration.  The
+#: provider is the upstream API a credential authenticates to; keying by it
+#: (rather than by the CLI/agent that happens to use it) lets many agents share
+#: one provider's credential.  Providers already named for their service
+#: (``openrouter``, ``blablador``, ``kisski``, ``coderabbit``) need no rename.
+_PROVIDER_RENAMES = {
+    "claude": "anthropic",
+    "codex": "openai",
+    "vibe": "mistral",
+    "gh": "github",
+    "glab": "gitlab",
+    "sonar": "sonarcloud",
+}
+
+
+def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
+    """Re-key ``provider`` values from agent names to provider names.
+
+    Touches both ``credentials`` (persistent) and ``proxy_tokens`` (ephemeral)
+    so a host mid-task stays consistent.  ``UPDATE OR IGNORE`` skips the
+    degenerate case where the target name already exists in the same set —
+    leaving the legacy row rather than violating the primary key.  Idempotent:
+    rows already on a provider name match no ``WHERE`` clause.
+    """
+    for old_name, new_name in _PROVIDER_RENAMES.items():
+        conn.execute(
+            "UPDATE OR IGNORE credentials SET provider = ? WHERE provider = ?",
+            (new_name, old_name),
+        )
+        conn.execute(
+            "UPDATE OR IGNORE proxy_tokens SET provider = ? WHERE provider = ?",
+            (new_name, old_name),
+        )
