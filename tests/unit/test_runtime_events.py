@@ -140,3 +140,39 @@ class TestStream:
         ]
         with self._stream(monkeypatch, lines)[0] as stream:
             assert next(iter(stream)) == ContainerEvent("proj-cli-1", "start")
+
+
+class _TimeoutProc(_FakeProc):
+    """A child whose first ``wait`` times out, forcing the ``kill`` fallback."""
+
+    def __init__(self) -> None:
+        super().__init__([])
+        self._returncode = None
+        self._waits = 0
+
+    def wait(self, timeout: float | None = None) -> int:
+        import subprocess
+
+        self._waits += 1
+        if self._waits == 1:
+            raise subprocess.TimeoutExpired("podman", timeout)
+        return -9
+
+
+class TestRuntimeEvents:
+    """``PodmanRuntime.events`` hands back a live stream; teardown is robust."""
+
+    def test_events_returns_a_stream(self, monkeypatch: Any) -> None:
+        from terok_sandbox import PodmanRuntime
+
+        monkeypatch.setattr(podman.subprocess, "Popen", lambda *a, **k: _FakeProc([]))
+        stream = PodmanRuntime().events(PREFIX)
+        assert isinstance(stream, PodmanEventStream)
+        stream.close()
+
+    def test_close_kills_when_terminate_times_out(self, monkeypatch: Any) -> None:
+        fake = _TimeoutProc()
+        monkeypatch.setattr(podman.subprocess, "Popen", lambda *a, **k: fake)
+        stream = PodmanEventStream(PREFIX)
+        stream.close()  # terminate → wait times out → kill → wait
+        assert fake._waits == 2
