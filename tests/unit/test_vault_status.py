@@ -161,6 +161,21 @@ class TestHandleVaultStatusText:
         assert "terok vault unlock" in out
         assert "Credentials: vault locked" in out
 
+    def test_default_cfg_branch(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """``cfg=None`` constructs a default ``SandboxConfig`` rather than crashing."""
+        cfg = _status_cfg(db_error=RuntimeError("locked"))
+        with (
+            patch("terok_sandbox.commands.vault.SandboxConfig", return_value=cfg) as ctor,
+            patch(
+                "terok_sandbox.vault.store.recovery.RecoveryStatus.load",
+                return_value=SimpleNamespace(acknowledged=False, source=None),
+            ),
+            patch("terok_sandbox.paths.plaintext_passphrase_config_path", return_value=None),
+        ):
+            _handle_vault_status()  # cfg omitted → default-construction branch
+        ctor.assert_called_once_with()
+        assert "Vault: LOCKED" in capsys.readouterr().out
+
     def test_unlocked_names_active_tier(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:

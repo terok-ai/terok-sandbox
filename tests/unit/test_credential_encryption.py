@@ -1607,6 +1607,19 @@ class TestVaultUnlockLock:
 
         assert cfg.vault_passphrase_file.read_text().rstrip("\n") == "freshly-typed"
 
+    def test_unlock_default_cfg_branch(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """``cfg=None`` constructs a default config; a durable tier short-circuits the prompt."""
+        from terok_sandbox.commands import _handle_vault_unlock
+
+        cfg = _make_cfg(tmp_path)
+        cfg.vault_systemd_creds_file.parent.mkdir(parents=True, exist_ok=True)
+        cfg.vault_systemd_creds_file.write_bytes(b"sealed-blob")
+        monkeypatch.setattr("terok_sandbox.commands.vault.SandboxConfig", lambda: cfg)
+        _handle_vault_unlock()  # cfg omitted → default-construction branch
+        assert "already auto-unlocks" in capsys.readouterr().out
+
     # ── lock = clear every stored copy (absorbs the old `destroy`) ──
 
     def test_lock_aborts_when_unacknowledged(
@@ -1844,6 +1857,14 @@ class TestVaultUnlockLock:
         with pytest.raises(SystemExit, match="failed to remove sealed credential"):
             _handle_vault_lock(cfg=cfg)
 
+    def test_lock_default_cfg_branch(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``cfg=None`` constructs a default config; ``--force`` carries it through the purge."""
+        from terok_sandbox.commands import _handle_vault_lock
+
+        cfg = _make_cfg(tmp_path)  # use_keyring=False → purge skips every tier cleanly
+        monkeypatch.setattr("terok_sandbox.commands.vault.SandboxConfig", lambda: cfg)
+        _handle_vault_lock(force=True)  # cfg omitted → default-construction branch
+
 
 class TestVaultSeal:
     """``terok-sandbox vault seal`` CLI handler.
@@ -2044,6 +2065,15 @@ class TestVaultSeal:
         seal = MagicMock()
         monkeypatch.setattr(sc, "seal", seal)
         return sc, seal
+
+    def test_seal_default_cfg_branch(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``cfg=None`` constructs a default config before the systemd-creds availability gate."""
+        from terok_sandbox.commands import handle_vault_seal
+        from terok_sandbox.vault.store import systemd_creds as sc
+
+        monkeypatch.setattr(sc, "is_available", lambda: False)
+        with pytest.raises(SystemExit, match="systemd-creds unavailable"):
+            handle_vault_seal()  # cfg omitted → default-construction branch, then the gate
 
     def test_seal_removes_session_shadow(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
