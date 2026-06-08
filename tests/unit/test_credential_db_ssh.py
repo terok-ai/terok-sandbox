@@ -133,6 +133,70 @@ class TestCascadeOrphan:
         assert db.list_ssh_keys_for_scope("proj") == []
 
 
+class TestRoutingProjection:
+    """Verify the scope-independent listings that feed a routing matrix."""
+
+    def test_list_all_ssh_keys_is_empty_on_fresh_db(self, db: CredentialDB) -> None:
+        """No keys stored → empty row axis."""
+        assert db.list_all_ssh_keys() == []
+
+    def test_list_all_ssh_keys_spans_scopes_without_duplication(self, db: CredentialDB) -> None:
+        """A key shared across scopes appears once; ordering is by id."""
+        k1 = _store_key(db, "fp-1", comment="one")
+        k2 = _store_key(db, "fp-2", comment="two")
+        db.assign_ssh_key("proj-a", k1)
+        db.assign_ssh_key("proj-b", k1)  # k1 shared — still one row
+        db.assign_ssh_key("proj-b", k2)
+        rows = db.list_all_ssh_keys()
+        assert [r.id for r in rows] == [k1, k2]
+        assert {r.fingerprint for r in rows} == {"fp-1", "fp-2"}
+
+    def test_list_assignments_returns_full_edge_set(self, db: CredentialDB) -> None:
+        """Every (scope, key_id) pair is returned, sorted deterministically."""
+        k1 = _store_key(db, "fp-1")
+        k2 = _store_key(db, "fp-2")
+        db.assign_ssh_key("proj-b", k1)
+        db.assign_ssh_key("proj-a", k1)
+        db.assign_ssh_key("proj-a", k2)
+        assert db.list_ssh_key_assignments() == [
+            ("proj-a", k1),
+            ("proj-a", k2),
+            ("proj-b", k1),
+        ]
+
+
+class TestDeleteSshKey:
+    """Verify delete_ssh_key drops a key and cascades its assignments."""
+
+    def test_delete_removes_key_and_all_edges(self, db: CredentialDB) -> None:
+        """The key vanishes from every scope in one call."""
+        key_id = _store_key(db, "fp-del")
+        db.assign_ssh_key("proj-a", key_id)
+        db.assign_ssh_key("proj-b", key_id)
+        assert db.delete_ssh_key(key_id) is True
+        assert db.get_ssh_key_by_fingerprint("fp-del") is None
+        assert db.list_ssh_key_assignments() == []
+
+    def test_delete_unknown_key_returns_false(self, db: CredentialDB) -> None:
+        """Deleting an absent id is a no-op that reports nothing happened."""
+        assert db.delete_ssh_key(9999) is False
+
+    def test_delete_rejects_infra_assigned_key_by_default(self, db: CredentialDB) -> None:
+        """A key bound to a ``%`` scope is protected from caller-driven delete."""
+        key_id = _store_key(db, "fp-infra-del")
+        db.assign_ssh_key("%host", key_id, allow_infra=True)
+        with pytest.raises(InvalidScopeName, match="reserved for sandbox"):
+            db.delete_ssh_key(key_id)
+        assert db.get_ssh_key_by_fingerprint("fp-infra-del") is not None
+
+    def test_delete_accepts_infra_assigned_key_with_flag(self, db: CredentialDB) -> None:
+        """Infra-aware callers can decommission a key bound to a reserved scope."""
+        key_id = _store_key(db, "fp-infra-del-ok")
+        db.assign_ssh_key("%host", key_id, allow_infra=True)
+        assert db.delete_ssh_key(key_id, allow_infra=True) is True
+        assert db.get_ssh_key_by_fingerprint("fp-infra-del-ok") is None
+
+
 class TestLoadRecords:
     """Verify load_ssh_keys_for_scope returns full records with raw bytes."""
 
