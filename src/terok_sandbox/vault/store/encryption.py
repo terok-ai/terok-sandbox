@@ -24,6 +24,7 @@ import shlex
 import sqlite3
 import subprocess  # nosec B404 — operator-supplied passphrase_command helper — operator-supplied passphrase_command helper + systemd-creds
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
@@ -208,6 +209,73 @@ def resolve_passphrase(
         prompt_on_tty=prompt_on_tty,
     )
     return passphrase
+
+
+@dataclass(frozen=True)
+class TierPresence:
+    """Whether one passphrase-chain tier currently holds material — for ``vault status``.
+
+    A diagnostic, non-short-circuiting counterpart to
+    [`resolve_passphrase_with_source`][terok_sandbox.vault.store.encryption.resolve_passphrase_with_source]:
+    that walker stops at the first tier that resolves, so it can only
+    ever name the *winner*.  ``vault status`` needs the whole chain to
+    show when a high-priority tier (typically the session file) is
+    *shadowing* a durable tier underneath — the operator's "why is my
+    TPM2 box reading a RAM-backed file?" question.
+    """
+
+    source: PassphraseSource
+    present: bool
+    detail: str
+
+
+def probe_passphrase_chain(
+    *,
+    passphrase_file: Path | None = None,
+    systemd_creds_file: Path | None = None,
+    use_keyring: bool = False,
+    passphrase_command: str | None = None,
+    config_fallback: str | None = None,
+) -> tuple[TierPresence, ...]:
+    """Report per-tier presence across the resolution chain without short-circuiting.
+
+    Presence is judged from *material on hand*, not by resolving the
+    secret: the sealed systemd-creds credential is never unsealed and
+    the ``passphrase_command`` is never executed (both can be slow or
+    have side effects), so their mere configuration counts as present.
+    The session-file and keyring tiers are cheap to read, so those are
+    probed for real.  Tiers appear in resolution order; the first
+    ``present`` one is the tier that would unlock the vault.  The
+    interactive ``prompt`` tier is omitted — it stores nothing, so it
+    can neither be "present" nor shadow anything.
+    """
+    return (
+        TierPresence(
+            "session-file",
+            bool(passphrase_file and load_passphrase_from_file(passphrase_file)),
+            str(passphrase_file) if passphrase_file else "no session file",
+        ),
+        TierPresence(
+            "systemd-creds",
+            bool(systemd_creds_file and systemd_creds_file.is_file()),
+            str(systemd_creds_file) if systemd_creds_file else "not sealed",
+        ),
+        TierPresence(
+            "keyring",
+            use_keyring and load_passphrase_from_keyring() is not None,
+            "OS keyring" if use_keyring else "use_keyring off",
+        ),
+        TierPresence(
+            "passphrase-command",
+            bool(passphrase_command),
+            "configured (not executed)" if passphrase_command else "not configured",
+        ),
+        TierPresence(
+            "config",
+            bool(config_fallback),
+            "plaintext in config.yml" if config_fallback else "not set",
+        ),
+    )
 
 
 # ── Tier primitives ─────────────────────────────────────────────────

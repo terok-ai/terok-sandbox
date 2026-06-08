@@ -407,6 +407,164 @@ def _handle_vault_passphrase_acknowledge(*, cfg: SandboxConfig | None = None) ->
     print("recovery key marked as saved.")
 
 
+#: Tiers that survive a reboot.  A higher-priority *volatile* tier (the
+#: session file) sitting on top of one of these is "shadowing" it: the
+#: vault auto-resolves from the session copy and silently ignores the
+#: durable one — how a TPM2-sealed box ends up reading a RAM-backed file.
+_DURABLE_TIERS = frozenset({"systemd-creds", "keyring", "passphrase-command", "config"})
+
+
+def _read_credential_providers(cfg: SandboxConfig) -> list[str] | None:
+    """Best-effort sorted provider slugs across every credential set.
+
+    Returns ``None`` when the DB can't be opened (locked vault, schema
+    drift) — ``vault status`` renders that as "locked" rather than
+    crashing.  Never prompts: a status read must not block on stdin.
+    """
+    try:
+        db = cfg.open_credential_db(prompt_on_tty=False)
+    except (Exception, SystemExit):  # noqa: BLE001 — any open failure means "can't inspect"
+        return None
+    try:
+        return sorted(
+            {provider for cs in db.list_credential_sets() for provider in db.list_credentials(cs)}
+        )
+    finally:
+        db.close()
+
+
+def _handle_vault_status(*, cfg: SandboxConfig | None = None, as_json: bool = False) -> None:
+    """Show the vault's lock state, passphrase resolution chain, and stored secrets.
+
+    Read-only host-side diagnostic: it never opens a write transaction
+    and never resolves the live passphrase beyond a best-effort DB open
+    for the credential count.  Unlike the daemon-startup log, it reports
+    the *whole* chain rather than only the winning tier, so a session
+    file shadowing a durable systemd-creds / keyring tier is visible —
+    and it re-states the plaintext-on-disk and unconfirmed-recovery
+    warnings the TUI and sickbay share.
+    """
+    import json
+
+    from ..paths import plaintext_passphrase_config_path
+    from ..vault.store.encryption import probe_passphrase_chain
+    from ..vault.store.recovery import RecoveryStatus
+
+    if cfg is None:
+        cfg = SandboxConfig()
+
+    chain = probe_passphrase_chain(
+        passphrase_file=cfg.vault_passphrase_file,
+        systemd_creds_file=cfg.vault_systemd_creds_file,
+        use_keyring=cfg.credentials_use_keyring,
+        passphrase_command=cfg.credentials_passphrase_command,
+        config_fallback=cfg.credentials_passphrase,
+    )
+    active_index = next((i for i, tier in enumerate(chain) if tier.present), None)
+    rows = [
+        (
+            tier,
+            i == active_index,
+            tier.present
+            and active_index is not None
+            and i > active_index
+            and tier.source in _DURABLE_TIERS,
+        )
+        for i, tier in enumerate(chain)
+    ]
+    active_source = chain[active_index].source if active_index is not None else None
+    shadowed = [tier.source for tier, _active, is_shadowed in rows if is_shadowed]
+
+    recovery = RecoveryStatus.load(cfg)
+    plaintext = plaintext_passphrase_config_path()
+    providers = _read_credential_providers(cfg)
+
+    if as_json:
+        print(
+            json.dumps(
+                {
+                    "locked": active_index is None,
+                    "passphrase_source": active_source,
+                    "chain": [
+                        {
+                            "source": tier.source,
+                            "present": tier.present,
+                            "active": is_active,
+                            "shadowed": is_shadowed,
+                            "detail": tier.detail,
+                        }
+                        for tier, is_active, is_shadowed in rows
+                    ],
+                    "shadowed_tiers": shadowed,
+                    "recovery_acknowledged": recovery.acknowledged,
+                    "plaintext_passphrase_path": str(plaintext) if plaintext else None,
+                    "credentials": providers,
+                    "db_path": str(cfg.db_path),
+                },
+                indent=2,
+            )
+        )
+        return
+
+    _print_vault_status(
+        rows=rows,
+        active_source=active_source,
+        shadowed=shadowed,
+        recovery_acknowledged=recovery.acknowledged,
+        plaintext=plaintext,
+        providers=providers,
+        db_path=cfg.db_path,
+    )
+
+
+def _print_vault_status(
+    *,
+    rows: list[tuple[object, bool, bool]],
+    active_source: str | None,
+    shadowed: list[str],
+    recovery_acknowledged: bool,
+    plaintext: object | None,
+    providers: list[str] | None,
+    db_path: object,
+) -> None:
+    """Render the human-readable ``vault status`` report to stdout.
+
+    The JSON branch carries the same facts; this is purely presentation.
+    Every operator-influenced string (tier detail, provider slugs, paths)
+    flows through [`sanitize_tty`][terok_util.sanitize_tty] — they trace
+    back to on-disk config / DB content.
+    """
+    locked = active_source is None
+    header = "LOCKED" if locked else f"unlocked — passphrase via {active_source}"
+    print(f"Vault: {header}")
+    print(f"  DB:  {sanitize_tty(str(db_path))}")
+    print("  Passphrase resolution chain:")
+    for tier, is_active, is_shadowed in rows:
+        marker = "active" if is_active else "shadowed" if is_shadowed else "–"
+        print(f"    {tier.source:<19} {marker:<9} {sanitize_tty(tier.detail)}")  # type: ignore[attr-defined]
+    if locked:
+        print("  the vault is locked — run `terok vault unlock` to provision a passphrase")
+    if shadowed:
+        durable = ", ".join(sanitize_tty(s) for s in shadowed)
+        print(
+            f"  warning: the session-file tier is shadowing a durable tier ({durable}); the"
+            " vault auto-unlocks from the volatile session copy, not the durable one"
+        )
+    recovery_line = (
+        "acknowledged"
+        if recovery_acknowledged
+        else "NOT acknowledged — save the passphrase off-host before you rely on a machine-bound tier"
+    )
+    print(f"  Recovery key: {recovery_line}")
+    if plaintext is not None:
+        print(f"  warning: vault passphrase stored in plaintext at {sanitize_tty(str(plaintext))}")
+    if providers is None:
+        print("  Credentials: vault locked — run `terok vault unlock` to inspect")
+    else:
+        listing = f" ({', '.join(sanitize_tty(p) for p in providers)})" if providers else ""
+        print(f"  Credentials: {len(providers)} stored{listing}")
+
+
 def _handle_vault_list(
     *,
     cfg: SandboxConfig | None = None,
@@ -634,6 +792,19 @@ VAULT_COMMANDS: tuple[CommandDef, ...] = (
         name="vault",
         help="Vault passphrase management",
         children=(
+            CommandDef(
+                name="status",
+                help="Show lock state, the passphrase resolution chain, and stored secrets",
+                handler=_handle_vault_status,
+                args=(
+                    ArgDef(
+                        name="--json",
+                        dest="as_json",
+                        action="store_true",
+                        help="Machine-readable JSON output",
+                    ),
+                ),
+            ),
             CommandDef(
                 name="unlock",
                 help="Provision the credentials-DB passphrase for this session (tmpfs file)",
