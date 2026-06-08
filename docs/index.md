@@ -1,6 +1,6 @@
 # terok-sandbox
 
-The hardened-Podman runtime that powers terok.
+The hardened-Podman runtime that powers [terok](https://terok-ai.github.io/terok/).
 
 terok-sandbox launches per-task containers with a credential vault,
 a gated git server, and egress firewall.
