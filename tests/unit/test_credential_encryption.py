@@ -152,6 +152,13 @@ def _make_cfg(
     )
 
 
+def _ack_recovery(cfg) -> None:
+    """Mark the recovery key as saved so the escrow-before-destroy / -enable gates pass."""
+    from terok_sandbox.vault.store.recovery import acknowledge
+
+    acknowledge(cfg.vault_recovery_marker_file)
+
+
 class TestPlaintextProbe:
     """The setup-time probe distinguishes legacy plaintext sqlite from SQLCipher."""
 
@@ -1570,66 +1577,129 @@ class TestVaultUnlockLock:
         _scripted_tty_prompt(monkeypatch, "freshly-typed")
         _handle_vault_unlock(cfg=cfg)
 
-    def test_lock_removes_file_and_stops_daemon(
+    def test_unlock_skips_when_durable_tier_present(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """``unlock`` won't shadow a durable tier — a sealed credential blocks the session write."""
+
+        from terok_sandbox.commands import _handle_vault_unlock
+
+        cfg = _make_cfg(tmp_path)
+        cfg.vault_systemd_creds_file.parent.mkdir(parents=True, exist_ok=True)
+        cfg.vault_systemd_creds_file.write_bytes(b"sealed-blob")
+        _handle_vault_unlock(cfg=cfg)
+
+        assert not cfg.vault_passphrase_file.exists()
+        assert "already auto-unlocks via systemd-creds" in capsys.readouterr().out
+
+    def test_unlock_force_overrides_durable_shadow(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Lock path: delete tmpfs file, stop daemon — symmetric to unlock."""
+        """``--force`` writes the session file even when a durable tier resolves."""
+
+        from terok_sandbox.commands import _handle_vault_unlock
+
+        cfg = _make_cfg(tmp_path)
+        cfg.vault_systemd_creds_file.parent.mkdir(parents=True, exist_ok=True)
+        cfg.vault_systemd_creds_file.write_bytes(b"sealed-blob")
+        _scripted_tty_prompt(monkeypatch, "freshly-typed")
+        _handle_vault_unlock(cfg=cfg, force=True)
+
+        assert cfg.vault_passphrase_file.read_text().rstrip("\n") == "freshly-typed"
+
+    # ── lock = clear every stored copy (absorbs the old `destroy`) ──
+
+    def test_lock_aborts_when_unacknowledged(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unconfirmed vault refuses to lock without a typed SAVED — nothing is purged."""
 
         from terok_sandbox.commands import _handle_vault_lock
 
         cfg = _make_cfg(tmp_path)
         cfg.vault_passphrase_file.parent.mkdir(parents=True, exist_ok=True)
         cfg.vault_passphrase_file.write_text("stale\n")
-        _handle_vault_lock(cfg=cfg)
+        # Headless: the confirm channel yields nothing → fail closed.
+        monkeypatch.setattr(
+            "terok_sandbox.vault.store.encryption._read_from_controlling_tty",
+            lambda _prompt: None,
+        )
 
-        assert not cfg.vault_passphrase_file.exists()
+        with pytest.raises(SystemExit, match="lock aborted"):
+            _handle_vault_lock(cfg=cfg)
+        assert cfg.vault_passphrase_file.exists()  # untouched
 
-    def test_lock_is_idempotent_when_already_locked(
+    def test_lock_confirm_proceeds_on_saved(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Already-locked state (no file, no daemon) is a clean no-op."""
+        """Typing SAVED on an unconfirmed vault lets the lock through."""
 
         from terok_sandbox.commands import _handle_vault_lock
 
         cfg = _make_cfg(tmp_path)
-        _handle_vault_lock(cfg=cfg)  # must not raise
-
-    def test_lock_warns_when_non_session_tiers_active(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        """Plain ``lock`` with keyring / passphrase_command / config tiers warns about silent auto-unlock."""
-
-        from terok_sandbox.commands import _handle_vault_lock
-
-        cfg = _make_cfg(
-            tmp_path,
-            use_keyring=True,
-            passphrase="from-config",
-            passphrase_command="pass show terok-sandbox/vault",
+        cfg.vault_passphrase_file.parent.mkdir(parents=True, exist_ok=True)
+        cfg.vault_passphrase_file.write_text("stale\n")
+        monkeypatch.setattr(
+            "terok_sandbox.vault.store.encryption._read_from_controlling_tty",
+            lambda _prompt: "SAVED",
         )
         _handle_vault_lock(cfg=cfg)
 
-        err = capsys.readouterr().err
-        assert "non-session passphrase tiers still active" in err
-        assert "keyring" in err
-        assert "passphrase_command" in err
-        assert "config.yml" in err
-        assert "vault passphrase destroy" in err
+        assert not cfg.vault_passphrase_file.exists()
 
-    def test_lock_forget_clears_keyring_and_config(
+    def test_lock_force_skips_confirm(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--force`` bypasses the confirmation even when unacknowledged."""
+
+        from terok_sandbox.commands import _handle_vault_lock
+
+        cfg = _make_cfg(tmp_path)
+        cfg.vault_passphrase_file.parent.mkdir(parents=True, exist_ok=True)
+        cfg.vault_passphrase_file.write_text("stale\n")
+        # Confirm channel must never be consulted.
+        monkeypatch.setattr(
+            "terok_sandbox.vault.store.encryption._read_from_controlling_tty",
+            lambda _prompt: (_ for _ in ()).throw(AssertionError("should not prompt")),
+        )
+        _handle_vault_lock(cfg=cfg, force=True)
+
+        assert not cfg.vault_passphrase_file.exists()
+
+    def test_lock_clears_session_file_when_acknowledged(self, tmp_path: Path) -> None:
+        """An acknowledged vault locks without prompting — session file removed."""
+
+        from terok_sandbox.commands import _handle_vault_lock
+
+        cfg = _make_cfg(tmp_path)
+        cfg.vault_passphrase_file.parent.mkdir(parents=True, exist_ok=True)
+        cfg.vault_passphrase_file.write_text("stale\n")
+        _ack_recovery(cfg)
+        _handle_vault_lock(cfg=cfg)
+
+        assert not cfg.vault_passphrase_file.exists()
+
+    def test_lock_is_idempotent_when_already_locked(self, tmp_path: Path) -> None:
+        """Already-locked state (nothing stored) is a clean no-op."""
+
+        from terok_sandbox.commands import _handle_vault_lock
+
+        cfg = _make_cfg(tmp_path)
+        _ack_recovery(cfg)
+        _handle_vault_lock(cfg=cfg)  # must not raise
+
+    def test_lock_clears_keyring_and_config(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """``lock --forget`` removes the keyring entry and clears config.yml."""
+        """``lock`` removes the keyring entry and clears config.yml."""
 
         from terok_sandbox import config as _config
         from terok_sandbox.commands import _handle_vault_lock
 
         cfg = _make_cfg(tmp_path, use_keyring=True, passphrase="from-config")
+        _ack_recovery(cfg)
         forget_calls: dict[str, int] = {"n": 0}
 
         def _forget() -> bool:
@@ -1647,22 +1717,23 @@ class TestVaultUnlockLock:
         )
         _config._credentials_section.cache_clear()
 
-        _handle_vault_lock(cfg=cfg, forget=True)
+        _handle_vault_lock(cfg=cfg)
 
         assert forget_calls["n"] == 1
         assert "passphrase: from-config" not in user_config.read_text()
 
-    def test_lock_forget_clears_passphrase_command(
+    def test_lock_clears_passphrase_command(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """``lock --forget`` removes ``credentials.passphrase_command`` so the next start can't auto-resolve via the helper."""
+        """``lock`` removes ``credentials.passphrase_command`` so the next start can't auto-resolve via the helper."""
 
         from terok_sandbox import config as _config
         from terok_sandbox.commands import _handle_vault_lock
 
         cfg = _make_cfg(tmp_path, passphrase_command="pass show terok-sandbox/vault")
+        _ack_recovery(cfg)
         user_config = tmp_path / "config.yml"
         user_config.write_text(
             "credentials:\n  passphrase_command: pass show terok-sandbox/vault\n"
@@ -1672,23 +1743,24 @@ class TestVaultUnlockLock:
         )
         _config._credentials_section.cache_clear()
 
-        _handle_vault_lock(cfg=cfg, forget=True)
+        _handle_vault_lock(cfg=cfg)
 
         # Key may remain with a null value depending on YAML serializer behaviour;
         # the recipe string itself must be gone so the next start can't auto-resolve.
         assert "pass show terok-sandbox/vault" not in user_config.read_text()
 
-    def test_lock_forget_treats_absent_keyring_entry_as_idempotent(
+    def test_lock_treats_absent_keyring_entry_as_idempotent(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        """Forget on a configured-but-empty keyring is success (not a hard failure)."""
+        """Locking a configured-but-empty keyring is success (not a hard failure)."""
 
         from terok_sandbox.commands import _handle_vault_lock
 
         cfg = _make_cfg(tmp_path, use_keyring=True)
+        _ack_recovery(cfg)
         # Helper returns False on missing entry (keyring.delete_password raises);
         # the readback then confirms the entry really is absent.
         monkeypatch.setattr(
@@ -1700,20 +1772,21 @@ class TestVaultUnlockLock:
             lambda: None,
         )
 
-        _handle_vault_lock(cfg=cfg, forget=True)  # must not raise
+        _handle_vault_lock(cfg=cfg)  # must not raise
 
         assert "already absent" in capsys.readouterr().out
 
-    def test_lock_forget_raises_when_keyring_backend_rejects_delete(
+    def test_lock_raises_when_keyring_backend_rejects_delete(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A residual entry after a failed delete means --forget couldn't honour its contract."""
+        """A residual entry after a failed delete means lock couldn't honour its contract."""
 
         from terok_sandbox.commands import _handle_vault_lock
 
         cfg = _make_cfg(tmp_path, use_keyring=True)
+        _ack_recovery(cfg)
         # Helper claimed failure AND the entry is still there: real backend rejection.
         monkeypatch.setattr(
             "terok_sandbox.vault.store.encryption.forget_passphrase_in_keyring",
@@ -1725,25 +1798,25 @@ class TestVaultUnlockLock:
         )
 
         with pytest.raises(SystemExit, match="failed to clear keyring entry"):
-            _handle_vault_lock(cfg=cfg, forget=True)
+            _handle_vault_lock(cfg=cfg)
 
-    def test_lock_forget_removes_sealed_credential(
+    def test_lock_removes_sealed_credential(
         self,
         tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """``lock --forget`` deletes the systemd-creds blob so the next daemon start can't auto-unlock from it."""
+        """``lock`` deletes the systemd-creds blob so the next daemon start can't auto-unlock from it."""
 
         from terok_sandbox.commands import _handle_vault_lock
 
         cfg = _make_cfg(tmp_path)
+        _ack_recovery(cfg)
         cfg.vault_systemd_creds_file.parent.mkdir(parents=True, exist_ok=True)
         cfg.vault_systemd_creds_file.write_bytes(b"sealed-blob")
-        _handle_vault_lock(cfg=cfg, forget=True)
+        _handle_vault_lock(cfg=cfg)
 
         assert not cfg.vault_systemd_creds_file.exists()
 
-    def test_lock_forget_surfaces_unlink_failure_as_systemexit(
+    def test_lock_surfaces_unlink_failure_as_systemexit(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
@@ -1753,12 +1826,12 @@ class TestVaultUnlockLock:
         from terok_sandbox.commands import _handle_vault_lock
 
         cfg = _make_cfg(tmp_path)
+        _ack_recovery(cfg)
         cfg.vault_systemd_creds_file.parent.mkdir(parents=True, exist_ok=True)
         cfg.vault_systemd_creds_file.write_bytes(b"sealed-blob")
         # Target only the sealed-credential unlink so any other Path.unlink
-        # call inside the handler (e.g. ``cfg.vault_passphrase_file`` clearing
-        # in another branch) keeps its real behaviour and the test stays
-        # robust against future changes to ``_handle_vault_lock``.
+        # call inside the handler keeps its real behaviour and the test stays
+        # robust against future changes to ``purge_passphrase_tiers``.
         original_unlink = Path.unlink
 
         def _conditional_unlink(self: Path, missing_ok: bool = False) -> None:
@@ -1769,26 +1842,7 @@ class TestVaultUnlockLock:
         monkeypatch.setattr("pathlib.Path.unlink", _conditional_unlink)
 
         with pytest.raises(SystemExit, match="failed to remove sealed credential"):
-            _handle_vault_lock(cfg=cfg, forget=True)
-
-    def test_lock_warns_when_sealed_credential_still_present(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        """Plain ``lock`` with a sealed credential warns — that tier auto-unlocks on next start."""
-
-        from terok_sandbox.commands import _handle_vault_lock
-
-        cfg = _make_cfg(tmp_path)
-        cfg.vault_systemd_creds_file.parent.mkdir(parents=True, exist_ok=True)
-        cfg.vault_systemd_creds_file.write_bytes(b"sealed-blob")
-        _handle_vault_lock(cfg=cfg)
-
-        err = capsys.readouterr().err
-        assert "non-session passphrase tiers still active" in err
-        assert "systemd-creds" in err
+            _handle_vault_lock(cfg=cfg)
 
 
 class TestVaultSeal:
@@ -1947,11 +2001,31 @@ class TestVaultSeal:
 
     @staticmethod
     def _seed_cfg(tmp_path: Path) -> object:
-        """Return a cfg with a session-unlock file already populated."""
+        """Return a cfg with a session-unlock file populated and recovery acknowledged.
+
+        Recovery is pre-acknowledged so the escrow-before-enable gate
+        passes — the tests below exercise the sealing mechanics, not the
+        gate (which has its own test).
+        """
         cfg = _make_cfg(tmp_path)
         cfg.vault_passphrase_file.parent.mkdir(parents=True, exist_ok=True)
         cfg.vault_passphrase_file.write_text("current-pw\n")
+        _ack_recovery(cfg)
         return cfg
+
+    def test_seal_refuses_until_recovery_acknowledged(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Escrow-before-enable: sealing is blocked until the operator confirms a saved copy."""
+        from terok_sandbox.commands import handle_vault_seal
+
+        cfg = _make_cfg(tmp_path)
+        cfg.vault_passphrase_file.parent.mkdir(parents=True, exist_ok=True)
+        cfg.vault_passphrase_file.write_text("current-pw\n")  # passphrase resolvable…
+        self._stub_seal_ready(monkeypatch)  # …and systemd-creds available
+        # …but recovery is NOT acknowledged.
+        with pytest.raises(SystemExit, match="recovery passphrase isn't marked as saved"):
+            handle_vault_seal(cfg=cfg)
 
     @staticmethod
     def _stub_seal_ready(
@@ -1971,6 +2045,20 @@ class TestVaultSeal:
         monkeypatch.setattr(sc, "seal", seal)
         return sc, seal
 
+    def test_seal_removes_session_shadow(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """After sealing, the redundant session file is dropped so it can't shadow the seal."""
+        from terok_sandbox.commands import handle_vault_seal
+
+        cfg = self._seed_cfg(tmp_path)  # writes a session file + acks recovery
+        self._stub_seal_ready(monkeypatch)
+        assert cfg.vault_passphrase_file.exists()
+
+        handle_vault_seal(cfg=cfg)
+
+        assert not cfg.vault_passphrase_file.exists()
+
 
 class TestVaultToKeyring:
     """``terok-sandbox vault passphrase to-keyring`` — relocate the passphrase to the OS keyring."""
@@ -1987,6 +2075,7 @@ class TestVaultToKeyring:
         cfg = _make_cfg(tmp_path)
         cfg.vault_passphrase_file.parent.mkdir(parents=True, exist_ok=True)
         cfg.vault_passphrase_file.write_text("current-pw\n")
+        _ack_recovery(cfg)
         # Undo the autouse blank of the session-file tier so this test
         # actually exercises a session → keyring relocation.
         monkeypatch.setattr(
@@ -2057,6 +2146,7 @@ class TestVaultToKeyring:
         cfg = _make_cfg(tmp_path)
         cfg.vault_passphrase_file.parent.mkdir(parents=True, exist_ok=True)
         cfg.vault_passphrase_file.write_text("current-pw\n")
+        _ack_recovery(cfg)
         monkeypatch.setattr(
             "terok_sandbox.vault.store.encryption.load_passphrase_from_file",
             load_passphrase_from_file,
@@ -2082,6 +2172,7 @@ class TestVaultToKeyring:
         cfg = _make_cfg(tmp_path)
         cfg.vault_passphrase_file.parent.mkdir(parents=True, exist_ok=True)
         cfg.vault_passphrase_file.write_text("current-pw\n")
+        _ack_recovery(cfg)
         user_config = tmp_path / "config.yml"
         user_config.write_text("credentials: {}\n")
         monkeypatch.setattr(
@@ -2135,24 +2226,29 @@ class TestVaultToKeyring:
         with pytest.raises(SystemExit, match="no current passphrase"):
             handle_vault_to_keyring()
 
-
-class TestVaultDestroyPassphrase:
-    """``vault passphrase destroy`` — the renamed, scarier ``vault lock --forget``."""
-
-    def test_delegates_to_lock_with_forget(
+    def test_to_keyring_refuses_until_recovery_acknowledged(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The verb is a thin wrapper; assert the destructive flow runs (sealed credential removed)."""
+        """Escrow-before-enable: moving to the keyring is blocked until recovery is acknowledged."""
+        from unittest.mock import MagicMock
 
-        from terok_sandbox.commands import _handle_vault_destroy_passphrase
+        from terok_sandbox.commands import handle_vault_to_keyring
 
         cfg = _make_cfg(tmp_path)
-        cfg.vault_systemd_creds_file.parent.mkdir(parents=True, exist_ok=True)
-        cfg.vault_systemd_creds_file.write_bytes(b"sealed-blob")
-        _handle_vault_destroy_passphrase(cfg=cfg)
-
-        # The destructive ``forget=True`` flow ran — sealed credential gone.
-        assert not cfg.vault_systemd_creds_file.exists()
+        cfg.vault_passphrase_file.parent.mkdir(parents=True, exist_ok=True)
+        cfg.vault_passphrase_file.write_text("current-pw\n")  # passphrase resolvable…
+        monkeypatch.setattr(
+            "terok_sandbox.vault.store.encryption.load_passphrase_from_file",
+            load_passphrase_from_file,
+        )
+        store = MagicMock(return_value=True)
+        monkeypatch.setattr(
+            "terok_sandbox.vault.store.encryption.store_passphrase_in_keyring", store
+        )
+        # …but recovery is NOT acknowledged → refuse before any keyring write.
+        with pytest.raises(SystemExit, match="recovery passphrase isn't marked as saved"):
+            handle_vault_to_keyring(cfg=cfg)
+        store.assert_not_called()
 
 
 class TestPersistModeChoice:
