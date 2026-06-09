@@ -534,6 +534,42 @@ class CredentialDB:
             self.unassign_ssh_key(scope, kid, allow_infra=allow_infra)
         return len(key_ids)
 
+    def delete_ssh_key(self, key_id: int, *, allow_infra: bool = False) -> bool:
+        """Delete a keypair outright, removing it from every scope at once.
+
+        The atomic counterpart to revoking a key from each project one
+        cell at a time: the keypair and all its scope assignments go
+        together.  Returns ``True`` when a key was removed, ``False`` when
+        *key_id* was already absent.
+
+        Refuses by default to delete a key still bound to a ``%``-prefixed
+        infrastructure scope — pair with ``allow_infra=True`` for sandbox
+        internals decommissioning a reserved key.
+
+        Auto-commits unless called inside a
+        [`transaction()`][terok_sandbox.vault.store.db.CredentialDB.transaction]
+        scope — in which case the outer block owns the commit.
+        """
+        if not allow_infra:
+            infra = [
+                r[0]
+                for r in self._conn.execute(
+                    "SELECT scope FROM ssh_key_assignments WHERE key_id = ?",
+                    (key_id,),
+                ).fetchall()
+                if r[0].startswith("%")
+            ]
+            if infra:
+                raise InvalidScopeName(
+                    f"key {key_id} is assigned to infrastructure scope(s) {infra}: "
+                    "'%' prefix is reserved for sandbox infrastructure and not "
+                    "deletable through caller-driven writes"
+                )
+        cur = self._conn.execute("DELETE FROM ssh_keys WHERE id = ?", (key_id,))
+        if not self._in_outer_tx:
+            self._conn.commit()
+        return bool(cur.rowcount)
+
     def list_ssh_keys_for_scope(self, scope: str) -> list[SSHKeyRow]:
         """Return metadata rows for every key assigned to *scope*.
 
@@ -578,6 +614,32 @@ class CredentialDB:
             "SELECT DISTINCT scope FROM ssh_key_assignments ORDER BY scope",
         ).fetchall()
         return [r[0] for r in rows]
+
+    def list_all_ssh_keys(self) -> list[SSHKeyRow]:
+        """Return metadata for every stored keypair, across all scopes.
+
+        The row axis of a keys×scopes routing view — pair with
+        [`list_ssh_key_assignments`][terok_sandbox.vault.store.db.CredentialDB.list_ssh_key_assignments]
+        for the edges.  Every stored key has at least one assignment, so
+        this lists exactly the keys reachable through some scope.  Ordered
+        by ``id`` for a stable listing.
+        """
+        rows = self._conn.execute(
+            "SELECT id, key_type, fingerprint, comment, created_at FROM ssh_keys ORDER BY id",
+        ).fetchall()
+        return [SSHKeyRow(*r) for r in rows]
+
+    def list_ssh_key_assignments(self) -> list[tuple[str, int]]:
+        """Return every ``(scope, key_id)`` assignment edge in the registry.
+
+        The complete scope↔key graph — the edge set a routing view
+        consumes whole, rather than sweeping it scope by scope.  Ordered
+        by ``(scope, key_id)`` for a deterministic listing.
+        """
+        rows = self._conn.execute(
+            "SELECT scope, key_id FROM ssh_key_assignments ORDER BY scope, key_id",
+        ).fetchall()
+        return [(r[0], r[1]) for r in rows]
 
     def count_ssh_keys(self) -> int:
         """Return the number of distinct keypairs stored in the DB.

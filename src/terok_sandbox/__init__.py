@@ -97,7 +97,7 @@ from .setup_stamp import SetupVerdict, installed_versions, needs_setup, read_sta
 from .vault.daemon import CODEX_SHARED_OAUTH_MARKER, PHANTOM_CREDENTIALS_MARKER
 from .vault.ssh.keypair import ensure_infra_keypair, public_line_of
 from .vault.ssh.manager import SSHInitResult, SSHManager
-from .vault.store.db import CredentialDB
+from .vault.store.db import CredentialDB, SSHKeyRow
 from .vault.store.encryption import NoPassphraseError, WrongPassphraseError
 from .vault.store.recovery import RecoveryStatus
 from .vault.store.systemd_creds import has_tpm2 as systemd_creds_has_tpm2
@@ -178,6 +178,7 @@ __all__ = [
     "handle_vault_to_keyring",
     # SSH
     "SSHInitResult",
+    "SSHKeyRow",
     "SSHManager",
     "ensure_infra_keypair",
     "public_line_of",
