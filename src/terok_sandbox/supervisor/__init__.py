@@ -3,9 +3,9 @@
 
 """Per-container supervisor — one process per container, lives for its lifetime.
 
-Composes the ``terok-vault``, clearance-hub, and verdict-server into a
-single in-process composition built per container.  Spawned by the OCI
-prestart hook (see
+Composes the ``terok-vault`` proxy, SSH signer, git gate server,
+clearance hub, and verdict server into a single in-process composition
+built per container.  Spawned by the OCI ``createRuntime`` hook (see
 `terok_sandbox.resources.hooks.supervisor_hook`)
 through the restart-loop wrapper (see
 `terok_sandbox.resources.supervisor_wrapper`);
