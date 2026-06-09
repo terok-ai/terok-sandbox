@@ -42,14 +42,16 @@ Lifecycle, end-to-end:
    the podman flags for the container (vault socket bind-mount,
    shield annotations, gate token, …).
 2. The operator (or the calling orchestrator) runs `podman run`.
-3. The OCI prestart hook installed by `terok-sandbox setup` reads
+3. The OCI `createRuntime` hook installed by `terok-sandbox setup` reads
    the sidecar, then `Popen`s a stdlib-only wrapper that supervises
    `terok-sandbox supervisor <id>` — the actual long-running asyncio
    loop.  The wrapper restarts the supervisor up to five times on
    non-zero exit, with exponential backoff capped at 60 s.
 4. The supervisor brings up a `VerdictServer`, `ClearanceHub`,
-   `VaultProxy` (in `socket` or `tcp` mode per the sidecar), and a
-   desktop notifier subscriber; awaits `podman wait <id>`; tears
+   the git `GateServer` (when the sidecar wires a gate), a
+   `VaultProxy` and the SSH signer (in `socket` or `tcp` mode per the
+   sidecar), and a desktop notifier subscriber; awaits
+   `podman wait <id>`; tears
    them down in reverse order on container exit.
 5. The OCI poststop hook SIGTERMs the wrapper PID (recorded under
    `$XDG_STATE_HOME/terok/pids/supervisor-<id>.pid`) and unlinks the

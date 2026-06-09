@@ -83,7 +83,7 @@ The full export list lives in
 ## Requirements
 
 - Linux with **Podman** (rootless, ≥ 5.6 recommended)
-- **systemd** user session (for gate / vault / clearance services)
+- **systemd** user session — optional; backs the `systemd-creds` vault passphrase tier (gate / vault / clearance run inside the per-container supervisor, no systemd units)
 - **nftables** (`nft` binary) — provided by terok-shield's runtime
 - **D-Bus** session bus — for the clearance notifier path; the system
   degrades gracefully when D-Bus is absent
