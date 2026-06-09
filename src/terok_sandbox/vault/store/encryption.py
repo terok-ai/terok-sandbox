@@ -262,7 +262,9 @@ def probe_passphrase_chain(
         ),
         TierPresence(
             "keyring",
-            use_keyring and load_passphrase_from_keyring() is not None,
+            # Truthy, not ``is not None``: an empty string is the resolver's
+            # "no passphrase" sentinel, so status must treat it as absent too.
+            use_keyring and bool(load_passphrase_from_keyring()),
             "OS keyring" if use_keyring else "use_keyring off",
         ),
         TierPresence(

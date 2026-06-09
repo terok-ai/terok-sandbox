@@ -91,6 +91,12 @@ class TestProbePassphraseChain:
         # one lookup for the enabled probe, none for the disabled one
         assert load.call_count == 1
 
+    def test_keyring_empty_string_is_absent(self) -> None:
+        """An empty keyring value is the resolver's no-passphrase sentinel — treat as absent."""
+        with patch.object(encryption, "load_passphrase_from_keyring", return_value=""):
+            chain = probe_passphrase_chain(use_keyring=True)
+        assert chain[2].present is False
+
     def test_passphrase_command_present_but_not_executed(self) -> None:
         chain = probe_passphrase_chain(passphrase_command="pass show vault")
         assert chain[3].source == "passphrase-command"
@@ -101,6 +107,21 @@ class TestProbePassphraseChain:
         chain = probe_passphrase_chain(config_fallback="plaintext-secret")
         assert chain[4].source == "config"
         assert chain[4].present is True
+
+
+class TestReadCredentialProviders:
+    """``_read_credential_providers`` is best-effort — it never propagates."""
+
+    def test_returns_none_on_read_error(self) -> None:
+        """A DB that opens but fails mid-read yields ``None``, not a crash; close still runs."""
+        from terok_sandbox.commands.vault import _read_credential_providers
+
+        db = MagicMock()
+        db.list_credential_sets.side_effect = RuntimeError("corrupt page")
+        cfg = MagicMock()
+        cfg.open_credential_db.return_value = db
+        assert _read_credential_providers(cfg) is None
+        db.close.assert_called_once()
 
 
 def _status_cfg(
@@ -158,7 +179,7 @@ class TestHandleVaultStatusText:
         _run_status(cfg)
         out = capsys.readouterr().out
         assert "Vault: LOCKED" in out
-        assert "terok vault unlock" in out
+        assert "terok-sandbox vault unlock" in out
         assert "Credentials: vault locked" in out
 
     def test_default_cfg_branch(self, capsys: pytest.CaptureFixture[str]) -> None:
@@ -200,6 +221,20 @@ class TestHandleVaultStatusText:
         assert "session-file        active" in out
         assert "systemd-creds       shadowed" in out
         assert "shadowing a durable tier (systemd-creds)" in out
+
+    def test_durable_active_tier_does_not_report_shadow(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A durable active tier outranking a lower durable tier is not 'shadowing'."""
+        sealed = tmp_path / "sealed.cred"
+        sealed.write_text("blob")
+        # systemd-creds (durable) active, config (durable) present below it.
+        cfg = _status_cfg(sealed=sealed, config_passphrase="from-config")
+        _run_status(cfg)
+        out = capsys.readouterr().out
+        assert "passphrase via systemd-creds" in out
+        assert "shadowed" not in out
+        assert "shadowing a durable tier" not in out
 
     def test_unacknowledged_recovery_warns(self, capsys: pytest.CaptureFixture[str]) -> None:
         cfg = _status_cfg(db_error=RuntimeError("locked"))

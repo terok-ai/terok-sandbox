@@ -523,6 +523,8 @@ def _read_credential_providers(cfg: SandboxConfig) -> list[str] | None:
         return sorted(
             {provider for cs in db.list_credential_sets() for provider in db.list_credentials(cs)}
         )
+    except Exception:  # noqa: BLE001 — a mid-read failure is still "can't inspect", not a crash
+        return None
     finally:
         db.close()
 
@@ -555,6 +557,11 @@ def _handle_vault_status(*, cfg: SandboxConfig | None = None, as_json: bool = Fa
         config_fallback=cfg.credentials_passphrase,
     )
     active_index = next((i for i, tier in enumerate(chain) if tier.present), None)
+    active_source = chain[active_index].source if active_index is not None else None
+    # Shadowing only matters when a *volatile* tier (the session file) sits on
+    # top of a durable one.  A durable active tier legitimately outranks the
+    # tiers below it — that's not a shadow, just the resolution order.
+    active_is_durable = active_source in _DURABLE_TIERS
     rows = [
         (
             tier,
@@ -562,11 +569,11 @@ def _handle_vault_status(*, cfg: SandboxConfig | None = None, as_json: bool = Fa
             tier.present
             and active_index is not None
             and i > active_index
-            and tier.source in _DURABLE_TIERS,
+            and tier.source in _DURABLE_TIERS
+            and not active_is_durable,
         )
         for i, tier in enumerate(chain)
     ]
-    active_source = chain[active_index].source if active_index is not None else None
     shadowed = [tier.source for tier, _active, is_shadowed in rows if is_shadowed]
 
     recovery = RecoveryStatus.load(cfg)
@@ -637,7 +644,7 @@ def _print_vault_status(
         marker = "active" if is_active else "shadowed" if is_shadowed else "–"
         print(f"    {tier.source:<19} {marker:<9} {sanitize_tty(tier.detail)}")
     if locked:
-        print("  the vault is locked — run `terok vault unlock` to provision a passphrase")
+        print("  the vault is locked — run `terok-sandbox vault unlock` to provision a passphrase")
     if shadowed:
         durable = ", ".join(sanitize_tty(s) for s in shadowed)
         print(
@@ -653,7 +660,7 @@ def _print_vault_status(
     if plaintext is not None:
         print(f"  warning: vault passphrase stored in plaintext at {sanitize_tty(str(plaintext))}")
     if providers is None:
-        print("  Credentials: vault locked — run `terok vault unlock` to inspect")
+        print("  Credentials: vault locked — run `terok-sandbox vault unlock` to inspect")
     else:
         listing = f" ({', '.join(sanitize_tty(p) for p in providers)})" if providers else ""
         print(f"  Credentials: {len(providers)} stored{listing}")
