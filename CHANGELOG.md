@@ -1,4 +1,14 @@
 # Changelog
+## v0.2.0 — Emissary, Part II
+
+## What's Changed
+* Combining LLM providers × agents, https://github.com/terok-ai/terok-sandbox/pull/374
+* podman container event stream, https://github.com/terok-ai/terok-sandbox/pull/375
+* SSH key M:N routing to projects, https://github.com/terok-ai/terok-sandbox/pull/385
+* Vault debugging and safer locking, https://github.com/terok-ai/terok-sandbox/pull/386
+
+**Full Changelog**: https://github.com/terok-ai/terok-sandbox/compare/v0.1.0...v0.2.0
+
 ## v0.1.0 — The Emissary
 
 **First public PyPi release**
