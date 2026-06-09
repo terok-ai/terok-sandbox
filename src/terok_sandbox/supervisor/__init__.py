@@ -6,9 +6,9 @@
 Composes the ``terok-vault`` proxy, SSH signer, git gate server,
 clearance hub, and verdict server into a single in-process composition
 built per container.  Spawned by the OCI ``createRuntime`` hook (see
-`terok_sandbox.resources.hooks.supervisor_hook`)
+[`supervisor_hook`][terok_sandbox.resources.hooks.supervisor_hook])
 through the restart-loop wrapper (see
-`terok_sandbox.resources.supervisor_wrapper`);
+[`supervisor_wrapper`][terok_sandbox.resources.supervisor_wrapper]);
 exits when ``podman wait`` returns.
 
 The entry point is [`run_supervisor`][terok_sandbox.supervisor.main.run_supervisor] —
