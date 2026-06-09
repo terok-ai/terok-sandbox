@@ -47,6 +47,10 @@ from ..config import SandboxConfig
 from ._types import ArgDef, CommandDef
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+    from pathlib import Path
+
+    from ..vault.store.encryption import TierPresence
     from ..vault.store.systemd_creds import KeyMode
 
 
@@ -124,9 +128,9 @@ def purge_passphrase_tiers(cfg: SandboxConfig) -> None:
     (``vault unlock``); it is **unrecoverable** without an off-host copy.
 
     No prompts and no acknowledgement check: this is the raw destructive
-    action.  The ``lock`` verb gates it behind
-    [`_confirm_lock_when_unacknowledged`][terok_sandbox.commands.vault._confirm_lock_when_unacknowledged];
-    panic calls it directly — no questions asked.
+    action.  The ``lock`` verb gates it behind a typed-``SAVED``
+    confirmation when recovery is unacknowledged; panic calls it
+    directly — no questions asked.
     """
     from ..vault.store.encryption import forget_passphrase_in_keyring, load_passphrase_from_keyring
 
@@ -609,13 +613,13 @@ def _handle_vault_status(*, cfg: SandboxConfig | None = None, as_json: bool = Fa
 
 def _print_vault_status(
     *,
-    rows: list[tuple[object, bool, bool]],
+    rows: Sequence[tuple[TierPresence, bool, bool]],
     active_source: str | None,
-    shadowed: list[str],
+    shadowed: Sequence[str],
     recovery_acknowledged: bool,
-    plaintext: object | None,
+    plaintext: Path | None,
     providers: list[str] | None,
-    db_path: object,
+    db_path: Path,
 ) -> None:
     """Render the human-readable ``vault status`` report to stdout.
 
@@ -631,7 +635,7 @@ def _print_vault_status(
     print("  Passphrase resolution chain:")
     for tier, is_active, is_shadowed in rows:
         marker = "active" if is_active else "shadowed" if is_shadowed else "–"
-        print(f"    {tier.source:<19} {marker:<9} {sanitize_tty(tier.detail)}")  # type: ignore[attr-defined]
+        print(f"    {tier.source:<19} {marker:<9} {sanitize_tty(tier.detail)}")
     if locked:
         print("  the vault is locked — run `terok vault unlock` to provision a passphrase")
     if shadowed:
