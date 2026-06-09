@@ -71,12 +71,12 @@ from .supervisor import SUPERVISOR_COMMANDS, _handle_supervisor
 from .vault import (
     VAULT_COMMANDS,
     _forget_config_tier_updates,
-    _handle_vault_destroy_passphrase,
     _handle_vault_list,
     _handle_vault_lock,
     _handle_vault_unlock,
     handle_vault_seal,
     handle_vault_to_keyring,
+    purge_passphrase_tiers,
 )
 
 #: Sandbox's top-level command forest — a [`CommandTree`][terok_util.cli_types.CommandTree]
@@ -146,12 +146,12 @@ __all__ = [
     "_handle_ssh_remove",
     "_handle_ssh_rename",
     "_handle_supervisor",
-    "_handle_vault_destroy_passphrase",
     "_handle_vault_list",
     "_handle_vault_lock",
     "handle_vault_seal",
     "handle_vault_to_keyring",
     "_handle_vault_unlock",
+    "purge_passphrase_tiers",
     "_key_id_from_row",
     "_open_db",
     "_persist_mode_choice",

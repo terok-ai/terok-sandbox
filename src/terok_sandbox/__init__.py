@@ -53,6 +53,7 @@ from .commands import (
     _handle_sandbox_uninstall as sandbox_uninstall,
     handle_vault_seal,
     handle_vault_to_keyring,
+    purge_passphrase_tiers,
 )
 from .config import CONTAINER_RUNTIME_DIR, SandboxConfig
 from .config_schema import (
@@ -176,6 +177,7 @@ __all__ = [
     "systemd_creds_has_tpm2",
     "handle_vault_seal",
     "handle_vault_to_keyring",
+    "purge_passphrase_tiers",
     # SSH
     "SSHInitResult",
     "SSHKeyRow",

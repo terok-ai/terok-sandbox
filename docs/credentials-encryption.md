@@ -125,10 +125,10 @@ sealed credential — one verb does the whole swap:
 terok-sandbox vault passphrase to-keyring
 
 # Move it into a machine-bound systemd-creds credential.
-# (Land it as session first if not already auto-resolvable, then seal.)
+# (Land it as session first if not already auto-resolvable, then seal.
+#  `seal` drops the now-redundant session copy for you.)
 echo -n "<passphrase>" | terok-sandbox vault unlock
 terok-sandbox vault passphrase seal --key=auto
-terok-sandbox vault passphrase destroy   # clear lower-tier copies
 ```
 
 `to-keyring` resolves the passphrase from whichever tier currently
@@ -142,7 +142,7 @@ passphrase fresh from the keyring.
 
 For other transitions (keyring → systemd-creds, anything →
 `passphrase_command`, downgrades) the swap is still **retrieve →
-destroy → reseed**:
+lock → reseed**:
 
 #### 1. Retrieve from the current tier
 
@@ -153,20 +153,24 @@ terok-sandbox vault passphrase reveal
 
 Keep the value somewhere safe for the duration of the swap — a
 password manager, or a `mktemp`d file you delete after step 3.
+`reveal` offers to mark the recovery key as saved; accept it so the
+`lock` in step 2 doesn't stop to ask.
 
-#### 2. Destroy the stored passphrase
+#### 2. Lock — clear every stored copy
 
 ```bash
-terok-sandbox vault passphrase destroy
+terok-sandbox vault lock
 ```
 
-Clears every persistent tier in one go (session file *plus* keyring,
-sealed systemd-creds, `credentials.passphrase`, and
-`credentials.passphrase_command`).  The underlying secret stays put
-in whichever store the helper points at (`pass`, 1Password, Vault,
-…) — only the resolver wiring is removed.  Without this step, the
-next per-container supervisor to spawn would resolve the passphrase
-from a leftover tier, defeating the swap.
+Clears every tier in one go (session file *plus* keyring, sealed
+systemd-creds, `credentials.passphrase`, and
+`credentials.passphrase_command`) and drops the recovery marker.  The
+underlying secret stays put in whichever store the helper points at
+(`pass`, 1Password, Vault, …) — only the resolver wiring is removed.
+Without this step, the next per-container supervisor to spawn would
+resolve the passphrase from a leftover tier, defeating the swap.  An
+unconfirmed vault asks you to type `SAVED` first (or pass `--force`);
+you just retrieved the value in step 1, so you have it.
 
 #### 3. Provision in the new tier
 
@@ -176,8 +180,7 @@ echo -n "<passphrase>" | terok-sandbox vault unlock
 
 # → systemd-creds (machine-bound, persistent):
 echo -n "<passphrase>" | terok-sandbox vault unlock   # land it as session first
-terok-sandbox vault passphrase seal --key=auto        # then seal from session
-terok-sandbox vault lock                              # remove the session file
+terok-sandbox vault passphrase seal --key=auto        # seal; drops the session copy
 
 # → OS keyring:
 terok-sandbox vault passphrase to-keyring             # one verb, no chooser
@@ -215,7 +218,8 @@ What to do — accepting that the encrypted data is gone:
 
 ```bash
 # 1. Clear any tier wiring that points at the lost passphrase.
-terok-sandbox vault passphrase destroy
+#    --force: the passphrase is gone, so you can't confirm a saved copy.
+terok-sandbox vault lock --force
 
 # 2. Delete the encrypted DB and any leftover backup tarballs.
 rm "${XDG_DATA_HOME:-$HOME/.local/share}/terok/vault/credentials.db"

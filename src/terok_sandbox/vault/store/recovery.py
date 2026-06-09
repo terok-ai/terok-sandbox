@@ -21,8 +21,8 @@ candidates and comparing.  An empty file leaks nothing.
 The trade-off: a passphrase rotation does NOT auto-invalidate the
 marker.  Operators who rotate their key should re-ack (interactive
 ``vault passphrase reveal`` or silent ``vault passphrase
-acknowledge``).  The destructive ``vault passphrase destroy`` flow
-clears the marker for them.
+acknowledge``).  ``vault lock`` clears the marker for them when it
+purges every tier.
 """
 
 from __future__ import annotations
