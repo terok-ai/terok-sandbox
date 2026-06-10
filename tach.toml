@@ -322,7 +322,11 @@ depends_on = []
 [[modules]]
 path = "terok_sandbox.commands.doctor"
 layer = "surface"
-depends_on = []
+depends_on = [
+    # The stray-sidecar sweep lives with the sidecar lifecycle in
+    # ``launch``; the doctor verb appends it to its host-level checks.
+    "terok_sandbox.launch",
+]
 
 [[modules]]
 path = "terok_sandbox.commands.credentials"

@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
+import stat
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -29,16 +32,18 @@ from terok_sandbox.launch import (
     _resolve_container_id,
     _rollback_compose_state,
     _validate_container_name,
-    _write_sidecar,  # noqa: PLC2701 — internal under test
     allocate_per_container_resources,
     bridges_resource_dir,
     cleanup,
     compose,
     exec_podman,
     format_args,
+    make_stray_sidecar_check,
     reject_managed_flags,
     reject_managed_volumes,
+    remove_container_state,
     run_state_dir,
+    write_sidecar,
 )
 
 
@@ -120,6 +125,12 @@ class TestCompose:
         assert "--name" in args and "myc" in args
         annotation_value = next(a for a in args if a.startswith("terok.sandbox.sidecar="))
         assert "/sidecar/myc.json" in annotation_value
+        # compose maps plan → writer kwargs: with the gate wired, the
+        # standalone scope doubles as the gate's project_id.
+        payload = json.loads(Path(annotation_value.split("=", 1)[1]).read_text())
+        assert payload["scope_id"] == "proj"
+        assert payload["project_id"] == "proj"
+        assert payload["gate_token"] == "terok-g-abc"
 
     def test_full_wiring_with_scope_tcp_mode(self, tmp_path: Path) -> None:
         """TCP mode emits per-container port env vars instead of socket mounts."""
@@ -259,9 +270,9 @@ class TestMetaAndCleanup:
     def test_ssh_mint_failure_does_not_write_sidecar(self, tmp_path: Path) -> None:
         """A locked vault during SSH-token minting aborts compose before the sidecar.
 
-        The gate token now lives only in-process (no on-disk store), so a
+        The gate token is a stateless pair-match (no host-side store), so a
         failed launch leaks nothing to revoke — compose simply raises and
-        ``_write_meta`` / ``_write_sidecar`` never run.
+        ``_write_meta`` / ``write_sidecar`` never run.
         """
         from terok_sandbox.vault.store.db import NoPassphraseError
 
@@ -298,24 +309,32 @@ def _socket_resources(tmp_path: Path) -> PerContainerResources:
 
 
 class TestWriteSidecar:
-    """``_write_sidecar`` persists the supervisor's per-container config.
+    """``write_sidecar`` persists the supervisor's per-container config.
 
-    Returns the absolute path on success; logs to stderr and returns
-    ``None`` on any filesystem failure (the caller fails the launch
-    closed rather than starting a container with dead endpoints).
+    The canonical writer for the whole package chain (terok-executor
+    routes through it too).  Returns the absolute path on success; logs
+    to stderr and returns ``None`` on any filesystem failure (callers
+    pick their own fail policy — ``compose`` rolls back and aborts).
     """
 
     def test_writes_socket_mode_payload(self, tmp_path: Path) -> None:
         """Socket mode: no port keys; gate keys only when a token is wired."""
         cfg = _make_cfg(tmp_path, services_mode="socket")
-        plan = WiringPlan(scope="proj", shield=False, gate=True, broker=True, ssh=True)
-        path = _write_sidecar(cfg, "myc", plan, _socket_resources(tmp_path), "terok-g-abc")
+        path = write_sidecar(
+            "myc",
+            cfg=cfg,
+            per_container=_socket_resources(tmp_path),
+            scope_id="proj",
+            project_id="proj",
+            gate_base_path=str(cfg.gate_base_path),
+            gate_token="terok-g-abc",
+        )
         assert path == cfg.state_dir / "sidecar" / "myc.json"
         payload = json.loads(path.read_text())
         assert payload["container_name"] == "myc"
         assert payload["ipc_mode"] == "socket"
         assert payload["scope_id"] == "proj"
-        assert payload["project_id"] == "proj"  # set because gate_token + scope present
+        assert payload["project_id"] == "proj"
         assert payload["gate_token"] == "terok-g-abc"
         assert payload["gate_base_path"] == str(cfg.gate_base_path)
         # Socket mode carries no TCP ports.
@@ -325,52 +344,221 @@ class TestWriteSidecar:
     def test_tcp_mode_carries_ports(self, tmp_path: Path) -> None:
         """TCP mode records the per-container broker / signer / gate ports."""
         cfg = _make_cfg(tmp_path, services_mode="tcp")
-        plan = WiringPlan(scope="proj", shield=False, gate=True, broker=True, ssh=True)
         res = PerContainerResources(
             container_runtime_dir=tmp_path / "run" / "myc",
             token_broker_port=21001,
             ssh_signer_port=21002,
             gate_port=21003,
         )
-        path = _write_sidecar(cfg, "myc", plan, res, "terok-g-abc")
+        path = write_sidecar(
+            "myc",
+            cfg=cfg,
+            per_container=res,
+            gate_base_path=str(cfg.gate_base_path),
+            gate_token="terok-g-abc",
+            gate_port=res.gate_port,
+        )
         assert path is not None
         payload = json.loads(path.read_text())
         assert payload["tcp_port"] == 21001
         assert payload["ssh_signer_port"] == 21002
         assert payload["gate_port"] == 21003
 
-    def test_no_gate_token_omits_gate_keys_and_project(self, tmp_path: Path) -> None:
-        """Without a gate token, gate keys are dropped and ``project_id`` is blank."""
+    def test_no_gate_kwargs_omit_gate_keys(self, tmp_path: Path) -> None:
+        """Without gate kwargs, no gate keys land in the payload."""
         cfg = _make_cfg(tmp_path, services_mode="socket")
-        plan = WiringPlan(scope="proj", shield=False, gate=False, broker=True, ssh=True)
-        path = _write_sidecar(cfg, "myc", plan, _socket_resources(tmp_path), None)
+        path = write_sidecar("myc", cfg=cfg, per_container=_socket_resources(tmp_path))
         assert path is not None
         payload = json.loads(path.read_text())
         assert payload["project_id"] == ""
         assert "gate_token" not in payload
         assert "gate_base_path" not in payload
+        assert "gate_port" not in payload
+
+    def test_task_identity_and_dossier_carried(self, tmp_path: Path) -> None:
+        """terok-executor's identity kwargs round-trip into the payload."""
+        cfg = _make_cfg(tmp_path, services_mode="socket")
+        path = write_sidecar(
+            "myc",
+            cfg=cfg,
+            per_container=_socket_resources(tmp_path),
+            project_id="proj",
+            task_id="42",
+            dossier_path=tmp_path / "dossier.json",
+        )
+        assert path is not None
+        payload = json.loads(path.read_text())
+        assert payload["project_id"] == "proj"
+        assert payload["task_id"] == "42"
+        assert payload["dossier_path"] == str(tmp_path / "dossier.json")
+
+    def test_sidecar_not_world_readable(self, tmp_path: Path) -> None:
+        """The payload can carry a live gate token → 0600, even on re-launch.
+
+        The pre-existing 0644 file mimics a sidecar left by an older
+        writer; the fchmod must tighten it, not inherit it.
+        """
+        cfg = _make_cfg(tmp_path, services_mode="socket")
+        target = cfg.state_dir / "sidecar" / "myc.json"
+        target.parent.mkdir(parents=True)
+        target.write_text("{}")
+        target.chmod(0o644)
+        path = write_sidecar(
+            "myc",
+            cfg=cfg,
+            per_container=_socket_resources(tmp_path),
+            gate_base_path=str(cfg.gate_base_path),
+            gate_token="terok-g-abc",
+        )
+        assert path is not None
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+    def test_symlink_target_refused(self, tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+        """``O_NOFOLLOW``: a pre-planted symlink soft-fails instead of clobbering."""
+        cfg = _make_cfg(tmp_path, services_mode="socket")
+        sidecar_dir = cfg.state_dir / "sidecar"
+        sidecar_dir.mkdir(parents=True)
+        victim = tmp_path / "victim"
+        victim.write_text("precious")
+        (sidecar_dir / "myc.json").symlink_to(victim)
+        result = write_sidecar("myc", cfg=cfg, per_container=_socket_resources(tmp_path))
+        assert result is None
+        assert victim.read_text() == "precious"
+        assert "sidecar write failed" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("name", ["", ".", "..", "a/b", "a\\b", "../escape"])
+    def test_invalid_container_name_raises(self, tmp_path: Path, name: str) -> None:
+        """A path-shaped name must never become a path segment."""
+        cfg = _make_cfg(tmp_path, services_mode="socket")
+        with pytest.raises(ValueError, match="invalid container name"):
+            write_sidecar(name, cfg=cfg, per_container=_socket_resources(tmp_path))
 
     def test_mkdir_failure_returns_none(
         self, tmp_path: Path, capsys: pytest.CaptureFixture
     ) -> None:
         """A sidecar-dir mkdir OSError soft-fails to ``None`` with a stderr warning."""
         cfg = _make_cfg(tmp_path, services_mode="socket")
-        plan = WiringPlan(scope=None, shield=True, gate=False, broker=False, ssh=False)
         with patch("pathlib.Path.mkdir", side_effect=OSError("read-only fs")):
-            result = _write_sidecar(cfg, "myc", plan, _socket_resources(tmp_path), None)
+            result = write_sidecar("myc", cfg=cfg, per_container=_socket_resources(tmp_path))
         assert result is None
         assert "sidecar dir setup failed" in capsys.readouterr().err
 
     def test_write_failure_returns_none(
         self, tmp_path: Path, capsys: pytest.CaptureFixture
     ) -> None:
-        """A json.dump OSError (e.g. disk full) soft-fails to ``None`` with a warning."""
+        """An open(2) OSError (e.g. disk full) soft-fails to ``None`` with a warning."""
         cfg = _make_cfg(tmp_path, services_mode="socket")
-        plan = WiringPlan(scope=None, shield=True, gate=False, broker=False, ssh=False)
-        with patch("pathlib.Path.open", side_effect=OSError("no space left")):
-            result = _write_sidecar(cfg, "myc", plan, _socket_resources(tmp_path), None)
+        with patch("terok_sandbox.launch.os.open", side_effect=OSError("no space left")):
+            result = write_sidecar("myc", cfg=cfg, per_container=_socket_resources(tmp_path))
         assert result is None
         assert "sidecar write failed" in capsys.readouterr().err
+
+
+class TestStraySidecarSweep:
+    """Host-side reconcile for sidecars stranded by out-of-band ``podman rm``.
+
+    The sidecar deliberately survives container stops (restarts must
+    come back supervised), so this sweep is the safety net for state
+    whose container disappeared without a real teardown.
+    """
+
+    @staticmethod
+    def _drop_sidecar(cfg: SandboxConfig, name: str, age_s: float = 7200.0) -> Path:
+        """Write a sidecar aged *age_s* seconds into the past."""
+        target = cfg.state_dir / "sidecar" / f"{name}.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("{}")
+        stamp = time.time() - age_s
+        os.utime(target, (stamp, stamp))
+        return target
+
+    def test_no_sidecars_is_ok(self, tmp_path: Path) -> None:
+        """Empty (or absent) sidecar dir → quiet ok."""
+        verdict = make_stray_sidecar_check(_make_cfg(tmp_path)).evaluate(0, "", "")
+        assert verdict.severity == "ok"
+        assert "no sidecars" in verdict.detail
+
+    def test_stray_past_grace_is_swept(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A sidecar with no matching container, past the grace window, is removed."""
+        cfg = _make_cfg(tmp_path)
+        stray = self._drop_sidecar(cfg, "gone")
+        runtime_leftover = cfg.runtime_dir / "run" / "gone"
+        runtime_leftover.mkdir(parents=True)
+        monkeypatch.setattr(
+            "terok_sandbox.launch._podman_container_names", lambda: frozenset({"live"})
+        )
+        verdict = make_stray_sidecar_check(cfg).evaluate(0, "", "")
+        assert verdict.severity == "ok"
+        assert "gone" in verdict.detail
+        assert not stray.exists()
+        assert not runtime_leftover.exists()
+
+    def test_live_container_sidecar_untouched(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A sidecar whose container podman still knows is never swept."""
+        cfg = _make_cfg(tmp_path)
+        live = self._drop_sidecar(cfg, "live")
+        monkeypatch.setattr(
+            "terok_sandbox.launch._podman_container_names", lambda: frozenset({"live"})
+        )
+        verdict = make_stray_sidecar_check(cfg).evaluate(0, "", "")
+        assert verdict.severity == "ok"
+        assert "no strays" in verdict.detail
+        assert live.exists()
+
+    def test_young_orphan_gets_grace(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A fresh container-less sidecar may be a prepare→run gap — left alone."""
+        cfg = _make_cfg(tmp_path)
+        young = self._drop_sidecar(cfg, "fresh", age_s=0.0)
+        monkeypatch.setattr("terok_sandbox.launch._podman_container_names", frozenset)
+        verdict = make_stray_sidecar_check(cfg).evaluate(0, "", "")
+        assert verdict.severity == "ok"
+        assert young.exists()
+
+    def test_podman_unreachable_skips_sweep(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without podman, live and stray are indistinguishable — warn, touch nothing."""
+        cfg = _make_cfg(tmp_path)
+        kept = self._drop_sidecar(cfg, "unknown")
+        monkeypatch.setattr("terok_sandbox.launch._podman_container_names", lambda: None)
+        verdict = make_stray_sidecar_check(cfg).evaluate(0, "", "")
+        assert verdict.severity == "warn"
+        assert kept.exists()
+
+    def test_is_host_side(self) -> None:
+        """The sweep runs on the host — never via ``podman exec``."""
+        check = make_stray_sidecar_check()
+        assert check.host_side is True
+        assert check.probe_cmd == []
+
+
+class TestRemoveContainerState:
+    """``remove_container_state`` is the real-teardown sweep for name-keyed state."""
+
+    def test_removes_sidecar_and_runtime_dir(self, tmp_path: Path) -> None:
+        """The inverse of allocate + write: both artifacts gone afterwards."""
+        cfg = _make_cfg(tmp_path)
+        res = allocate_per_container_resources(cfg, "myc")
+        path = write_sidecar("myc", cfg=cfg, per_container=res)
+        assert path is not None and path.exists()
+        assert res.container_runtime_dir.is_dir()
+        remove_container_state("myc", cfg=cfg)
+        assert not path.exists()
+        assert not res.container_runtime_dir.exists()
+
+    def test_idempotent_when_nothing_exists(self, tmp_path: Path) -> None:
+        """Missing state is a no-op, not an error."""
+        remove_container_state("ghost", cfg=_make_cfg(tmp_path))
+
+    @pytest.mark.parametrize("name", ["", ".", "..", "a/b", "a\\b"])
+    def test_invalid_name_raises(self, tmp_path: Path, name: str) -> None:
+        """A path-shaped name must never reach the unlink/rmtree."""
+        with pytest.raises(ValueError, match="invalid container name"):
+            remove_container_state(name, cfg=_make_cfg(tmp_path))
 
 
 class TestComposeAbortsOnSidecarFailure:
@@ -391,7 +579,7 @@ class TestComposeAbortsOnSidecarFailure:
                 "terok_sandbox.vault.store.db.CredentialDB.create_token",
                 return_value="terok-p-xyz",
             ),
-            patch("terok_sandbox.launch._write_sidecar", return_value=None),
+            patch("terok_sandbox.launch.write_sidecar", return_value=None),
             patch("terok_sandbox.launch._rollback_compose_state") as rollback,
             pytest.raises(SystemExit) as exc,
         ):

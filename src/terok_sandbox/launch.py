@@ -22,12 +22,14 @@ import shutil
 import socket as _socket
 import subprocess  # nosec B404 — podman inspect helper, fixed argv
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from terok_util import podman_userns_args
 
 from .config import CONTAINER_RUNTIME_DIR, SandboxConfig
+from .doctor import CheckVerdict, DoctorCheck
 from .gate.tokens import mint_gate_token
 from .sandbox import Sharing, VolumeSpec
 
@@ -447,7 +449,19 @@ def compose(
     args += ["--name", container]
 
     _write_meta(state_dir, plan)
-    sidecar_path = _write_sidecar(cfg, container, plan, per_container, gate_token)
+    sidecar_path = write_sidecar(
+        container,
+        cfg=cfg,
+        per_container=per_container,
+        scope_id=plan.scope or "",
+        # The supervisor uses ``project_id`` as the gate's scope (the repo
+        # it serves is ``<project_id>.git``).  In standalone sandbox the
+        # scope *is* the repo name, so carry it here when the gate is wired.
+        project_id=(plan.scope or "") if (gate_token and plan.scope) else "",
+        gate_base_path=str(cfg.gate_base_path) if gate_token else None,
+        gate_token=gate_token,
+        gate_port=per_container.gate_port if gate_token else None,
+    )
     if sidecar_path is None:
         # Fail closed: a launch with no sidecar means the supervisor never
         # starts, so the container would hit dead vault/SSH/gate endpoints.
@@ -462,31 +476,63 @@ def compose(
     return args, plan
 
 
-def _write_sidecar(
+def write_sidecar(
+    container_name: str,
+    *,
     cfg: SandboxConfig,
-    container: str,
-    plan: WiringPlan,
     per_container: PerContainerResources,
-    gate_token: str | None,
+    scope_id: str = "",
+    project_id: str = "",
+    task_id: str = "",
+    dossier_path: Path | str | None = None,
+    gate_base_path: str | None = None,
+    gate_token: str | None = None,
+    gate_port: int | None = None,
 ) -> Path | None:
     """Persist the per-container sidecar config the supervisor reads.
+
+    The canonical writer for the whole package chain — `compose` calls
+    it for standalone sandbox runs and terok-executor's
+    ``AgentRunner.launch_prepared`` calls it for terok tasks — so the
+    schema [`load_sidecar`][terok_sandbox.supervisor.main.load_sidecar]
+    parses has exactly one producer.
 
     Path: ``<cfg.state_dir>/sidecar/<container-name>.json``.  Returns
     the absolute path on success — the caller emits it as the
     ``terok.sandbox.sidecar`` OCI annotation that triggers the hook
     and tells it where to find this file.  No XDG guessing, no
-    name-vs-id rename: one anchor, one path.
+    name-vs-id rename: one anchor, one path.  The file survives
+    container stop/start cycles by design (its ports and tokens must
+    keep matching the container's immutable env, and the createRuntime
+    hook re-reads it on every ``podman start``); it is removed at real
+    teardown by
+    [`remove_container_state`][terok_sandbox.launch.remove_container_state].
 
     Socket paths are NOT carried in the sidecar — the supervisor
     derives them from the container name + runtime dir via
     [`SupervisorPaths.for_container`][terok_sandbox.supervisor.main.SupervisorPaths.for_container].
     TCP ports ARE carried because the launch path allocates them
-    fresh per container via ``bind(0)``.
+    fresh per container via ``bind(0)``.  Gate config travels only
+    when the gate is wired — the supervisor composes the gate iff
+    both ``gate_base_path`` and ``gate_token`` are present.
 
     Best-effort: a write failure logs to stderr and returns ``None``;
-    the launch proceeds but the supervisor never spawns (no annotation
-    → no hook fire).
+    callers pick their own policy (`compose` rolls back and aborts the
+    launch, the executor raises its ``BuildError``).
+
+    Raises:
+        ValueError: If ``container_name`` is empty or carries a path
+            separator / traversal segment — such a name would let the
+            write escape ``state_dir/sidecar``.
     """
+    if (
+        not container_name
+        or container_name in (".", "..")
+        or "/" in container_name
+        or "\\" in container_name
+    ):
+        raise ValueError(f"invalid container name: {container_name!r}")
+
     sidecar_dir = cfg.state_dir / "sidecar"
     try:
         sidecar_dir.mkdir(parents=True, exist_ok=True)
@@ -495,15 +541,12 @@ def _write_sidecar(
         return None
 
     payload: dict[str, object] = {
-        "container_name": container,
+        "container_name": container_name,
         "ipc_mode": cfg.services_mode,
         "db_path": str(cfg.db_path),
-        "scope_id": plan.scope or "",
-        # The supervisor uses ``project_id`` as the gate's scope (the repo
-        # it serves is ``<project_id>.git``).  In standalone sandbox the
-        # scope *is* the repo name, so carry it here when the gate is wired.
-        "project_id": (plan.scope or "") if (gate_token and plan.scope) else "",
-        "task_id": "",
+        "scope_id": scope_id or "",
+        "project_id": project_id or "",
+        "task_id": task_id or "",
         # The supervisor runs in crun's rootless userns where geteuid==0,
         # so it can't re-derive runtime_dir from path resolvers.  Pin it
         # here and read back verbatim.
@@ -512,22 +555,158 @@ def _write_sidecar(
     if cfg.services_mode == "tcp":
         payload["tcp_port"] = per_container.token_broker_port
         payload["ssh_signer_port"] = per_container.ssh_signer_port
-        payload["gate_port"] = per_container.gate_port
-    # Gate config travels here only when the gate is actually wired; the
-    # supervisor composes the gate iff both ``gate_base_path`` and
-    # ``gate_token`` are present.
-    if gate_token:
-        payload["gate_base_path"] = str(cfg.gate_base_path)
+    if dossier_path is not None:
+        payload["dossier_path"] = str(dossier_path)
+    if gate_base_path is not None:
+        payload["gate_base_path"] = gate_base_path
+    if gate_token is not None:
         payload["gate_token"] = gate_token
+    if gate_port is not None:
+        payload["gate_port"] = gate_port
 
-    target = sidecar_dir / f"{container}.json"
+    target = sidecar_dir / f"{container_name}.json"
+    # The payload can carry a live gate_token, so the file must not be
+    # world-readable.  Create it 0600 directly (the process umask would
+    # otherwise leave it 0644) and fchmod to also cover the re-launch case
+    # where the file already exists with looser permissions.
+    #
+    # ``O_NOFOLLOW`` refuses to open the final path component if it is a
+    # symlink — a pre-planted symlink at ``target`` (e.g. pointing at
+    # ``~/.ssh/authorized_keys``) would otherwise let this write clobber
+    # an arbitrary file with the token payload.  The container_name
+    # traversal guard above blocks one vector; this closes the symlink
+    # vector at the open(2) level.  The ``ELOOP`` it raises is an OSError,
+    # so it falls into the existing soft-fail branch and returns ``None``.
     try:
-        with target.open("w", encoding="utf-8") as fh:
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            os.fchmod(fh.fileno(), 0o600)
             json.dump(payload, fh, indent=2)
     except OSError as exc:
         print(f"warning: sidecar write failed: {exc}", file=sys.stderr)
         return None
     return target
+
+
+def remove_container_state(container: str, *, cfg: SandboxConfig) -> None:
+    """Remove the per-container sidecar + host-side runtime directory.
+
+    The inverse of
+    [`allocate_per_container_resources`][terok_sandbox.launch.allocate_per_container_resources]
+    + [`write_sidecar`][terok_sandbox.launch.write_sidecar]: deletes the
+    state keyed by container *name* that deliberately outlives a stop
+    (the sidecar survives poststop so restarts come back supervised).
+    Call at real teardown — after the container is removed — never at
+    mere stop.  Idempotent; missing state is a no-op.
+
+    Raises:
+        ValueError: If ``container`` is empty or carries a path
+            separator / traversal segment — such a name would redirect
+            the unlink/rmtree outside the sandbox-owned directories.
+    """
+    if not container or container in (".", "..") or "/" in container or "\\" in container:
+        raise ValueError(f"invalid container name: {container!r}")
+    (cfg.state_dir / "sidecar" / f"{container}.json").unlink(missing_ok=True)
+    shutil.rmtree(cfg.runtime_dir / "run" / container, ignore_errors=True)
+
+
+#: Minimum age before a sidecar with no matching container counts as a
+#: stray.  ``terok-sandbox prepare`` writes the sidecar before the
+#: operator's own ``podman run``, so a fresh file may simply not have
+#: its container *yet*; an hour comfortably covers that gap.
+_STRAY_GRACE_S = 3600.0
+
+
+def make_stray_sidecar_check(cfg: SandboxConfig | None = None) -> DoctorCheck:
+    """Sweep per-container state left behind by out-of-band removal.
+
+    The sidecar deliberately survives ``podman stop`` — a stopped
+    container must come back supervised, and the preserved file is the
+    only wiring that still matches the container's immutable env (see
+    [`write_sidecar`][terok_sandbox.launch.write_sidecar]).  The real
+    teardown paths ([`cleanup`][terok_sandbox.launch.cleanup], terok's
+    task delete) remove it; a container removed *outside* those paths
+    (bare ``podman rm``) strands its sidecar.  Strays are inert —
+    launches overwrite by name and the hook only fires via a live
+    container's annotation — so this reconciliation is hygiene, not
+    correctness.
+
+    The check acts on what it finds: a sidecar whose container podman
+    no longer knows, and which is past the prepare→run grace window, is
+    swept on the spot via
+    [`remove_container_state`][terok_sandbox.launch.remove_container_state],
+    and the verdict reports what was done.  When podman is unreachable,
+    live and stray are indistinguishable and the sweep is skipped.
+
+    Host-level like the recovery-key check: intentionally NOT bundled
+    into
+    [`sandbox_doctor_checks`][terok_sandbox.doctor.sandbox_doctor_checks]
+    (that list renders per container); top-level callers append it so
+    it runs exactly once.
+    """
+
+    def _eval(_rc: int, _stdout: str, _stderr: str) -> CheckVerdict:
+        active_cfg = cfg if cfg is not None else SandboxConfig()
+        sidecar_dir = active_cfg.state_dir / "sidecar"
+        candidates = sorted(sidecar_dir.glob("*.json")) if sidecar_dir.is_dir() else []
+        if not candidates:
+            return CheckVerdict("ok", "no sidecars on disk")
+
+        known = _podman_container_names()
+        if known is None:
+            return CheckVerdict(
+                "warn", "podman unreachable — cannot tell live sidecars from strays"
+            )
+
+        now = time.time()
+        swept: list[str] = []
+        for path in candidates:
+            name = path.stem
+            if name in known:
+                continue
+            try:
+                age = now - path.stat().st_mtime
+            except OSError:
+                continue  # vanished mid-scan — nothing left to sweep
+            if age < _STRAY_GRACE_S:
+                continue  # possibly a prepare→run gap; revisit next run
+            remove_container_state(name, cfg=active_cfg)
+            swept.append(name)
+        if swept:
+            return CheckVerdict("ok", f"swept {len(swept)} stray sidecar(s): {', '.join(swept)}")
+        return CheckVerdict("ok", f"no strays among {len(candidates)} sidecar(s)")
+
+    return DoctorCheck(
+        category="env",
+        label="Stray sidecar sweep",
+        probe_cmd=[],
+        evaluate=_eval,
+        host_side=True,
+    )
+
+
+def _podman_container_names() -> frozenset[str] | None:
+    """Names of every container podman knows (any state); ``None`` if unreachable.
+
+    One ``podman ps --all`` call covers the whole sweep — per-candidate
+    ``podman container exists`` probes would cost a subprocess each.
+    Mirrors `_resolve_container_id`'s soft-fail stance on a missing /
+    broken podman.
+    """
+    podman = shutil.which("podman")
+    if podman is None:
+        return None
+    try:
+        result = subprocess.run(  # noqa: S603  # nosec B603 — fixed argv, no user input
+            [podman, "ps", "--all", "--format", "{{.Names}}"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return frozenset(line.strip() for line in result.stdout.splitlines() if line.strip())
 
 
 def _volume_args(vol: VolumeSpec) -> list[str]:
@@ -638,9 +817,10 @@ def cleanup(container: str, *, cfg: SandboxConfig) -> bool:
     if plan is None:
         return False
 
-    # The gate token lives only in the supervisor process (it never
-    # touched disk), so there is nothing to revoke here — the gate stops
-    # serving the moment the supervisor dies.
+    # The gate token needs no revocation step: it is a stateless
+    # pair-match between the container's env and the sidecar, so it
+    # stops working the moment the supervisor dies, and its on-disk
+    # copy goes away with the sidecar sweep below.
     #
     # Revoke vault tokens before tearing down shield: a still-running
     # container using a revoked token gets clean 401s, not stale 200s.
@@ -698,12 +878,11 @@ def cleanup(container: str, *, cfg: SandboxConfig) -> bool:
             except (SystemExit, OSError):
                 pass
 
-    # Sweep the per-container sidecar file and runtime dir.  The OCI
-    # poststop hook would normally cover this, but ``terok-sandbox
-    # cleanup`` runs out-of-band from podman lifecycle (e.g.
-    # ``prepare`` without a corresponding ``podman run``).
-    (cfg.state_dir / "sidecar" / f"{container}.json").unlink(missing_ok=True)
-    shutil.rmtree(cfg.runtime_dir / "run" / container, ignore_errors=True)
+    # Sweep the per-container sidecar file and runtime dir.  This is
+    # the real teardown point — the OCI poststop hook deliberately
+    # leaves both in place so a stopped container can restart
+    # supervised.
+    remove_container_state(container, cfg=cfg)
 
     shutil.rmtree(state_dir, ignore_errors=True)
     return True

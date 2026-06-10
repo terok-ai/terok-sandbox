@@ -286,6 +286,36 @@ class TestHookSpawn:
         assert sent_pid == 12345
         assert sent_signal == mod.signal.SIGTERM
         assert not pid_file.exists()
-        # poststop also unlinks the sidecar so a long-running host
-        # doesn't accumulate stale JSONs.
-        assert not sidecar_path.exists()
+        # The sidecar must survive the reap: stop/start cycles re-fire
+        # createRuntime, and the preserved file is the only wiring that
+        # still matches the container's immutable env.  Removal belongs
+        # to real teardown (cleanup / task delete / doctor stray sweep).
+        assert sidecar_path.exists()
+
+    def test_poststop_without_pid_file_preserves_sidecar(
+        self, hook_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The no-pid-file reap path must not delete the sidecar either.
+
+        This is the restart contract's regression guard: every poststop
+        exit path used to unlink the sidecar, which made any later
+        ``podman start`` come up unsupervised (the createRuntime hook
+        soft-fails on the missing file).
+        """
+        mod = _load_hook_module()
+        container_id = "abc123def456"
+        sidecar_path = _write_sidecar(
+            hook_root,
+            "demo",
+            {"container_name": "demo", "db_path": str(hook_root / "v.db"), "ipc_mode": "socket"},
+        )
+        _feed_stdin(
+            monkeypatch,
+            {"id": container_id, "annotations": {"terok.sandbox.sidecar": str(sidecar_path)}},
+        )
+        monkeypatch.setattr(mod.sys, "argv", ["supervisor_hook", "poststop"])
+        monkeypatch.setattr(mod._supervisor_state, "outer_host_uid", lambda: os.getuid())
+
+        mod.main()
+
+        assert sidecar_path.exists()

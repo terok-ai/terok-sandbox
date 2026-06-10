@@ -57,7 +57,7 @@ async def test_missing_sidecar_bails_with_rc_2(tmp_path: Path) -> None:
 async def test_runs_until_container_exits_and_unwinds(sidecar: Path) -> None:
     """Happy path: start all services, await podman wait, stop in reverse."""
     services = _Services()
-    services.start = AsyncMock()  # type: ignore[method-assign]
+    services.start = AsyncMock(return_value=6)  # type: ignore[method-assign]
     services.stop = AsyncMock()  # type: ignore[method-assign]
 
     async def _fake_wait(_container_id: str) -> int:
@@ -75,10 +75,27 @@ async def test_runs_until_container_exits_and_unwinds(sidecar: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_service_start_failure_returns_rc_3(sidecar: Path) -> None:
-    """A failed ``start()`` short-circuits to rc 3 and runs ``stop()`` once."""
+async def test_partial_service_failure_keeps_running(sidecar: Path) -> None:
+    """One survivor is enough: a degraded bundle still runs to container exit."""
     services = _Services()
-    services.start = AsyncMock(side_effect=RuntimeError("vault bind failed"))  # type: ignore[method-assign]
+    services.start = AsyncMock(return_value=1)  # type: ignore[method-assign]
+    services.stop = AsyncMock()  # type: ignore[method-assign]
+
+    with (
+        patch("terok_sandbox.supervisor.main._Services", return_value=services),
+        patch("terok_sandbox.supervisor.main._wait_for_container", new=AsyncMock(return_value=0)),
+        patch("terok_sandbox.supervisor.main._install_signal_handlers"),
+    ):
+        rc = await run_supervisor("abc123", sidecar)
+    assert rc == 0
+    services.stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_no_service_started_returns_rc_3(sidecar: Path) -> None:
+    """Zero started services ⇒ rc 3 so the wrapper's retry loop gets a go."""
+    services = _Services()
+    services.start = AsyncMock(return_value=0)  # type: ignore[method-assign]
     services.stop = AsyncMock()  # type: ignore[method-assign]
 
     with (
@@ -300,8 +317,9 @@ class TestServicesStartGateComposition:
 
     The clearance trio, vault proxy, SSH signer, and notifier are stubbed
     to trivial awaitables — the contract under test is *which* gate
-    constructor (socket vs TCP) the start path picks, and the TCP-mode
-    guard rails that raise on a missing port.
+    constructor (socket vs TCP) the start path picks, and that the
+    TCP-mode guard rails degrade exactly the port-less service while the
+    rest of the bundle comes up.
     """
 
     @pytest.mark.asyncio
@@ -360,10 +378,15 @@ class TestServicesStartGateComposition:
         assert "socket_path" not in captured
 
     @pytest.mark.asyncio
-    async def test_tcp_mode_missing_gate_port_raises(
-        self, tmp_path: Path, supervisor_paths
+    async def test_tcp_mode_missing_gate_port_degrades_gate_only(
+        self, tmp_path: Path, supervisor_paths, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """TCP mode with a wired gate but no allocated gate port is a hard error."""
+        """TCP mode with a wired gate but no allocated port costs only the gate.
+
+        The guard raises before the ``GateServer`` is even constructed;
+        the degrade loop logs it and the other five services still come
+        up — services are convenience, not all-or-nothing.
+        """
         from terok_sandbox.supervisor.main import SidecarConfig, _Services
 
         cfg = SidecarConfig(
@@ -379,14 +402,18 @@ class TestServicesStartGateComposition:
             gate_token="terok-g-abc",
         )
         services = _Services()
-        with _services_stubs(), pytest.raises(RuntimeError, match="gate_port"):
-            await services.start(cfg, supervisor_paths)
+        with _services_stubs():
+            started = await services.start(cfg, supervisor_paths)
+        assert started == 5  # all but the gate
+        assert services.gate is None
+        assert services.vault is not None
+        assert "git gate failed to start" in caplog.text
 
     @pytest.mark.asyncio
-    async def test_tcp_mode_missing_vault_port_raises(
-        self, tmp_path: Path, supervisor_paths
+    async def test_tcp_mode_missing_vault_port_degrades_vault_only(
+        self, tmp_path: Path, supervisor_paths, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """TCP mode with no vault ``tcp_port`` raises before binding the proxy."""
+        """TCP mode with no vault ``tcp_port`` degrades the proxy, nothing else."""
         from terok_sandbox.supervisor.main import SidecarConfig, _Services
 
         cfg = SidecarConfig(
@@ -395,16 +422,21 @@ class TestServicesStartGateComposition:
             db_path=tmp_path / "vault.db",
             runtime_dir=tmp_path / "rt" / "sandbox",
             tcp_port=None,  # the bug this guards against
+            ssh_signer_port=22002,
         )
         services = _Services()
-        with _services_stubs(), pytest.raises(RuntimeError, match="tcp_port"):
-            await services.start(cfg, supervisor_paths)
+        with _services_stubs():
+            started = await services.start(cfg, supervisor_paths)
+        assert started == 4  # verdict, hub, signer, subscriber (no gate wired)
+        assert services.vault is None
+        assert services.ssh_signer is not None
+        assert "vault proxy failed to start" in caplog.text
 
     @pytest.mark.asyncio
-    async def test_tcp_mode_missing_ssh_signer_port_raises(
-        self, tmp_path: Path, supervisor_paths
+    async def test_tcp_mode_missing_ssh_signer_port_degrades_signer_only(
+        self, tmp_path: Path, supervisor_paths, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """TCP mode with no ``ssh_signer_port`` raises after the vault binds."""
+        """TCP mode with no ``ssh_signer_port`` degrades the signer, nothing else."""
         from terok_sandbox.supervisor.main import SidecarConfig, _Services
 
         cfg = SidecarConfig(
@@ -416,8 +448,12 @@ class TestServicesStartGateComposition:
             ssh_signer_port=None,  # the bug this guards against
         )
         services = _Services()
-        with _services_stubs(), pytest.raises(RuntimeError, match="ssh_signer_port"):
-            await services.start(cfg, supervisor_paths)
+        with _services_stubs():
+            started = await services.start(cfg, supervisor_paths)
+        assert started == 4
+        assert services.ssh_signer is None
+        assert services.vault is not None
+        assert "ssh signer failed to start" in caplog.text
 
 
 class TestWaitForContainer:
