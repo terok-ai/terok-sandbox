@@ -82,6 +82,16 @@ class RecoveryStatus:
     source: PassphraseSource | None
     """Whichever resolver tier unlocked the chain right now, or ``None`` if locked."""
 
+    resolve_error: str | None = None
+    """Diagnostic when the chain walk itself *raised* rather than yielded nothing.
+
+    A configured tier that fails closed (sealed systemd-creds credential
+    that won't unseal — machine identity changed; a ``passphrase_command``
+    that produced nothing) is a different operator problem from "no
+    passphrase anywhere": re-typing the passphrase won't fix a broken
+    seal, and status surfaces must say which one they're looking at.
+    ``None`` when resolution completed (with or without a source)."""
+
     @property
     def session_only(self) -> bool:
         """``True`` iff the passphrase lives only in the tmpfs session-unlock file.
@@ -113,13 +123,21 @@ class RecoveryStatus:
         from .encryption import NoPassphraseError, WrongPassphraseError  # noqa: PLC0415
 
         cfg = cfg or SandboxConfig()
+        resolve_error: str | None = None
         try:
             _passphrase, source = cfg.resolve_passphrase_with_source()
-        except (NoPassphraseError, WrongPassphraseError):
+        except WrongPassphraseError as exc:
+            # A tier is present but broken (unsealable credential, dead
+            # helper) — fail-closed by design.  Record the message so
+            # status surfaces can distinguish this from a plain lock.
+            source = None
+            resolve_error = str(exc)
+        except NoPassphraseError:
             source = None
         return cls(
             acknowledged=acknowledged(cfg.vault_recovery_marker_file),
             source=source,
+            resolve_error=resolve_error,
         )
 
     @staticmethod

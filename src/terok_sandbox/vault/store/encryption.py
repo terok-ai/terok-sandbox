@@ -249,11 +249,18 @@ def probe_passphrase_chain(
     interactive ``prompt`` tier is omitted — it stores nothing, so it
     can neither be "present" nor shadow anything.
     """
+    session_value = load_passphrase_from_file(passphrase_file) if passphrase_file else None
+    session_detail = str(passphrase_file) if passphrase_file else "no session file"
+    # A file that exists but yields nothing is a fault (permissions,
+    # SELinux, empty write), not a locked vault — say so in the detail
+    # line; the silent variant cost us a debugging session already.
+    if passphrase_file is not None and session_value is None and passphrase_file.exists():
+        session_detail = f"{passphrase_file} (exists but unreadable or empty)"
     return (
         TierPresence(
             "session-file",
-            bool(passphrase_file and load_passphrase_from_file(passphrase_file)),
-            str(passphrase_file) if passphrase_file else "no session file",
+            bool(session_value),
+            session_detail,
         ),
         TierPresence(
             "systemd-creds",
@@ -284,10 +291,21 @@ def probe_passphrase_chain(
 
 
 def load_passphrase_from_file(path: Path) -> str | None:
-    """Return the passphrase stored at *path*, or ``None`` if absent or unreadable."""
+    """Return the passphrase stored at *path*, or ``None`` if absent or unreadable.
+
+    An absent file is the normal locked state and stays silent.  Any
+    *other* ``OSError`` (EACCES from a permissions slip, an SELinux
+    denial, an unmounted tmpfs) also degrades to ``None`` so the chain
+    can fall through — but it logs a warning first: without the log a
+    blocked read is indistinguishable from "locked" on every surface,
+    which buries the actual fault.
+    """
     try:
         return path.read_text(encoding="utf-8").rstrip("\n") or None
-    except OSError:
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        _logger.warning("session passphrase file %s exists but is unreadable: %s", path, exc)
         return None
 
 

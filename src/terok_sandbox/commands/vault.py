@@ -51,6 +51,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from ..vault.store.encryption import TierPresence
+    from ..vault.store.recovery import RecoveryStatus
     from ..vault.store.systemd_creds import KeyMode
 
 
@@ -59,6 +60,40 @@ if TYPE_CHECKING:
 #: vault auto-resolves from the session copy and silently ignores the
 #: durable one — how a TPM2-sealed box ends up reading a RAM-backed file.
 _DURABLE_TIERS = frozenset({"systemd-creds", "keyring", "passphrase-command", "config"})
+
+
+def provision_session_passphrase(cfg: SandboxConfig, passphrase: str) -> bool:
+    """Validate *passphrase* against the credentials DB, then land it on the session tier.
+
+    The single writer of the session-unlock tmpfs file — the CLI
+    ``vault unlock`` and terok's TUI unlock modal both funnel through
+    here, so neither can store a value the DB rejects.  Without the
+    check, a wrong entry is written, reported as success, and every
+    subsequent open just says "locked" — the operator has no way to
+    tell a typo from a genuinely locked vault.
+
+    When the DB exists (and isn't a legacy plaintext file) the value is
+    test-opened first; a mismatch raises
+    [`WrongPassphraseError`][terok_sandbox.WrongPassphraseError] and
+    **nothing is written** — the chain keeps whatever state it had.  A
+    missing DB skips validation (it will be created encrypted with this
+    key on first use; opening it here just to check would create it as
+    a side effect).  Returns ``True`` when the value was verified
+    against an existing DB, ``False`` when there was no DB to verify
+    against — callers word their success message off that bit.
+    """
+    from .._yaml import write_secret_text
+    from ..vault.store.db import CredentialDB
+    from ..vault.store.encryption import is_plaintext_sqlite
+
+    validated = False
+    if cfg.db_path.exists() and not is_plaintext_sqlite(cfg.db_path):
+        # Raises WrongPassphraseError / PlaintextDBFoundError on mismatch —
+        # deliberately before the write so a bad value never lands.
+        CredentialDB(cfg.db_path, passphrase=passphrase).close()
+        validated = True
+    write_secret_text(cfg.vault_passphrase_file, passphrase + "\n")
+    return validated
 
 
 def _handle_vault_unlock(*, cfg: SandboxConfig | None = None, force: bool = False) -> None:
@@ -71,9 +106,19 @@ def _handle_vault_unlock(*, cfg: SandboxConfig | None = None, force: bool = Fals
     reboot then wipes — the operator believes the sealed key is in use
     when it isn't.  Skip the write when a durable tier already resolves,
     unless ``--force`` (re-key / deliberate session override).
+
+    The typed value is validated against the existing DB before the
+    write (see
+    [`provision_session_passphrase`][terok_sandbox.commands.vault.provision_session_passphrase])
+    — a wrong entry exits with an error instead of silently parking a
+    useless value on the highest-priority tier.
     """
-    from .._yaml import write_secret_text
-    from ..vault.store.encryption import probe_passphrase_chain, prompt_passphrase
+    from ..vault.store.db import PlaintextDBFoundError
+    from ..vault.store.encryption import (
+        WrongPassphraseError,
+        probe_passphrase_chain,
+        prompt_passphrase,
+    )
 
     if cfg is None:
         cfg = SandboxConfig()
@@ -98,8 +143,23 @@ def _handle_vault_unlock(*, cfg: SandboxConfig | None = None, force: bool = Fals
         )
         return
 
-    write_secret_text(cfg.vault_passphrase_file, prompt_passphrase() + "\n")
+    try:
+        validated = provision_session_passphrase(cfg, prompt_passphrase())
+    except WrongPassphraseError:
+        raise SystemExit(
+            f"that passphrase does not open {cfg.db_path} — nothing was written.\n"
+            "  If you never saved the passphrase, see"
+            " `terok-sandbox vault passphrase reveal` (while a tier still"
+            " resolves it) or the recovery section of the docs."
+        ) from None
+    except PlaintextDBFoundError as exc:
+        raise SystemExit(str(exc)) from exc
+
     print(f"→ wrote passphrase to {cfg.vault_passphrase_file} (RAM-backed, cleared on reboot)")
+    if validated:
+        print("  verified: the value opens the credentials DB")
+    else:
+        print(f"  no DB at {cfg.db_path} yet — this value becomes its key on first use")
 
 
 def _forget_config_tier_updates(cfg: SandboxConfig) -> dict[str, object | None]:
@@ -508,25 +568,63 @@ def _handle_vault_passphrase_acknowledge(*, cfg: SandboxConfig | None = None) ->
     print("recovery key marked as saved.")
 
 
-def _read_credential_providers(cfg: SandboxConfig) -> list[str] | None:
-    """Best-effort sorted provider slugs across every credential set.
+def _classify_vault_access(
+    cfg: SandboxConfig, recovery: RecoveryStatus
+) -> tuple[str | None, list[str] | None, str | None]:
+    """One best-effort DB open, three answers: ``(lock_reason, providers, db_error)``.
 
-    Returns ``None`` when the DB can't be opened (locked vault, schema
-    drift) — ``vault status`` renders that as "locked" rather than
-    crashing.  Never prompts: a status read must not block on stdin.
+    "Locked" hides three different operator problems, each with a
+    different remedy — collapsing them is how a wrong passphrase, a
+    broken sealed credential, and a genuinely empty chain all read as
+    the same word on every surface:
+
+    - ``lock_reason`` set — the vault can't be opened *because of the
+      passphrase*: ``no passphrase in any tier`` (provision one), the
+      resolved value doesn't open the DB (typo / foreign DB — re-enter
+      the right one), or a configured tier is unreadable (broken seal /
+      dead helper — fail-closed from the resolver, carried in from
+      [`RecoveryStatus.resolve_error`][terok_sandbox.RecoveryStatus]).
+    - ``providers`` set — the DB opened; sorted provider slugs.
+    - ``db_error`` set — the DB failed for a non-passphrase reason
+      (schema drift, permissions); surfaced verbatim.
+
+    Never prompts: a status read must not block on stdin.
     """
+    from ..vault.store.encryption import NoPassphraseError, WrongPassphraseError
+
+    # Plain prose, not a credential — named so credential-heuristic
+    # scanners (Sonar S2068) don't misread the assignment.
+    no_tier_reason = "no passphrase in any tier"
+    if recovery.resolve_error is not None:
+        return f"a configured tier is unreadable — {recovery.resolve_error}", None, None
+    if recovery.source is None:
+        return no_tier_reason, None, None
     try:
         db = cfg.open_credential_db(prompt_on_tty=False)
-    except (Exception, SystemExit):  # noqa: BLE001 — any open failure means "can't inspect"
-        return None
+    except WrongPassphraseError:
+        return (
+            f"the passphrase via {recovery.source} does not open the DB"
+            " — wrong key, or a DB from another install",
+            None,
+            None,
+        )
+    except NoPassphraseError:
+        # Tier vanished between the resolve and the open — plain lock.
+        return no_tier_reason, None, None
+    # ``Exception`` only: with ``prompt_on_tty=False`` no prompt path can
+    # raise ``SystemExit`` here, and catching it would stringify an
+    # explicit exit from a lower layer into a status line.
+    except Exception as exc:  # noqa: BLE001 - non-passphrase failure, surfaced verbatim
+        return None, None, str(exc)
     try:
-        return sorted(
+        providers = sorted(
             {provider for cs in db.list_credential_sets() for provider in db.list_credentials(cs)}
         )
-    except Exception:  # noqa: BLE001 — a mid-read failure is still "can't inspect", not a crash
-        return None
+    except Exception as exc:  # noqa: BLE001 - a mid-read failure is a DB fault, not a lock
+        return None, None, str(exc)
     finally:
         db.close()
+    return None, providers, None
 
 
 def _handle_vault_status(*, cfg: SandboxConfig | None = None, as_json: bool = False) -> None:
@@ -578,14 +676,20 @@ def _handle_vault_status(*, cfg: SandboxConfig | None = None, as_json: bool = Fa
 
     recovery = RecoveryStatus.load(cfg)
     plaintext = plaintext_passphrase_config_path()
-    providers = _read_credential_providers(cfg)
+    # Lock state comes from *access* (can the DB actually be opened?),
+    # not from chain presence — a sealed credential that exists but
+    # won't unseal is "present" in the table yet locked in the header,
+    # and that contradiction is exactly the diagnostic.
+    lock_reason, providers, db_error = _classify_vault_access(cfg, recovery)
 
     if as_json:
         print(
             json.dumps(
                 {
-                    "locked": active_index is None,
-                    "passphrase_source": active_source,
+                    "locked": lock_reason is not None,
+                    "lock_reason": lock_reason,
+                    "db_error": db_error,
+                    "passphrase_source": recovery.source,
                     "chain": [
                         {
                             "source": tier.source,
@@ -609,7 +713,9 @@ def _handle_vault_status(*, cfg: SandboxConfig | None = None, as_json: bool = Fa
 
     _print_vault_status(
         rows=rows,
-        active_source=active_source,
+        active_source=recovery.source,
+        lock_reason=lock_reason,
+        db_error=db_error,
         shadowed=shadowed,
         recovery_acknowledged=recovery.acknowledged,
         plaintext=plaintext,
@@ -622,6 +728,8 @@ def _print_vault_status(
     *,
     rows: Sequence[tuple[TierPresence, bool, bool]],
     active_source: str | None,
+    lock_reason: str | None,
+    db_error: str | None,
     shadowed: Sequence[str],
     recovery_acknowledged: bool,
     plaintext: Path | None,
@@ -635,8 +743,13 @@ def _print_vault_status(
     flows through [`sanitize_tty`][terok_util.sanitize_tty] — they trace
     back to on-disk config / DB content.
     """
-    locked = active_source is None
-    header = "LOCKED" if locked else f"unlocked — passphrase via {active_source}"
+    locked = lock_reason is not None
+    if db_error is not None:
+        header = f"ERROR — {sanitize_tty(db_error)}"
+    elif lock_reason is not None:
+        header = f"LOCKED — {sanitize_tty(lock_reason)}"
+    else:
+        header = f"unlocked — passphrase via {active_source}"
     print(f"Vault: {header}")
     print(f"  DB:  {sanitize_tty(str(db_path))}")
     print("  Passphrase resolution chain:")
@@ -660,7 +773,8 @@ def _print_vault_status(
     if plaintext is not None:
         print(f"  warning: vault passphrase stored in plaintext at {sanitize_tty(str(plaintext))}")
     if providers is None:
-        print("  Credentials: vault locked — run `terok-sandbox vault unlock` to inspect")
+        detail = "DB unreadable — see the error above" if db_error else "vault locked"
+        print(f"  Credentials: {detail}")
     else:
         listing = f" ({', '.join(sanitize_tty(p) for p in providers)})" if providers else ""
         print(f"  Credentials: {len(providers)} stored{listing}")

@@ -76,6 +76,7 @@ from .vault import (
     _handle_vault_unlock,
     handle_vault_seal,
     handle_vault_to_keyring,
+    provision_session_passphrase,
     purge_passphrase_tiers,
 )
 
@@ -151,6 +152,7 @@ __all__ = [
     "handle_vault_seal",
     "handle_vault_to_keyring",
     "_handle_vault_unlock",
+    "provision_session_passphrase",
     "purge_passphrase_tiers",
     "_key_id_from_row",
     "_open_db",

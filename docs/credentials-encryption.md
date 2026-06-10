@@ -82,12 +82,17 @@ container's supervisor walks the passphrase chain when it spawns.
 ## Day-to-day
 
 ```bash
-terok-sandbox vault unlock   # writes the session-unlock tmpfs file
-terok-sandbox vault lock     # removes the session-unlock tmpfs file
+terok-sandbox vault unlock   # validates the passphrase, writes the session-unlock tmpfs file
+terok-sandbox vault lock     # clears every stored copy — you'll need the passphrase to unlock
 ```
 
-`vault unlock` is normally run once per boot.  The next supervisor to
-start picks the freshly-resolved passphrase up automatically.
+`vault unlock` is normally run once per boot.  The typed value is
+**validated against the existing credentials DB first** — a wrong entry
+exits with an error and writes nothing, so a typo can't silently park a
+useless key on the highest-priority tier.  (With no DB yet there is
+nothing to validate; the value becomes the encryption key on first
+use.)  The next supervisor to start picks the freshly-resolved
+passphrase up automatically.
 
 ## Picking a tier at setup
 
