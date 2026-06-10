@@ -231,6 +231,14 @@ class TestRecoveryStatus:
         status = RecoveryStatus.load(cfg)
         assert status.source is None
         assert status.urgent is False
+        # The fail-closed message is preserved so status surfaces can say
+        # "a configured tier is unreadable" instead of a bare "locked".
+        assert status.resolve_error == "decryption failed under test"
+
+    def test_clean_resolution_has_no_resolve_error(self, tmp_path: Path) -> None:
+        """A chain that resolves (or yields nothing) reports resolve_error=None."""
+        assert RecoveryStatus.load(_cfg(tmp_path)).resolve_error is None
+        assert RecoveryStatus.load(_cfg(tmp_path, passphrase=None)).resolve_error is None
 
 
 class TestNoOfflineOracle:

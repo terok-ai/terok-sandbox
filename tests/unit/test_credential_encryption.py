@@ -214,6 +214,36 @@ class TestLoadPassphraseFromFile:
         path.touch()
         assert load_passphrase_from_file(path) is None
 
+    def test_blocked_read_returns_none_and_warns(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """EACCES / SELinux denials degrade to None but leave a trace in the log.
+
+        Silent degradation made a blocked read indistinguishable from a
+        locked vault on every surface — the warning is the only breadcrumb.
+        """
+        path = tmp_path / "p"
+        path.write_text(_PASSPHRASE)
+        real_read_text = Path.read_text
+
+        def _denied(self: Path, *args: object, **kwargs: object) -> str:
+            if self == path:
+                raise PermissionError(13, "Permission denied")
+            return real_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(Path, "read_text", _denied)
+        with caplog.at_level("WARNING", logger="terok_sandbox.vault.store.encryption"):
+            assert load_passphrase_from_file(path) is None
+        assert "exists but is unreadable" in caplog.text
+
+    def test_missing_file_does_not_warn(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """An absent file is the normal locked state — no log noise."""
+        with caplog.at_level("WARNING", logger="terok_sandbox.vault.store.encryption"):
+            assert load_passphrase_from_file(tmp_path / "absent") is None
+        assert "unreadable" not in caplog.text
+
 
 class TestResolvePassphrase:
     """Walk the resolution chain: file → systemd-creds → keyring → passphrase_command → config → prompt."""
@@ -1549,8 +1579,92 @@ class TestAutoSystemdCredsBranch:
         assert sealed[0] in out
 
 
+class TestProvisionSessionPassphrase:
+    """``provision_session_passphrase`` — the validated single writer of the session tier."""
+
+    @staticmethod
+    def _make_encrypted_db(cfg) -> None:
+        """Create a minimal SQLCipher DB at ``cfg.db_path`` keyed with ``_PASSPHRASE``."""
+        cfg.db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = open_sqlcipher(cfg.db_path, _PASSPHRASE)
+        conn.execute("CREATE TABLE t (x INTEGER)")
+        conn.commit()
+        conn.close()
+
+    def test_validates_against_existing_db_and_writes(self, tmp_path: Path) -> None:
+        from terok_sandbox.commands import provision_session_passphrase
+
+        cfg = _make_cfg(tmp_path)
+        self._make_encrypted_db(cfg)
+        assert provision_session_passphrase(cfg, _PASSPHRASE) is True
+        assert cfg.vault_passphrase_file.read_text().rstrip("\n") == _PASSPHRASE
+
+    def test_rejects_wrong_passphrase_and_writes_nothing(self, tmp_path: Path) -> None:
+        from terok_sandbox.commands import provision_session_passphrase
+        from terok_sandbox.vault.store.encryption import WrongPassphraseError
+
+        cfg = _make_cfg(tmp_path)
+        self._make_encrypted_db(cfg)
+        with pytest.raises(WrongPassphraseError):
+            provision_session_passphrase(cfg, "wrong-guess")
+        # The whole point: a rejected value must never land on the
+        # highest-priority tier where it would shadow working state.
+        assert not cfg.vault_passphrase_file.exists()
+
+    def test_skips_validation_when_db_missing(self, tmp_path: Path) -> None:
+        """No DB yet → nothing to validate against; the value becomes the key on first use."""
+        from terok_sandbox.commands import provision_session_passphrase
+
+        cfg = _make_cfg(tmp_path)
+        assert provision_session_passphrase(cfg, "brand-new-key") is False
+        assert cfg.vault_passphrase_file.exists()
+        # Validation must not create the DB as a side effect.
+        assert not cfg.db_path.exists()
+
+    def test_skips_validation_on_legacy_plaintext_db(self, tmp_path: Path) -> None:
+        """A plaintext DB has no key to validate against — unlock-then-migrate is the documented flow."""
+        from terok_sandbox.commands import provision_session_passphrase
+
+        cfg = _make_cfg(tmp_path)
+        cfg.db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(cfg.db_path))
+        conn.execute("CREATE TABLE t (x INTEGER)")
+        conn.commit()
+        conn.close()
+        assert provision_session_passphrase(cfg, "future-key") is False
+        assert cfg.vault_passphrase_file.exists()
+
+
 class TestVaultUnlockLock:
     """``terok-sandbox vault unlock`` / ``vault lock`` CLI handlers."""
+
+    def test_unlock_rejects_wrong_passphrase(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A typed value that doesn't open the DB exits with an error; nothing is written."""
+
+        from terok_sandbox.commands import _handle_vault_unlock
+
+        cfg = _make_cfg(tmp_path)
+        TestProvisionSessionPassphrase._make_encrypted_db(cfg)
+        _scripted_tty_prompt(monkeypatch, "wrong-guess")
+        with pytest.raises(SystemExit, match="does not open"):
+            _handle_vault_unlock(cfg=cfg)
+        assert not cfg.vault_passphrase_file.exists()
+
+    def test_unlock_reports_validation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A value that opens the DB is written and reported as verified."""
+
+        from terok_sandbox.commands import _handle_vault_unlock
+
+        cfg = _make_cfg(tmp_path)
+        TestProvisionSessionPassphrase._make_encrypted_db(cfg)
+        _scripted_tty_prompt(monkeypatch, _PASSPHRASE)
+        _handle_vault_unlock(cfg=cfg)
+        assert cfg.vault_passphrase_file.read_text().rstrip("\n") == _PASSPHRASE
+        assert "verified: the value opens the credentials DB" in capsys.readouterr().out
 
     def test_unlock_writes_passphrase_and_restarts_running_daemon(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
