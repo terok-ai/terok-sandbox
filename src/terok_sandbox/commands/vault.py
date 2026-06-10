@@ -592,11 +592,13 @@ def _classify_vault_access(
     """
     from ..vault.store.encryption import NoPassphraseError, WrongPassphraseError
 
-    no_passphrase = "no passphrase in any tier"
+    # Plain prose, not a credential — named so credential-heuristic
+    # scanners (Sonar S2068) don't misread the assignment.
+    no_tier_reason = "no passphrase in any tier"
     if recovery.resolve_error is not None:
         return f"a configured tier is unreadable — {recovery.resolve_error}", None, None
     if recovery.source is None:
-        return no_passphrase, None, None
+        return no_tier_reason, None, None
     try:
         db = cfg.open_credential_db(prompt_on_tty=False)
     except WrongPassphraseError:
@@ -608,8 +610,11 @@ def _classify_vault_access(
         )
     except NoPassphraseError:
         # Tier vanished between the resolve and the open — plain lock.
-        return no_passphrase, None, None
-    except (Exception, SystemExit) as exc:  # noqa: BLE001 — non-passphrase failure, surfaced verbatim
+        return no_tier_reason, None, None
+    # ``Exception`` only: with ``prompt_on_tty=False`` no prompt path can
+    # raise ``SystemExit`` here, and catching it would stringify an
+    # explicit exit from a lower layer into a status line.
+    except Exception as exc:  # noqa: BLE001 — non-passphrase failure, surfaced verbatim
         return None, None, str(exc)
     try:
         providers = sorted(

@@ -504,6 +504,10 @@ class TestLoadPassphraseFromCommand:
         # /bin/sh -c 'printf "a b"' — one quoted arg through shell, no trailing newline
         assert load_passphrase_from_command('/bin/sh -c "printf abc"') == "abc"
 
+    def test_blank_command_returns_none(self) -> None:
+        """A whitespace-only command shlex-splits to nothing — fall through, don't exec."""
+        assert load_passphrase_from_command("   ") is None
+
     def test_non_zero_exit_returns_none(self, caplog: pytest.LogCaptureFixture) -> None:
         """A failed helper logs the exit code + stderr at WARNING and returns ``None``."""
         with caplog.at_level("WARNING", logger="terok_sandbox.vault.store.encryption"):
@@ -1651,6 +1655,31 @@ class TestVaultUnlockLock:
         with pytest.raises(SystemExit, match="does not open"):
             _handle_vault_unlock(cfg=cfg)
         assert not cfg.vault_passphrase_file.exists()
+
+    def test_unlock_surfaces_plaintext_db_as_clean_exit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A legacy plaintext DB surfaces its migration message as a clean CLI exit.
+
+        Defensive seam: ``provision_session_passphrase`` gates on
+        ``is_plaintext_sqlite`` before validating, but ``CredentialDB``
+        runs its own plaintext probe — if the two ever disagree the
+        handler must still exit with the actionable message, not a
+        traceback.
+        """
+        from unittest.mock import MagicMock
+
+        from terok_sandbox.commands import _handle_vault_unlock
+        from terok_sandbox.vault.store.db import PlaintextDBFoundError
+
+        cfg = _make_cfg(tmp_path)
+        _scripted_tty_prompt(monkeypatch, "whatever")
+        monkeypatch.setattr(
+            "terok_sandbox.commands.vault.provision_session_passphrase",
+            MagicMock(side_effect=PlaintextDBFoundError("legacy plaintext sqlite DB — migrate")),
+        )
+        with pytest.raises(SystemExit, match="legacy plaintext"):
+            _handle_vault_unlock(cfg=cfg)
 
     def test_unlock_reports_validation(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]

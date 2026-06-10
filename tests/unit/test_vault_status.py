@@ -167,6 +167,26 @@ class TestClassifyVaultAccess:
         assert reason is not None and "via keyring does not open the DB" in reason
         assert providers is None and db_error is None
 
+    def test_open_no_passphrase_race_is_plain_lock(self) -> None:
+        """A tier that vanishes between the resolve and the open is a plain lock."""
+        from terok_sandbox.commands.vault import _classify_vault_access
+        from terok_sandbox.vault.store.encryption import NoPassphraseError
+
+        cfg = MagicMock()
+        cfg.open_credential_db.side_effect = NoPassphraseError("tier gone")
+        reason, providers, db_error = _classify_vault_access(cfg, _recovery(source="config"))
+        assert reason == "no passphrase in any tier"
+        assert providers is None and db_error is None
+
+    def test_system_exit_propagates(self) -> None:
+        """An explicit exit from a lower layer must not be stringified into status."""
+        from terok_sandbox.commands.vault import _classify_vault_access
+
+        cfg = MagicMock()
+        cfg.open_credential_db.side_effect = SystemExit(3)
+        with pytest.raises(SystemExit):
+            _classify_vault_access(cfg, _recovery(source="config"))
+
     def test_open_ok_lists_providers(self) -> None:
         from terok_sandbox.commands.vault import _classify_vault_access
 
@@ -277,6 +297,17 @@ class TestHandleVaultStatusText:
         out = capsys.readouterr().out
         assert "LOCKED — a configured tier is unreadable" in out
         assert "could not be unsealed" in out
+
+    def test_db_error_header_renders_error_not_locked(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A non-passphrase DB failure renders as ERROR with the message, not LOCKED."""
+        cfg = _status_cfg(db_error=RuntimeError("schema drift"))
+        _run_status(cfg, source="config")
+        out = capsys.readouterr().out
+        assert "Vault: ERROR — schema drift" in out
+        assert "LOCKED" not in out
+        assert "Credentials: DB unreadable — see the error above" in out
 
     def test_default_cfg_branch(self, capsys: pytest.CaptureFixture[str]) -> None:
         """``cfg=None`` constructs a default ``SandboxConfig`` rather than crashing."""

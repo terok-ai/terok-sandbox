@@ -235,6 +235,31 @@ class TestRecoveryStatus:
         # "a configured tier is unreadable" instead of a bare "locked".
         assert status.resolve_error == "decryption failed under test"
 
+    def test_resolver_no_passphrase_exception_is_plain_lock(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``NoPassphraseError`` from the resolver → plain lock, no resolve_error.
+
+        The resolver normally *returns* ``(None, None)`` rather than
+        raising, so this branch is defensive — but a raise must collapse
+        to the same "locked, nothing broken" shape, not be confused with
+        a fail-closed broken tier.
+        """
+        from terok_sandbox.config import SandboxConfig as _SandboxConfig
+        from terok_sandbox.vault.store.encryption import NoPassphraseError
+
+        cfg = _cfg(tmp_path)
+
+        def _raise(self, **_kw: object) -> object:
+            raise NoPassphraseError("nothing resolvable under test")
+
+        monkeypatch.setattr(_SandboxConfig, "resolve_passphrase_with_source", _raise)
+        status = RecoveryStatus.load(cfg)
+        assert status.source is None
+        assert status.resolve_error is None
+
     def test_clean_resolution_has_no_resolve_error(self, tmp_path: Path) -> None:
         """A chain that resolves (or yields nothing) reports resolve_error=None."""
         assert RecoveryStatus.load(_cfg(tmp_path)).resolve_error is None
