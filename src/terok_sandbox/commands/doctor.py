@@ -27,14 +27,15 @@ def _handle_doctor(*, cfg: SandboxConfig | None = None) -> None:
     run from inside the container.
     """
     from ..doctor import make_recovery_acknowledged_check, sandbox_doctor_checks
+    from ..launch import make_stray_sidecar_check
 
     if cfg is None:
         cfg = SandboxConfig()
-    # The recovery-acknowledged check is a host-level concern (one
-    # marker per install, not per task), so it lives outside
-    # ``sandbox_doctor_checks`` to avoid duplicating it per container
-    # when terok's sickbay loops over tasks.  The standalone CLI is the
-    # natural caller that re-appends it.
+    # The recovery-acknowledged and stray-sidecar checks are host-level
+    # concerns (one marker / one sweep per install, not per task), so
+    # they live outside ``sandbox_doctor_checks`` to avoid duplicating
+    # them per container when terok's sickbay loops over tasks.  The
+    # standalone CLI is the natural caller that re-appends them.
     checks = [
         *sandbox_doctor_checks(
             token_broker_port=None,  # per-container — see docstring
@@ -42,6 +43,7 @@ def _handle_doctor(*, cfg: SandboxConfig | None = None) -> None:
             desired_shield_state=None,  # standalone mode — no task context
         ),
         make_recovery_acknowledged_check(),
+        make_stray_sidecar_check(cfg),
     ]
     worst = "ok"
     markers = {"ok": "ok", "warn": "WARN", "error": "ERROR"}

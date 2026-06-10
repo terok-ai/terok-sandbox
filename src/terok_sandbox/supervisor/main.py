@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
     from typing import Any
 
 _logger = logging.getLogger("terok-supervisor")
@@ -57,11 +58,15 @@ _PODMAN_WAIT_CANCEL_GRACE_S = 2.0
 class SidecarConfig:
     """Per-container config the supervisor reads from the sidecar JSON.
 
-    Written by ``terok-sandbox prepare`` (and equivalents in
-    terok-executor / terok) at container-creation time.  Keyed by
-    container name initially; promoted to a container-ID-keyed
-    filename on first hook fire (see
-    `terok_sandbox.resources.hooks._supervisor_state.load_sidecar`).
+    Written once at container-creation time by
+    [`write_sidecar`][terok_sandbox.launch.write_sidecar] (terok-executor
+    routes through the same writer) and read back by the OCI hook on
+    every ``podman start``.  Keyed by container name
+    (``<state>/sidecar/<name>.json``); the ``terok.sandbox.sidecar``
+    annotation pins the absolute path.  The file persists across
+    stop/start cycles — its ports and tokens must keep matching the
+    container's immutable env — and is removed at real teardown by
+    [`remove_container_state`][terok_sandbox.launch.remove_container_state].
     """
 
     container_name: str
@@ -306,8 +311,10 @@ async def run_supervisor(container_id: str, sidecar_path: Path) -> int:
     1. Load the sidecar JSON from *sidecar_path*; bail with exit code
        2 on parse / missing.
     2. Bring the `_Services`
-       bundle up in dependency order; a startup failure unwinds anything
-       already started and returns exit code 3.
+       bundle up in dependency order; services degrade independently
+       (a single startup failure is logged and skipped), but when *no*
+       service starts the bundle unwinds and exit code 3 hands the
+       wrapper its retry.
     3. Install SIGTERM / SIGINT handlers that race with ``podman wait``
        so a host-side ``terok-sandbox supervisor`` invocation can be
        stopped cleanly with Ctrl-C.
@@ -348,10 +355,11 @@ async def run_supervisor(container_id: str, sidecar_path: Path) -> int:
     _install_signal_handlers(stop_event)
 
     try:
-        try:
-            await services.start(cfg, paths)
-        except Exception:
-            _logger.exception("supervisor failed to start services for %s", container_id)
+        if await services.start(cfg, paths) == 0:
+            _logger.error(
+                "supervisor: no service could start for %s — exiting so the wrapper retries",
+                container_id,
+            )
             await services.stop()
             return 3
 
@@ -392,7 +400,10 @@ class _Services:
     gate, the SSH signer, and the desktop event subscriber (with the
     D-Bus notifier it drives).
     `_Services.start`
-    brings them up in dependency order; ``stop`` unwinds in reverse.
+    brings them up in dependency order, degrading per service: every
+    service here is convenience, not a security boundary (shield's
+    fail-closed egress hook runs independently), so one failed bring-up
+    must not take the rest down.  ``stop`` unwinds in reverse.
 
     Order matters at teardown — verdict and hub talk to each other, so
     the hub goes down first, then verdict.  The vault stops last among
@@ -409,33 +420,67 @@ class _Services:
         self.subscriber: Any | None = None
         self.notifier: Any | None = None
 
-    async def start(self, cfg: SidecarConfig, paths: SupervisorPaths) -> None:
-        """Bring all services online in dependency order."""
-        from terok_sandbox._util._selinux import socket_selinux_context
-        from terok_sandbox.gate.server import GateServer
-        from terok_sandbox.integrations.clearance import (
-            NOTIFY_BLOCKED,
-            NOTIFY_VERDICT,
-            ClearanceHub,
-            EventSubscriber,
-            VerdictClient,
-            VerdictServer,
-            create_notifier,
-        )
-        from terok_sandbox.vault.daemon.token_broker import TcpBind, UnixBind, VaultProxy
-        from terok_sandbox.vault.ssh.signer import start_ssh_signer
+    async def start(self, cfg: SidecarConfig, paths: SupervisorPaths) -> int:
+        """Bring services online in dependency order, degrading per service.
 
-        # Verdict first — the hub holds a client to it.  Both binds get
-        # the ``terok_socket_t`` SELinux type via ``setsockcreatecon`` so
-        # confined containers (``container_t``) can ``connectto`` them
-        # once the host operator has installed the bundled policy
-        # (``sudo bash $(terok-sandbox setup --print-selinux-script)``).
-        # On non-SELinux hosts the helper is a no-op.
+        Each service's startup failure is logged with its traceback and
+        the bring-up continues — the typical restart-time case is a TCP
+        port stolen while the container sat stopped, which must cost
+        exactly the one service that lost its port.  A service whose
+        dependency died fails its own startup the same way (hub →
+        verdict, subscriber → hub).  Imports happen per service for the
+        same reason: a broken module degrades that service, not the
+        bundle.
+
+        Returns the number of services that started; the caller treats
+        ``0`` as "supervisor effectively absent".
+        """
+        starters: list[tuple[str, Callable[[], Awaitable[None]]]] = [
+            ("verdict server", lambda: self._start_verdict(paths)),
+            ("clearance hub", lambda: self._start_hub(paths)),
+        ]
+        # Git gate — only when the launch path wired it (gate_base_path +
+        # gate_token both present); an unwired gate is not a failure.
+        if cfg.gate_base_path and cfg.gate_token:
+            starters.append(("git gate", lambda: self._start_gate(cfg, paths)))
+        starters += [
+            ("vault proxy", lambda: self._start_vault(cfg, paths)),
+            ("ssh signer", lambda: self._start_ssh_signer(cfg, paths)),
+            ("event notifier", lambda: self._start_subscriber(paths)),
+        ]
+
+        started = 0
+        for label, bring_up in starters:
+            try:
+                await bring_up()
+                started += 1
+            except Exception:
+                _logger.exception("%s failed to start — continuing without it", label)
+        return started
+
+    async def _start_verdict(self, paths: SupervisorPaths) -> None:
+        """Varlink verdict server — execs ``terok-shield allow|deny``.
+
+        First up: the hub holds a client to it.  The bind gets the
+        ``terok_socket_t`` SELinux type via ``setsockcreatecon`` so
+        confined containers (``container_t``) can ``connectto`` it once
+        the host operator has installed the bundled policy
+        (``sudo bash $(terok-sandbox setup --print-selinux-script)``).
+        On non-SELinux hosts the helper is a no-op.
+        """
+        from terok_sandbox._util._selinux import socket_selinux_context
+        from terok_sandbox.integrations.clearance import VerdictServer
+
         self.verdict = VerdictServer(
             socket_path=paths.verdict_socket,
             socket_context=socket_selinux_context,
         )
         await self.verdict.start()
+
+    async def _start_hub(self, paths: SupervisorPaths) -> None:
+        """Clearance hub — same SELinux socket labelling as the verdict bind."""
+        from terok_sandbox._util._selinux import socket_selinux_context
+        from terok_sandbox.integrations.clearance import ClearanceHub, VerdictClient
 
         self.hub = ClearanceHub(
             clearance_socket=paths.clearance_socket,
@@ -445,34 +490,42 @@ class _Services:
         )
         await self.hub.start()
 
-        # Git gate — started before the vault because it needs no DB and is
-        # the first service the container touches (the entrypoint clones
-        # through it immediately), so binding it early keeps it off the
-        # vault's slower SQLCipher-open path.  Only when the launch path
-        # wired it (gate_base_path + gate_token both present): serves
-        # ``<gate_base_path>/<project_id>.git`` gated on the single minted
-        # token; scope is the project the gate serves.  Socket mode binds a
-        # per-container socket inside ``container_runtime_dir``; TCP mode
-        # binds a per-container loopback port (raising if none was allocated).
-        if cfg.gate_base_path and cfg.gate_token:
-            if cfg.ipc_mode == "tcp":
-                if not cfg.gate_port:
-                    raise RuntimeError(f"sidecar ipc_mode='tcp' but gate_port is {cfg.gate_port!r}")
-                self.gate = GateServer(
-                    mirror_root=cfg.gate_base_path,
-                    token=cfg.gate_token,
-                    scope=cfg.project_id,
-                    host="127.0.0.1",
-                    port=cfg.gate_port,
-                )
-            else:
-                self.gate = GateServer(
-                    mirror_root=cfg.gate_base_path,
-                    token=cfg.gate_token,
-                    scope=cfg.project_id,
-                    socket_path=paths.gate_socket,
-                )
-            await self.gate.start()
+    async def _start_gate(self, cfg: SidecarConfig, paths: SupervisorPaths) -> None:
+        """Git gate — before the vault because it needs no DB and is the
+        first service the container touches (the entrypoint clones
+        through it immediately), so binding it early keeps it off the
+        vault's slower SQLCipher-open path.  Serves
+        ``<gate_base_path>/<project_id>.git`` gated on the single minted
+        token; scope is the project the gate serves.  Socket mode binds a
+        per-container socket inside ``container_runtime_dir``; TCP mode
+        binds a per-container loopback port (raising if none was allocated).
+        """
+        from terok_sandbox.gate.server import GateServer
+
+        if not cfg.gate_base_path or not cfg.gate_token:
+            raise RuntimeError("gate starter invoked without gate wiring in the sidecar")
+        if cfg.ipc_mode == "tcp":
+            if not cfg.gate_port:
+                raise RuntimeError(f"sidecar ipc_mode='tcp' but gate_port is {cfg.gate_port!r}")
+            self.gate = GateServer(
+                mirror_root=cfg.gate_base_path,
+                token=cfg.gate_token,
+                scope=cfg.project_id,
+                host="127.0.0.1",
+                port=cfg.gate_port,
+            )
+        else:
+            self.gate = GateServer(
+                mirror_root=cfg.gate_base_path,
+                token=cfg.gate_token,
+                scope=cfg.project_id,
+                socket_path=paths.gate_socket,
+            )
+        await self.gate.start()
+
+    async def _start_vault(self, cfg: SidecarConfig, paths: SupervisorPaths) -> None:
+        """Vault HTTP/WS proxy, transport picked from the sidecar's ipc_mode."""
+        from terok_sandbox.vault.daemon.token_broker import TcpBind, UnixBind, VaultProxy
 
         bind: UnixBind | TcpBind
         if cfg.ipc_mode == "tcp":
@@ -488,6 +541,10 @@ class _Services:
             runtime_dir=cfg.runtime_dir,
         )
         await self.vault.start()
+
+    async def _start_ssh_signer(self, cfg: SidecarConfig, paths: SupervisorPaths) -> None:
+        """Token-gated SSH-agent, same transport split as the vault proxy."""
+        from terok_sandbox.vault.ssh.signer import start_ssh_signer
 
         if cfg.ipc_mode == "tcp":
             if not cfg.ssh_signer_port:
@@ -505,7 +562,19 @@ class _Services:
                 socket_path=str(paths.ssh_signer_socket),
             )
 
-        # No-fail by contract — degrades to NullNotifier when no bus.
+    async def _start_subscriber(self, paths: SupervisorPaths) -> None:
+        """Desktop notifier + the event subscriber that drives it.
+
+        ``create_notifier`` is no-fail by contract — it degrades to a
+        NullNotifier when no session bus is reachable.
+        """
+        from terok_sandbox.integrations.clearance import (
+            NOTIFY_BLOCKED,
+            NOTIFY_VERDICT,
+            EventSubscriber,
+            create_notifier,
+        )
+
         self.notifier = await create_notifier("terok-supervisor")
         self.subscriber = EventSubscriber(
             self.notifier,

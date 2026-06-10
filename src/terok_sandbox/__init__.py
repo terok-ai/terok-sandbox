@@ -75,7 +75,13 @@ from .integrations.shield import (
     check_environment,
     resolve_container_state_dir,
 )
-from .launch import PerContainerResources, allocate_per_container_resources
+from .launch import (
+    PerContainerResources,
+    allocate_per_container_resources,
+    make_stray_sidecar_check,
+    remove_container_state,
+    write_sidecar,
+)
 from .port_registry import claim_port, release_port
 from .runtime import (
     DEFAULT_GUEST_SSHD_PORT,
@@ -136,6 +142,8 @@ __all__ = [
     "PerContainerResources",
     "allocate_per_container_resources",
     "mint_gate_token",
+    "remove_container_state",
+    "write_sidecar",
     # Runtime + facade
     "ContainerRuntime",
     "DEFAULT_GUEST_SSHD_PORT",
@@ -192,6 +200,7 @@ __all__ = [
     # Doctor (container health checks)
     "CheckVerdict",
     "DoctorCheck",
+    "make_stray_sidecar_check",
     "sandbox_doctor_checks",
     # SELinux (one-call probe + install plumbing; the granular probes
     # stay in ``_util._selinux``).

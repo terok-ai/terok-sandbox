@@ -52,10 +52,18 @@ Lifecycle, end-to-end:
    `VaultProxy` and the SSH signer (in `socket` or `tcp` mode per the
    sidecar), and a desktop notifier subscriber; awaits
    `podman wait <id>`; tears
-   them down in reverse order on container exit.
+   them down in reverse order on container exit.  Services degrade
+   independently — a single failed bring-up (say, a TCP port stolen
+   while the container sat stopped) is logged and skipped, never
+   fatal to the rest; the container itself starts regardless.
 5. The OCI poststop hook SIGTERMs the wrapper PID (recorded under
    `$XDG_STATE_HOME/terok/pids/supervisor-<id>.pid`) and unlinks the
-   PID file.
+   PID file.  The sidecar stays: OCI hooks fire per run-cycle, so a
+   later `podman start` re-runs step 3 with the same wiring the
+   container's immutable env was created with — restarts come back
+   supervised.  The sidecar is removed at real teardown
+   (`terok-sandbox cleanup`, terok's task delete) or by the doctor's
+   stray sweep once the container is gone.
 
 Operators don't usually invoke `terok-sandbox supervisor` directly —
 it's hidden from the main help and spawned by the hook chain — but

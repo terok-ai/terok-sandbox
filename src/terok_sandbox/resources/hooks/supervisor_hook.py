@@ -23,6 +23,13 @@ session bus, failed Popen all log and return normally so the
 container still starts.  ``terok-shield``'s nft hook is fail-closed
 independently — egress protection survives a broken supervisor.
 
+OCI hooks fire per podman run-cycle, not per container lifetime:
+createRuntime re-fires on every ``podman start`` and poststop on
+every stop.  The poststop reap therefore leaves the sidecar on disk —
+it is the only wiring that matches the container's immutable env on
+the next start, and removing it here is what used to make restarted
+containers come up unsupervised.
+
 Stdlib-only by design, except for the sibling-module import of
 ``_supervisor_state`` shipped to the same hooks directory at install
 time.
@@ -144,7 +151,7 @@ def _dispatch(stage: str, container_id: str, sidecar_path: Path, host_uid: int) 
     """Dispatch by stage — spawn at createRuntime, reap at poststop."""
     root = sidecar_path.parent.parent  # <root>/sidecar/<name>.json → <root>
     if stage == "poststop":
-        _reap_supervisor(container_id, root, sidecar_path)
+        _reap_supervisor(container_id, root)
         return
     if stage != "createRuntime":
         _supervisor_state.log(f"terok-sandbox supervisor hook: unknown stage {stage!r}")
@@ -257,33 +264,37 @@ def _supervisor_alive(pid_file: Path, wrapper_path: Path, container_id: str) -> 
     return _is_our_wrapper(pid, str(wrapper_path), container_id)
 
 
-def _reap_supervisor(container_id: str, root: Path, sidecar_path: Path) -> None:
-    """SIGTERM the wrapper at poststop, SIGKILL if it lingers past 2 s."""
+def _reap_supervisor(container_id: str, root: Path) -> None:
+    """SIGTERM the wrapper at poststop, SIGKILL if it lingers past 2 s.
+
+    Reaps only the process tree and its PID file.  The sidecar JSON
+    deliberately survives the stop: the container's env (TCP ports,
+    gate token, phantom credential tokens) is immutable after ``podman
+    run``, so the preserved sidecar is the only wiring the supervisor
+    may come back with when createRuntime re-fires on the next
+    ``podman start``.  Sidecar removal belongs to real teardown —
+    [`remove_container_state`][terok_sandbox.launch.remove_container_state]
+    at cleanup / task delete, or the doctor's stray sweep.
+    """
     pid_file = root / "pids" / f"supervisor-{container_id}.pid"
     wrapper_path = Path(__file__).resolve().parent.parent / "supervisor_wrapper.py"
-    if not pid_file.exists():
-        sidecar_path.unlink(missing_ok=True)
-        return
     try:
         pid = int(pid_file.read_text().strip())
     except (OSError, ValueError):
         pid_file.unlink(missing_ok=True)
-        sidecar_path.unlink(missing_ok=True)
         return
     if not _is_our_wrapper(pid, str(wrapper_path), container_id):
         pid_file.unlink(missing_ok=True)
-        sidecar_path.unlink(missing_ok=True)
         return
     try:
         os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
         pid_file.unlink(missing_ok=True)
-        sidecar_path.unlink(missing_ok=True)
         return
     except OSError as exc:
         # SIGTERM failed for a reason other than the process being gone
         # (e.g. EPERM). The wrapper may still be live, so keep the pidfile
-        # and sidecar — they're the only handle a later reap has to retry.
+        # — it's the only handle a later reap has to retry.
         _supervisor_state.log(f"terok-sandbox supervisor hook: SIGTERM failed: {exc}")
         return
 
@@ -295,7 +306,6 @@ def _reap_supervisor(container_id: str, root: Path, sidecar_path: Path) -> None:
         with contextlib.suppress(ProcessLookupError, OSError):
             os.kill(pid, signal.SIGKILL)
     pid_file.unlink(missing_ok=True)
-    sidecar_path.unlink(missing_ok=True)
 
 
 def _is_our_wrapper(pid: int, wrapper_path: str, container_id: str) -> bool:
