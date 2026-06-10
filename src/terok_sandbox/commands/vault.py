@@ -614,13 +614,13 @@ def _classify_vault_access(
     # ``Exception`` only: with ``prompt_on_tty=False`` no prompt path can
     # raise ``SystemExit`` here, and catching it would stringify an
     # explicit exit from a lower layer into a status line.
-    except Exception as exc:  # noqa: BLE001 — non-passphrase failure, surfaced verbatim
+    except Exception as exc:  # noqa: BLE001 - non-passphrase failure, surfaced verbatim
         return None, None, str(exc)
     try:
         providers = sorted(
             {provider for cs in db.list_credential_sets() for provider in db.list_credentials(cs)}
         )
-    except Exception as exc:  # noqa: BLE001 — a mid-read failure is a DB fault, not a lock
+    except Exception as exc:  # noqa: BLE001 - a mid-read failure is a DB fault, not a lock
         return None, None, str(exc)
     finally:
         db.close()
