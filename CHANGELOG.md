@@ -1,4 +1,10 @@
 # Changelog
+## v0.3.1 — Start Again
+
+hotfix: rebuild the per-container runtime dir in Sandbox.start, https://github.com/terok-ai/terok-sandbox/pull/396
+
+**Full Changelog**: https://github.com/terok-ai/terok-sandbox/compare/v0.3.0...v0.3.1
+
 ## v0.3.0 — Locks and Hooks
 
 Hotfix for vault passphrase error modes [#390](https://github.com/terok-ai/terok-sandbox/pull/390) and supervisor restart [#389](https://github.com/terok-ai/terok-sandbox/pull/389)
