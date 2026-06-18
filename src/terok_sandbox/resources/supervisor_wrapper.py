@@ -16,6 +16,7 @@ is baked into ``_SANDBOX_BIN_ARGV`` at install time by
 [`install_supervisor_hooks`][terok_sandbox.supervisor.install.install_supervisor_hooks].
 """
 
+import re
 import subprocess  # nosec B404
 import sys
 import time
@@ -31,6 +32,14 @@ _UNRENDERED_SENTINEL = "__" + "TEROK_SANDBOX_BIN" + "__"  # not a replace target
 
 _MAX_ATTEMPTS = 5
 _BACKOFF_CAP_SECONDS = 60
+
+#: A podman container id (or, when an operator debugs by hand, a name):
+#: one leading alphanumeric then the podman id/name charset.  The anchored
+#: allow-list is what lets ``main()`` hand ``container_id`` to the
+#: ``supervisor`` verb safely — a value starting with ``-`` would otherwise
+#: be read as an option flag (CWE-88 argument injection), and ``--`` can't
+#: rescue it because the CLI reserves that separator for ``run`` alone.
+_SAFE_CONTAINER_ID = re.compile(r"\A[0-9A-Za-z][0-9A-Za-z_.-]*\Z")
 
 
 def main() -> int:
@@ -49,12 +58,32 @@ def main() -> int:
         return 2
     container_id, sidecar_path = sys.argv[1], sys.argv[2]
 
+    # Validate both positionals before they reach the CLI.  The OCI hook
+    # only ever passes podman's hex id and an absolute, pre-validated
+    # sidecar path, but the wrapper trusts whatever argv it is handed — so
+    # gate it here: an id or path starting with ``-`` would be parsed as an
+    # option by the ``supervisor`` verb's argparse rather than a positional
+    # (argument injection), and a relative sidecar path would resolve
+    # against the hook's cwd instead of the intended file.
+    if not _SAFE_CONTAINER_ID.match(container_id):
+        print(
+            f"supervisor_wrapper: refusing unsafe container_id: {container_id!r}",
+            file=sys.stderr,
+        )
+        return 2
+    if not sidecar_path.startswith("/"):
+        print(
+            f"supervisor_wrapper: sidecar_path must be absolute: {sidecar_path!r}",
+            file=sys.stderr,
+        )
+        return 2
+
     argv = [*_SANDBOX_BIN_ARGV, "supervisor", container_id, sidecar_path]
     attempts = 0
     rc = 1
     while attempts < _MAX_ATTEMPTS:
         try:
-            rc = subprocess.call(argv)  # noqa: S603  # nosec B603 — argv is a fixed list
+            rc = subprocess.call(argv)  # noqa: S603  # nosec B603 — fixed verb list, positionals validated above
         except FileNotFoundError:
             # Baked entry point vanished after install — fail controlled
             # rather than letting the wrapper crash mid-restart-loop.
