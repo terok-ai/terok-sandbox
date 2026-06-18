@@ -1600,7 +1600,8 @@ class TestProvisionSessionPassphrase:
 
         cfg = _make_cfg(tmp_path)
         self._make_encrypted_db(cfg)
-        assert provision_session_passphrase(cfg, _PASSPHRASE) is True
+        result = provision_session_passphrase(cfg, _PASSPHRASE)
+        assert result.written is True and result.validated is True
         assert cfg.vault_passphrase_file.read_text().rstrip("\n") == _PASSPHRASE
 
     def test_rejects_wrong_passphrase_and_writes_nothing(self, tmp_path: Path) -> None:
@@ -1620,7 +1621,8 @@ class TestProvisionSessionPassphrase:
         from terok_sandbox.commands import provision_session_passphrase
 
         cfg = _make_cfg(tmp_path)
-        assert provision_session_passphrase(cfg, "brand-new-key") is False
+        result = provision_session_passphrase(cfg, "brand-new-key")
+        assert result.written is True and result.validated is False
         assert cfg.vault_passphrase_file.exists()
         # Validation must not create the DB as a side effect.
         assert not cfg.db_path.exists()
@@ -1635,8 +1637,31 @@ class TestProvisionSessionPassphrase:
         conn.execute("CREATE TABLE t (x INTEGER)")
         conn.commit()
         conn.close()
-        assert provision_session_passphrase(cfg, "future-key") is False
+        result = provision_session_passphrase(cfg, "future-key")
+        assert result.written is True and result.validated is False
         assert cfg.vault_passphrase_file.exists()
+
+    def test_refuses_to_shadow_a_durable_tier(self, tmp_path: Path) -> None:
+        """A durable tier already resolving → refuse the write, name the tier, no validation."""
+        from terok_sandbox.commands import provision_session_passphrase
+
+        # ``config`` plaintext tier is durable and present.
+        cfg = _make_cfg(tmp_path, passphrase="durable-key")
+        self._make_encrypted_db(cfg)  # exists, but must not be touched
+        result = provision_session_passphrase(cfg, "anything")
+        assert result.written is False
+        assert result.shadowed_durable == "config"
+        assert not cfg.vault_passphrase_file.exists()
+
+    def test_force_overrides_the_shadow_guard(self, tmp_path: Path) -> None:
+        """``force=True`` writes even over a durable tier (re-key / deliberate override)."""
+        from terok_sandbox.commands import provision_session_passphrase
+
+        cfg = _make_cfg(tmp_path, passphrase=_PASSPHRASE)
+        self._make_encrypted_db(cfg)  # keyed _PASSPHRASE, so validation passes
+        result = provision_session_passphrase(cfg, _PASSPHRASE, force=True)
+        assert result.written is True
+        assert cfg.vault_passphrase_file.read_text().rstrip("\n") == _PASSPHRASE
 
 
 class TestVaultUnlockLock:
