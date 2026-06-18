@@ -618,10 +618,23 @@ class Sandbox:
         return spec.container_name
 
     def start(self, container_name: str, *, hooks: LifecycleHooks | None = None) -> None:
-        """Start a previously created container via the runtime.
+        """Start a previously created container, re-establishing its scaffolding.
+
+        Ensures the per-container runtime directory exists first (see
+        [`ensure_container_runtime_dir`][terok_sandbox.config.SandboxConfig.ensure_container_runtime_dir]):
+        it is the bind-mount source for the in-container ``/run/terok``
+        socket dir, it lives on the reboot-wiped ``$XDG_RUNTIME_DIR``
+        tmpfs, and the supervisor removes it on every stop — so a restart
+        (most visibly after a host reboot) finds it gone and ``podman
+        start`` would fail on the missing mount source.  Idempotent, so
+        the ``create`` → ``copy_to`` → ``start`` launch path (where the
+        dir already exists) is unaffected.  This is the single primitive
+        orchestrators call to (re)start a container: the host-side
+        precondition is sandbox's concern, not theirs.
 
         Fires *hooks.post_start* after a successful start.
         """
+        self._cfg.ensure_container_runtime_dir(container_name)
         self._runtime.container(container_name).start()
         if hooks and hooks.post_start:
             hooks.post_start()

@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
+import shutil
 import unittest.mock
+from pathlib import Path
 
 import pytest
 
@@ -167,3 +169,78 @@ class TestExperimentalEnabled:
         with unittest.mock.patch("terok_sandbox.config.experimental_enabled", return_value=True):
             cfg = SandboxConfig(experimental=False)
         assert cfg.experimental is False
+
+
+class TestContainerRuntimeDir:
+    """Per-container runtime dir derivation + idempotent (re)creation.
+
+    The dir is the ``/run/terok`` bind-mount source; it must survive
+    being wiped by a reboot and the supervisor's stop-time rmtree, so the
+    ensure path rebuilds the whole chain on every (re)start.
+    """
+
+    def test_derives_path_under_runtime_dir(self, tmp_path: Path) -> None:
+        """``container_runtime_dir`` is ``runtime_dir/run/<name>`` (pure, no I/O)."""
+        cfg = SandboxConfig(runtime_dir=tmp_path / "rt")
+        path = cfg.container_runtime_dir("myc")
+        assert path == tmp_path / "rt" / "run" / "myc"
+        assert not path.exists()
+
+    def test_ensure_creates_mode_0700(self, tmp_path: Path) -> None:
+        """``ensure_container_runtime_dir`` creates the dir at mode 0700."""
+        cfg = SandboxConfig(runtime_dir=tmp_path / "rt")
+        path = cfg.ensure_container_runtime_dir("myc")
+        assert path.is_dir()
+        assert (path.stat().st_mode & 0o777) == 0o700
+
+    def test_ensure_rebuilds_after_reboot_wipe(self, tmp_path: Path) -> None:
+        """After the whole runtime tree is gone (reboot), ensure rebuilds it.
+
+        ``mkdir(parents=True)`` is what makes the post-reboot case work —
+        the OS wipes ``$XDG_RUNTIME_DIR`` to nothing, so the leaf and every
+        ancestor under ``runtime_dir`` must come back.
+        """
+        cfg = SandboxConfig(runtime_dir=tmp_path / "rt")
+        cfg.ensure_container_runtime_dir("myc")
+        shutil.rmtree(tmp_path / "rt")
+        assert not cfg.container_runtime_dir("myc").exists()
+
+        path = cfg.ensure_container_runtime_dir("myc")
+        assert path.is_dir()
+
+    def test_ensure_is_idempotent(self, tmp_path: Path) -> None:
+        """A second ensure on an existing dir neither raises nor loosens perms."""
+        cfg = SandboxConfig(runtime_dir=tmp_path / "rt")
+        cfg.ensure_container_runtime_dir("myc")
+        path = cfg.ensure_container_runtime_dir("myc")
+        assert path.is_dir()
+        assert (path.stat().st_mode & 0o777) == 0o700
+
+    @pytest.mark.parametrize(
+        "bad",
+        ["", ".", "..", "/etc", "../escape", "a/b", "nested/../..", "back\\slash"],
+        ids=[
+            "empty",
+            "dot",
+            "dotdot",
+            "absolute",
+            "traversal",
+            "separator",
+            "nested-traversal",
+            "backslash",
+        ],
+    )
+    def test_rejects_unsafe_container_names(self, tmp_path: Path, bad: str) -> None:
+        """A name that is not a single path component is refused before any I/O.
+
+        ``Path("…/run") / "/etc"`` would swallow the whole prefix and
+        ``…/run / ".."`` would climb out, so an unvalidated name could
+        redirect the mkdir/chmod/rmtree the callers perform onto an
+        unintended host path.  Both the pure derivation and the ``ensure``
+        wrapper (which funnels through it) must reject it.
+        """
+        cfg = SandboxConfig(runtime_dir=tmp_path / "rt")
+        with pytest.raises(ValueError, match="unsafe container name"):
+            cfg.container_runtime_dir(bad)
+        with pytest.raises(ValueError, match="unsafe container name"):
+            cfg.ensure_container_runtime_dir(bad)

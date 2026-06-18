@@ -433,6 +433,59 @@ class SandboxConfig:
         """
         return self.runtime_dir / "vault.passphrase"
 
+    def container_runtime_dir(self, container_name: str) -> Path:
+        """Host-side per-container runtime dir, bind-mounted at ``/run/terok``.
+
+        The single source of the ``runtime_dir/run/<name>`` convention:
+        the launch path bind-mounts this directory into the container so
+        the supervisor's ``vault.sock`` / ``ssh-agent.sock`` /
+        ``gate-server.sock`` (socket mode) surface at the well-known
+        ``/run/terok/`` paths inside it.  A method, not a property,
+        because it is keyed on the container name.
+
+        *container_name* must be a single safe path component — the
+        returned path is ``mkdir``'d, ``chmod``'d, and ``rmtree``'d by
+        callers ([`ensure_container_runtime_dir`][terok_sandbox.config.SandboxConfig.ensure_container_runtime_dir],
+        [`remove_container_state`][terok_sandbox.launch.remove_container_state]),
+        so a name carrying a separator or ``..`` (or an absolute path,
+        which ``Path.__truediv__`` would let swallow the whole prefix)
+        could redirect those mutations outside the runtime dir.  This is
+        the same guard [`write_sidecar`][terok_sandbox.launch.write_sidecar]
+        and the supervisor's ``load_sidecar`` apply at their entry points.
+
+        Raises:
+            ValueError: If *container_name* is empty or not a single path
+                component (contains ``/`` or ``\\``, or is ``.``/``..``).
+        """
+        if (
+            not container_name
+            or container_name in (".", "..")
+            or "/" in container_name
+            or "\\" in container_name
+        ):
+            raise ValueError(
+                f"unsafe container name (not a single path component): {container_name!r}"
+            )
+        return self.runtime_dir / "run" / container_name
+
+    def ensure_container_runtime_dir(self, container_name: str) -> Path:
+        """(Re)create [`container_runtime_dir`][terok_sandbox.config.SandboxConfig.container_runtime_dir] (mode 0700) and return it.
+
+        Idempotent, and it must be re-callable: the directory is gone for
+        two routine reasons by the time a stopped container restarts — it
+        lives under ``runtime_dir`` (``$XDG_RUNTIME_DIR``), a tmpfs the OS
+        clears on logout/reboot, and the per-container supervisor
+        ``rmtree``s it on every stop.  ``podman start`` re-binds the
+        ``/run/terok`` mount from this exact source, so it must exist
+        first.  A plain stop/start survives because podman recreates the
+        leaf while its parent lives; a reboot wipes the whole ``…/run``
+        chain and ``mkdir(parents=True)`` is what rebuilds it.
+        """
+        run_dir = self.container_runtime_dir(container_name)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        run_dir.chmod(0o700)
+        return run_dir
+
     @property
     def vault_systemd_creds_file(self) -> Path:
         """Return the sealed-credential path for the systemd-creds tier.
