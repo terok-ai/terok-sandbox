@@ -158,9 +158,7 @@ def allocate_per_container_resources(cfg: SandboxConfig, container: str) -> PerC
     re-bind on the same port is an EADDRINUSE-loud failure mode, not
     silent breakage.
     """
-    container_runtime_dir = cfg.runtime_dir / "run" / container
-    container_runtime_dir.mkdir(parents=True, exist_ok=True)
-    container_runtime_dir.chmod(0o700)
+    container_runtime_dir = cfg.ensure_container_runtime_dir(container)
 
     if cfg.services_mode != "tcp":
         return PerContainerResources(
@@ -607,7 +605,7 @@ def remove_container_state(container: str, *, cfg: SandboxConfig) -> None:
     if not container or container in (".", "..") or "/" in container or "\\" in container:
         raise ValueError(f"invalid container name: {container!r}")
     (cfg.state_dir / "sidecar" / f"{container}.json").unlink(missing_ok=True)
-    shutil.rmtree(cfg.runtime_dir / "run" / container, ignore_errors=True)
+    shutil.rmtree(cfg.container_runtime_dir(container), ignore_errors=True)
 
 
 #: Minimum age before a sidecar with no matching container counts as a

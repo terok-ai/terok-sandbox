@@ -192,6 +192,26 @@ class TestSandbox:
             handles = mock.call_args[0][0]
             assert [c.name for c in handles] == ["c1", "c2"]
 
+    def test_start_ensures_runtime_dir_then_delegates(self) -> None:
+        """``Sandbox.start`` rebuilds the /run/terok bind source before starting.
+
+        The dir lives on the reboot-wiped runtime tmpfs and the supervisor
+        removes it on every stop, so a restart must recreate it or
+        ``podman start`` fails on the missing mount source.  Orchestrators
+        call this one method and stay ignorant of the precondition.
+        """
+        s = Sandbox()
+        run_dir = s.config.container_runtime_dir("ctr")
+        assert not run_dir.exists()
+
+        with patch.object(s.runtime, "container") as container:
+            s.start("ctr")
+
+        assert run_dir.is_dir()
+        assert (run_dir.stat().st_mode & 0o777) == 0o700
+        container.assert_called_once_with("ctr")
+        container.return_value.start.assert_called_once_with()
+
     def test_stream_logs_uses_ready_marker(self) -> None:
         """``Sandbox.stream_logs`` delegates to the container's stream_initial_logs."""
         from terok_sandbox.runtime.podman import PodmanContainer
