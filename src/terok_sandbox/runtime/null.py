@@ -126,6 +126,16 @@ class NullContainer:
         """Return the fixture rw_size, or ``None`` when unset."""
         return self._runtime._container_rw_sizes.get(self.name)
 
+    @property
+    def id(self) -> str | None:
+        """Return the fixture container ID, or ``None`` when unset."""
+        return self._runtime._container_ids.get(self.name)
+
+    @property
+    def mounts(self) -> list[tuple[str, str]]:
+        """Return the fixture mounts, or ``[]`` when unset."""
+        return list(self._runtime._container_mounts.get(self.name, ()))
+
     def start(self) -> None:
         """Flip the fixture state to ``"running"``."""
         self._runtime._container_states[self.name] = "running"
@@ -236,6 +246,8 @@ class NullRuntime:
         self._container_states: dict[str, str] = {}
         self._container_images: dict[str, str] = {}
         self._container_rw_sizes: dict[str, int] = {}
+        self._container_ids: dict[str, str] = {}
+        self._container_mounts: dict[str, tuple[tuple[str, str], ...]] = {}
         self._container_exit_codes: dict[str, int] = {}
         self._ready_results: dict[str, bool] = {}
         self._image_records: dict[str, dict[str, str]] = {}
@@ -262,6 +274,14 @@ class NullRuntime:
     def set_container_rw_size(self, name: str, bytes_: int) -> None:
         """Record the writable-layer size of container *name*."""
         self._container_rw_sizes[name] = bytes_
+
+    def set_container_id(self, name: str, container_id: str) -> None:
+        """Record the full container ID [`Container.id`][terok_sandbox.runtime.Container.id] returns for *name*."""
+        self._container_ids[name] = container_id
+
+    def set_container_mounts(self, name: str, mounts: tuple[tuple[str, str], ...]) -> None:
+        """Record the ``(source, destination)`` mounts for container *name*."""
+        self._container_mounts[name] = mounts
 
     def set_exit_code(self, name: str, code: int) -> None:
         """Record the exit code [`Container.wait`][terok_sandbox.runtime.Container.wait] will return for *name*."""
@@ -407,6 +427,8 @@ class NullRuntime:
             self._container_states.pop(name, None)
             self._container_images.pop(name, None)
             self._container_rw_sizes.pop(name, None)
+            self._container_ids.pop(name, None)
+            self._container_mounts.pop(name, None)
             self._container_exit_codes.pop(name, None)
             self._ready_results.pop(name, None)
             # Drop any pre-registered exec results keyed by this container name

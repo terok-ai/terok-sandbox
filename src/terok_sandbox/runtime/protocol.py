@@ -93,6 +93,19 @@ class Container(Protocol):
         """Writable-layer size in bytes, or ``None`` if unavailable."""
         ...
 
+    @property
+    def id(self) -> str | None:
+        """Full container ID (podman ``.Id``), or ``None`` when the container is absent."""
+        ...
+
+    @property
+    def mounts(self) -> list[tuple[str, str]]:
+        """Bind/volume mounts as ``(host_source, container_destination)`` pairs.
+
+        Empty when the container is absent or has no mounts.
+        """
+        ...
+
     def start(self) -> None:
         """Start the container.  Raises [`RuntimeError`][RuntimeError] on failure."""
         ...
