@@ -50,11 +50,15 @@ from ._util._selinux import (
 from ._yaml import update_section as yaml_update_section
 from .commands import (
     CommandTree,
+    SessionProvisionResult,
+    SessionShadow,
     _handle_sandbox_uninstall as sandbox_uninstall,
+    clear_redundant_session_file,
     handle_vault_seal,
     handle_vault_to_keyring,
     provision_session_passphrase,
     purge_passphrase_tiers,
+    session_shadow_state,
 )
 from .config import CONTAINER_RUNTIME_DIR, SandboxConfig
 from .config_schema import (
@@ -186,8 +190,12 @@ __all__ = [
     "systemd_creds_has_tpm2",
     "handle_vault_seal",
     "handle_vault_to_keyring",
+    "SessionProvisionResult",
+    "SessionShadow",
+    "clear_redundant_session_file",
     "provision_session_passphrase",
     "purge_passphrase_tiers",
+    "session_shadow_state",
     # SSH
     "SSHInitResult",
     "SSHKeyRow",

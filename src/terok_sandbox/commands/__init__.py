@@ -70,14 +70,18 @@ from .ssh import (
 from .supervisor import SUPERVISOR_COMMANDS, _handle_supervisor
 from .vault import (
     VAULT_COMMANDS,
+    SessionProvisionResult,
+    SessionShadow,
     _forget_config_tier_updates,
     _handle_vault_list,
     _handle_vault_lock,
     _handle_vault_unlock,
+    clear_redundant_session_file,
     handle_vault_seal,
     handle_vault_to_keyring,
     provision_session_passphrase,
     purge_passphrase_tiers,
+    session_shadow_state,
 )
 
 #: Sandbox's top-level command forest — a [`CommandTree`][terok_util.cli_types.CommandTree]
@@ -152,8 +156,12 @@ __all__ = [
     "handle_vault_seal",
     "handle_vault_to_keyring",
     "_handle_vault_unlock",
+    "SessionProvisionResult",
+    "SessionShadow",
+    "clear_redundant_session_file",
     "provision_session_passphrase",
     "purge_passphrase_tiers",
+    "session_shadow_state",
     "_key_id_from_row",
     "_open_db",
     "_persist_mode_choice",

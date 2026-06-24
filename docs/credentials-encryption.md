@@ -94,6 +94,17 @@ nothing to validate; the value becomes the encryption key on first
 use.)  The next supervisor to start picks the freshly-resolved
 passphrase up automatically.
 
+`unlock` also **refuses to shadow a durable tier**: on a host that
+already auto-unlocks from systemd-creds / keyring / config, the session
+file would only mask the durable key and then vanish on the next reboot,
+so the write is skipped (`vault status` would have shown it as a
+shadow).  Pass `--force` for a deliberate re-key or session override.
+If a redundant session copy already exists from an older release — the
+session file holding the *same* passphrase a durable tier resolves —
+`vault status` flags it as harmless residue (it clears on reboot), and
+`terok sickbay --fix` removes it; a session file with a *different*
+passphrase is treated as a deliberate override and kept.
+
 ## Picking a tier at setup
 
 `terok setup` (or `terok-sandbox setup`) **auto-detects systemd-creds**
