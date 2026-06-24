@@ -101,6 +101,64 @@ class TestImageId:
         assert PodmanRuntime().image("ref").id is None
 
 
+# ── Container.id ─────────────────────────────────────────────────────────
+
+
+class TestContainerId:
+    """``Container.id`` resolves the full container ID through ``podman inspect``."""
+
+    @patch("terok_sandbox.runtime.podman.subprocess.check_output", return_value="abc123def\n")
+    def test_resolved_id(self, _co) -> None:
+        """A non-empty stripped id is returned."""
+        assert PodmanRuntime().container("ctr").id == "abc123def"
+
+    @patch("terok_sandbox.runtime.podman.subprocess.check_output", return_value="\n")
+    def test_empty_id_is_none(self, _co) -> None:
+        """Empty podman output → ``None``."""
+        assert PodmanRuntime().container("gone").id is None
+
+    @patch("terok_sandbox.runtime.podman.subprocess.check_output", side_effect=FileNotFoundError)
+    def test_no_podman_is_none(self, _co) -> None:
+        """Missing podman → ``None``."""
+        assert PodmanRuntime().container("ctr").id is None
+
+
+# ── Container.mounts ─────────────────────────────────────────────────────
+
+
+class TestContainerMounts:
+    """``Container.mounts`` projects ``podman inspect`` ``.Mounts`` to (src, dest) pairs."""
+
+    _JSON = (
+        '[{"Type":"bind","Source":"/host/work","Destination":"/workspace"},'
+        '{"Type":"volume","Source":"/var/vol","Destination":"/run/terok"}]'
+    )
+
+    @patch("terok_sandbox.runtime.podman.subprocess.check_output")
+    def test_projects_source_and_destination(self, co) -> None:
+        """Each mount becomes a ``(Source, Destination)`` tuple in order."""
+        co.return_value = self._JSON + "\n"
+        assert PodmanRuntime().container("ctr").mounts == [
+            ("/host/work", "/workspace"),
+            ("/var/vol", "/run/terok"),
+        ]
+
+    @patch("terok_sandbox.runtime.podman.subprocess.check_output", return_value="[]\n")
+    def test_no_mounts_is_empty(self, _co) -> None:
+        """An empty ``.Mounts`` array → ``[]``."""
+        assert PodmanRuntime().container("ctr").mounts == []
+
+    @patch("terok_sandbox.runtime.podman.subprocess.check_output", return_value="not json\n")
+    def test_unparseable_is_empty(self, _co) -> None:
+        """Malformed JSON degrades to ``[]`` rather than raising."""
+        assert PodmanRuntime().container("ctr").mounts == []
+
+    @patch("terok_sandbox.runtime.podman.subprocess.check_output", side_effect=FileNotFoundError)
+    def test_no_podman_is_empty(self, _co) -> None:
+        """Missing podman → ``[]``."""
+        assert PodmanRuntime().container("ctr").mounts == []
+
+
 # ── Copy-in ──────────────────────────────────────────────────────────────
 
 

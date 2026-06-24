@@ -353,6 +353,44 @@ class PodmanContainer:
         ):
             return None
 
+    @property
+    def id(self) -> str | None:
+        """Full container ID (podman ``.Id``), or ``None`` when the container is absent."""
+        try:
+            out = subprocess.check_output(  # nosec B603 B607 — argv built from fixed verbs + caller-controlled scope/container names — binary PATH lookup is the cross-distro contract
+                ["podman", "inspect", "-f", "{{.Id}}", self.name],
+                stderr=subprocess.DEVNULL,
+                text=True,
+            ).strip()
+            return out or None
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            return None
+
+    @property
+    def mounts(self) -> list[tuple[str, str]]:
+        """Bind/volume mounts as ``(host_source, container_destination)`` pairs.
+
+        Reads ``podman inspect`` ``.Mounts`` as JSON and projects each
+        entry to its host source and in-container destination — the two
+        fields an operator needs to answer "is my code mounted where I
+        think it is?".  Empty list on an absent container, no mounts, or
+        any inspect/parse failure (matching the absent-is-empty contract
+        the other handle properties follow).
+        """
+        try:
+            out = subprocess.check_output(  # nosec B603 B607 — argv built from fixed verbs + caller-controlled scope/container names — binary PATH lookup is the cross-distro contract
+                ["podman", "inspect", "-f", "{{json .Mounts}}", self.name],
+                stderr=subprocess.DEVNULL,
+                text=True,
+            ).strip()
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            return []
+        try:
+            entries = json.loads(out) if out else []
+        except json.JSONDecodeError:
+            return []
+        return [(m.get("Source", ""), m.get("Destination", "")) for m in entries or []]
+
     def start(self) -> None:
         """Start the container.
 
