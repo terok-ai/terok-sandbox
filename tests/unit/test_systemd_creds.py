@@ -94,6 +94,52 @@ class TestAvailability:
         ):
             assert systemd_creds.is_available() is False
 
+    def test_unavailable_reason_none_when_usable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A recent binary + live Varlink socket → no reason (tier usable)."""
+        monkeypatch.setattr(
+            "terok_sandbox.vault.store.systemd_creds._VARLINK_SOCKET",
+            _FakeVarlinkSocket(),
+        )
+        with (
+            patch("shutil.which", return_value="/usr/bin/systemd-creds"),
+            patch("subprocess.run", return_value=_version_output(259)),
+        ):
+            assert systemd_creds.unavailable_reason() is None
+            assert systemd_creds.is_available() is True
+
+    def test_unavailable_reason_names_missing_binary(self) -> None:
+        with patch("shutil.which", return_value=None):
+            reason = systemd_creds.unavailable_reason()
+        assert reason is not None
+        assert "not found on PATH" in reason
+
+    def test_unavailable_reason_names_old_systemd(self) -> None:
+        """The Ubuntu 24.04 case: systemd 255 lacks the non-root --user path."""
+        with (
+            patch("shutil.which", return_value="/usr/bin/systemd-creds"),
+            patch("subprocess.run", return_value=_version_output(255)),
+        ):
+            reason = systemd_creds.unavailable_reason()
+        assert reason is not None
+        assert "needs systemd ≥ 257" in reason
+        assert "host has 255" in reason
+
+    def test_unavailable_reason_names_missing_varlink_socket(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Recent binary but PID 1 isn't serving the socket → that's the reason."""
+        monkeypatch.setattr(
+            "terok_sandbox.vault.store.systemd_creds._VARLINK_SOCKET",
+            _FakeVarlinkSocket(present=False),
+        )
+        with (
+            patch("shutil.which", return_value="/usr/bin/systemd-creds"),
+            patch("subprocess.run", return_value=_version_output(259)),
+        ):
+            reason = systemd_creds.unavailable_reason()
+        assert reason is not None
+        assert "not served by PID 1" in reason
+
     def test_has_tpm2_short_circuits_when_unavailable(self) -> None:
         """``is_available`` False → no TPM probe; no extra subprocess spawned."""
         with (
@@ -548,10 +594,18 @@ def _seal_argv(run_mock: MagicMock) -> list[str]:
 
 
 class _FakeVarlinkSocket:
-    """Duck-typed ``Path`` whose ``is_socket()`` always reports True."""
+    """Duck-typed ``Path`` whose ``is_socket()`` reports *present* (default True).
+
+    Lets availability tests pin the socket's presence instead of leaking
+    the host's real ``/run/systemd/io.systemd.Credentials`` state into
+    the assertion.
+    """
+
+    def __init__(self, present: bool = True) -> None:
+        self._present = present
 
     def is_socket(self) -> bool:
-        return True
+        return self._present
 
 
 def _fake_varlink_socket(reply: dict) -> MagicMock:
