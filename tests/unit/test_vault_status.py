@@ -101,6 +101,38 @@ class TestProbePassphraseChain:
             probe_passphrase_chain(systemd_creds_file=sealed)
         creds.unseal.assert_not_called()
 
+    def test_systemd_creds_unconfigured_says_not_configured(self) -> None:
+        """No path wired at all reads like the other absent tiers, not a blank."""
+        chain = probe_passphrase_chain()
+        assert chain[1].detail == "not configured"
+
+    def test_systemd_creds_absent_file_says_not_sealed(self, tmp_path: Path) -> None:
+        """A configured path with nothing sealed must not masquerade as a live tier."""
+        cred = tmp_path / "vault.passphrase.cred"  # never created
+        with patch.object(encryption._systemd_creds, "unavailable_reason", return_value=None):
+            chain = probe_passphrase_chain(systemd_creds_file=cred)
+        assert chain[1].present is False
+        assert "not sealed" in chain[1].detail
+        assert str(cred) in chain[1].detail
+
+    def test_systemd_creds_unusable_reason_surfaced(self, tmp_path: Path) -> None:
+        """When the tier can't run here (e.g. systemd 255), status says why."""
+        cred = tmp_path / "vault.passphrase.cred"
+        reason = "needs systemd ≥ 257 for non-root --user mode (host has 255)"
+        with patch.object(encryption._systemd_creds, "unavailable_reason", return_value=reason):
+            chain = probe_passphrase_chain(systemd_creds_file=cred)
+        assert "unusable here" in chain[1].detail
+        assert "host has 255" in chain[1].detail
+
+    def test_systemd_creds_sealed_and_usable_shows_bare_path(self, tmp_path: Path) -> None:
+        """Sealed + tier available → detail is just the path, no noise appended."""
+        cred = tmp_path / "vault.passphrase.cred"
+        cred.write_text("sealed-blob")
+        with patch.object(encryption._systemd_creds, "unavailable_reason", return_value=None):
+            chain = probe_passphrase_chain(systemd_creds_file=cred)
+        assert chain[1].present is True
+        assert chain[1].detail == str(cred)
+
     def test_keyring_only_probed_when_enabled(self) -> None:
         with patch.object(encryption, "load_passphrase_from_keyring", return_value="k") as load:
             on = probe_passphrase_chain(use_keyring=True)

@@ -381,10 +381,15 @@ def unseal(credential_path: Path) -> str | None:
 # ── Capability probes ───────────────────────────────────────────────
 
 
-def is_available() -> bool:
-    """Return ``True`` when ``systemd-creds`` is usable from a non-root caller.
+def unavailable_reason() -> str | None:
+    """Explain why the tier can't serve a non-root caller here, or ``None`` if it can.
 
-    Requires three things, in order from cheapest to most decisive:
+    Checks the same three preconditions as
+    [`is_available`][terok_sandbox.vault.store.systemd_creds.is_available],
+    cheapest to most decisive, but returns a human sentence instead of a
+    bare bool so diagnostic surfaces (``vault status``) can tell the
+    operator *why* the tier is a dead end rather than silently listing
+    it. ``None`` means the tier is usable.
 
     1. The binary on ``PATH``.
     2. A host systemd ≥ ``_MIN_SYSTEMD_VERSION`` so the non-root
@@ -392,13 +397,31 @@ def is_available() -> bool:
     3. A live ``io.systemd.Credentials`` Varlink socket — present only
        when PID 1 is a recent enough systemd actually serving the
        interface.  Containers and minimal-init systems pass (1) + (2)
-       but fail (3); without this check ``seal()`` would surface the
-       opaque ``Failed to connect to io.systemd.Credentials`` error.
+       but fail (3).
     """
     version = _systemd_creds_version()
-    if version is None or version < _MIN_SYSTEMD_VERSION:
-        return False
-    return _VARLINK_SOCKET.is_socket()
+    if version is None:
+        return f"{_BINARY} not found on PATH"
+    if version < _MIN_SYSTEMD_VERSION:
+        return (
+            f"needs systemd ≥ {_MIN_SYSTEMD_VERSION} for non-root --user mode (host has {version})"
+        )
+    if not _VARLINK_SOCKET.is_socket():
+        return f"{_VARLINK_SOCKET} not served by PID 1"
+    return None
+
+
+def is_available() -> bool:
+    """Return ``True`` when ``systemd-creds`` is usable from a non-root caller.
+
+    A thin bool view over
+    [`unavailable_reason`][terok_sandbox.vault.store.systemd_creds.unavailable_reason],
+    which owns the three preconditions (binary on ``PATH``, host systemd
+    ≥ ``_MIN_SYSTEMD_VERSION``, and a live ``io.systemd.Credentials``
+    Varlink socket served by PID 1). Callers that gate a seal/unseal use
+    this; callers that want to explain the gate use ``unavailable_reason``.
+    """
+    return unavailable_reason() is None
 
 
 def has_tpm2() -> bool:
@@ -490,4 +513,4 @@ def _require_exe() -> str:
     return exe
 
 
-__all__ = ["KeyMode", "has_tpm2", "is_available", "seal", "unseal"]
+__all__ = ["KeyMode", "has_tpm2", "is_available", "seal", "unavailable_reason", "unseal"]

@@ -94,6 +94,46 @@ class TestAvailability:
         ):
             assert systemd_creds.is_available() is False
 
+    def test_unavailable_reason_none_when_usable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A recent binary + live Varlink socket → no reason (tier usable)."""
+        monkeypatch.setattr(
+            "terok_sandbox.vault.store.systemd_creds._VARLINK_SOCKET",
+            _FakeVarlinkSocket(),
+        )
+        with (
+            patch("shutil.which", return_value="/usr/bin/systemd-creds"),
+            patch("subprocess.run", return_value=_version_output(259)),
+        ):
+            assert systemd_creds.unavailable_reason() is None
+            assert systemd_creds.is_available() is True
+
+    def test_unavailable_reason_names_missing_binary(self) -> None:
+        with patch("shutil.which", return_value=None):
+            reason = systemd_creds.unavailable_reason()
+        assert reason is not None
+        assert "not found on PATH" in reason
+
+    def test_unavailable_reason_names_old_systemd(self) -> None:
+        """The Ubuntu 24.04 case: systemd 255 lacks the non-root --user path."""
+        with (
+            patch("shutil.which", return_value="/usr/bin/systemd-creds"),
+            patch("subprocess.run", return_value=_version_output(255)),
+        ):
+            reason = systemd_creds.unavailable_reason()
+        assert reason is not None
+        assert "needs systemd ≥ 257" in reason
+        assert "host has 255" in reason
+
+    def test_unavailable_reason_names_missing_varlink_socket(self) -> None:
+        """Recent binary but PID 1 isn't serving the socket → that's the reason."""
+        with (
+            patch("shutil.which", return_value="/usr/bin/systemd-creds"),
+            patch("subprocess.run", return_value=_version_output(259)),
+        ):
+            reason = systemd_creds.unavailable_reason()
+        assert reason is not None
+        assert "not served by PID 1" in reason
+
     def test_has_tpm2_short_circuits_when_unavailable(self) -> None:
         """``is_available`` False → no TPM probe; no extra subprocess spawned."""
         with (
