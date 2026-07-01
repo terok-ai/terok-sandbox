@@ -124,8 +124,14 @@ class TestAvailability:
         assert "needs systemd ≥ 257" in reason
         assert "host has 255" in reason
 
-    def test_unavailable_reason_names_missing_varlink_socket(self) -> None:
+    def test_unavailable_reason_names_missing_varlink_socket(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Recent binary but PID 1 isn't serving the socket → that's the reason."""
+        monkeypatch.setattr(
+            "terok_sandbox.vault.store.systemd_creds._VARLINK_SOCKET",
+            _FakeVarlinkSocket(present=False),
+        )
         with (
             patch("shutil.which", return_value="/usr/bin/systemd-creds"),
             patch("subprocess.run", return_value=_version_output(259)),
@@ -588,10 +594,18 @@ def _seal_argv(run_mock: MagicMock) -> list[str]:
 
 
 class _FakeVarlinkSocket:
-    """Duck-typed ``Path`` whose ``is_socket()`` always reports True."""
+    """Duck-typed ``Path`` whose ``is_socket()`` reports *present* (default True).
+
+    Lets availability tests pin the socket's presence instead of leaking
+    the host's real ``/run/systemd/io.systemd.Credentials`` state into
+    the assertion.
+    """
+
+    def __init__(self, present: bool = True) -> None:
+        self._present = present
 
     def is_socket(self) -> bool:
-        return True
+        return self._present
 
 
 def _fake_varlink_socket(reply: dict) -> MagicMock:

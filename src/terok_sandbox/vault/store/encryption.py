@@ -229,34 +229,6 @@ class TierPresence:
     detail: str
 
 
-def _systemd_creds_detail(path: Path | None) -> str:
-    """Human detail for the systemd-creds tier in the ``vault status`` chain.
-
-    The tier row used to print the bare configured path regardless of
-    whether anything was sealed or whether the tier could even run here,
-    so an absent credential looked identical to a present-but-outranked
-    one, and a host too old for the non-root ``--user`` path (systemd
-    < 257, no TPM needed) was listed as if it were a live option. This
-    separates the three states the path blurred together:
-
-    - unconfigured → ``not configured`` (matches the other tiers' phrasing);
-    - configured but nothing sealed → ``not sealed (<path>)``;
-    - sealed/configured but the tier can't run on this host →
-      the path plus ``— unusable here: <reason>``.
-
-    Uses the cheap, cached availability probe
-    ([`unavailable_reason`][terok_sandbox.vault.store.systemd_creds.unavailable_reason]) —
-    it never unseals and has no side effects, so it's safe on the
-    diagnostic path that the rest of ``probe_passphrase_chain`` keeps
-    free of secret resolution.
-    """
-    if path is None:
-        return "not configured"
-    base = str(path) if path.is_file() else f"not sealed ({path})"
-    reason = _systemd_creds.unavailable_reason()
-    return f"{base} — unusable here: {reason}" if reason else base
-
-
 def probe_passphrase_chain(
     *,
     passphrase_file: Path | None = None,
@@ -313,6 +285,34 @@ def probe_passphrase_chain(
             "plaintext in config.yml" if config_fallback else "not set",
         ),
     )
+
+
+def _systemd_creds_detail(path: Path | None) -> str:
+    """Human detail for the systemd-creds tier in the ``vault status`` chain.
+
+    The tier row used to print the bare configured path regardless of
+    whether anything was sealed or whether the tier could even run here,
+    so an absent credential looked identical to a present-but-outranked
+    one, and a host too old for the non-root ``--user`` path (systemd
+    < 257, no TPM needed) was listed as if it were a live option. This
+    separates the three states the path blurred together:
+
+    - unconfigured → ``not configured`` (matches the other tiers' phrasing);
+    - configured but nothing sealed → ``not sealed (<path>)``;
+    - sealed/configured but the tier can't run on this host →
+      the path plus ``— unusable here: <reason>``.
+
+    Uses the cheap, cached availability probe
+    ([`unavailable_reason`][terok_sandbox.vault.store.systemd_creds.unavailable_reason]) —
+    it never unseals and has no side effects, so it's safe on the
+    diagnostic path that the rest of ``probe_passphrase_chain`` keeps
+    free of secret resolution.
+    """
+    if path is None:
+        return "not configured"
+    base = str(path) if path.is_file() else f"not sealed ({path})"
+    reason = _systemd_creds.unavailable_reason()
+    return f"{base} — unusable here: {reason}" if reason else base
 
 
 # ── Tier primitives ─────────────────────────────────────────────────
