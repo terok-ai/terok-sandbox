@@ -239,14 +239,14 @@ files = [
 
 [[package]]
 name = "asyncvarlink"
-version = "0.3.1"
+version = "0.3.2"
 description = "asyncio-compatible, type-driven varlink implementation supporting file descriptor passing"
 optional = false
 python-versions = ">=3.11"
 groups = ["main"]
 files = [
-    {file = "asyncvarlink-0.3.1-py3-none-any.whl", hash = "sha256:cb367071fdfb59614ab1677239199afc17dd3b0ab03bc2251eeed4e093d1d009"},
-    {file = "asyncvarlink-0.3.1.tar.gz", hash = "sha256:2883f9bed35aac9416a713dd6ed48eccdab693c182eb940569e105886cc75bd9"},
+    {file = "asyncvarlink-0.3.2-py3-none-any.whl", hash = "sha256:d9eee56a378008c36145b4aa4063eeda96bd685f62d3a4205200264109dd3d5a"},
+    {file = "asyncvarlink-0.3.2.tar.gz", hash = "sha256:80906780cc4fa786aeb05e5858f02326147eb14ffe752317b4e647fc51ed28a5"},
 ]
 
 [package.extras]
@@ -3413,32 +3413,34 @@ tomli-w = ">=1.0,<2.0"
 
 [[package]]
 name = "terok-clearance"
-version = "0.7.1"
+version = "0.7.2"
 description = "Shield clearance and desktop notifications for terok"
 optional = false
-python-versions = "<4.0,>=3.12"
+python-versions = ">=3.12,<4.0"
 groups = ["main"]
 files = [
-    {file = "terok_clearance-0.7.1-py3-none-any.whl", hash = "sha256:ccd1f7f75c2670e6b9a40e6a49b2b1f2a6319fcf33700f6def1c196cf2cc7427"},
-    {file = "terok_clearance-0.7.1.tar.gz", hash = "sha256:9ff0c144362752641d612df68c31b2aabafe31f9c57f212dd44ec2e126046da3"},
+    {file = "terok_clearance-0.7.2-py3-none-any.whl", hash = "sha256:885e10d58ab2e8e8b92645e34f6874aae807f08e5c456b57e2c773ca1f549798"},
 ]
 
 [package.dependencies]
-asyncvarlink = ">=0.3.1,<0.4.0"
+asyncvarlink = "0.3.2"
 dbus-fast = ">=4.3.0,<5.0"
 pyyaml = ">=6.0"
 terok-util = ">=0.2.0,<0.3.0"
+
+[package.source]
+type = "url"
+url = "https://github.com/terok-ai/terok-clearance/releases/download/v0.7.2/terok_clearance-0.7.2-py3-none-any.whl"
 
 [[package]]
 name = "terok-shield"
 version = "0.7.1"
 description = "nftables-based egress firewalling for Podman containers"
 optional = false
-python-versions = "<4.0,>=3.12"
+python-versions = ">=3.12,<4.0"
 groups = ["main"]
 files = [
     {file = "terok_shield-0.7.1-py3-none-any.whl", hash = "sha256:f21df6a0681f4407e3c28db4ef54cbb49eb4cfb9c88380be2394c2f05428d167"},
-    {file = "terok_shield-0.7.1.tar.gz", hash = "sha256:d9ecf081870baa975637d8785e99b38e0d50732eeca5ea1ba29472594eb0d9d4"},
 ]
 
 [package.dependencies]
@@ -3446,21 +3448,28 @@ pydantic = ">=2.0"
 PyYAML = ">=6.0"
 terok-util = ">=0.2.0,<0.3.0"
 
+[package.source]
+type = "url"
+url = "https://github.com/terok-ai/terok-shield/releases/download/v0.7.1/terok_shield-0.7.1-py3-none-any.whl"
+
 [[package]]
 name = "terok-util"
 version = "0.2.0"
 description = "Shared utility library for the terok-* sibling packages"
 optional = false
-python-versions = "<4.0,>=3.12"
+python-versions = ">=3.12,<4.0"
 groups = ["main"]
 files = [
     {file = "terok_util-0.2.0-py3-none-any.whl", hash = "sha256:74f047643962ff64e62e354958fe37caa91f04dc811eb61f6af41220f8311ef8"},
-    {file = "terok_util-0.2.0.tar.gz", hash = "sha256:8fc285c4fdcfc6a2c3aeb04236f85c49093cb60c8602fe0e43d1e8b9a6f3e7cd"},
 ]
 
 [package.dependencies]
 platformdirs = ">=4.10.0"
 "ruamel.yaml" = ">=0.18"
+
+[package.source]
+type = "url"
+url = "https://github.com/terok-ai/terok-util/releases/download/v0.2.0/terok_util-0.2.0-py3-none-any.whl"
 
 [[package]]
 name = "tomli"
@@ -3836,4 +3845,4 @@ propcache = ">=0.2.1"
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<4.0"
-content-hash = "08fc3c34487c6a31b194966cfa35b21a3bb234b14221f061cb89a1c5c53ee5e8"
+content-hash = "29016d9d5aa40f42ff40646ade31c7b1fce8744f1920e6a915f927c7b04aa3c1"
