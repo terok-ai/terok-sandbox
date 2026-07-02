@@ -103,3 +103,61 @@ class TestRestartLoop:
         spec.loader.exec_module(mod)
         monkeypatch.setattr(mod.sys, "argv", ["supervisor_wrapper.py", "abc", "/sidecar.json"])
         assert mod.main() == 2
+
+
+class TestArgvValidation:
+    """Untrusted argv is gated before it reaches the supervisor CLI.
+
+    The wrapper trusts whatever argv it is handed, so a container_id or
+    sidecar_path that starts with ``-`` (which the ``supervisor`` verb's
+    argparse would read as an option — CWE-88 argument injection) or a
+    relative sidecar path is refused before any ``subprocess.call``.
+    """
+
+    @pytest.mark.parametrize(
+        "bad_id",
+        ["-x", "--config=/evil", "", "a b", "a;b", "../x"],
+        ids=["dash", "long-opt", "empty", "space", "semicolon", "traversal"],
+    )
+    def test_unsafe_container_id_refused(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, bad_id: str
+    ) -> None:
+        """Anything that is not a safe single token is refused, never spawned."""
+        mod = _render_wrapper(tmp_path, ["/bin/terok-sandbox"])
+        with patch.object(mod.subprocess, "call") as call_mock:
+            monkeypatch.setattr(mod.sys, "argv", ["supervisor_wrapper.py", bad_id, "/sidecar.json"])
+            assert mod.main() == 2
+        call_mock.assert_not_called()
+
+    def test_relative_sidecar_path_refused(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A non-absolute sidecar path is refused before any spawn."""
+        mod = _render_wrapper(tmp_path, ["/bin/terok-sandbox"])
+        with patch.object(mod.subprocess, "call") as call_mock:
+            monkeypatch.setattr(
+                mod.sys, "argv", ["supervisor_wrapper.py", "abc123", "relative/sidecar.json"]
+            )
+            assert mod.main() == 2
+        call_mock.assert_not_called()
+
+    def test_valid_id_and_absolute_path_reach_cli_unchanged(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A normal podman id + absolute path pass straight through (no ``--``).
+
+        The CLI reserves ``--`` for ``run``, so the wrapper must hand the
+        positionals bare — validation, not a separator, is what keeps them
+        from being misparsed.
+        """
+        mod = _render_wrapper(tmp_path, ["/bin/terok-sandbox"])
+        with patch.object(mod.subprocess, "call", return_value=0) as call_mock:
+            monkeypatch.setattr(
+                mod.sys,
+                "argv",
+                ["supervisor_wrapper.py", "9f8e7d6c5b4a", "/state/sidecar/x.json"],
+            )
+            assert mod.main() == 0
+        call_mock.assert_called_once_with(
+            ["/bin/terok-sandbox", "supervisor", "9f8e7d6c5b4a", "/state/sidecar/x.json"]
+        )
