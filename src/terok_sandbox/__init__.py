@@ -69,6 +69,7 @@ from .config_schema import (
     ServicesMode,
     gate_use_personal_ssh_default,
 )
+from .diagnostics import ContainerDiagnostics, container_diagnostics
 from .doctor import CheckVerdict, DoctorCheck, sandbox_doctor_checks
 from .gate.mirror import GateAuthNotConfigured, GateStalenessInfo, GitGate, is_ssh_url
 from .gate.server import GateServer
@@ -212,6 +213,9 @@ __all__ = [
     "DoctorCheck",
     "make_stray_sidecar_check",
     "sandbox_doctor_checks",
+    # Container diagnostics (on-host supervisor/sidecar artifact paths)
+    "ContainerDiagnostics",
+    "container_diagnostics",
     # SELinux (one-call probe + install plumbing; the granular probes
     # stay in ``_util._selinux``).
     "SelinuxCheckResult",

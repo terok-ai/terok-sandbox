@@ -46,6 +46,14 @@ class TestNullContainerDefaults:
         """Unknown container yields ``rw_size == None``."""
         assert NullRuntime().container("nobody").rw_size is None
 
+    def test_id_is_none_without_fixture(self) -> None:
+        """Unknown container yields ``id == None``."""
+        assert NullRuntime().container("nobody").id is None
+
+    def test_mounts_is_empty_without_fixture(self) -> None:
+        """Unknown container yields ``mounts == []``."""
+        assert NullRuntime().container("nobody").mounts == []
+
     def test_wait_defaults_to_zero(self) -> None:
         """Unknown container's wait returns 0."""
         assert NullRuntime().container("nobody").wait() == 0
@@ -74,6 +82,14 @@ class TestNullContainerFixtures:
         image = rt.container("c").image
         assert image is not None
         assert image.ref == "img-ref"
+
+    def test_id_and_mounts_fixtures(self) -> None:
+        """``set_container_id`` / ``set_container_mounts`` are reflected by the handle."""
+        rt = NullRuntime()
+        rt.set_container_id("c", "abc123def456")
+        rt.set_container_mounts("c", (("/host/work", "/workspace"),))
+        assert rt.container("c").id == "abc123def456"
+        assert rt.container("c").mounts == [("/host/work", "/workspace")]
 
     def test_start_flips_state_to_running(self) -> None:
         """``start()`` flips the fixture state."""
