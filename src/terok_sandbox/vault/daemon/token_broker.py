@@ -594,7 +594,12 @@ async def _handle_request(request: web.Request) -> web.StreamResponse:
         )
         await _audit_request(request, token_info, 404, "no_route", started_at)
         return web.Response(status=404, text=f"No route for provider: {provider}")
-    rest = request.path
+    # Forward the *encoded* path: ``request.path`` percent-decodes, collapsing
+    # ``%2F`` into ``/`` and mangling URL-encoded path segments — e.g. glab's
+    # by-path lookups (``/api/v4/projects/group%2Fproject``) would 404 because
+    # the upstream sees ``projects/group/project``.  ``rel_url.raw_path`` keeps
+    # the segment intact (query string is appended separately below).
+    rest = request.rel_url.raw_path
 
     # 3. Load real credential
     cred = token_db.load_credential(token_info["credential_set"], provider)

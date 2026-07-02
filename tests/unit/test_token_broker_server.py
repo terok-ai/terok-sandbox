@@ -534,6 +534,7 @@ def _forwarding_env(tmp_path: Path):
                 "x_api_key": request.headers.get("x-api-key", ""),
                 "private_token": request.headers.get("PRIVATE-TOKEN", ""),
                 "path": request.path,
+                "raw_path": request.raw_path,
                 "qs": request.query_string,
                 "beta": request.headers.get("anthropic-beta", ""),
             }
@@ -821,6 +822,46 @@ class TestForwardingPath:
             body = await resp.json()
             assert body["private_token"] == "glpat-real"
             assert body["path"] == "/api/v4/projects"
+
+        await upstream_server.close()
+
+    async def test_encoded_path_segment_is_preserved(self, _forwarding_env) -> None:
+        """``%2F`` in a path segment survives forwarding (not collapsed to ``/``).
+
+        glab's by-path lookups encode the project slug —
+        ``/api/v4/projects/group%2Fproject`` — and GitLab 404s if the broker
+        decodes the separator. The broker must forward the *raw* encoded path.
+        """
+        from aiohttp.test_utils import TestClient, TestServer
+
+        upstream_app, tmp_path, tokens = _forwarding_env
+        upstream_server = TestServer(upstream_app)
+        await upstream_server.start_server()
+
+        routes = tmp_path / "routes.json"
+        routes.write_text(
+            json.dumps(
+                {
+                    "glab": {
+                        "upstream": f"http://127.0.0.1:{upstream_server.port}",
+                        "auth_header": "PRIVATE-TOKEN",
+                        "auth_prefix": "",
+                    },
+                }
+            )
+        )
+
+        broker_app = _build_app(str(tmp_path / "test.db"), str(routes))
+        async with TestClient(TestServer(broker_app)) as client:
+            resp = await client.get(
+                "/api/v4/projects/group%2Fproject",
+                headers={"PRIVATE-TOKEN": tokens["glab"]},
+            )
+            assert resp.status == 200
+            body = await resp.json()
+            # The upstream sees the encoded separator intact, not a decoded path.
+            assert body["raw_path"] == "/api/v4/projects/group%2Fproject"
+            assert "%2F" not in body["path"]  # ``request.path`` decodes; raw does not
 
         await upstream_server.close()
 
