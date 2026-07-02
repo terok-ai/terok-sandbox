@@ -1,4 +1,12 @@
 # Changelog
+## v0.3.2 — We are constantly searching
+
+## What's Changed
+* Vault diagnostics improved https://github.com/terok-ai/terok-sandbox/pull/408, https://github.com/terok-ai/terok-sandbox/pull/399, https://github.com/terok-ai/terok-sandbox/pull/400
+* Remote API fix: preserve URL-encoded path segments when forwarding, https://github.com/terok-ai/terok-sandbox/pull/402
+
+**Full Changelog**: https://github.com/terok-ai/terok-sandbox/compare/v0.3.1...v0.3.2
+
 ## v0.3.1 — Start Again
 
 hotfix: rebuild the per-container runtime dir in Sandbox.start, https://github.com/terok-ai/terok-sandbox/pull/396
