@@ -16,6 +16,16 @@ maintainers = [
 keywords = ["podman", "containers", "sandbox", "security", "isolation"]
 requires-python = ">=3.12,<4.0"
 dynamic = ["version", "classifiers"]
+# ── Dependency pinning policy (see AGENTS.md) ───────────────────────
+# Third-party runtime deps at major 0 (0.y.z) are pinned to an exact
+# patch: pre-1.0 packages guarantee nothing across minors OR patches.
+# Major >= 1 deps use ranges (semver).  Sibling terok-* deps are exempt
+# — we guarantee patch-level API stability, so they keep ranges (or a
+# release-wheel URL pin).  Dev/test/docs groups are exempt.  This is the
+# ONLY comment permitted in this file — never add dev-cycle notes here,
+# and never mention temporary git-branch pins or the multi-repo PR chain
+# (a merge script rewrites deps and would leak such comments into a
+# production release).
 dependencies = [
     "terok-util @ https://github.com/terok-ai/terok-util/releases/download/v0.2.0/terok_util-0.2.0-py3-none-any.whl",
     "terok-shield @ https://github.com/terok-ai/terok-shield/releases/download/v0.7.1/terok_shield-0.7.1-py3-none-any.whl",
@@ -26,9 +36,9 @@ dependencies = [
     "jinja2>=3.1",
     "pydantic>=2.9",
     "packaging>=24",
-    "sqlcipher3>=0.6.2",
+    "sqlcipher3==0.6.2",
     "keyring>=25.0",
-    "ruamel.yaml>=0.18",
+    "ruamel.yaml==0.19.1",
     "prompt-toolkit>=3.0",
 ]
 
