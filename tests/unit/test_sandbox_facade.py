@@ -7,11 +7,12 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
 from terok_sandbox import GpuConfigError, SandboxConfig
+from terok_sandbox.runtime import ContainerRemoveResult
 from terok_sandbox.runtime.podman import check_gpu_error, redact_env_args
 from terok_sandbox.sandbox import (
     READY_MARKER,
@@ -183,14 +184,31 @@ class TestSandbox:
                 loopback_ports_override=None,
             )
 
-    def test_stop_delegates_to_runtime_force_remove(self) -> None:
-        """``Sandbox.stop`` wraps names in container handles and delegates."""
+    def test_stop_halts_containers_and_keeps_them(self) -> None:
+        """``Sandbox.stop`` stops each container and removes nothing."""
         s = Sandbox()
-        with patch.object(s.runtime, "force_remove", return_value=[]) as mock:
-            s.stop(["c1", "c2"])
-            mock.assert_called_once()
-            handles = mock.call_args[0][0]
-            assert [c.name for c in handles] == ["c1", "c2"]
+        with (
+            patch.object(s.runtime, "container") as container,
+            patch.object(s.runtime, "force_remove") as remove,
+        ):
+            s.stop(["c1", "c2"], timeout=5)
+
+        assert container.call_args_list == [call("c1"), call("c2")]
+        container.return_value.stop.assert_called_with(timeout=5)
+        remove.assert_not_called()
+
+    def test_rm_force_removes_containers(self) -> None:
+        """``Sandbox.rm`` wraps names in container handles and force-removes."""
+        s = Sandbox()
+        results = [
+            ContainerRemoveResult(name="c1", removed=True),
+            ContainerRemoveResult(name="c2", removed=False, error="in use"),
+        ]
+        with patch.object(s.runtime, "force_remove", return_value=results) as remove:
+            assert s.rm(["c1", "c2"]) == results
+
+        handles = remove.call_args[0][0]
+        assert [c.name for c in handles] == ["c1", "c2"]
 
     def test_start_ensures_runtime_dir_then_delegates(self) -> None:
         """``Sandbox.start`` rebuilds the /run/terok bind source before starting.
@@ -246,6 +264,28 @@ class TestSandbox:
         assert "-v" in cmd
         assert "-e" in cmd
         assert "alpine:latest" in cmd
+
+    def test_run_retains_container_by_default(self) -> None:
+        """Without ephemeral, the assembled command carries no --rm."""
+        with (
+            patch("subprocess.run") as mock_run,
+            patch("builtins.print"),
+            patch("terok_sandbox.integrations.shield.ShieldManager.pre_start", return_value=[]),
+        ):
+            Sandbox().run(_make_spec())
+
+        assert "--rm" not in mock_run.call_args[0][0]
+
+    def test_run_ephemeral_adds_rm_flag(self) -> None:
+        """spec.ephemeral flows through as podman --rm."""
+        with (
+            patch("subprocess.run") as mock_run,
+            patch("builtins.print"),
+            patch("terok_sandbox.integrations.shield.ShieldManager.pre_start", return_value=[]),
+        ):
+            Sandbox().run(_make_spec(ephemeral=True))
+
+        assert "--rm" in mock_run.call_args[0][0]
 
     def test_run_omits_hostname_by_default(self) -> None:
         """Without an explicit hostname, --hostname is absent (podman picks one)."""
