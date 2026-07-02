@@ -20,6 +20,11 @@
 # toolchain).
 FROM ghcr.io/void-linux/void-glibc:latest
 
+# Ownership label: a Containerfile LABEL propagates into every
+# intermediate layer image, so the harness teardown can prune exactly
+# its own dangling generations (value = the harness IMAGE_PREFIX).
+LABEL "io.terok.matrix-test"="terok-sandbox-test"
+
 # Sync + self-update xbps first (rolling release), then install deps.  The
 # musl toolchain equivalents from the Alpine slot are glibc here; build
 # tooling (base-devel + libffi-devel) covers any sdist (e.g. cffi) without
