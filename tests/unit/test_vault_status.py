@@ -370,16 +370,65 @@ class TestHandleVaultStatusText:
     def test_session_file_shadows_durable_tier(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str], real_file_tier: None
     ) -> None:
+        """The chain table marks the shadow; the warning names same-vs-different.
+
+        ``session_shadow_state`` is stubbed so the rendering is asserted
+        without a real unseal — the comparison logic has its own tests.
+        """
+        from terok_sandbox.commands.vault import SessionShadow
+
         session = tmp_path / "session"
         session.write_text("pw\n")
         sealed = tmp_path / "sealed.cred"
         sealed.write_text("blob")
         cfg = _status_cfg(session=session, sealed=sealed)
-        _run_status(cfg, source="session-file")
+        with patch(
+            "terok_sandbox.commands.vault.session_shadow_state",
+            return_value=SessionShadow("systemd-creds", redundant=False),
+        ):
+            _run_status(cfg, source="session-file")
         out = capsys.readouterr().out
         assert "session-file        active" in out
         assert "systemd-creds       shadowed" in out
-        assert "shadowing a durable tier (systemd-creds)" in out
+        assert "shadows the durable systemd-creds tier with a DIFFERENT passphrase" in out
+
+    def test_redundant_shadow_renders_as_note(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], real_file_tier: None
+    ) -> None:
+        from terok_sandbox.commands.vault import SessionShadow
+
+        session = tmp_path / "session"
+        session.write_text("pw\n")
+        sealed = tmp_path / "sealed.cred"
+        sealed.write_text("blob")
+        cfg = _status_cfg(session=session, sealed=sealed)
+        with patch(
+            "terok_sandbox.commands.vault.session_shadow_state",
+            return_value=SessionShadow("systemd-creds", redundant=True),
+        ):
+            _run_status(cfg, source="session-file")
+        out = capsys.readouterr().out
+        assert "duplicates the durable systemd-creds tier (same passphrase)" in out
+        assert "redundant residue" in out
+
+    def test_unverifiable_shadow_renders_as_warning(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], real_file_tier: None
+    ) -> None:
+        from terok_sandbox.commands.vault import SessionShadow
+
+        session = tmp_path / "session"
+        session.write_text("pw\n")
+        sealed = tmp_path / "sealed.cred"
+        sealed.write_text("blob")
+        cfg = _status_cfg(session=session, sealed=sealed)
+        with patch(
+            "terok_sandbox.commands.vault.session_shadow_state",
+            return_value=SessionShadow("systemd-creds", redundant=None),
+        ):
+            _run_status(cfg, source="session-file")
+        out = capsys.readouterr().out
+        assert "shadows systemd-creds" in out
+        assert "could not be read to compare" in out
 
     def test_durable_active_tier_does_not_report_shadow(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -465,3 +514,90 @@ class TestHandleVaultStatusJson:
         assert data["locked"] is True
         assert "unreadable" in data["lock_reason"]
         assert "could not be unsealed" in data["lock_reason"]
+
+    def test_json_session_shadow(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], real_file_tier: None
+    ) -> None:
+        """``session_shadow`` carries the durable source + redundancy verdict."""
+        from terok_sandbox.commands.vault import SessionShadow
+
+        session = tmp_path / "session"
+        session.write_text("pw\n")
+        sealed = tmp_path / "sealed.cred"
+        sealed.write_text("blob")
+        cfg = _status_cfg(session=session, sealed=sealed)
+        with patch(
+            "terok_sandbox.commands.vault.session_shadow_state",
+            return_value=SessionShadow("systemd-creds", redundant=True),
+        ):
+            _run_status(cfg, as_json=True, source="session-file")
+        data = json.loads(capsys.readouterr().out)
+        assert data["session_shadow"] == {"durable_source": "systemd-creds", "redundant": True}
+
+    def test_json_session_shadow_absent(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """No shadow → the field is explicitly null, never an unseal on the common path."""
+        _run_status(_status_cfg(), as_json=True, source="config")
+        assert json.loads(capsys.readouterr().out)["session_shadow"] is None
+
+
+class TestSessionShadowState:
+    """``session_shadow_state`` / ``clear_redundant_session_file`` over real tiers.
+
+    Uses the ``config`` (plaintext) tier as the durable one — cheap to
+    control and resolvable without a TPM, so the same/different-key
+    comparison is exercised end to end.
+    """
+
+    def test_no_session_file_is_no_shadow(self, tmp_path: Path, real_file_tier: None) -> None:
+        from terok_sandbox.commands.vault import session_shadow_state
+
+        cfg = _status_cfg(config_passphrase="K")  # durable present, but no session file
+        assert session_shadow_state(cfg) is None
+
+    def test_no_durable_tier_is_no_shadow(self, tmp_path: Path, real_file_tier: None) -> None:
+        from terok_sandbox.commands.vault import session_shadow_state
+
+        session = tmp_path / "session"
+        session.write_text("only-tier\n")
+        cfg = _status_cfg(session=session)  # session present, nothing durable under it
+        assert session_shadow_state(cfg) is None
+
+    def test_same_key_is_redundant(self, tmp_path: Path, real_file_tier: None) -> None:
+        from terok_sandbox.commands.vault import session_shadow_state
+
+        session = tmp_path / "session"
+        session.write_text("K\n")
+        cfg = _status_cfg(session=session, config_passphrase="K")
+        shadow = session_shadow_state(cfg)
+        assert shadow is not None
+        assert shadow.durable_source == "config"
+        assert shadow.redundant is True
+
+    def test_different_key_is_not_redundant(self, tmp_path: Path, real_file_tier: None) -> None:
+        from terok_sandbox.commands.vault import session_shadow_state
+
+        session = tmp_path / "session"
+        session.write_text("session-key\n")
+        cfg = _status_cfg(session=session, config_passphrase="durable-key")
+        shadow = session_shadow_state(cfg)
+        assert shadow is not None and shadow.redundant is False
+
+    def test_clear_removes_only_redundant(self, tmp_path: Path, real_file_tier: None) -> None:
+        from terok_sandbox.commands.vault import clear_redundant_session_file
+
+        session = tmp_path / "session"
+        session.write_text("K\n")
+        cfg = _status_cfg(session=session, config_passphrase="K")
+        assert clear_redundant_session_file(cfg) == "config"
+        assert not session.exists()
+
+    def test_clear_keeps_a_different_key_override(
+        self, tmp_path: Path, real_file_tier: None
+    ) -> None:
+        from terok_sandbox.commands.vault import clear_redundant_session_file
+
+        session = tmp_path / "session"
+        session.write_text("override\n")
+        cfg = _status_cfg(session=session, config_passphrase="durable-key")
+        assert clear_redundant_session_file(cfg) is None
+        assert session.exists()  # a deliberate override is never auto-removed

@@ -38,6 +38,7 @@ one — per the no-state-preservation rule).
 from __future__ import annotations
 
 import sys
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from terok_util import sanitize_tty
@@ -62,29 +63,81 @@ if TYPE_CHECKING:
 _DURABLE_TIERS = frozenset({"systemd-creds", "keyring", "passphrase-command", "config"})
 
 
-def provision_session_passphrase(cfg: SandboxConfig, passphrase: str) -> bool:
-    """Validate *passphrase* against the credentials DB, then land it on the session tier.
+@dataclass(frozen=True)
+class SessionProvisionResult:
+    """Outcome of [`provision_session_passphrase`][terok_sandbox.commands.vault.provision_session_passphrase].
+
+    ``written`` is the load-bearing bit: ``False`` means the write was
+    *refused* because a durable tier already resolves the vault, so a
+    session file would only shadow it (``shadowed_durable`` names that
+    tier).  Refusal is a normal outcome, not an error — callers report
+    it ("already unlocked via X") rather than raising.  ``validated``
+    says whether the written value was test-opened against an existing
+    DB (vs. an empty install where it becomes the key on first use).
+    """
+
+    written: bool
+    validated: bool = False
+    shadowed_durable: str | None = None
+
+
+def _active_durable_source(cfg: SandboxConfig) -> str | None:
+    """Name the durable tier that already resolves the vault, or ``None``.
+
+    Probes the chain *minus* the session file (file presence only — no
+    unseal, no command exec): if a reboot-surviving tier is present, a
+    session write would merely shadow it.  The single source of truth
+    for the no-shadow guard, shared by the writer and the CLI's
+    skip-the-prompt early-out.
+    """
+    from ..vault.store.encryption import probe_passphrase_chain
+
+    for tier in probe_passphrase_chain(
+        systemd_creds_file=cfg.vault_systemd_creds_file,
+        use_keyring=cfg.credentials_use_keyring,
+        passphrase_command=cfg.credentials_passphrase_command,
+        config_fallback=cfg.credentials_passphrase,
+    ):
+        if tier.present and tier.source in _DURABLE_TIERS:
+            return tier.source
+    return None
+
+
+def provision_session_passphrase(
+    cfg: SandboxConfig, passphrase: str, *, force: bool = False
+) -> SessionProvisionResult:
+    """Validate *passphrase* against the DB, then land it on the session tier.
 
     The single writer of the session-unlock tmpfs file — the CLI
     ``vault unlock`` and terok's TUI unlock modal both funnel through
-    here, so neither can store a value the DB rejects.  Without the
-    check, a wrong entry is written, reported as success, and every
-    subsequent open just says "locked" — the operator has no way to
-    tell a typo from a genuinely locked vault.
+    here, so the no-shadow and validation guards apply to every caller
+    by construction; neither can store a value the DB rejects, nor
+    silently shadow a working durable tier.
 
-    When the DB exists (and isn't a legacy plaintext file) the value is
-    test-opened first; a mismatch raises
-    [`WrongPassphraseError`][terok_sandbox.WrongPassphraseError] and
-    **nothing is written** — the chain keeps whatever state it had.  A
-    missing DB skips validation (it will be created encrypted with this
-    key on first use; opening it here just to check would create it as
-    a side effect).  Returns ``True`` when the value was verified
-    against an existing DB, ``False`` when there was no DB to verify
-    against — callers word their success message off that bit.
+    Two guards, in order:
+
+    1. **No-shadow.** The session tier is the highest-priority slot, so
+       writing it masks any durable tier (systemd-creds / keyring /
+       config) underneath — a reboot then wipes the session copy and the
+       operator only *thought* the sealed key was in use.  When a durable
+       tier already resolves and *force* is false, nothing is written and
+       the result reports ``written=False`` + the shadowed tier.  *force*
+       (re-key / deliberate override) skips this guard.
+    2. **Validation.** When the DB exists (and isn't a legacy plaintext
+       file) the value is test-opened first; a mismatch raises
+       [`WrongPassphraseError`][terok_sandbox.WrongPassphraseError] and
+       **nothing is written**.  A missing DB skips validation (opening it
+       just to check would create it as a side effect) — the value
+       becomes its key on first use.
     """
     from .._yaml import write_secret_text
     from ..vault.store.db import CredentialDB
     from ..vault.store.encryption import is_plaintext_sqlite
+
+    if not force:
+        shadowed = _active_durable_source(cfg)
+        if shadowed is not None:
+            return SessionProvisionResult(written=False, shadowed_durable=shadowed)
 
     validated = False
     if cfg.db_path.exists() and not is_plaintext_sqlite(cfg.db_path):
@@ -93,58 +146,38 @@ def provision_session_passphrase(cfg: SandboxConfig, passphrase: str) -> bool:
         CredentialDB(cfg.db_path, passphrase=passphrase).close()
         validated = True
     write_secret_text(cfg.vault_passphrase_file, passphrase + "\n")
-    return validated
+    return SessionProvisionResult(written=True, validated=validated)
 
 
 def _handle_vault_unlock(*, cfg: SandboxConfig | None = None, force: bool = False) -> None:
     """Write the credentials-DB passphrase to the session-unlock tmpfs file.
 
-    The session-file tier is the highest-priority slot in the resolution
-    chain, so writing it *shadows* any durable tier underneath: on a box
-    that already auto-unlocks from systemd-creds / keyring, a stray
-    ``unlock`` would route every open through a RAM-backed copy that a
-    reboot then wipes — the operator believes the sealed key is in use
-    when it isn't.  Skip the write when a durable tier already resolves,
-    unless ``--force`` (re-key / deliberate session override).
-
-    The typed value is validated against the existing DB before the
-    write (see
-    [`provision_session_passphrase`][terok_sandbox.commands.vault.provision_session_passphrase])
-    — a wrong entry exits with an error instead of silently parking a
-    useless value on the highest-priority tier.
+    Both guards live in
+    [`provision_session_passphrase`][terok_sandbox.commands.vault.provision_session_passphrase]
+    (no-shadow + DB validation).  This handler adds only CLI ergonomics:
+    a pre-prompt durable-tier check so the operator isn't asked to type a
+    passphrase the writer would just refuse, and exit codes / messages
+    for each outcome.
     """
     from ..vault.store.db import PlaintextDBFoundError
-    from ..vault.store.encryption import (
-        WrongPassphraseError,
-        probe_passphrase_chain,
-        prompt_passphrase,
-    )
+    from ..vault.store.encryption import WrongPassphraseError, prompt_passphrase
 
     if cfg is None:
         cfg = SandboxConfig()
 
-    # Probe the durable tiers only (omit ``passphrase_file``) — if one is
-    # present, a session write would just mask it.
-    durable = [
-        tier.source
-        for tier in probe_passphrase_chain(
-            systemd_creds_file=cfg.vault_systemd_creds_file,
-            use_keyring=cfg.credentials_use_keyring,
-            passphrase_command=cfg.credentials_passphrase_command,
-            config_fallback=cfg.credentials_passphrase,
-        )
-        if tier.present and tier.source in _DURABLE_TIERS
-    ]
-    if durable and not force:
+    # Skip the prompt entirely when the writer would refuse anyway — same
+    # guard the writer applies, run early purely so we don't ask for a
+    # value we'd discard.
+    if not force and (durable := _active_durable_source(cfg)) is not None:
         print(
-            f"vault already auto-unlocks via {durable[0]}; not writing a session file"
+            f"vault already auto-unlocks via {durable}; not writing a session file"
             " (it would shadow the durable tier and be lost on the next reboot)."
             " Re-run with --force to override."
         )
         return
 
     try:
-        validated = provision_session_passphrase(cfg, prompt_passphrase())
+        result = provision_session_passphrase(cfg, prompt_passphrase(), force=force)
     except WrongPassphraseError:
         raise SystemExit(
             f"that passphrase does not open {cfg.db_path} — nothing was written.\n"
@@ -156,10 +189,87 @@ def _handle_vault_unlock(*, cfg: SandboxConfig | None = None, force: bool = Fals
         raise SystemExit(str(exc)) from exc
 
     print(f"→ wrote passphrase to {cfg.vault_passphrase_file} (RAM-backed, cleared on reboot)")
-    if validated:
+    if result.validated:
         print("  verified: the value opens the credentials DB")
     else:
         print(f"  no DB at {cfg.db_path} yet — this value becomes its key on first use")
+
+
+@dataclass(frozen=True)
+class SessionShadow:
+    """A session-file tier sitting on top of a durable tier.
+
+    ``redundant`` is the actionable bit:
+
+    - ``True`` — the session copy is byte-identical to what the durable
+      tier resolves to, so it's pure residue (a past ``unlock`` on a
+      box that already auto-unlocks).  Safe to delete; nothing is lost.
+    - ``False`` — the two differ.  Either a deliberate re-key in
+      progress or a stale unlock masking the durable value; never
+      auto-removed.
+    - ``None`` — the durable tier is present but couldn't be read to
+      compare (broken seal, dead helper), so the session file may be
+      doing real work.  Left alone.
+    """
+
+    durable_source: str
+    redundant: bool | None
+
+
+def session_shadow_state(cfg: SandboxConfig) -> SessionShadow | None:
+    """Describe a session-file-over-durable-tier shadow, or ``None`` if there is none.
+
+    Returns ``None`` in the common cases — no session file, or no durable
+    tier beneath it — without resolving anything.  Only when both are
+    present does it resolve the *durable* chain (omitting the session
+    file) to compare values; that one comparison is the only place
+    status / remediation pay an unseal.  The session secret never leaves
+    the process — this reads two tiers and compares, exactly what the
+    resolver already does internally.
+    """
+    from ..vault.store.encryption import (
+        NoPassphraseError,
+        WrongPassphraseError,
+        load_passphrase_from_file,
+        resolve_passphrase_with_source,
+    )
+
+    session_value = load_passphrase_from_file(cfg.vault_passphrase_file)
+    if not session_value:
+        return None
+    durable_source = _active_durable_source(cfg)
+    if durable_source is None:
+        return None
+    try:
+        durable_value, _ = resolve_passphrase_with_source(
+            systemd_creds_file=cfg.vault_systemd_creds_file,
+            use_keyring=cfg.credentials_use_keyring,
+            passphrase_command=cfg.credentials_passphrase_command,
+            config_fallback=cfg.credentials_passphrase,
+            # ``passphrase_file`` omitted on purpose — resolve the durable
+            # chain *under* the session file so we can compare against it.
+        )
+    except (WrongPassphraseError, NoPassphraseError):
+        durable_value = None
+    if not durable_value:
+        return SessionShadow(durable_source, redundant=None)
+    return SessionShadow(durable_source, redundant=(durable_value == session_value))
+
+
+def clear_redundant_session_file(cfg: SandboxConfig) -> str | None:
+    """Remove the session-unlock file iff it merely duplicates a durable tier.
+
+    Same-key residue only: a session file whose passphrase differs from
+    the durable tier is a deliberate override (or a re-key mid-flight)
+    and is kept.  Re-verifies state at call time rather than trusting a
+    caller's stale read.  Returns the durable tier it deduplicated
+    against, or ``None`` when there was nothing safe to remove.
+    """
+    shadow = session_shadow_state(cfg)
+    if shadow is None or shadow.redundant is not True:
+        return None
+    cfg.vault_passphrase_file.unlink(missing_ok=True)
+    return shadow.durable_source
 
 
 def _forget_config_tier_updates(cfg: SandboxConfig) -> dict[str, object | None]:
@@ -676,6 +786,11 @@ def _handle_vault_status(*, cfg: SandboxConfig | None = None, as_json: bool = Fa
 
     recovery = RecoveryStatus.load(cfg)
     plaintext = plaintext_passphrase_config_path()
+    # When the chain table shows a session-over-durable shadow, resolve it
+    # once more to learn whether the session copy is redundant (same key)
+    # or a real override (different key) — turns the bare "shadowing"
+    # warning into an actionable one.  Cheap no-op unless a shadow exists.
+    shadow = session_shadow_state(cfg) if shadowed else None
     # Lock state comes from *access* (can the DB actually be opened?),
     # not from chain presence — a sealed credential that exists but
     # won't unseal is "present" in the table yet locked in the header,
@@ -701,6 +816,11 @@ def _handle_vault_status(*, cfg: SandboxConfig | None = None, as_json: bool = Fa
                         for tier, is_active, is_shadowed in rows
                     ],
                     "shadowed_tiers": shadowed,
+                    "session_shadow": (
+                        {"durable_source": shadow.durable_source, "redundant": shadow.redundant}
+                        if shadow
+                        else None
+                    ),
                     "recovery_acknowledged": recovery.acknowledged,
                     "plaintext_passphrase_path": str(plaintext) if plaintext else None,
                     "credentials": providers,
@@ -716,7 +836,7 @@ def _handle_vault_status(*, cfg: SandboxConfig | None = None, as_json: bool = Fa
         active_source=recovery.source,
         lock_reason=lock_reason,
         db_error=db_error,
-        shadowed=shadowed,
+        shadow=shadow,
         recovery_acknowledged=recovery.acknowledged,
         plaintext=plaintext,
         providers=providers,
@@ -730,7 +850,7 @@ def _print_vault_status(
     active_source: str | None,
     lock_reason: str | None,
     db_error: str | None,
-    shadowed: Sequence[str],
+    shadow: SessionShadow | None,
     recovery_acknowledged: bool,
     plaintext: Path | None,
     providers: list[str] | None,
@@ -758,12 +878,24 @@ def _print_vault_status(
         print(f"    {tier.source:<19} {marker:<9} {sanitize_tty(tier.detail)}")
     if locked:
         print("  the vault is locked — run `terok-sandbox vault unlock` to provision a passphrase")
-    if shadowed:
-        durable = ", ".join(sanitize_tty(s) for s in shadowed)
-        print(
-            f"  warning: the session-file tier is shadowing a durable tier ({durable}); the"
-            " vault auto-unlocks from the volatile session copy, not the durable one"
-        )
+    if shadow is not None:
+        src = sanitize_tty(shadow.durable_source)
+        if shadow.redundant is True:
+            print(
+                f"  note: the session-file tier duplicates the durable {src} tier"
+                " (same passphrase) — redundant residue; it clears on the next reboot"
+            )
+        elif shadow.redundant is False:
+            print(
+                f"  warning: the session-file tier shadows the durable {src} tier with a"
+                " DIFFERENT passphrase — a deliberate override, or a stale unlock masking"
+                " the durable value; the durable tier resumes once the session file is gone"
+            )
+        else:
+            print(
+                f"  warning: the session-file tier shadows {src}, but {src} could not be"
+                " read to compare — fix or remove the durable tier"
+            )
     recovery_line = (
         "acknowledged"
         if recovery_acknowledged
