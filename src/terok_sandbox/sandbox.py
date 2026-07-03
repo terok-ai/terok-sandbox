@@ -718,11 +718,17 @@ class Sandbox:
         The retain half of podman's stop/rm verb pair: the container and
         its writable layer stay in podman storage, and the per-container
         state that must outlive a stop (sidecar file) is left in place.
-        Absent containers are a no-op, matching podman handle semantics.
+        A missing container surfaces the runtime's error, exactly as
+        ``podman stop`` would fail on it — callers expecting absence check
+        container state first (or use [`rm`][terok_sandbox.sandbox.Sandbox.rm], which tolerates it).
 
         Args:
             containers: Container names to stop.
             timeout: Seconds the runtime waits before escalating to SIGKILL.
+
+        Raises:
+            RuntimeError: When the runtime cannot stop a container
+                (including one that does not exist).
         """
         for name in containers:
             self._runtime.container(name).stop(timeout=timeout)
