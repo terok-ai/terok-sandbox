@@ -17,8 +17,10 @@ keywords = ["podman", "containers", "sandbox", "security", "isolation"]
 requires-python = ">=3.12,<4.0"
 dynamic = ["version", "classifiers"]
 # Dependency pins follow the policy in AGENTS.md ("Dependency Pinning &
-# pyproject.toml Hygiene").  No other comments belong in this file — a
-# comment-blind release script would carry them into a production release.
+# pyproject.toml Hygiene").  Keep the dependency tables comment-free and
+# self-documenting -- in particular, never note here why a sibling
+# terok-* package is pinned a certain way, nor any transient dev-cycle
+# state: a comment-blind release script would ship such notes.
 dependencies = [
     "terok-util @ https://github.com/terok-ai/terok-util/releases/download/v0.2.0/terok_util-0.2.0-py3-none-any.whl",
     "terok-shield @ https://github.com/terok-ai/terok-shield/releases/download/v0.7.1/terok_shield-0.7.1-py3-none-any.whl",
@@ -106,7 +108,7 @@ markers = [
   "needs_podman: requires podman on the host",
   "needs_vault: vault integration (real server + DB)",
   "needs_host_features: requires systemd-user, real filesystem, host services beyond a plain Python interpreter",
-  "needs_systemd_creds: requires systemd-creds ≥ 257 on PATH with the Varlink io.systemd.Credentials interface",
+  "needs_systemd_creds: requires systemd-creds >= 257 on PATH with the Varlink io.systemd.Credentials interface",
 ]
 asyncio_mode = "auto"
 
@@ -147,7 +149,7 @@ quote-style = "double"
 indent-style = "space"
 docstring-code-format = true
 
-# Static type checking — see `make typecheck`.
+# Static type checking -- see `make typecheck`.
 [tool.mypy]
 python_version = "3.12"
 files = ["src/terok_sandbox"]
