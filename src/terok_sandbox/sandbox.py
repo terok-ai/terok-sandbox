@@ -239,6 +239,17 @@ class RunSpec:
     sealed: bool = False
     """When True, volumes are injected via ``podman cp`` instead of bind-mounted."""
 
+    ephemeral: bool = False
+    """When True, podman removes the container as soon as it exits (``--rm``).
+
+    Retained — the default — keeps the exited container and its writable
+    layer in podman storage for a later
+    [`start`][terok_sandbox.sandbox.Sandbox.start] or
+    [`rm`][terok_sandbox.sandbox.Sandbox.rm].  Ephemeral is the opt-in for
+    disposable runs whose durable output (if any) leaves through a
+    mounted volume.
+    """
+
     hostname: str | None = None
     """Override the in-container hostname (podman ``--hostname``).
 
@@ -468,6 +479,8 @@ class Sandbox:
         (they are injected via [`copy_to`][terok_sandbox.sandbox.Sandbox.copy_to] between create and start).
         """
         cmd: list[str] = ["podman", verb] + (["-d"] if verb == "run" else [])
+        if spec.ephemeral:
+            cmd.append("--rm")
         cmd += podman_userns_args()
 
         # ``--runtime`` must come before the image to be honoured; emit
@@ -699,10 +712,39 @@ class Sandbox:
         """Block until *container* exits; return its exit code."""
         return self._runtime.container(container).wait(timeout)
 
-    def stop(self, containers: list[str]) -> list[ContainerRemoveResult]:
-        """Best-effort stop and remove *containers*.
+    def stop(self, containers: list[str], *, timeout: int = 10) -> None:
+        """Stop *containers*, keeping them for a later [`start`][terok_sandbox.sandbox.Sandbox.start].
 
-        Returns one [`ContainerRemoveResult`][terok_sandbox.runtime.ContainerRemoveResult] per entry.
+        The retain half of podman's stop/rm verb pair: the container and
+        its writable layer stay in podman storage, and the per-container
+        state that must outlive a stop (sidecar file) is left in place.
+        A missing container surfaces the runtime's error, exactly as
+        ``podman stop`` would fail on it — callers expecting absence check
+        container state first (or use [`rm`][terok_sandbox.sandbox.Sandbox.rm], which tolerates it).
+
+        Args:
+            containers: Container names to stop.
+            timeout: Seconds the runtime waits before escalating to SIGKILL.
+
+        Raises:
+            RuntimeError: When the runtime cannot stop a container
+                (including one that does not exist).
+        """
+        for name in containers:
+            self._runtime.container(name).stop(timeout=timeout)
+
+    def rm(self, containers: list[str]) -> list[ContainerRemoveResult]:
+        """Force-remove *containers*, stopping them first when needed.
+
+        The teardown half of the verb pair: the container and its
+        writable layer are gone afterwards.  Host-side per-container
+        state (sidecar file, runtime dir) is deliberately left in place —
+        it belongs to the wiring layer above, which pairs removal with
+        [`remove_container_state`][terok_sandbox.launch.remove_container_state]
+        at real teardown.
+
+        Returns:
+            One [`ContainerRemoveResult`][terok_sandbox.runtime.ContainerRemoveResult] per entry.
         """
         handles = [self._runtime.container(name) for name in containers]
         return self._runtime.force_remove(handles)
