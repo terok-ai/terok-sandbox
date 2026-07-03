@@ -185,16 +185,18 @@ class TestSandbox:
             )
 
     def test_stop_halts_containers_and_keeps_them(self) -> None:
-        """``Sandbox.stop`` stops each container and removes nothing."""
+        """``Sandbox.stop`` stops every named container and removes nothing."""
         s = Sandbox()
+        handles = {"c1": MagicMock(), "c2": MagicMock()}
         with (
-            patch.object(s.runtime, "container") as container,
+            patch.object(s.runtime, "container", side_effect=handles.get) as container,
             patch.object(s.runtime, "force_remove") as remove,
         ):
             s.stop(["c1", "c2"], timeout=5)
 
         assert container.call_args_list == [call("c1"), call("c2")]
-        container.return_value.stop.assert_called_with(timeout=5)
+        for handle in handles.values():
+            handle.stop.assert_called_once_with(timeout=5)
         remove.assert_not_called()
 
     def test_rm_force_removes_containers(self) -> None:
