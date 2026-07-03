@@ -16,20 +16,22 @@ maintainers = [
 keywords = ["podman", "containers", "sandbox", "security", "isolation"]
 requires-python = ">=3.12,<4.0"
 dynamic = ["version", "classifiers"]
+# Dependency pins follow the policy in AGENTS.md ("Dependency Pinning &
+# pyproject.toml Hygiene").  Keep the dependency list comment-free.
 dependencies = [
     "terok-util @ https://github.com/terok-ai/terok-util/releases/download/v0.2.0/terok_util-0.2.0-py3-none-any.whl",
     "terok-shield @ https://github.com/terok-ai/terok-shield/releases/download/v0.7.1/terok_shield-0.7.1-py3-none-any.whl",
     "terok-clearance @ https://github.com/terok-ai/terok-clearance/releases/download/v0.7.2/terok_clearance-0.7.2-py3-none-any.whl",
-    "platformdirs>=4.10.0",
-    "aiohttp>=3.14.1",
-    "cryptography>=49.0.0",
-    "jinja2>=3.1",
-    "pydantic>=2.9",
-    "packaging>=24",
-    "sqlcipher3>=0.6.2",
-    "keyring>=25.0",
-    "ruamel.yaml>=0.18",
-    "prompt-toolkit>=3.0",
+    "platformdirs~=4.10",
+    "aiohttp~=3.14.1",
+    "cryptography~=49.0",
+    "jinja2~=3.1",
+    "pydantic~=2.13",
+    "packaging~=26.2",
+    "sqlcipher3==0.6.2",
+    "keyring~=25.7",
+    "ruamel.yaml==0.19.1",
+    "prompt-toolkit~=3.0",
 ]
 
 [project.urls]
@@ -103,7 +105,7 @@ markers = [
   "needs_podman: requires podman on the host",
   "needs_vault: vault integration (real server + DB)",
   "needs_host_features: requires systemd-user, real filesystem, host services beyond a plain Python interpreter",
-  "needs_systemd_creds: requires systemd-creds ≥ 257 on PATH with the Varlink io.systemd.Credentials interface",
+  "needs_systemd_creds: requires systemd-creds >= 257 on PATH with the Varlink io.systemd.Credentials interface",
 ]
 asyncio_mode = "auto"
 
@@ -144,7 +146,7 @@ quote-style = "double"
 indent-style = "space"
 docstring-code-format = true
 
-# Static type checking — see `make typecheck`.
+# Static type checking -- see `make typecheck`.
 [tool.mypy]
 python_version = "3.12"
 files = ["src/terok_sandbox"]
