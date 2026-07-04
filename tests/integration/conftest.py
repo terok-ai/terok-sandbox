@@ -9,12 +9,10 @@ Each fixture creates disposable resources (DB, config, sockets) within
 
 from __future__ import annotations
 
-import os
-import shutil
-import socket
 from pathlib import Path
 
 import pytest
+from terok_util.matrix import binary_on_path, check_capability_contract, tcp_reachable
 
 from terok_sandbox.vault.store.db import CredentialDB
 from tests.constants import PUBLIC_DNS_PROBE
@@ -84,54 +82,22 @@ def populated_db(db: CredentialDB) -> CredentialDB:
 
 
 # ── Matrix capability contract ───────────────────────────────────────
-# On a dev machine a missing binary is a host limitation and skipping is
-# the right degradation.  Inside the matrix the harness BUILT the image,
-# so every capability it declares (TEROK_EXPECT, exported by the matrix
-# engine) is a contract: absence means the slot is broken and must fail
-# at session start — not dissolve into skips that read as green.
-
-# dnsmasq/nft install into sbin on several distros while the test user's
-# PATH may omit those dirs — probe with them appended.
-_SBIN_AWARE_PATH = os.pathsep.join(
-    [os.environ.get("PATH", ""), "/usr/sbin", "/sbin", "/usr/local/sbin"]
-)
+# The probe map is the repo-specific half of the contract; the protocol
+# (TEROK_EXPECT parsing, unknown-name rejection, fail-up-front) lives in
+# terok_util.matrix.check_capability_contract.
 
 _CAPABILITY_PROBES = {
-    "podman": lambda: _has("podman"),
-    "nft": lambda: _has("nft"),
-    "dnsmasq": lambda: _has("dnsmasq"),
-    "dig": lambda: _has("dig"),
-    "getent": lambda: _has("getent"),
-    "git": lambda: _has("git"),
-    "internet": lambda: _tcp_reachable(*PUBLIC_DNS_PROBE),
+    "podman": lambda: binary_on_path("podman"),
+    "nft": lambda: binary_on_path("nft"),
+    "dnsmasq": lambda: binary_on_path("dnsmasq"),
+    "dig": lambda: binary_on_path("dig"),
+    "getent": lambda: binary_on_path("getent"),
+    "git": lambda: binary_on_path("git"),
+    "internet": lambda: tcp_reachable(*PUBLIC_DNS_PROBE),
 }
-
-
-def _has(binary: str) -> bool:
-    """Whether *binary* resolves on the sbin-extended PATH."""
-    return shutil.which(binary, path=_SBIN_AWARE_PATH) is not None
-
-
-def _tcp_reachable(ip: str, port: int, timeout: float = 5.0) -> bool:
-    """Whether a TCP connection to ``ip:port`` succeeds within *timeout*."""
-    try:
-        with socket.create_connection((ip, port), timeout=timeout):
-            return True
-    except OSError:
-        return False
 
 
 def pytest_sessionstart(session: pytest.Session) -> None:
     """Fail the whole session when the matrix capability contract is broken."""
-    expected = {c for c in os.environ.get("TEROK_EXPECT", "").split(",") if c}
-    if not expected:
-        return
-    unknown = expected - _CAPABILITY_PROBES.keys()
-    if unknown:
-        pytest.exit(f"TEROK_EXPECT names unknown capabilities: {sorted(unknown)}", returncode=3)
-    missing = sorted(cap for cap in expected if not _CAPABILITY_PROBES[cap]())
-    if missing:
-        pytest.exit(
-            "matrix capability contract broken — expected but missing: " + ", ".join(missing),
-            returncode=3,
-        )
+    if broken := check_capability_contract(_CAPABILITY_PROBES):
+        pytest.exit(broken, returncode=3)
