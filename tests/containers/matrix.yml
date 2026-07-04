@@ -12,6 +12,7 @@
 
 image-prefix: terok-sandbox-test
 flavor: podman
+expect: [podman, nft, dnsmasq, dig, getent, git, internet]
 poetry-groups: [test]
 
 slots:
