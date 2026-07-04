@@ -12,8 +12,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from terok_util.matrix import binary_on_path, check_capability_contract, tcp_reachable
 
 from terok_sandbox.vault.store.db import CredentialDB
+from tests.constants import PUBLIC_DNS_PROBE
 
 
 @pytest.fixture()
@@ -77,3 +79,25 @@ def populated_db(db: CredentialDB) -> CredentialDB:
         },
     )
     return db
+
+
+# ── Matrix capability contract ───────────────────────────────────────
+# The probe map is the repo-specific half of the contract; the protocol
+# (TEROK_EXPECT parsing, unknown-name rejection, fail-up-front) lives in
+# terok_util.matrix.check_capability_contract.
+
+_CAPABILITY_PROBES = {
+    "podman": lambda: binary_on_path("podman"),
+    "nft": lambda: binary_on_path("nft"),
+    "dnsmasq": lambda: binary_on_path("dnsmasq"),
+    "dig": lambda: binary_on_path("dig"),
+    "getent": lambda: binary_on_path("getent"),
+    "git": lambda: binary_on_path("git"),
+    "internet": lambda: tcp_reachable(*PUBLIC_DNS_PROBE),
+}
+
+
+def pytest_sessionstart(session: pytest.Session) -> None:
+    """Fail the whole session when the matrix capability contract is broken."""
+    if broken := check_capability_contract(_CAPABILITY_PROBES):
+        pytest.exit(broken, returncode=3)

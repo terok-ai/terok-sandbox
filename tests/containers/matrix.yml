@@ -1,0 +1,42 @@
+# SPDX-FileCopyrightText: 2026 Jiri Vyskocil
+# SPDX-License-Identifier: Apache-2.0
+#
+# Multi-distro test matrix for terok-sandbox — declarative input to the
+# shared engine in terok-util.  Run with `poetry run terok-matrix` from
+# the repo root (or `make test-matrix`).
+#
+# The sandbox runtime (per-container supervisor, vault proxy, git gate)
+# needs the nested rootless-podman image family; systemd is added on the
+# systemd distros because the vault's systemd-creds tier and the unit-dir
+# guards are exercised there.
+
+image-prefix: terok-sandbox-test
+flavor: podman
+expect: [podman, nft, dnsmasq, dig, getent, git, internet]
+poetry-groups: [test]
+
+slots:
+  debian12:
+    extra-packages: [systemd]
+  ubuntu2404:
+    extra-packages: [systemd]
+  ubuntu2604:
+    extra-packages: [systemd]
+  debian13:
+    extra-packages: [systemd]
+  fedora43:
+    extra-packages: [systemd]
+  fedora44:
+    extra-packages: [systemd]
+  podman:
+  alpine:
+  void:
+  mageia:
+
+phases:
+  - name: unit tests
+    scope: unit
+    pytest: tests/unit/ -v --tb=short
+  - name: integration tests
+    scope: integ
+    pytest: tests/integration/ -v --tb=short

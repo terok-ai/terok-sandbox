@@ -53,3 +53,8 @@ FAKE_PEER_PORT = 12345
 
 LOCALHOST_PEER = (LOCALHOST, FAKE_PEER_PORT)
 """Fake peer address for HTTP handler tests."""
+
+# ── Matrix capability probes ─────────────────────────────────────────────────
+
+PUBLIC_DNS_PROBE = ("1.1.1.1", 53)
+"""Public DNS endpoint the matrix 'internet' capability probe connects to."""
