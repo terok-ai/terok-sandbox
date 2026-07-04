@@ -3413,44 +3413,38 @@ tomli-w = ">=1.0,<2.0"
 
 [[package]]
 name = "terok-clearance"
-version = "0.7.2"
+version = "0.7.3"
 description = "Shield clearance and desktop notifications for terok"
 optional = false
-python-versions = ">=3.12,<4.0"
+python-versions = "<4.0,>=3.12"
 groups = ["main"]
 files = [
-    {file = "terok_clearance-0.7.2-py3-none-any.whl", hash = "sha256:885e10d58ab2e8e8b92645e34f6874aae807f08e5c456b57e2c773ca1f549798"},
+    {file = "terok_clearance-0.7.3-py3-none-any.whl", hash = "sha256:4f3b474c68438f76f0ba43131cec7e76c4f407174424719a683045e286065c87"},
+    {file = "terok_clearance-0.7.3.tar.gz", hash = "sha256:bb619cf35c936085c6075592cdda9b6984dca21f22a24ea0a3f2f7ffd8a26ff6"},
 ]
 
 [package.dependencies]
 asyncvarlink = "0.3.2"
-dbus-fast = ">=4.3.0,<5.0"
-pyyaml = ">=6.0"
-terok-util = ">=0.2.0,<0.3.0"
-
-[package.source]
-type = "url"
-url = "https://github.com/terok-ai/terok-clearance/releases/download/v0.7.2/terok_clearance-0.7.2-py3-none-any.whl"
+dbus-fast = ">=4.3,<5.0"
+pyyaml = ">=6.0,<7.0"
+terok-util = ">=0.2.1,<0.3.0"
 
 [[package]]
 name = "terok-shield"
-version = "0.7.1"
+version = "0.7.2"
 description = "nftables-based egress firewalling for Podman containers"
 optional = false
-python-versions = ">=3.12,<4.0"
+python-versions = "<4.0,>=3.12"
 groups = ["main"]
 files = [
-    {file = "terok_shield-0.7.1-py3-none-any.whl", hash = "sha256:f21df6a0681f4407e3c28db4ef54cbb49eb4cfb9c88380be2394c2f05428d167"},
+    {file = "terok_shield-0.7.2-py3-none-any.whl", hash = "sha256:e88f3fb2a897aa8b033540e646d14c58fa2fd497774acd7500f56240d0042b09"},
+    {file = "terok_shield-0.7.2.tar.gz", hash = "sha256:6aa5e66b27c9901b0f06c86fb62930522aae73282e08a7b4110b1b4ed9e3b80a"},
 ]
 
 [package.dependencies]
-pydantic = ">=2.0"
-PyYAML = ">=6.0"
-terok-util = ">=0.2.0,<0.3.0"
-
-[package.source]
-type = "url"
-url = "https://github.com/terok-ai/terok-shield/releases/download/v0.7.1/terok_shield-0.7.1-py3-none-any.whl"
+pydantic = ">=2.13,<3.0"
+PyYAML = ">=6.0,<7.0"
+terok-util = ">=0.2.1,<0.3.0"
 
 [[package]]
 name = "terok-util"
@@ -3846,4 +3840,4 @@ propcache = ">=0.2.1"
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<4.0"
-content-hash = "4742a3aa8f5a5850bc3bf83bc5de3632536c42d1c63ab93a2547895d5c19f6bd"
+content-hash = "63f2806a486694cf1c5cfe74d24874cfeb1034860327361993e60da995d3cc4b"
