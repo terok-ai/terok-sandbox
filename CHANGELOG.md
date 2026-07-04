@@ -1,4 +1,12 @@
 # Changelog
+## v0.4.0 — The Celestial Temple
+
+* Better UI for vault passphrase handling, https://github.com/terok-ai/terok-sandbox/pull/408, https://github.com/terok-ai/terok-sandbox/pull/399, https://github.com/terok-ai/terok-sandbox/pull/402, https://github.com/terok-ai/terok-sandbox/pull/400, https://github.com/terok-ai/terok-sandbox/pull/398
+* Container lifecycle verbs, https://github.com/terok-ai/terok-sandbox/pull/411
+* Operator hints https://github.com/terok-ai/terok-sandbox/pull/417, https://github.com/terok-ai/terok-sandbox/pull/419
+
+**Full Changelog**: https://github.com/terok-ai/terok-sandbox/compare/v0.3.1...v0.4.0
+
 ## v0.3.2 — We are constantly searching
 
 ## What's Changed
