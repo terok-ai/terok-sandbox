@@ -26,27 +26,31 @@ a gated git server, and egress firewall.
 - **Clearance composed in-supervisor** — every container gets a
   per-container supervisor that hosts the hub, verdict server, and
   desktop notifier in one short-lived process, spawned by an OCI
-  hook and reaped by `podman wait`.  No lingering daemons between
-  tasks; `pgrep terok` is empty when no containers are running.
-- **Setup as one call** — `sandbox_setup()` brings the whole stack up
-  idempotently; `sandbox_uninstall()` undoes it.
+  hook; it exits when `podman wait` returns and the poststop hook
+  reaps it.  No lingering daemons between tasks; `pgrep terok` is
+  empty when no containers are running.
+- **Setup as one call** — `terok-sandbox setup` brings the whole stack
+  up idempotently; `terok-sandbox uninstall` undoes it.
 
 ## Per-container supervisor
 
-The supervisor composes `terok-vault`, clearance-hub, verdict, and
-notifier into a single in-process composition per container.
+The supervisor composes the vault proxy, git gate, SSH signer,
+clearance hub, verdict server, and desktop notifier into a single
+in-process composition per container.
 Lifecycle, end-to-end:
 
 1. `terok-sandbox prepare` writes a sidecar config to
-   `$XDG_STATE_HOME/terok/sidecar/<container-name>.json` and emits
-   the podman flags for the container (vault socket bind-mount,
-   shield annotations, gate token, …).
+   `<state_root>/sidecar/<container-name>.json` (state root defaults
+   to `~/.local/share/terok/sandbox`) and emits the podman flags for
+   the container (the `/run/terok` bind-mount, shield annotations,
+   gate token, …) — including a `terok.sandbox.sidecar` annotation
+   carrying the sidecar's absolute path.
 2. The operator (or the calling orchestrator) runs `podman run`.
 3. The OCI `createRuntime` hook installed by `terok-sandbox setup` reads
    the sidecar, then `Popen`s a stdlib-only wrapper that supervises
-   `terok-sandbox supervisor <id>` — the actual long-running asyncio
-   loop.  The wrapper restarts the supervisor up to five times on
-   non-zero exit, with exponential backoff capped at 60 s.
+   `terok-sandbox supervisor <id> <sidecar-path>` — the actual
+   long-running asyncio loop.  On non-zero exit the wrapper re-runs
+   the supervisor with exponential backoff, up to five attempts.
 4. The supervisor brings up a `VerdictServer`, `ClearanceHub`,
    the git `GateServer` (when the sidecar wires a gate), a
    `VaultProxy` and the SSH signer (in `socket` or `tcp` mode per the
@@ -57,8 +61,8 @@ Lifecycle, end-to-end:
    while the container sat stopped) is logged and skipped, never
    fatal to the rest; the container itself starts regardless.
 5. The OCI poststop hook SIGTERMs the wrapper PID (recorded under
-   `$XDG_STATE_HOME/terok/pids/supervisor-<id>.pid`) and unlinks the
-   PID file.  The sidecar stays: OCI hooks fire per run-cycle, so a
+   `<state_root>/pids/supervisor-<id>.pid`, SIGKILL after a 2 s
+   grace) and unlinks the PID file.  The sidecar stays: OCI hooks fire per run-cycle, so a
    later `podman start` re-runs step 3 with the same wiring the
    container's immutable env was created with — restarts come back
    supervised.  The sidecar is removed at real teardown
@@ -84,7 +88,7 @@ filtering and
 the operator-in-the-loop verdict path.
 
 The split exists so that callers do not need to understand
-nftables, OCI hook wiring, vault sockets, or systemd unit lifecycles
+nftables, OCI hook wiring, vault sockets, or supervisor lifecycles
 to get a safe container.
 
 ## Installation
