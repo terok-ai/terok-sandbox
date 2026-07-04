@@ -3469,9 +3469,9 @@ platformdirs = ">=4.10,<5.0"
 
 [package.source]
 type = "git"
-url = "https://github.com/sliwowitz/terok-util.git"
-reference = "feat/matrix-engine"
-resolved_reference = "66edd4af4f17b27d5c679cf2b81f6739e5f34ae2"
+url = "https://github.com/terok-ai/terok-util.git"
+reference = "879265e4808f1bdb8bdd7b21d71508021b9e90dd"
+resolved_reference = "879265e4808f1bdb8bdd7b21d71508021b9e90dd"
 
 [[package]]
 name = "tomli"
@@ -3847,4 +3847,4 @@ propcache = ">=0.2.1"
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<4.0"
-content-hash = "3f50c242128bd28c51b0960acffd3535d2e54ec945298f3c6a2d22172c07f3c1"
+content-hash = "6c57962a6f42b7247923b58248416feb172fecda2334f34e6eaf941c2354ae47"
