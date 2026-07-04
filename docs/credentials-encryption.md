@@ -13,9 +13,8 @@ top-to-bottom and stops at the first hit:
    RAM-backed, cleared on reboot.  Written by `vault unlock`.
 2. **systemd-creds** — sealed credential at
    `${XDG_DATA_HOME:-~/.local/share}/terok/vault/vault.passphrase.cred`
-   (`XDG_DATA_HOME` is rarely set — the `~/.local/share` fallback is
-   what most hosts hit; the path matches `vault status`'s `DB:` line
-   directory).  Decrypted via `systemd-creds(1)`.  Machine-bound
+   (the same directory as the credentials DB).  Decrypted via
+   `systemd-creds(1)`.  Machine-bound
    (TPM2 or host key), survives reboot, no keyring needed.  Written
    by `vault passphrase seal`.  Requires systemd ≥ 257.
 3. **OS keyring** — `(service=terok-sandbox, username=credentials-db)`,
@@ -52,8 +51,9 @@ credentials:
 ```
 
 The resolver tokenises with `shlex.split` and runs
-`subprocess.run(...)` with a 30-second timeout, then strips trailing
-whitespace from stdout.  Anything that prints a passphrase on stdout
+`subprocess.run(...)` with a 30-second timeout, then strips the
+trailing newline from stdout (inner whitespace reaches SQLCipher
+verbatim).  Anything that prints a passphrase on stdout
 works; ready-to-use recipes (🤖 guesses, not manually verified):
 
 | Backend | `passphrase_command` value |
@@ -75,9 +75,10 @@ trusted workstation, then `pass git push` to your sync remote and
 the same repo your dotfiles already follow.
 
 Diagnostics from the helper land in the per-container supervisor logs
-(``$XDG_STATE_HOME/terok/logs/<container-id>.log``); look for lines
-like ``passphrase_command 'pass' exited 1: <stderr>``.  Each
-container's supervisor walks the passphrase chain when it spawns.
+(``<state_root>/logs/<container-id>.log``, state root defaulting to
+``~/.local/share/terok/sandbox``); look for lines like
+``passphrase_command 'pass' exited 1: <stderr>``.  Each container's
+supervisor walks the passphrase chain when it spawns.
 
 ## Day-to-day
 
@@ -114,7 +115,9 @@ available, and asking when the answer is unambiguous just slows the
 install down.  Either `host+tpm2` (TPM-equipped hosts) or `host` only,
 chosen by `systemd-creds --with-key=auto`.
 
-When systemd-creds isn't available, setup asks once:
+When systemd-creds isn't available, setup asks once (non-interactive
+runs must pass `--passphrase-tier` explicitly — there is no silent
+fallback):
 
 | Choice | When to pick it |
 |--------|-----------------|
@@ -154,6 +157,11 @@ fallbacks, and removes the session/sealed copies.  No retrieve-then-reseed
 by hand — the next per-container supervisor to spawn resolves the
 passphrase fresh from the keyring.
 
+Both upgrade verbs refuse to enable a machine-bound auto-unlock tier
+until the recovery key is marked as saved — run
+`terok-sandbox vault passphrase reveal` (which offers to mark it) or
+`vault passphrase acknowledge` first.
+
 ### Manual three-step (for anything not on the upgrade path)
 
 For other transitions (keyring → systemd-creds, anything →
@@ -190,15 +198,22 @@ you just retrieved the value in step 1, so you have it.
 
 #### 3. Provision in the new tier
 
+The machine-bound targets (systemd-creds, keyring) refuse until the
+recovery key is re-acknowledged — the `lock` in step 2 dropped the
+marker — so run `terok-sandbox vault passphrase acknowledge` first
+for those two paths.
+
 ```bash
 # → session-file (default; ephemeral, cleared on reboot):
 echo -n "<passphrase>" | terok-sandbox vault unlock
 
 # → systemd-creds (machine-bound, persistent):
 echo -n "<passphrase>" | terok-sandbox vault unlock   # land it as session first
+terok-sandbox vault passphrase acknowledge            # re-confirm the recovery key
 terok-sandbox vault passphrase seal --key=auto        # seal; drops the session copy
 
 # → OS keyring:
+terok-sandbox vault passphrase acknowledge            # re-confirm the recovery key
 terok-sandbox vault passphrase to-keyring             # one verb, no chooser
 
 # → passphrase_command (headless; helper points at pass / bw / op / cloud CLI):
@@ -211,9 +226,9 @@ yq -yi '.credentials.passphrase_command = "pass show terok-sandbox/vault-passphr
 terok-sandbox setup     # chooser → [c] → type "yes" to accept the trust boundary
 ```
 
-Run `terok-sandbox vault status` afterwards to confirm
-`Passphrase: resolved via <new-tier>` — and to verify no stale
-plaintext WARNING is still pointing at `config.yml`.
+Run `terok-sandbox vault status` afterwards to confirm the header
+reads `Vault: unlocked — passphrase via <new-tier>` — and to verify no
+stale plaintext warning is still pointing at `config.yml`.
 
 ## Recovering from a lost passphrase
 
