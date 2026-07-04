@@ -291,6 +291,13 @@ path = "terok_sandbox.commands._types"
 layer = "foundation"
 depends_on = []
 
+# Operator-facing invocation identity for re-run hints.  Foundation-level
+# so any layer composing operator hints can import it.
+[[modules]]
+path = "terok_sandbox.operator_cli"
+layer = "foundation"
+depends_on = []
+
 [[modules]]
 path = "terok_sandbox.commands.sandbox"
 layer = "surface"
