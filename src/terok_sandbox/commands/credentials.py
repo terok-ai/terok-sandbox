@@ -26,6 +26,7 @@ from typing import Literal
 
 from .._yaml import update_section as _yaml_update_section
 from ..config import SandboxConfig
+from ..operator_cli import setup_invocation
 from ..vault.store.encryption import PassphraseSource
 from ._types import CommandDef
 
@@ -45,7 +46,7 @@ SetupTier = Literal["session-file", "keyring", "config"]
 _EXPLICIT_TIERS: frozenset[str] = frozenset({"session-file", "keyring", "config", "systemd-creds"})
 
 _NON_TTY_TIER_HINT = """\
-terok-sandbox setup: running non-interactively but no passphrase tier was chosen.
+{setup}: running non-interactively but no passphrase tier was chosen.
 
   systemd-creds is unavailable on this host (needs systemd ≥ 257), so
   setup would otherwise fall through to the session-unlock tmpfs file
@@ -56,7 +57,7 @@ terok-sandbox setup: running non-interactively but no passphrase tier was chosen
     --passphrase-tier session-file   (re-run `vault unlock` after each boot)
     --passphrase-tier config         (plaintext-on-disk; needs confirmation)
 
-  Or install systemd ≥ 257 (Fedora ≥ 42, Debian ≥ 13) and re-run setup
+  Or install systemd ≥ 257 (Fedora ≥ 42, Debian ≥ 13) and re-run `{setup}`
   so the systemd-creds auto-tier becomes available."""
 
 _CHOOSER_PROMPT = """\
@@ -326,7 +327,7 @@ def _ask_passphrase_mode() -> SetupTier:
     trade is wrong, so we now fail closed with an actionable hint.
     """
     if not sys.stdin.isatty():
-        raise SystemExit(_NON_TTY_TIER_HINT)
+        raise SystemExit(_NON_TTY_TIER_HINT.format(setup=setup_invocation()))
     while True:
         print(_CHOOSER_PROMPT)
         choice = sys.stdin.readline().strip().lower()[:1]
