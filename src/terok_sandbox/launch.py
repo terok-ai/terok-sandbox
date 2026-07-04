@@ -851,8 +851,8 @@ def cleanup(container: str, *, cfg: SandboxConfig) -> bool:
             print(
                 f"warning: cleanup couldn't revoke broker/SSH tokens for"
                 f" {plan.scope}/{container}: {type(exc).__name__}: {exc}\n"
-                f"         tokens remain in the credentials DB until the next"
-                f" `terok-sandbox credentials revoke` after a `vault unlock`.",
+                f"         tokens remain in the credentials DB; re-run"
+                f" `terok-sandbox cleanup` after a `vault unlock` to purge them.",
                 file=sys.stderr,
             )
             db = None

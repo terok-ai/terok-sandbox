@@ -387,8 +387,9 @@ def load_passphrase_from_command(
     ``None`` means "skip this tier" or "fail closed".  Diagnostic
     detail (parse error, exec failure, non-zero exit, helper stderr,
     timeout) is logged at WARNING so operators can triage their helper
-    via ``journalctl --user -u terok-vault`` without us crashing the
-    chain walk.
+    from the invoking command's output (or the per-container supervisor
+    log under ``<state_root>/logs/``) without us crashing the chain
+    walk.
 
     Same vocabulary as ``git config credential.helper``, ssh pinentry,
     ``BORG_PASSCOMMAND``: one field plugs any credential backend into
