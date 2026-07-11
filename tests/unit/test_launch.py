@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import importlib
 import inspect
 import json
 import os
@@ -681,8 +682,11 @@ class TestRegistration:
 
     def test_handlers_accept_cfg(self) -> None:
         for cmd in LAUNCH_COMMANDS:
-            sig = inspect.signature(cmd.handler)
-            assert "cfg" in sig.parameters, f"{cmd.handler.__name__} missing cfg"
+            # Handlers are registered lazily (``LazyHandler`` targets), so
+            # resolve to the real callable before introspecting its signature.
+            module_name, _, qualname = cmd.handler.target.partition(":")
+            fn = getattr(importlib.import_module(module_name), qualname)
+            assert "cfg" in inspect.signature(fn).parameters, f"{fn.__name__} missing cfg"
 
     def test_prepare_help_mentions_both_delivery_patterns(self) -> None:
         prep = next(c for c in LAUNCH_COMMANDS if c.name == "prepare")
@@ -931,11 +935,9 @@ class TestEdgeCases:
 
     def test_handlers_construct_default_cfg(self, tmp_path: Path) -> None:
         """Handlers fall back to `SandboxConfig()` when *cfg* is omitted."""
-        from terok_sandbox.commands import launch as launch_cmds
-
         fake_cfg = _make_cfg(tmp_path)
         with (
-            patch.object(launch_cmds, "SandboxConfig", return_value=fake_cfg),
+            patch("terok_sandbox.config.SandboxConfig", return_value=fake_cfg),
             patch("terok_sandbox.integrations.shield.ShieldManager.pre_start", return_value=[]),
             patch("terok_sandbox.launch.shutil.which", return_value="/usr/bin/podman"),
             patch("terok_sandbox.launch.Path.resolve", return_value=Path("/usr/bin/podman")),

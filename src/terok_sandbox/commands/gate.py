@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from terok_util import LazyHandler
+
 from ._types import ArgDef, CommandDef
 
 if TYPE_CHECKING:
@@ -47,7 +49,7 @@ GATE_COMMANDS: tuple[CommandDef, ...] = (
             CommandDef(
                 name="path",
                 help="Print the file:// URL of a project's bare mirror",
-                handler=_handle_gate_path,
+                handler=LazyHandler("terok_sandbox.commands.gate:_handle_gate_path"),
                 args=(
                     ArgDef(
                         name="project",

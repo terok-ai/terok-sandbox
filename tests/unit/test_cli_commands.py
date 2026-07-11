@@ -19,6 +19,25 @@ from terok_sandbox.commands import (
 )
 
 
+def _resolve_handler(handler: object) -> object:
+    """Resolve a possibly-lazy handler to the underlying function for introspection.
+
+    Handlers are registered as [`LazyHandler`][terok_util.cli_types.LazyHandler]
+    ``"module:qualname"`` targets, so signature checks import and unwrap
+    the real callable first.
+    """
+    import importlib
+
+    target = getattr(handler, "target", None)
+    if target is None:
+        return handler
+    module_name, _, qualname = target.partition(":")
+    obj: object = importlib.import_module(module_name)
+    for part in qualname.split("."):
+        obj = getattr(obj, part)
+    return obj
+
+
 def _run_cli(*args: str) -> tuple[str, str, int]:
     """Run CLI in-process, capturing stdout/stderr and exit code."""
     stdout, stderr = StringIO(), StringIO()
@@ -168,16 +187,16 @@ class TestHandlerCfgSignatures:
 
         gate = GATE_COMMANDS[0]
         for cmd in gate.children:
-            sig = inspect.signature(cmd.handler)
-            assert "cfg" in sig.parameters, f"{cmd.handler.__name__} missing cfg param"
+            fn = _resolve_handler(cmd.handler)
+            assert "cfg" in inspect.signature(fn).parameters, f"{fn.__name__} missing cfg param"
 
     def test_ssh_handlers_accept_cfg(self) -> None:
         import inspect
 
         ssh = SSH_COMMANDS[0]
         for cmd in ssh.children:
-            sig = inspect.signature(cmd.handler)
-            assert "cfg" in sig.parameters, f"{cmd.handler.__name__} missing cfg param"
+            fn = _resolve_handler(cmd.handler)
+            assert "cfg" in inspect.signature(fn).parameters, f"{fn.__name__} missing cfg param"
 
 
 class TestGatePathVerb:

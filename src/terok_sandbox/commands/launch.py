@@ -16,8 +16,14 @@ which holds the actual composition logic.
 
 from __future__ import annotations
 
-from ..config import SandboxConfig
+from typing import TYPE_CHECKING
+
+from terok_util import LazyHandler
+
 from ._types import ArgDef, CommandDef
+
+if TYPE_CHECKING:
+    from ..config import SandboxConfig
 
 
 def _csv_list(value: str) -> list[str]:
@@ -78,6 +84,7 @@ def _handle_prepare(
         output_json: Emit a JSON array instead of a shell-quoted string.
         cfg: Optional [`SandboxConfig`][terok_sandbox.SandboxConfig] override.
     """
+    from ..config import SandboxConfig
     from ..launch import compose, format_args
 
     if cfg is None:
@@ -112,6 +119,7 @@ def _handle_run(
     plus a collision check on the user-supplied trailing podman args and
     an ``os.execv`` into the podman binary.  Caller does not return.
     """
+    from ..config import SandboxConfig
     from ..launch import compose, exec_podman
 
     if cfg is None:
@@ -136,6 +144,7 @@ def _handle_cleanup(container: str, *, cfg: SandboxConfig | None = None) -> None
     and removes the per-container state directory.  Idempotent — exits
     quietly when no state is found.
     """
+    from ..config import SandboxConfig
     from ..launch import cleanup
 
     if cfg is None:
@@ -151,7 +160,7 @@ LAUNCH_COMMANDS: tuple[CommandDef, ...] = (
     CommandDef(
         name="prepare",
         help="Print podman flags for sandboxing a user-owned container",
-        handler=_handle_prepare,
+        handler=LazyHandler("terok_sandbox.commands.launch:_handle_prepare"),
         epilog=_BRIDGES_EPILOG,
         args=(
             ArgDef(name="container", help="Container name (becomes --name)"),
@@ -193,7 +202,7 @@ LAUNCH_COMMANDS: tuple[CommandDef, ...] = (
     CommandDef(
         name="run",
         help="Launch a sandboxed user-owned container (exec into podman run)",
-        handler=_handle_run,
+        handler=LazyHandler("terok_sandbox.commands.launch:_handle_run"),
         epilog=_BRIDGES_EPILOG,
         args=(
             ArgDef(name="container", help="Container name (becomes --name)"),
@@ -229,7 +238,7 @@ LAUNCH_COMMANDS: tuple[CommandDef, ...] = (
     CommandDef(
         name="cleanup",
         help="Revoke tokens and drop shield rules for a sandboxed container",
-        handler=_handle_cleanup,
+        handler=LazyHandler("terok_sandbox.commands.launch:_handle_cleanup"),
         args=(ArgDef(name="container", help="Container name to clean up"),),
     ),
 )

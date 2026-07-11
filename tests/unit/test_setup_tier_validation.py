@@ -56,26 +56,24 @@ class TestSetupRejectsBeforeMutation:
             return _inner
 
         monkeypatch.setattr(
-            "terok_sandbox.commands.sandbox.run_legacy_install_cleanup_phase",
+            "terok_sandbox._setup.run_legacy_install_cleanup_phase",
             _trap("legacy_cleanup"),
         )
+        monkeypatch.setattr("terok_sandbox._setup.run_shield_install_phase", _trap("shield"))
         monkeypatch.setattr(
-            "terok_sandbox.commands.sandbox.run_shield_install_phase", _trap("shield")
+            "terok_sandbox.commands.credentials._run_credentials_setup_phase", _trap("credentials")
         )
         monkeypatch.setattr(
-            "terok_sandbox.commands.sandbox._run_credentials_setup_phase", _trap("credentials")
-        )
-        monkeypatch.setattr(
-            "terok_sandbox.commands.sandbox.run_supervisor_install_phase", _trap("supervisor")
+            "terok_sandbox._setup.run_supervisor_install_phase", _trap("supervisor")
         )
         # The prereq report is read-only but it still talks to selinux —
         # patch it to a no-op so the test doesn't depend on the host.
         monkeypatch.setattr(
-            "terok_sandbox.commands.sandbox.run_prereq_report",
+            "terok_sandbox._setup.run_prereq_report",
             lambda _cfg: type("R", (), {"status": "OK"})(),
         )
         monkeypatch.setattr(
-            "terok_sandbox.commands.sandbox.print_selinux_install_hint",
+            "terok_sandbox._setup.print_selinux_install_hint",
             lambda _result: None,
         )
 
@@ -90,21 +88,15 @@ class TestSetupRejectsBeforeMutation:
         # bogus tier value is just noise.  Refusing here would block the
         # documented "install everything *except* the credentials phase"
         # escape hatch.
+        monkeypatch.setattr("terok_sandbox._setup.run_legacy_install_cleanup_phase", lambda: True)
+        monkeypatch.setattr("terok_sandbox._setup.run_shield_install_phase", lambda **_kw: True)
+        monkeypatch.setattr("terok_sandbox._setup.run_supervisor_install_phase", lambda: True)
         monkeypatch.setattr(
-            "terok_sandbox.commands.sandbox.run_legacy_install_cleanup_phase", lambda: True
-        )
-        monkeypatch.setattr(
-            "terok_sandbox.commands.sandbox.run_shield_install_phase", lambda **_kw: True
-        )
-        monkeypatch.setattr(
-            "terok_sandbox.commands.sandbox.run_supervisor_install_phase", lambda: True
-        )
-        monkeypatch.setattr(
-            "terok_sandbox.commands.sandbox.run_prereq_report",
+            "terok_sandbox._setup.run_prereq_report",
             lambda _cfg: type("R", (), {"status": "OK"})(),
         )
         monkeypatch.setattr(
-            "terok_sandbox.commands.sandbox.print_selinux_install_hint",
+            "terok_sandbox._setup.print_selinux_install_hint",
             lambda _result: None,
         )
         # write_stamp is imported lazily inside the handler; patch its
@@ -118,8 +110,10 @@ class TestSetupRejectsBeforeMutation:
         def _boom(*_a: object, **_kw: object) -> bool:
             raise RuntimeError("credentials phase ran despite --no-vault")
 
-        monkeypatch.setattr("terok_sandbox.commands.sandbox._run_credentials_setup_phase", _boom)
+        monkeypatch.setattr(
+            "terok_sandbox.commands.credentials._run_credentials_setup_phase", _boom
+        )
 
         # Should not raise — the bogus tier is ignored under --no-vault.
-        with patch("terok_sandbox.commands.sandbox.SandboxConfig"):
+        with patch("terok_sandbox.config.SandboxConfig"):
             _handle_sandbox_setup(passphrase_tier="bogus", no_vault=True)

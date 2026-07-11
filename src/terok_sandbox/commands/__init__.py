@@ -31,8 +31,11 @@ Shield commands are delegated to terok-shield's own registry —
 
 from __future__ import annotations
 
+# Underscore-prefixed handlers are re-exported (not advertised in
+# ``__all__``) for terok-executor's CLI splice and the tests that mock
+# them; the F401 suppressions below mark those intentional re-exports.
 from ._types import ArgDef, CommandDef, CommandTree, KeyRow
-from .credentials import (
+from .credentials import (  # noqa: F401
     CREDENTIALS_COMMANDS,
     _ask_passphrase_mode,
     _back_up_plaintext_db,
@@ -41,16 +44,25 @@ from .credentials import (
     _provision_passphrase,
     _run_credentials_setup_phase,
 )
-from .doctor import DOCTOR_COMMANDS, _handle_doctor
-from .gate import GATE_COMMANDS, _handle_gate_path
-from .launch import LAUNCH_COMMANDS, _handle_cleanup, _handle_prepare, _handle_run
-from .sandbox import SETUP_COMMANDS, _handle_sandbox_setup, _handle_sandbox_uninstall
-from .shield import (
+from .doctor import DOCTOR_COMMANDS, _handle_doctor  # noqa: F401
+from .gate import GATE_COMMANDS, _handle_gate_path  # noqa: F401
+from .launch import (  # noqa: F401
+    LAUNCH_COMMANDS,
+    _handle_cleanup,
+    _handle_prepare,
+    _handle_run,
+)
+from .sandbox import (  # noqa: F401
+    SETUP_COMMANDS,
+    _handle_sandbox_setup,
+    _handle_sandbox_uninstall,
+)
+from .shield import (  # noqa: F401
     SHIELD_COMMANDS,
     _handle_shield_setup,
     _handle_shield_uninstall,
 )
-from .ssh import (
+from .ssh import (  # noqa: F401
     SSH_COMMANDS,
     _build_key_rows,
     _filter_key_rows,
@@ -67,8 +79,8 @@ from .ssh import (
     _print_key_table,
     _validate_scope_name,
 )
-from .supervisor import SUPERVISOR_COMMANDS, _handle_supervisor
-from .vault import (
+from .supervisor import SUPERVISOR_COMMANDS, _handle_supervisor  # noqa: F401
+from .vault import (  # noqa: F401
     VAULT_COMMANDS,
     SessionProvisionResult,
     SessionShadow,
@@ -106,6 +118,11 @@ COMMANDS: CommandTree = CommandTree(
 )
 
 
+#: The registry's stable surface.  Underscore-prefixed handlers
+#: (``_handle_sandbox_setup``, ``_open_db``, …) stay importable for the
+#: executor's CLI splice and the tests that mock them, but they are
+#: deliberately absent from ``__all__``: the ``*_COMMANDS`` registries
+#: are the public entry point, not the handler functions themselves.
 __all__ = [
     # Vocabulary
     "ArgDef",
@@ -123,50 +140,13 @@ __all__ = [
     "SSH_COMMANDS",
     "SUPERVISOR_COMMANDS",
     "VAULT_COMMANDS",
-    # Handlers re-exported for testing and out-of-tree consumers (terok
-    # frontends sometimes call them directly).  The underscore prefix
-    # marks them as "registry-only" — the registry is the public entry
-    # point, not the handler functions themselves.
-    "_ask_passphrase_mode",
-    "_back_up_plaintext_db",
-    "_build_key_rows",
-    "_filter_key_rows",
-    "_forget_config_tier_updates",
-    "_handle_cleanup",
-    "_handle_credentials_encrypt_db",
-    "_handle_doctor",
-    "_handle_gate_path",
-    "_handle_prepare",
-    "_handle_run",
-    "_handle_sandbox_setup",
-    "_handle_sandbox_uninstall",
-    "_handle_shield_setup",
-    "_handle_shield_uninstall",
-    "_handle_ssh_add",
-    "_handle_ssh_export",
-    "_handle_ssh_import",
-    "_handle_ssh_link",
-    "_handle_ssh_list",
-    "_handle_ssh_pub",
-    "_handle_ssh_remove",
-    "_handle_ssh_rename",
-    "_handle_supervisor",
-    "_handle_vault_list",
-    "_handle_vault_lock",
-    "handle_vault_seal",
-    "handle_vault_to_keyring",
-    "_handle_vault_unlock",
+    # Vault passphrase workflows (public, non-underscore surface)
     "SessionProvisionResult",
     "SessionShadow",
     "clear_redundant_session_file",
+    "handle_vault_seal",
+    "handle_vault_to_keyring",
     "provision_session_passphrase",
     "purge_passphrase_tiers",
     "session_shadow_state",
-    "_key_id_from_row",
-    "_open_db",
-    "_persist_mode_choice",
-    "_print_key_table",
-    "_provision_passphrase",
-    "_run_credentials_setup_phase",
-    "_validate_scope_name",
 ]

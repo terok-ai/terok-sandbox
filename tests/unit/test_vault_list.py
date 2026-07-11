@@ -100,7 +100,7 @@ class TestHandleVaultListErrors:
 
         default_cfg = MagicMock()
         default_cfg.open_credential_db.side_effect = RuntimeError("vault locked")
-        with patch("terok_sandbox.commands.vault.SandboxConfig", return_value=default_cfg):
+        with patch("terok_sandbox.config.SandboxConfig", return_value=default_cfg):
             with pytest.raises(SystemExit) as exc:
                 _handle_vault_list()
         assert exc.value.code == 2

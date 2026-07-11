@@ -19,6 +19,8 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+from terok_util import LazyHandler
+
 from ._types import ArgDef, CommandDef
 
 
@@ -44,7 +46,7 @@ SUPERVISOR_COMMANDS: tuple[CommandDef, ...] = (
     CommandDef(
         name="supervisor",
         help="Run the per-container supervisor (internal; spawned by the OCI hook)",
-        handler=_handle_supervisor,
+        handler=LazyHandler("terok_sandbox.commands.supervisor:_handle_supervisor"),
         group="internal",
         args=(
             ArgDef(name="container_id", help="Container ID the supervisor manages"),

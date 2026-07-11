@@ -1784,7 +1784,7 @@ class TestVaultUnlockLock:
         cfg = _make_cfg(tmp_path)
         cfg.vault_systemd_creds_file.parent.mkdir(parents=True, exist_ok=True)
         cfg.vault_systemd_creds_file.write_bytes(b"sealed-blob")
-        monkeypatch.setattr("terok_sandbox.commands.vault.SandboxConfig", lambda: cfg)
+        monkeypatch.setattr("terok_sandbox.config.SandboxConfig", lambda: cfg)
         _handle_vault_unlock()  # cfg omitted → default-construction branch
         assert "already auto-unlocks" in capsys.readouterr().out
 
@@ -2030,7 +2030,7 @@ class TestVaultUnlockLock:
         from terok_sandbox.commands import _handle_vault_lock
 
         cfg = _make_cfg(tmp_path)  # use_keyring=False → purge skips every tier cleanly
-        monkeypatch.setattr("terok_sandbox.commands.vault.SandboxConfig", lambda: cfg)
+        monkeypatch.setattr("terok_sandbox.config.SandboxConfig", lambda: cfg)
         _handle_vault_lock(force=True)  # cfg omitted → default-construction branch
 
 
@@ -2582,19 +2582,19 @@ class TestCredentialsCommandCoverageGaps:
         is absent — that's enough to cover the default-cfg branch.
         """
         from terok_sandbox.commands import _handle_credentials_encrypt_db, credentials as cred_cmds
+        from terok_sandbox.config import SandboxConfig
 
-        def _fake_sandbox_config():
-            from terok_sandbox.config import SandboxConfig
-
-            return SandboxConfig(
-                state_dir=tmp_path / "state",
-                runtime_dir=tmp_path / "rt",
-                config_dir=tmp_path / "cfg",
-                vault_dir=tmp_path / "vault-absent",
-                services_mode="socket",
-            )
-
-        monkeypatch.setattr(cred_cmds, "SandboxConfig", _fake_sandbox_config)
+        # Build the fallback config with the real class *before* patching,
+        # so the default-factory (which imports SandboxConfig lazily) hands
+        # back this instance without recursing into the stub.
+        fake_cfg = SandboxConfig(
+            state_dir=tmp_path / "state",
+            runtime_dir=tmp_path / "rt",
+            config_dir=tmp_path / "cfg",
+            vault_dir=tmp_path / "vault-absent",
+            services_mode="socket",
+        )
+        monkeypatch.setattr("terok_sandbox.config.SandboxConfig", lambda: fake_cfg)
         # systemd-creds path is the fast-track that needs least mocking.
         monkeypatch.setattr("terok_sandbox.vault.store.systemd_creds.is_available", lambda: True)
         monkeypatch.setattr(
