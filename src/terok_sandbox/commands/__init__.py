@@ -44,7 +44,7 @@ package to read ``COMMANDS`` never pulls a handler module behind it.
 from __future__ import annotations
 
 from importlib import import_module
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ._types import ArgDef, CommandDef, CommandTree, KeyRow
 
@@ -193,7 +193,7 @@ _LAZY: dict[str, str] = {
 }
 
 
-def __getattr__(name: str) -> object:
+def __getattr__(name: str) -> Any:
     """Resolve a re-exported registry / handler by importing its module on first access.
 
     Looked up in the module's ``_LAZY`` map and cached on the

@@ -37,7 +37,7 @@ __version__: str = "0.0.0"  # placeholder; replaced at build time
 
 from importlib import import_module
 from importlib.metadata import PackageNotFoundError, version as _meta_version
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from terok_util.config_stack import ConfigScope
 
@@ -169,7 +169,7 @@ _LAZY: dict[str, str] = {
 }
 
 
-def __getattr__(name: str) -> object:
+def __getattr__(name: str) -> Any:
     """Resolve a public symbol by importing its owning submodule on first access (PEP 562).
 
     Looked up in the module's ``_LAZY`` map; the resolved value is
