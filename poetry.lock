@@ -3367,56 +3367,55 @@ tomli-w = ">=1.0,<2.0"
 
 [[package]]
 name = "terok-clearance"
-version = "0.7.3"
+version = "0.7.4a1"
 description = "Shield clearance and desktop notifications for terok"
 optional = false
 python-versions = ">=3.12,<4.0"
 groups = ["main"]
-files = []
-develop = false
+files = [
+    {file = "terok_clearance-0.7.4a1-py3-none-any.whl", hash = "sha256:e81c0df6165093946b8a98d7e86e68b929637617c6024c5a02f3478afac62dee"},
+]
 
 [package.dependencies]
 asyncvarlink = "0.3.2"
 dbus-fast = ">=4.3,<5.0"
 pyyaml = ">=6.0,<7.0"
-terok-util = {git = "https://github.com/sliwowitz/terok-util.git", rev = "perf/lazy-command-handler"}
+terok_util = {url = "https://github.com/terok-ai/terok-util/releases/download/v0.2.2a1/terok_util-0.2.2a1-py3-none-any.whl"}
 
 [package.source]
-type = "git"
-url = "https://github.com/sliwowitz/terok-clearance.git"
-reference = "perf/lazy-imports"
-resolved_reference = "6a132729aecde6da0cf9797dfd80b7e59c74950f"
+type = "url"
+url = "https://github.com/terok-ai/terok-clearance/releases/download/v0.7.4a1/terok_clearance-0.7.4a1-py3-none-any.whl"
 
 [[package]]
 name = "terok-shield"
-version = "0.7.2"
+version = "0.7.3a1"
 description = "nftables-based egress firewalling for Podman containers"
 optional = false
 python-versions = ">=3.12,<4.0"
 groups = ["main"]
-files = []
-develop = false
+files = [
+    {file = "terok_shield-0.7.3a1-py3-none-any.whl", hash = "sha256:eeab004818d65f33e7d1d73f8b86b57d04fe7c5599008a7c92ad3cc99ffb6e33"},
+]
 
 [package.dependencies]
 pydantic = ">=2.13,<3.0"
 PyYAML = ">=6.0,<7.0"
-terok-util = {git = "https://github.com/sliwowitz/terok-util.git", rev = "perf/lazy-command-handler"}
+terok_util = {url = "https://github.com/terok-ai/terok-util/releases/download/v0.2.2a1/terok_util-0.2.2a1-py3-none-any.whl"}
 
 [package.source]
-type = "git"
-url = "https://github.com/sliwowitz/terok-shield.git"
-reference = "perf/lazy-imports"
-resolved_reference = "7543e56f76ca37c5e021fff977105a10cfb16e3f"
+type = "url"
+url = "https://github.com/terok-ai/terok-shield/releases/download/v0.7.3a1/terok_shield-0.7.3a1-py3-none-any.whl"
 
 [[package]]
 name = "terok-util"
-version = "0.2.1"
+version = "0.2.2a1"
 description = "Shared utility library for the terok-* sibling packages"
 optional = false
 python-versions = ">=3.12,<4.0"
 groups = ["main"]
-files = []
-develop = false
+files = [
+    {file = "terok_util-0.2.2a1-py3-none-any.whl", hash = "sha256:fdc6c80eac2dc5db684bc20fead65caca88a0aa0a6e3a4cbba40fc4209c9cb7d"},
+]
 
 [package.dependencies]
 jinja2 = ">=3.1,<4.0"
@@ -3424,10 +3423,8 @@ platformdirs = ">=4.10,<5.0"
 "ruamel.yaml" = "0.19.1"
 
 [package.source]
-type = "git"
-url = "https://github.com/sliwowitz/terok-util.git"
-reference = "perf/lazy-command-handler"
-resolved_reference = "a01cfc3eb10dcc2f17f04c820404052a8bbebddf"
+type = "url"
+url = "https://github.com/terok-ai/terok-util/releases/download/v0.2.2a1/terok_util-0.2.2a1-py3-none-any.whl"
 
 [[package]]
 name = "tomli"
@@ -3802,4 +3799,4 @@ propcache = ">=0.2.1"
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<4.0"
-content-hash = "9a44459dace2471adf8a7b30d5b67940be8648b81ae7f0fe69e93b0ee65b44ce"
+content-hash = "4f8a49ee01f8aca47570d92e084101e5897cd473f232c9f0c2a5d5a238a7902c"
