@@ -113,9 +113,9 @@ def _resolve_shield_command(cmd: Any) -> Any:
 def _adapt_shield_command(cmd: Any) -> CommandDef:
     """Convert one (resolved) shield CommandDef into sandbox's vocabulary.
 
-    Prepends an implicit ``container`` positional arg when
-    ``needs_container=True`` — shield's standalone CLI adds it the
-    same way at parse time, so the user-facing argv is identical.
+    Shield's own verb defs already declare the ``container`` positional
+    for the per-container verbs, so the args copy across as-is — sandbox
+    only re-wraps the handler to bind a per-container ``Shield``.
     """
     args = tuple(
         ArgDef(
@@ -130,8 +130,6 @@ def _adapt_shield_command(cmd: Any) -> CommandDef:
         for arg in cmd.args
     )
     needs_container = _shield_needs_container(cmd)
-    if needs_container:
-        args = (ArgDef(name="container", help="Container name"), *args)
     return CommandDef(
         name=cmd.name,
         help=cmd.help,
