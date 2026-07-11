@@ -84,6 +84,12 @@ class GateSyncResult(TypedDict):
     ``upstream_url`` is ``None`` when the gate is initialised without a
     remote — a local-only mirror that the container can push to but that
     never fetches external commits.
+
+    The clone-cache refresh is best-effort: ``cache_error`` carries the
+    failure description when the refresh was attempted and failed, so
+    callers can report it instead of silently claiming a clean sync.
+    ``cache_refreshed`` stays ``False`` both on failure and when no
+    cache is configured; ``cache_error`` distinguishes the two.
     """
 
     path: str
@@ -93,6 +99,7 @@ class GateSyncResult(TypedDict):
     updated_branches: list[str]
     errors: list[str]
     cache_refreshed: bool
+    cache_error: str | None
 
 
 class BranchSyncResult(TypedDict):
@@ -320,14 +327,17 @@ class GitGate:
                 "updated_branches": [],
                 "errors": [],
                 "cache_refreshed": False,
+                "cache_error": None,
             }
 
         sync_result = self.sync_branches(branches)
 
         # Refresh the non-bare clone cache from the bare mirror (best-effort).
+        cache_error: str | None = None
         cache_refreshed = False
         if sync_result["success"] and self._clone_cache_base:
-            cache_refreshed = self._refresh_clone_cache()
+            cache_error = self._refresh_clone_cache()
+            cache_refreshed = cache_error is None
 
         return {
             "path": str(gate_dir),
@@ -337,19 +347,22 @@ class GitGate:
             "updated_branches": sync_result["updated_branches"],
             "errors": sync_result["errors"],
             "cache_refreshed": cache_refreshed,
+            "cache_error": cache_error,
         }
 
-    def _refresh_clone_cache(self) -> bool:
+    def _refresh_clone_cache(self) -> str | None:
         """Refresh the non-bare clone cache from the local bare mirror.
 
         Creates the cache via ``git clone`` if it doesn't exist, or
-        fetches updates if it does.  Returns ``True`` on success.
+        fetches updates if it does.  Returns ``None`` on success or a
+        failure description (including git's stderr) otherwise.
         Failures are logged and swallowed — the cache is purely an
-        optimization for faster task startup.
+        optimization for faster task startup — but the description is
+        returned so ``sync()`` can surface it to the operator.
         """
         cache_dir = self.cache_path
         if cache_dir is None:
-            return False
+            return "no clone cache configured"
 
         gate_file_url = self._gate_path.resolve().as_uri()
         try:
@@ -377,6 +390,16 @@ class GitGate:
                     capture_output=True,
                     timeout=120,
                 )
+                # ``fetch`` never touches ``refs/remotes/origin/HEAD`` — only
+                # ``clone`` creates it, and the mirror's default branch can
+                # move after the cache was cloned.  Re-resolve it explicitly
+                # or the reset below fails on caches missing the ref.
+                subprocess.run(  # nosec B603 B607 — argv built from fixed verbs + repo-relative paths — binary PATH lookup is the cross-distro contract
+                    ["git", "-C", str(cache_dir), "remote", "set-head", "origin", "--auto"],
+                    check=True,
+                    capture_output=True,
+                    timeout=30,
+                )
                 # Update working tree to match fetched HEAD — the cache is
                 # copied as-is into task workspaces, so stale files matter.
                 subprocess.run(  # nosec B603 B607 — argv built from fixed verbs + repo-relative paths — binary PATH lookup is the cross-distro contract
@@ -392,10 +415,11 @@ class GitGate:
                     capture_output=True,
                     timeout=30,
                 )
-            return True
+            return None
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
-            logger.warning("Clone cache refresh failed (non-fatal): %s", exc)
-            return False
+            error = _describe_git_failure(exc)
+            logger.warning("Clone cache refresh failed (non-fatal): %s", error)
+            return error
 
     def sync_branches(self, branches: list[str] | None = None) -> BranchSyncResult:
         """Sync specific branches in the gate from upstream.
@@ -733,6 +757,22 @@ def _db_has_keys_for_scope(cfg: SandboxConfig, scope: str, passphrase: str) -> b
         return False
     finally:
         db.close()
+
+
+def _describe_git_failure(exc: Exception) -> str:
+    """Render a git subprocess failure with its captured stderr.
+
+    ``CalledProcessError``'s own ``str()`` names only the argv and exit
+    status; the actionable part — git's complaint — sits in ``stderr``,
+    which ``capture_output=True`` collected but nobody would otherwise
+    show.  ``TimeoutExpired`` / ``OSError`` carry no stderr and fall
+    through to their plain ``str()``.
+    """
+    stderr = getattr(exc, "stderr", None)
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", errors="replace")
+    detail = (stderr or "").strip()
+    return f"{exc}: {detail}" if detail else str(exc)
 
 
 def _clone_gate_mirror(upstream_url: str, gate_dir: Path, env: dict) -> None:

@@ -63,7 +63,7 @@ class TestRefreshCloneCache:
             mock_run.return_value.returncode = 0
             result = gate._refresh_clone_cache()
 
-        assert result is True
+        assert result is None
         mock_run.assert_called_once()
         cmd = mock_run.call_args[0][0]
         assert cmd[0:2] == ["git", "clone"]
@@ -88,17 +88,60 @@ class TestRefreshCloneCache:
             mock_run.return_value.returncode = 0
             result = gate._refresh_clone_cache()
 
-        assert result is True
-        assert mock_run.call_count == 4
-        # set-url → fetch → reset --hard → clean -ffdx
+        assert result is None
+        assert mock_run.call_count == 5
+        # set-url → fetch → set-head → reset --hard → clean -ffdx
         cmds = [call.args[0] for call in mock_run.call_args_list]
         assert "set-url" in cmds[0]
         assert "fetch" in cmds[1]
-        assert "reset" in cmds[2] and "--hard" in cmds[2]
-        assert "clean" in cmds[3] and "-ffdx" in cmds[3]
+        assert "set-head" in cmds[2]
+        assert "reset" in cmds[3] and "--hard" in cmds[3]
+        assert "clean" in cmds[4] and "-ffdx" in cmds[4]
 
-    def test_failure_returns_false(self, tmp_path: Path) -> None:
-        """Subprocess failures are caught and return False."""
+    def test_refreshes_cache_missing_origin_head(self, tmp_path: Path) -> None:
+        """Regression: a cache without ``refs/remotes/origin/HEAD`` refreshes cleanly.
+
+        ``git fetch`` never creates the ref (only ``git clone`` does), so a
+        cache that lost it — or whose mirror default branch moved — used to
+        fail the ``reset --hard origin/HEAD`` with exit 128.
+        """
+        import subprocess
+
+        upstream = tmp_path / "upstream"
+        subprocess.run(
+            ["git", "init", "-b", "main", str(upstream)], check=True, capture_output=True
+        )
+        (upstream / "file.txt").write_text("v1\n")
+        git = ["git", "-C", str(upstream)]
+        subprocess.run([*git, "add", "."], check=True, capture_output=True)
+        subprocess.run(
+            [*git, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "v1"],
+            check=True,
+            capture_output=True,
+        )
+
+        gate_dir = tmp_path / "gate" / "proj.git"
+        subprocess.run(
+            ["git", "clone", "--mirror", str(upstream), str(gate_dir)],
+            check=True,
+            capture_output=True,
+        )
+        cache_base = tmp_path / "clone-cache"
+        gate = GitGate(scope="proj", gate_path=gate_dir, clone_cache_base=cache_base)
+
+        assert gate._refresh_clone_cache() is None  # creates the cache via clone
+        cache_dir = cache_base / "proj"
+        subprocess.run(
+            ["git", "-C", str(cache_dir), "remote", "set-head", "origin", "--delete"],
+            check=True,
+            capture_output=True,
+        )
+
+        assert gate._refresh_clone_cache() is None
+        assert (cache_dir / "file.txt").read_text() == "v1\n"
+
+    def test_failure_returns_description_with_stderr(self, tmp_path: Path) -> None:
+        """Subprocess failures are caught and described, including git's stderr."""
         import subprocess
 
         gate_dir = tmp_path / "gate" / "proj.git"
@@ -113,16 +156,18 @@ class TestRefreshCloneCache:
 
         with patch(
             "terok_sandbox.gate.mirror.subprocess.run",
-            side_effect=subprocess.CalledProcessError(1, "git"),
+            side_effect=subprocess.CalledProcessError(128, "git", stderr=b"fatal: bad ref\n"),
         ):
             result = gate._refresh_clone_cache()
 
-        assert result is False
+        assert result is not None
+        assert "128" in result
+        assert "fatal: bad ref" in result
 
-    def test_returns_false_when_no_cache_base(self) -> None:
-        """With no clone_cache_base, _refresh_clone_cache is a no-op."""
+    def test_returns_error_when_no_cache_base(self) -> None:
+        """With no clone_cache_base, _refresh_clone_cache reports it is unconfigured."""
         gate = GitGate(scope="proj", gate_path="/tmp/terok-testing/gate/proj.git")
-        assert gate._refresh_clone_cache() is False
+        assert gate._refresh_clone_cache() == "no clone cache configured"
 
 
 class TestSyncIntegration:
@@ -148,12 +193,30 @@ class TestSyncIntegration:
                 "sync_branches",
                 return_value={"success": True, "updated_branches": ["all"], "errors": []},
             ),
-            patch.object(_gate_with_cache, "_refresh_clone_cache", return_value=True) as mock_cache,
+            patch.object(_gate_with_cache, "_refresh_clone_cache", return_value=None) as mock_cache,
         ):
             result = _gate_with_cache.sync()
 
         mock_cache.assert_called_once()
         assert result["cache_refreshed"] is True
+        assert result["cache_error"] is None
+
+    def test_sync_reports_cache_refresh_failure(self, _gate_with_cache: GitGate) -> None:
+        with (
+            patch.object(_gate_with_cache, "_validate_gate"),
+            patch.object(_gate_with_cache, "_ssh_env", return_value={}),
+            patch.object(
+                _gate_with_cache,
+                "sync_branches",
+                return_value={"success": True, "updated_branches": ["all"], "errors": []},
+            ),
+            patch.object(_gate_with_cache, "_refresh_clone_cache", return_value="boom"),
+        ):
+            result = _gate_with_cache.sync()
+
+        assert result["success"] is True
+        assert result["cache_refreshed"] is False
+        assert result["cache_error"] == "boom"
 
     def test_sync_skips_cache_on_branch_failure(self, _gate_with_cache: GitGate) -> None:
         with (
@@ -174,6 +237,7 @@ class TestSyncIntegration:
 
         mock_cache.assert_not_called()
         assert result["cache_refreshed"] is False
+        assert result["cache_error"] is None
 
     def test_sync_without_cache_base(self, tmp_path: Path) -> None:
         gate_dir = tmp_path / "gate" / "proj.git"
