@@ -247,10 +247,24 @@ class TestContainerStates:
         mock_co.return_value = "good Running\nmalformed-no-state\n"
         assert PodmanRuntime().container_states("p") == {"good": "running"}
 
-    @patch("terok_sandbox.runtime.podman.subprocess.check_output", side_effect=FileNotFoundError)
-    def test_returns_empty_when_podman_missing(self, _co) -> None:
-        """Missing podman → empty dict."""
+    @patch("terok_sandbox.runtime.podman.subprocess.check_output")
+    def test_no_matches_is_empty_dict(self, mock_co) -> None:
+        """A successful query with no matching containers → ``{}``, not ``None``."""
+        mock_co.return_value = ""
         assert PodmanRuntime().container_states("p") == {}
+
+    @patch("terok_sandbox.runtime.podman.subprocess.check_output", side_effect=FileNotFoundError)
+    def test_returns_none_when_podman_missing(self, _co) -> None:
+        """Missing podman → ``None``: a failed query must not read as "no containers"."""
+        assert PodmanRuntime().container_states("p") is None
+
+    @patch(
+        "terok_sandbox.runtime.podman.subprocess.check_output",
+        side_effect=subprocess.CalledProcessError(1, "podman"),
+    )
+    def test_returns_none_on_podman_error(self, _co) -> None:
+        """``podman ps`` erroring (e.g. lock contention during a build) → ``None``."""
+        assert PodmanRuntime().container_states("p") is None
 
 
 class TestContainerState:
