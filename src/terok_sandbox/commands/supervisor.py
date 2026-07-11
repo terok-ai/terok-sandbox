@@ -55,5 +55,10 @@ SUPERVISOR_COMMANDS: tuple[CommandDef, ...] = (
     ),
 )
 
+#: Per-verb lazy-dispatch entry point resolved by ``commands.COMMANDS``
+#: via its ``source`` string (see that module).  Co-located with the
+#: registry tuple above so the verb definition stays the single source.
+SUPERVISOR: CommandDef = SUPERVISOR_COMMANDS[0]
 
-__all__ = ["SUPERVISOR_COMMANDS"]
+
+__all__ = ["SUPERVISOR", "SUPERVISOR_COMMANDS"]

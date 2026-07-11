@@ -172,7 +172,7 @@ _LAZY: dict[str, str] = {
 def __getattr__(name: str) -> object:
     """Resolve a public symbol by importing its owning submodule on first access (PEP 562).
 
-    Looked up in [`_LAZY`][terok_sandbox._LAZY]; the resolved value is
+    Looked up in the module's ``_LAZY`` map; the resolved value is
     cached on the module so subsequent accesses are plain attribute
     reads.  Unknown names raise [`AttributeError`][AttributeError] the
     same way a missing module global would.

@@ -16,7 +16,14 @@ from terok_sandbox.commands import (
     GATE_COMMANDS,
     SSH_COMMANDS,
     CommandDef,
+    CommandTree,
 )
+
+#: Fully-resolved view of the lazy forest for structural assertions.  The
+#: live ``COMMANDS`` defers each verb to its module via a ``source``
+#: string (so building it imports nothing); ``resolve()`` materialises
+#: every root's real subtree for the well-formedness checks below.
+_RESOLVED = CommandTree([root.resolve() for root in COMMANDS])
 
 
 def _resolve_handler(handler: object) -> object:
@@ -70,32 +77,37 @@ class TestCommandRegistry:
         for _path, cmd in COMMANDS.walk():
             assert cmd.name, f"Command missing name: {cmd}"
 
+    def test_roots_are_lazy(self) -> None:
+        """Every top-level verb is a lazy ``source`` reference (imports on dispatch)."""
+        for cmd in COMMANDS:
+            assert cmd.is_lazy, f"root {cmd.name!r} should defer to a source module"
+
     def test_every_leaf_has_a_handler(self) -> None:
         """Group nodes have ``children`` and no handler; leaves have a handler."""
-        for path, cmd in COMMANDS.walk():
+        for path, cmd in _RESOLVED.walk():
             if cmd.children:
                 assert cmd.handler is None, f"group {'.'.join(path)} has a handler"
             else:
                 assert cmd.handler is not None, f"leaf {'.'.join(path)} has no handler"
 
     def test_gate_subverbs_present(self) -> None:
-        gate = COMMANDS.find_at(("gate",))
+        gate = _RESOLVED.find_at(("gate",))
         names = {c.name for c in gate.children}
         assert {"path"} <= names
 
     def test_shield_subverbs_present(self) -> None:
-        shield = COMMANDS.find_at(("shield",))
+        shield = _RESOLVED.find_at(("shield",))
         names = {c.name for c in shield.children}
         assert {"install-hooks", "status"} <= names
 
     def test_ssh_subverbs_present(self) -> None:
-        ssh = COMMANDS.find_at(("ssh",))
+        ssh = _RESOLVED.find_at(("ssh",))
         names = {c.name for c in ssh.children}
         assert {"import", "add", "remove"} <= names
 
     def test_vault_passphrase_nested_subgroup(self) -> None:
         """The ``vault passphrase`` subgroup is reachable as a nested CommandDef."""
-        passphrase = COMMANDS.find_at(("vault", "passphrase"))
+        passphrase = _RESOLVED.find_at(("vault", "passphrase"))
         names = {c.name for c in passphrase.children}
         # ``destroy`` folded into ``vault lock`` (lock now clears every tier).
         assert {"seal", "to-keyring", "reveal", "acknowledge"} == names

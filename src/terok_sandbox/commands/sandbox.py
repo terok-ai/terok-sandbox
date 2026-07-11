@@ -286,5 +286,11 @@ SETUP_COMMANDS: tuple[CommandDef, ...] = (
     ),
 )
 
+#: Per-verb lazy-dispatch entry point resolved by ``commands.COMMANDS``
+#: via its ``source`` string (see that module).  Co-located with the
+#: registry tuple above so the verb definition stays the single source.
+SETUP: CommandDef = SETUP_COMMANDS[0]
+UNINSTALL: CommandDef = SETUP_COMMANDS[1]
 
-__all__ = ["SETUP_COMMANDS"]
+
+__all__ = ["SETUP", "UNINSTALL", "SETUP_COMMANDS"]

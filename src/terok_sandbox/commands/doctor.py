@@ -91,5 +91,10 @@ DOCTOR_COMMANDS: tuple[CommandDef, ...] = (
     ),
 )
 
+#: Per-verb lazy-dispatch entry point resolved by ``commands.COMMANDS``
+#: via its ``source`` string (see that module).  Co-located with the
+#: registry tuple above so the verb definition stays the single source.
+DOCTOR: CommandDef = DOCTOR_COMMANDS[0]
 
-__all__ = ["DOCTOR_COMMANDS"]
+
+__all__ = ["DOCTOR", "DOCTOR_COMMANDS"]

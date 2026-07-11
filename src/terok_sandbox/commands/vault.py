@@ -1182,5 +1182,10 @@ VAULT_COMMANDS: tuple[CommandDef, ...] = (
     ),
 )
 
+#: Per-verb lazy-dispatch entry point resolved by ``commands.COMMANDS``
+#: via its ``source`` string (see that module).  Co-located with the
+#: registry tuple above so the verb definition stays the single source.
+VAULT: CommandDef = VAULT_COMMANDS[0]
 
-__all__ = ["VAULT_COMMANDS"]
+
+__all__ = ["VAULT", "VAULT_COMMANDS"]

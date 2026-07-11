@@ -243,5 +243,12 @@ LAUNCH_COMMANDS: tuple[CommandDef, ...] = (
     ),
 )
 
+#: Per-verb lazy-dispatch entry point resolved by ``commands.COMMANDS``
+#: via its ``source`` string (see that module).  Co-located with the
+#: registry tuple above so the verb definition stays the single source.
+PREPARE: CommandDef = LAUNCH_COMMANDS[0]
+RUN: CommandDef = LAUNCH_COMMANDS[1]
+CLEANUP: CommandDef = LAUNCH_COMMANDS[2]
 
-__all__ = ["LAUNCH_COMMANDS"]
+
+__all__ = ["PREPARE", "RUN", "CLEANUP", "LAUNCH_COMMANDS"]

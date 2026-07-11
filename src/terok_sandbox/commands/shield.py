@@ -16,27 +16,31 @@ a [`terok_shield.Shield`][terok_shield.Shield] via shield's own
 ``resolve_state_dir`` so the standalone CLI and the sandbox-wrapped
 form behave identically.
 
-The inherited children are materialised **lazily** — see
-[`_LazyShieldChildren`][terok_sandbox.commands.shield._LazyShieldChildren].
-Building the sandbox command forest (and the per-container supervisor
-spawn that starts by importing it) must not import terok-shield; the
-registry import waits until the shield subtree is actually wired or
-walked.  Every ``from terok_shield …`` therefore lives inside a function
-body, keeping this module the sole (import-linter-sanctioned) importer
-without paying the cost at import time.
+This module — and therefore terok-shield — is imported only when the
+``shield`` verb is actually dispatched: ``COMMANDS`` references it by a
+lazy ``source`` string, so a plain ``import terok_sandbox`` or a
+``terok-sandbox vault …`` run never pays for the shield stack.  As the
+sole (import-linter-sanctioned) importer of ``terok_shield`` besides the
+integrations adapter, keeping the imports at module top is fine here.
 """
 
 from __future__ import annotations
 
 import functools
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
+from terok_shield import COMMANDS as _SHIELD_REGISTRY, Shield
+from terok_shield.cli.main import _build_config as _shield_build_config  # noqa: PLC2701
+from terok_shield.commands import (
+    needs_container as _shield_needs_container,
+    standalone_only as _shield_standalone_only,
+)
 from terok_util import LazyHandler
 
 from ._types import ArgDef, CommandDef
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable
 
 
 def _handle_shield_setup() -> None:
@@ -74,9 +78,6 @@ def _wrap_shield_handler(
 
     @functools.wraps(handler)
     def wrapped(**kwargs: Any) -> Any:
-        from terok_shield import Shield
-        from terok_shield.cli.main import _build_config as _shield_build_config  # noqa: PLC2701
-
         container = kwargs.pop("container", None)
         # Reach for shield's private ``_build_config`` until it's
         # promoted to public API — sandbox needs the same state-dir
@@ -95,15 +96,27 @@ def _wrap_shield_handler(
     return wrapped
 
 
+def _resolve_shield_command(cmd: Any) -> Any:
+    """Materialise a shield registry entry, importing its module if it is lazy.
+
+    terok-shield's ``COMMANDS`` are themselves lazy references (only
+    ``name``/``help`` plus a ``source``), so ``handler`` / ``args`` /
+    ``standalone_only`` aren't populated until the entry is resolved.
+    Sandbox needs the full definition to wrap the handler and mirror the
+    args, so resolve here — this runs only when the ``shield`` verb is
+    dispatched (this module is itself lazily loaded).
+    """
+    resolve = getattr(cmd, "resolve", None)
+    return resolve() if callable(resolve) else cmd
+
+
 def _adapt_shield_command(cmd: Any) -> CommandDef:
-    """Convert one shield CommandDef into sandbox's vocabulary.
+    """Convert one (resolved) shield CommandDef into sandbox's vocabulary.
 
     Prepends an implicit ``container`` positional arg when
     ``needs_container=True`` — shield's standalone CLI adds it the
     same way at parse time, so the user-facing argv is identical.
     """
-    from terok_shield.commands import needs_container as _shield_needs_container
-
     args = tuple(
         ArgDef(
             name=arg.name,
@@ -135,13 +148,15 @@ def _imported_shield_children() -> tuple[CommandDef, ...]:
     ``resolve`` carry custom CLI logic that doesn't lift cleanly into
     the integration surface) and handlerless entries (defensive — same
     set, but the check makes the filter intent unambiguous).
-    """
-    from terok_shield import COMMANDS as _SHIELD_REGISTRY
-    from terok_shield.commands import standalone_only as _shield_standalone_only
 
+    Each registry entry is resolved first — terok-shield's ``COMMANDS``
+    are lazy references whose ``handler`` / ``standalone_only`` only
+    materialise on resolution.
+    """
+    resolved = (_resolve_shield_command(cmd) for cmd in _SHIELD_REGISTRY)
     return tuple(
         _adapt_shield_command(cmd)
-        for cmd in _SHIELD_REGISTRY
+        for cmd in resolved
         if not _shield_standalone_only(cmd) and cmd.handler is not None
     )
 
@@ -163,75 +178,18 @@ _SANDBOX_VERBS: tuple[CommandDef, ...] = (
 )
 
 
-class _LazyShieldChildren:
-    """Shield subverbs, materialised from terok-shield's registry on first traversal.
-
-    Building the sandbox command forest must not import terok-shield —
-    that keeps ``import terok_sandbox`` and the per-container supervisor
-    spawn off pydantic and the shield stack.  The inherited shield verbs
-    are only needed when the tree is actually wired, walked, or overlaid,
-    so this stand-in defers the registry import until it is first
-    iterated or indexed.  It quacks like the ``tuple[CommandDef, ...]``
-    the [`CommandDef.children`][terok_util.cli_types.CommandDef] field
-    expects (hence the [`cast`][typing.cast] at the wiring site).
-    """
-
-    __slots__ = ("_resolved",)
-
-    def __init__(self) -> None:
-        """Start unresolved — no terok-shield import yet."""
-        self._resolved: tuple[CommandDef, ...] | None = None
-
-    def _materialise(self) -> tuple[CommandDef, ...]:
-        """Build (once) and return the static verbs plus the inherited shield subtree."""
-        if self._resolved is None:
-            self._resolved = _SANDBOX_VERBS + _imported_shield_children()
-        return self._resolved
-
-    def __iter__(self) -> Iterator[CommandDef]:
-        """Yield each child, resolving the registry on first call."""
-        return iter(self._materialise())
-
-    def __len__(self) -> int:
-        """Number of shield subverbs (resolves the registry)."""
-        return len(self._materialise())
-
-    def __getitem__(self, index: int) -> CommandDef:
-        """Return the child at *index* (resolves the registry)."""
-        return self._materialise()[index]
-
-    def __add__(self, other: tuple[CommandDef, ...]) -> tuple[CommandDef, ...]:
-        """Concatenate the resolved children with *other* (used by ``extend_at``)."""
-        return self._materialise() + tuple(other)
-
-    def __radd__(self, other: tuple[CommandDef, ...]) -> tuple[CommandDef, ...]:
-        """Concatenate *other* with the resolved children."""
-        return tuple(other) + self._materialise()
-
-    def __bool__(self) -> bool:
-        """Always truthy — the static install/uninstall verbs are always present.
-
-        Answering without materialising lets ``wire``'s ``if
-        cmd.children:`` guard stay off terok-shield until it actually
-        descends into the group.
-        """
-        return True
-
-
-#: The shield command group exposed at sandbox's top level.  Composes
-#: sandbox's own ``install-hooks`` / ``uninstall-hooks`` admin verbs
-#: with every non-standalone-only entry from shield's own registry.
-#: Adding a new shield verb (e.g. ``terok-shield`` grows a new
-#: per-container action) flows into sandbox CLI zero-edit.  The children
-#: are the lazy stand-in so importing this module — and building
-#: ``COMMANDS`` — never pulls in terok-shield.
-SHIELD_COMMANDS: tuple[CommandDef, ...] = (
-    CommandDef(
-        name="shield",
-        help="Egress firewall management",
-        children=cast("tuple[CommandDef, ...]", _LazyShieldChildren()),
-    ),
+#: The shield command group — sandbox's own admin verbs plus every
+#: non-standalone-only entry from terok-shield's own registry.  Adding a
+#: new shield verb flows into the sandbox CLI zero-edit.  Referenced by a
+#: lazy ``source`` from [`commands.COMMANDS`][terok_sandbox.commands.COMMANDS],
+#: so this whole module (and terok-shield) loads only for ``shield`` verbs.
+SHIELD: CommandDef = CommandDef(
+    name="shield",
+    help="Egress firewall management",
+    children=_SANDBOX_VERBS + _imported_shield_children(),
 )
 
+SHIELD_COMMANDS: tuple[CommandDef, ...] = (SHIELD,)
 
-__all__ = ["SHIELD_COMMANDS"]
+
+__all__ = ["SHIELD", "SHIELD_COMMANDS"]

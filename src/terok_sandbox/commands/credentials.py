@@ -630,5 +630,10 @@ CREDENTIALS_COMMANDS: tuple[CommandDef, ...] = (
     ),
 )
 
+#: Per-verb lazy-dispatch entry point resolved by ``commands.COMMANDS``
+#: via its ``source`` string (see that module).  Co-located with the
+#: registry tuple above so the verb definition stays the single source.
+CREDENTIALS: CommandDef = CREDENTIALS_COMMANDS[0]
 
-__all__ = ["CREDENTIALS_COMMANDS", "_run_credentials_setup_phase"]
+
+__all__ = ["CREDENTIALS", "CREDENTIALS_COMMANDS", "_run_credentials_setup_phase"]

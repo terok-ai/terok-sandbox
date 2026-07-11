@@ -70,6 +70,78 @@ def test_building_commands_pulls_no_heavy_leaves() -> None:
     assert _heavy_leaves_after("from terok_sandbox.commands import COMMANDS") == []
 
 
+#: The per-subsystem command modules, by leaf name — the set lazy
+#: dispatch keeps out of ``sys.modules`` until their verb is invoked.
+COMMAND_MODULES = (
+    "gate",
+    "vault",
+    "ssh",
+    "credentials",
+    "shield",
+    "doctor",
+    "launch",
+    "sandbox",
+    "supervisor",
+)
+
+
+def _command_modules_after(argv: list[str]) -> list[str]:
+    """Return which command modules a fresh ``terok-sandbox`` *argv* run loaded.
+
+    Drives [`terok_sandbox.cli.main`][terok_sandbox.cli.main] with *argv*
+    in a fresh interpreter and reports the per-subsystem modules present
+    in ``sys.modules`` afterwards.
+    """
+    code = (
+        "import sys\n"
+        "from terok_sandbox.cli import main\n"
+        "try:\n"
+        f"    main({argv!r})\n"
+        "except SystemExit:\n"
+        "    pass\n"
+        f"loaded = [n for n in {COMMAND_MODULES!r} "
+        "if f'terok_sandbox.commands.{n}' in sys.modules]\n"
+        "import json; print(json.dumps(loaded))"
+    )
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join([_SRC_ROOT, os.environ.get("PYTHONPATH", "")]),
+    }
+    result = subprocess.run(  # noqa: S603 — fixed interpreter + inline code, no shell
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    )
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+def test_verb_loads_only_its_own_module() -> None:
+    """``terok-sandbox gate …`` imports the gate module and no other subsystem."""
+    assert _command_modules_after(["gate", "--help"]) == ["gate"]
+
+
+def test_supervisor_spawn_loads_only_supervisor() -> None:
+    """The per-container spawn (``supervisor <id> <sidecar>``) stays off every other module."""
+    assert _command_modules_after(["supervisor", "cid", "/sidecar.json"]) == ["supervisor"]
+    # …and specifically never touches terok-shield.
+    assert (
+        _heavy_leaves_after(
+            "from terok_sandbox.cli import main\n"
+            "import contextlib\n"
+            "with contextlib.suppress(SystemExit, BaseException):\n"
+            "    main(['supervisor', 'cid', '/sidecar.json'])"
+        )
+        == []
+    )
+
+
+def test_top_level_help_imports_no_command_module() -> None:
+    """``terok-sandbox --help`` lists every verb without importing any subsystem module."""
+    assert _command_modules_after(["--help"]) == []
+
+
 def test_supervisor_verb_skips_shield_wiring() -> None:
     """The `supervisor` fast-path wires only its own subtree, so the shield
     subtree never materialises and terok-shield stays unimported — this is
