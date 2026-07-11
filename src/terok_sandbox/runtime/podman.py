@@ -1119,12 +1119,20 @@ class PodmanRuntime:
 
     # -- Batch helpers (optimisations over repeated handle ops) -------------
 
-    def container_states(self, prefix: str) -> dict[str, str]:
+    def container_states(self, prefix: str) -> dict[str, str] | None:
         """Return ``{container_name: state}`` for matching containers.
 
         Optimisation over ``[c.state for c in containers_with_prefix(prefix)]``
         — single ``podman ps -a`` instead of N inspects.  Backend-specific;
         not part of the [`ContainerRuntime`][terok_sandbox.ContainerRuntime] protocol.
+
+        Returns:
+            ``{}`` when the query succeeded but no container matched, ``None``
+            when the query itself failed (podman missing, or ``podman ps``
+            erroring — e.g. on storage-lock contention with a concurrent
+            build).  Callers must not read a failure as "no containers":
+            a status display that does so degrades every task to "not found"
+            for as long as the runtime is busy (terok#1134).
         """
         try:
             out = subprocess.check_output(  # nosec B603 B607 — argv built from fixed verbs + caller-controlled scope/container names — binary PATH lookup is the cross-distro contract
@@ -1142,7 +1150,7 @@ class PodmanRuntime:
                 text=True,
             )
         except (subprocess.CalledProcessError, FileNotFoundError):
-            return {}
+            return None
 
         result: dict[str, str] = {}
         for line in out.strip().splitlines():
