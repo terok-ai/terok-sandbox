@@ -67,12 +67,15 @@ fi
 # The host vault socket is mounted at /run/terok/vault.sock.  Socket-native
 # clients (gh, claude) use it directly; everyone else reaches it via this
 # TCP loopback so their "base URL" knob has something to point at.
+# retry=/interval= (as on the gate bridge) hold each connection until the
+# host-side broker is accepting — the vault comes up after the gate, so an
+# early credentialed request would otherwise race the broker's bind.
 if [[ -n "${TEROK_VAULT_LOOPBACK_PORT:-}" ]] \
    && [[ -S /run/terok/vault.sock ]] \
    && command -v socat >/dev/null 2>&1 \
    && ! _terok_bridge_alive "$_TEROK_PIDDIR/vault-loopback.pid"; then
   socat "TCP-LISTEN:${TEROK_VAULT_LOOPBACK_PORT},bind=127.0.0.1,fork,reuseaddr" \
-    UNIX-CONNECT:/run/terok/vault.sock &
+    UNIX-CONNECT:/run/terok/vault.sock,retry=300,interval=0.1 &
   echo $! > "$_TEROK_PIDDIR/vault-loopback.pid"
 fi
 
@@ -84,7 +87,7 @@ if [[ -n "${TEROK_TOKEN_BROKER_PORT:-}" ]] \
    && ! _terok_bridge_alive "$_TEROK_PIDDIR/vault-socket.pid"; then
   rm -f /tmp/terok-vault.sock
   socat UNIX-LISTEN:/tmp/terok-vault.sock,fork \
-    TCP:host.containers.internal:"${TEROK_TOKEN_BROKER_PORT}" &
+    TCP:host.containers.internal:"${TEROK_TOKEN_BROKER_PORT}",retry=300,interval=0.1 &
   echo $! > "$_TEROK_PIDDIR/vault-socket.pid"
 fi
 
@@ -97,7 +100,7 @@ if [[ -n "${TEROK_TOKEN_BROKER_PORT:-}" ]] \
    && command -v socat >/dev/null 2>&1 \
    && ! _terok_bridge_alive "$_TEROK_PIDDIR/vault-loopback.pid"; then
   socat "TCP-LISTEN:${TEROK_VAULT_LOOPBACK_PORT},bind=127.0.0.1,fork,reuseaddr" \
-    TCP:host.containers.internal:"${TEROK_TOKEN_BROKER_PORT}" &
+    TCP:host.containers.internal:"${TEROK_TOKEN_BROKER_PORT}",retry=300,interval=0.1 &
   echo $! > "$_TEROK_PIDDIR/vault-loopback.pid"
 fi
 
@@ -113,9 +116,11 @@ if [[ -n "${TEROK_GATE_SOCKET:-}" ]] \
   # backend connect until the supervisor has bound the gate socket, rather
   # than returning an empty reply when the container clones before the gate
   # is up.  The supervisor binds the gate early (before its vault DB open),
-  # so this usually connects on the first try.
+  # so this usually connects on the first try; the 0.1s interval keeps the
+  # rare cold-start race down to ~100ms instead of a full second, while
+  # retry*interval still tolerates a ~30s laggard.
   socat TCP-LISTEN:9418,fork,reuseaddr \
-    UNIX-CONNECT:"${TEROK_GATE_SOCKET}",retry=30,interval=1 &
+    UNIX-CONNECT:"${TEROK_GATE_SOCKET}",retry=300,interval=0.1 &
   echo $! > "$_TEROK_PIDDIR/gate.pid"
 fi
 
@@ -130,6 +135,6 @@ if [[ -n "${TEROK_GATE_PORT:-}" ]] \
   # See the socket-mode note above: retry=/interval= wait for the
   # supervisor's gate listener instead of failing the container's first clone.
   socat TCP-LISTEN:9418,fork,reuseaddr \
-    TCP:host.containers.internal:"${TEROK_GATE_PORT}",retry=30,interval=1 &
+    TCP:host.containers.internal:"${TEROK_GATE_PORT}",retry=300,interval=0.1 &
   echo $! > "$_TEROK_PIDDIR/gate.pid"
 fi
