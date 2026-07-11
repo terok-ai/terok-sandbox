@@ -17,7 +17,7 @@ from __future__ import annotations
 import argparse
 from importlib.metadata import PackageNotFoundError, version as _meta_version
 
-from .commands import COMMANDS, CommandTree
+from .commands import COMMANDS, SUPERVISOR_COMMANDS, CommandTree
 
 try:
     __version__ = _meta_version("terok-sandbox")
@@ -48,7 +48,12 @@ def main(argv: list[str] | None = None) -> None:
         description="Hardened Podman container runtime with shield firewall and git gate",
     )
     parser.add_argument("--version", action="version", version=f"terok-sandbox {__version__}")
-    COMMANDS.wire(parser)
+    # Fast-path the internal supervisor launcher.  `terok-sandbox supervisor
+    # <id> <sidecar>` is spawned on every container start/restart and needs
+    # none of the user-facing command tree — wiring the full forest would
+    # materialise the shield subtree (importing terok_shield) for nothing.
+    tree = CommandTree(SUPERVISOR_COMMANDS) if argv[:1] == ["supervisor"] else COMMANDS
+    tree.wire(parser)
 
     args = parser.parse_args(argv)
 

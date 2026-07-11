@@ -68,3 +68,17 @@ def test_bare_import_pulls_no_heavy_leaves() -> None:
 def test_building_commands_pulls_no_heavy_leaves() -> None:
     """Building the command forest — the supervisor-spawn path — stays lightweight."""
     assert _heavy_leaves_after("from terok_sandbox.commands import COMMANDS") == []
+
+
+def test_supervisor_verb_skips_shield_wiring() -> None:
+    """The `supervisor` fast-path wires only its own subtree, so the shield
+    subtree never materialises and terok-shield stays unimported — this is
+    the last heavy leaf the live per-container spawn would otherwise pay."""
+    snippet = (
+        "from terok_sandbox.cli import main\n"
+        "try:\n"
+        "    main(['supervisor', '--help'])\n"
+        "except SystemExit:\n"
+        "    pass"
+    )
+    assert _heavy_leaves_after(snippet) == []
