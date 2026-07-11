@@ -1,4 +1,12 @@
 # Changelog
+## v0.4.1 — You Exist Here
+
+* Resilient clone-cache refresh, https://github.com/terok-ai/terok-sandbox/pull/430
+* Fast cold-start reconnect for gate + retry on vault bridges, https://github.com/terok-ai/terok-sandbox/pull/426
+* Resilient gate restart after upgrade https://github.com/terok-ai/terok-sandbox/pull/428
+
+**Full Changelog**: https://github.com/terok-ai/terok-sandbox/compare/v0.4.0...v0.4.1
+
 ## v0.4.0 — The Celestial Temple
 
 * Better UI for vault passphrase handling, https://github.com/terok-ai/terok-sandbox/pull/408, https://github.com/terok-ai/terok-sandbox/pull/399, https://github.com/terok-ai/terok-sandbox/pull/402, https://github.com/terok-ai/terok-sandbox/pull/400, https://github.com/terok-ai/terok-sandbox/pull/398
