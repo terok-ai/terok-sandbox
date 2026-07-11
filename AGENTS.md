@@ -2,6 +2,16 @@
 
 ## Verification
 
+**During development, ALWAYS iterate with `make test-fast`** — it runs
+only the tests affected by your branch diff (tach impact analysis, no
+coverage) and is far cheaper than the full suite.  Running the full
+suite after every edit is the single biggest time sink in agent dev
+loops; don't do it.  Run the full `make test` exactly once, right
+before committing.  One exception: impact analysis follows the Python
+import graph only, so after changing non-Python inputs (resource YAML,
+templates, shell scripts) `make test-fast` skips tests that are
+actually affected — run the full `make test` for those changes.
+
 Run `make check` before declaring work done — it covers lint, unit
 tests, module boundaries (tach), security, docstring coverage, dead
 code, and SPDX compliance.  Skip tests that need podman or docker;
