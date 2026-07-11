@@ -48,7 +48,12 @@ def main(argv: list[str] | None = None) -> None:
         description="Hardened Podman container runtime with shield firewall and git gate",
     )
     parser.add_argument("--version", action="version", version=f"terok-sandbox {__version__}")
-    COMMANDS.wire(parser)
+    # Lazy dispatch: passing ``argv`` wires only the invoked verb's module
+    # in full (others stay name/help placeholders for the ``--help``
+    # listing).  `terok-sandbox supervisor <id> <sidecar>` — spawned on
+    # every container start/restart — therefore loads only the supervisor
+    # module: no config, no SQLCipher, no terok-shield.
+    COMMANDS.wire(parser, argv=argv)
 
     args = parser.parse_args(argv)
 

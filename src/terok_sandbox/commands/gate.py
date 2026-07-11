@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from terok_util import LazyHandler
+
 from ._types import ArgDef, CommandDef
 
 if TYPE_CHECKING:
@@ -47,7 +49,7 @@ GATE_COMMANDS: tuple[CommandDef, ...] = (
             CommandDef(
                 name="path",
                 help="Print the file:// URL of a project's bare mirror",
-                handler=_handle_gate_path,
+                handler=LazyHandler("terok_sandbox.commands.gate:_handle_gate_path"),
                 args=(
                     ArgDef(
                         name="project",
@@ -59,5 +61,10 @@ GATE_COMMANDS: tuple[CommandDef, ...] = (
     ),
 )
 
+#: Per-verb lazy-dispatch entry point resolved by ``commands.COMMANDS``
+#: via its ``source`` string (see that module).  Co-located with the
+#: registry tuple above so the verb definition stays the single source.
+GATE: CommandDef = GATE_COMMANDS[0]
 
-__all__ = ["GATE_COMMANDS"]
+
+__all__ = ["GATE", "GATE_COMMANDS"]

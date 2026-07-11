@@ -41,19 +41,31 @@ import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from terok_util import sanitize_tty
+from terok_util import LazyHandler, sanitize_tty
 
-from .._yaml import update_section as _yaml_update_section
-from ..config import SandboxConfig
 from ._types import ArgDef, CommandDef
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
 
+    from ..config import SandboxConfig
     from ..vault.store.encryption import TierPresence
     from ..vault.store.recovery import RecoveryStatus
     from ..vault.store.systemd_creds import KeyMode
+
+
+def _resolve_cfg(cfg: SandboxConfig | None) -> SandboxConfig:
+    """Return *cfg*, or a default [`SandboxConfig`][terok_sandbox.SandboxConfig] built lazily.
+
+    Keeps the default-config import (pydantic, the credential store) out
+    of module import time so building the command registry stays cheap.
+    """
+    if cfg is not None:
+        return cfg
+    from ..config import SandboxConfig
+
+    return SandboxConfig()
 
 
 #: Tiers that survive a reboot.  A higher-priority *volatile* tier (the
@@ -162,8 +174,7 @@ def _handle_vault_unlock(*, cfg: SandboxConfig | None = None, force: bool = Fals
     from ..vault.store.db import PlaintextDBFoundError
     from ..vault.store.encryption import WrongPassphraseError, prompt_passphrase
 
-    if cfg is None:
-        cfg = SandboxConfig()
+    cfg = _resolve_cfg(cfg)
 
     # Skip the prompt entirely when the writer would refuse anyway — same
     # guard the writer applies, run early purely so we don't ask for a
@@ -326,6 +337,7 @@ def purge_passphrase_tiers(cfg: SandboxConfig) -> None:
     config_updates = _forget_config_tier_updates(cfg)
     if config_updates:
         from .. import config as _config
+        from .._yaml import update_section as _yaml_update_section
         from ..paths import config_file_paths
 
         user_config = next((p for label, p in config_file_paths() if label == "user"), None)
@@ -392,8 +404,7 @@ def _handle_vault_lock(*, cfg: SandboxConfig | None = None, force: bool = False)
     Reversible only by re-supplying that passphrase via ``vault unlock``;
     unconfirmed vaults are gated behind a typed confirmation.
     """
-    if cfg is None:
-        cfg = SandboxConfig()
+    cfg = _resolve_cfg(cfg)
     _confirm_lock_when_unacknowledged(cfg, force=force)
     purge_passphrase_tiers(cfg)
 
@@ -448,8 +459,7 @@ def handle_vault_seal(*, cfg: SandboxConfig | None = None, key: str = "auto") ->
     from ..vault.store import systemd_creds
     from ..vault.store.encryption import WrongPassphraseError
 
-    if cfg is None:
-        cfg = SandboxConfig()
+    cfg = _resolve_cfg(cfg)
 
     if not systemd_creds.is_available():
         raise SystemExit(
@@ -509,13 +519,13 @@ def handle_vault_to_keyring(*, cfg: SandboxConfig | None = None) -> None:
     write fails, the source tier is still intact.
     """
     from .. import config as _config
+    from .._yaml import update_section as _yaml_update_section
     from ..vault.store.encryption import (
         WrongPassphraseError,
         store_passphrase_in_keyring,
     )
 
-    if cfg is None:
-        cfg = SandboxConfig()
+    cfg = _resolve_cfg(cfg)
 
     try:
         passphrase, source = cfg.resolve_passphrase_with_source(prompt_on_tty=True)
@@ -588,8 +598,7 @@ def _handle_vault_passphrase_reveal(
     )
     from ..vault.store.recovery import acknowledge, acknowledged
 
-    if cfg is None:
-        cfg = SandboxConfig()
+    cfg = _resolve_cfg(cfg)
 
     try:
         passphrase, source = cfg.resolve_passphrase_with_source(prompt_on_tty=True)
@@ -668,8 +677,7 @@ def _handle_vault_passphrase_acknowledge(*, cfg: SandboxConfig | None = None) ->
     """
     from ..vault.store.recovery import acknowledge, acknowledged
 
-    if cfg is None:
-        cfg = SandboxConfig()
+    cfg = _resolve_cfg(cfg)
 
     if acknowledged(cfg.vault_recovery_marker_file):
         print("recovery key already marked as saved.")
@@ -754,8 +762,7 @@ def _handle_vault_status(*, cfg: SandboxConfig | None = None, as_json: bool = Fa
     from ..vault.store.encryption import probe_passphrase_chain
     from ..vault.store.recovery import RecoveryStatus
 
-    if cfg is None:
-        cfg = SandboxConfig()
+    cfg = _resolve_cfg(cfg)
 
     chain = probe_passphrase_chain(
         passphrase_file=cfg.vault_passphrase_file,
@@ -927,8 +934,7 @@ def _handle_vault_list(
     """
     import json
 
-    if cfg is None:
-        cfg = SandboxConfig()
+    cfg = _resolve_cfg(cfg)
 
     try:
         db = cfg.open_credential_db(prompt_on_tty=True)
@@ -1053,7 +1059,7 @@ _PASSPHRASE_GROUP = CommandDef(
         CommandDef(
             name="seal",
             help="Seal the current passphrase into a systemd-creds credential",
-            handler=handle_vault_seal,
+            handler=LazyHandler("terok_sandbox.commands.vault:handle_vault_seal"),
             args=(
                 ArgDef(
                     name="--key",
@@ -1069,7 +1075,7 @@ _PASSPHRASE_GROUP = CommandDef(
         CommandDef(
             name="to-keyring",
             help="Move the current passphrase from its current tier into the OS keyring",
-            handler=handle_vault_to_keyring,
+            handler=LazyHandler("terok_sandbox.commands.vault:handle_vault_to_keyring"),
         ),
         CommandDef(
             name="reveal",
@@ -1077,7 +1083,7 @@ _PASSPHRASE_GROUP = CommandDef(
                 "Display the current vault passphrase (to /dev/tty by default)"
                 " and offer to mark the recovery key as saved"
             ),
-            handler=_handle_vault_passphrase_reveal,
+            handler=LazyHandler("terok_sandbox.commands.vault:_handle_vault_passphrase_reveal"),
             args=(
                 ArgDef(
                     name="--allow-redirect",
@@ -1096,7 +1102,9 @@ _PASSPHRASE_GROUP = CommandDef(
                 "Mark the current passphrase as saved (silent ack from TUI / CI"
                 " after the value has been captured out-of-band)"
             ),
-            handler=_handle_vault_passphrase_acknowledge,
+            handler=LazyHandler(
+                "terok_sandbox.commands.vault:_handle_vault_passphrase_acknowledge"
+            ),
         ),
     ),
 )
@@ -1117,7 +1125,7 @@ VAULT_COMMANDS: tuple[CommandDef, ...] = (
             CommandDef(
                 name="status",
                 help="Show lock state, the passphrase resolution chain, and stored secrets",
-                handler=_handle_vault_status,
+                handler=LazyHandler("terok_sandbox.commands.vault:_handle_vault_status"),
                 args=(
                     ArgDef(
                         name="--json",
@@ -1130,7 +1138,7 @@ VAULT_COMMANDS: tuple[CommandDef, ...] = (
             CommandDef(
                 name="unlock",
                 help="Provision the credentials-DB passphrase for this session (tmpfs file)",
-                handler=_handle_vault_unlock,
+                handler=LazyHandler("terok_sandbox.commands.vault:_handle_vault_unlock"),
                 args=(
                     ArgDef(
                         name="--force",
@@ -1142,7 +1150,7 @@ VAULT_COMMANDS: tuple[CommandDef, ...] = (
             CommandDef(
                 name="lock",
                 help="Clear every stored copy of the passphrase — you'll need it to unlock again",
-                handler=_handle_vault_lock,
+                handler=LazyHandler("terok_sandbox.commands.vault:_handle_vault_lock"),
                 args=(
                     ArgDef(
                         name="--force",
@@ -1154,7 +1162,7 @@ VAULT_COMMANDS: tuple[CommandDef, ...] = (
             CommandDef(
                 name="list",
                 help="Inventory stored credentials (and optionally proxy tokens)",
-                handler=_handle_vault_list,
+                handler=LazyHandler("terok_sandbox.commands.vault:_handle_vault_list"),
                 args=(
                     ArgDef(
                         name="--include-tokens",
@@ -1174,5 +1182,10 @@ VAULT_COMMANDS: tuple[CommandDef, ...] = (
     ),
 )
 
+#: Per-verb lazy-dispatch entry point resolved by ``commands.COMMANDS``
+#: via its ``source`` string (see that module).  Co-located with the
+#: registry tuple above so the verb definition stays the single source.
+VAULT: CommandDef = VAULT_COMMANDS[0]
 
-__all__ = ["VAULT_COMMANDS"]
+
+__all__ = ["VAULT", "VAULT_COMMANDS"]

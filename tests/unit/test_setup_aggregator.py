@@ -44,27 +44,23 @@ def install_spies():
     _no_selinux_concern = SelinuxCheckResult(SelinuxStatus.NOT_APPLICABLE_TCP_MODE)
     with (
         patch(
-            "terok_sandbox.commands.sandbox.run_prereq_report",
+            "terok_sandbox._setup.run_prereq_report",
             return_value=_no_selinux_concern,
         ) as prereq,
         patch(
-            "terok_sandbox.commands.sandbox.run_legacy_install_cleanup_phase",
+            "terok_sandbox._setup.run_legacy_install_cleanup_phase",
             return_value=True,
         ) as legacy,
-        patch(
-            "terok_sandbox.commands.sandbox.run_shield_install_phase", return_value=True
-        ) as shield,
+        patch("terok_sandbox._setup.run_shield_install_phase", return_value=True) as shield,
         # The credentials phase is the one non-``run_*_install_phase``
         # step the aggregator drives in-line.  It needs stubbing for
         # the same reason as the others — without it, the real
         # passphrase-tier resolution runs and (under proper $HOME
         # isolation) exits via the non-TTY tier-choice prompt.
         patch(
-            "terok_sandbox.commands.sandbox._run_credentials_setup_phase", return_value=True
+            "terok_sandbox.commands.credentials._run_credentials_setup_phase", return_value=True
         ) as credentials,
-        patch(
-            "terok_sandbox.commands.sandbox.run_supervisor_install_phase", return_value=True
-        ) as supervisor,
+        patch("terok_sandbox._setup.run_supervisor_install_phase", return_value=True) as supervisor,
     ):
         yield {
             "prereq": prereq,
@@ -80,13 +76,13 @@ def uninstall_spies():
     """Replace every ``run_*_uninstall_phase`` with a MagicMock so order is observable."""
     with (
         patch(
-            "terok_sandbox.commands.sandbox.run_supervisor_uninstall_phase", return_value=True
+            "terok_sandbox._setup.run_supervisor_uninstall_phase", return_value=True
         ) as supervisor_uninstall,
         patch(
-            "terok_sandbox.commands.sandbox.run_shield_uninstall_phase", return_value=True
+            "terok_sandbox._setup.run_shield_uninstall_phase", return_value=True
         ) as shield_uninstall,
         patch(
-            "terok_sandbox.commands.sandbox.run_legacy_install_cleanup_phase", return_value=True
+            "terok_sandbox._setup.run_legacy_install_cleanup_phase", return_value=True
         ) as legacy_cleanup,
     ):
         yield {

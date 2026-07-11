@@ -16,13 +16,27 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from terok_util import sanitize_tty
+from terok_util import LazyHandler, sanitize_tty
 
-from ..config import SandboxConfig
 from ._types import ArgDef, CommandDef, KeyRow
 
 if TYPE_CHECKING:
+    from ..config import SandboxConfig
     from ..vault.store.db import CredentialDB
+
+
+def _resolve_cfg(cfg: SandboxConfig | None) -> SandboxConfig:
+    """Return *cfg*, or a default [`SandboxConfig`][terok_sandbox.SandboxConfig] built lazily.
+
+    The default-config import lands here rather than at module top so
+    building the command registry (and the supervisor spawn that walks
+    it) never pulls in pydantic / the credential store.
+    """
+    if cfg is not None:
+        return cfg
+    from ..config import SandboxConfig
+
+    return SandboxConfig()
 
 
 def _open_db(cfg: SandboxConfig) -> CredentialDB:
@@ -166,8 +180,7 @@ def _handle_ssh_list(
     ``--scope %name`` filter is rejected up front rather than
     silently honoured.
     """
-    if cfg is None:
-        cfg = SandboxConfig()
+    cfg = _resolve_cfg(cfg)
 
     if scope is not None:
         # Reject ``--scope %host`` at the user CLI; infra scopes are not
@@ -206,8 +219,7 @@ def _handle_ssh_import(
     from ..vault.store.db import UnsafeCommentError
 
     _validate_scope_name(scope)
-    if cfg is None:
-        cfg = SandboxConfig()
+    cfg = _resolve_cfg(cfg)
 
     priv_path = Path(private_key).expanduser().resolve()
     pub_path = Path(public_key).expanduser().resolve() if public_key else None
@@ -265,8 +277,7 @@ def _handle_ssh_add(
     _validate_scope_name(scope)
     if key_type not in ("ed25519", "rsa"):
         raise SystemExit("Unsupported --key-type. Use 'ed25519' or 'rsa'.")
-    if cfg is None:
-        cfg = SandboxConfig()
+    cfg = _resolve_cfg(cfg)
 
     db = _open_db(cfg)
     try:
@@ -295,8 +306,7 @@ def _handle_ssh_export(
     from ..vault.ssh.keypair import export_ssh_keypair
 
     _validate_scope_name(scope)
-    if cfg is None:
-        cfg = SandboxConfig()
+    cfg = _resolve_cfg(cfg)
 
     db = _open_db(cfg)
     try:
@@ -336,8 +346,7 @@ def _handle_ssh_pub(
     from ..vault.ssh.keypair import public_line_of
 
     _validate_scope_name(scope)
-    if cfg is None:
-        cfg = SandboxConfig()
+    cfg = _resolve_cfg(cfg)
 
     if all_keys and key_id is not None:
         raise SystemExit("--all and --key-id are mutually exclusive")
@@ -377,8 +386,7 @@ def _handle_ssh_link(
     single deploy key.
     """
     _validate_scope_name(scope)
-    if cfg is None:
-        cfg = SandboxConfig()
+    cfg = _resolve_cfg(cfg)
 
     db = _open_db(cfg)
     try:
@@ -419,8 +427,7 @@ def _handle_ssh_rename(
     """
     from ..vault.store.db import UnsafeCommentError
 
-    if cfg is None:
-        cfg = SandboxConfig()
+    cfg = _resolve_cfg(cfg)
 
     matches = _filter_key_rows(_build_key_rows(cfg), fingerprint=fingerprint)
     distinct = {r.fingerprint for r in matches}
@@ -458,8 +465,7 @@ def _handle_ssh_remove(
     direct matching when any of ``--scope``, ``--comment``, or
     ``--fingerprint`` is provided.
     """
-    if cfg is None:
-        cfg = SandboxConfig()
+    cfg = _resolve_cfg(cfg)
 
     if scope is not None:
         # Reject ``--scope %host`` up front — infra scopes are not
@@ -546,7 +552,7 @@ SSH_COMMANDS: tuple[CommandDef, ...] = (
             CommandDef(
                 name="list",
                 help="List SSH keys stored in the vault",
-                handler=_handle_ssh_list,
+                handler=LazyHandler("terok_sandbox.commands.ssh:_handle_ssh_list"),
                 args=(
                     ArgDef(
                         name="--scope",
@@ -558,7 +564,7 @@ SSH_COMMANDS: tuple[CommandDef, ...] = (
             CommandDef(
                 name="import",
                 help="Import an OpenSSH keypair from files into the vault DB",
-                handler=_handle_ssh_import,
+                handler=LazyHandler("terok_sandbox.commands.ssh:_handle_ssh_import"),
                 args=(
                     ArgDef(name="scope", help="Credential scope to associate the key with"),
                     ArgDef(
@@ -583,7 +589,7 @@ SSH_COMMANDS: tuple[CommandDef, ...] = (
             CommandDef(
                 name="add",
                 help="Generate a new SSH keypair in the vault for a credential scope",
-                handler=_handle_ssh_add,
+                handler=LazyHandler("terok_sandbox.commands.ssh:_handle_ssh_add"),
                 args=(
                     ArgDef(name="scope", help="Credential scope to associate the key with"),
                     ArgDef(
@@ -607,7 +613,7 @@ SSH_COMMANDS: tuple[CommandDef, ...] = (
             CommandDef(
                 name="export",
                 help="Export a scope's SSH keypair to standard OpenSSH files",
-                handler=_handle_ssh_export,
+                handler=LazyHandler("terok_sandbox.commands.ssh:_handle_ssh_export"),
                 args=(
                     ArgDef(name="scope", help="Credential scope to export"),
                     ArgDef(
@@ -634,7 +640,7 @@ SSH_COMMANDS: tuple[CommandDef, ...] = (
             CommandDef(
                 name="pub",
                 help="Print a scope's public key to stdout",
-                handler=_handle_ssh_pub,
+                handler=LazyHandler("terok_sandbox.commands.ssh:_handle_ssh_pub"),
                 args=(
                     ArgDef(name="scope", help="Credential scope"),
                     ArgDef(
@@ -655,7 +661,7 @@ SSH_COMMANDS: tuple[CommandDef, ...] = (
             CommandDef(
                 name="link",
                 help="Link an existing vault key to an additional scope",
-                handler=_handle_ssh_link,
+                handler=LazyHandler("terok_sandbox.commands.ssh:_handle_ssh_link"),
                 args=(
                     ArgDef(name="scope", help="Credential scope to link the key to"),
                     ArgDef(
@@ -670,7 +676,7 @@ SSH_COMMANDS: tuple[CommandDef, ...] = (
             CommandDef(
                 name="rename",
                 help="Change the comment of a stored SSH key (selected by fingerprint prefix)",
-                handler=_handle_ssh_rename,
+                handler=LazyHandler("terok_sandbox.commands.ssh:_handle_ssh_rename"),
                 args=(
                     ArgDef(
                         name="fingerprint",
@@ -685,7 +691,7 @@ SSH_COMMANDS: tuple[CommandDef, ...] = (
             CommandDef(
                 name="remove",
                 help="Unassign SSH keys from scopes (orphaned keys cascade-delete)",
-                handler=_handle_ssh_remove,
+                handler=LazyHandler("terok_sandbox.commands.ssh:_handle_ssh_remove"),
                 args=(
                     ArgDef(
                         name="--scope",
@@ -714,5 +720,10 @@ SSH_COMMANDS: tuple[CommandDef, ...] = (
     ),
 )
 
+#: Per-verb lazy-dispatch entry point resolved by ``commands.COMMANDS``
+#: via its ``source`` string (see that module).  Co-located with the
+#: registry tuple above so the verb definition stays the single source.
+SSH: CommandDef = SSH_COMMANDS[0]
 
-__all__ = ["SSH_COMMANDS"]
+
+__all__ = ["SSH", "SSH_COMMANDS"]

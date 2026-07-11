@@ -19,9 +19,9 @@ dynamic = ["version", "classifiers"]
 # Dependency pins follow the policy in AGENTS.md ("Dependency Pinning &
 # pyproject.toml Hygiene").  Keep the dependency list comment-free.
 dependencies = [
-    "terok-util>=0.2.1,<0.3.0",
-    "terok-shield>=0.7.2,<0.8.0",
-    "terok-clearance>=0.7.3,<0.8.0",
+    "terok-util @ https://github.com/terok-ai/terok-util/releases/download/v0.2.2a1/terok_util-0.2.2a1-py3-none-any.whl",
+    "terok-shield @ https://github.com/terok-ai/terok-shield/releases/download/v0.7.3a1/terok_shield-0.7.3a1-py3-none-any.whl",
+    "terok-clearance @ https://github.com/terok-ai/terok-clearance/releases/download/v0.7.4a1/terok_clearance-0.7.4a1-py3-none-any.whl",
     "platformdirs~=4.10",
     "aiohttp~=3.14.1",
     "cryptography~=49.0",
@@ -61,7 +61,7 @@ classifiers = [
 packages = [
   { include = "terok_sandbox", from = "src" },
 ]
-version = "0.4.1"
+version = "0.4.2a1"
 
 [tool.poetry.group.dev.dependencies]
 ruff = ">=0.15.20"

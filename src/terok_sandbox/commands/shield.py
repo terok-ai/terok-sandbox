@@ -15,6 +15,13 @@ Per-container shield verbs (``allow``, ``deny``, ``down``, ``up``,
 a [`terok_shield.Shield`][terok_shield.Shield] via shield's own
 ``resolve_state_dir`` so the standalone CLI and the sandbox-wrapped
 form behave identically.
+
+This module — and therefore terok-shield — is imported only when the
+``shield`` verb is actually dispatched: ``COMMANDS`` references it by a
+lazy ``source`` string, so a plain ``import terok_sandbox`` or a
+``terok-sandbox vault …`` run never pays for the shield stack.  As the
+sole (import-linter-sanctioned) importer of ``terok_shield`` besides the
+integrations adapter, keeping the imports at module top is fine here.
 """
 
 from __future__ import annotations
@@ -28,6 +35,7 @@ from terok_shield.commands import (
     needs_container as _shield_needs_container,
     standalone_only as _shield_standalone_only,
 )
+from terok_util import LazyHandler
 
 from ._types import ArgDef, CommandDef
 
@@ -88,12 +96,26 @@ def _wrap_shield_handler(
     return wrapped
 
 
-def _adapt_shield_command(cmd: Any) -> CommandDef:
-    """Convert one shield CommandDef into sandbox's vocabulary.
+def _resolve_shield_command(cmd: Any) -> Any:
+    """Materialise a shield registry entry, importing its module if it is lazy.
 
-    Prepends an implicit ``container`` positional arg when
-    ``needs_container=True`` — shield's standalone CLI adds it the
-    same way at parse time, so the user-facing argv is identical.
+    terok-shield's ``COMMANDS`` are themselves lazy references (only
+    ``name``/``help`` plus a ``source``), so ``handler`` / ``args`` /
+    ``standalone_only`` aren't populated until the entry is resolved.
+    Sandbox needs the full definition to wrap the handler and mirror the
+    args, so resolve here — this runs only when the ``shield`` verb is
+    dispatched (this module is itself lazily loaded).
+    """
+    resolve = getattr(cmd, "resolve", None)
+    return resolve() if callable(resolve) else cmd
+
+
+def _adapt_shield_command(cmd: Any) -> CommandDef:
+    """Convert one (resolved) shield CommandDef into sandbox's vocabulary.
+
+    Shield's own verb defs already declare the ``container`` positional
+    for the per-container verbs, so the args copy across as-is — sandbox
+    only re-wraps the handler to bind a per-container ``Shield``.
     """
     args = tuple(
         ArgDef(
@@ -108,8 +130,6 @@ def _adapt_shield_command(cmd: Any) -> CommandDef:
         for arg in cmd.args
     )
     needs_container = _shield_needs_container(cmd)
-    if needs_container:
-        args = (ArgDef(name="container", help="Container name"), *args)
     return CommandDef(
         name=cmd.name,
         help=cmd.help,
@@ -126,10 +146,15 @@ def _imported_shield_children() -> tuple[CommandDef, ...]:
     ``resolve`` carry custom CLI logic that doesn't lift cleanly into
     the integration surface) and handlerless entries (defensive — same
     set, but the check makes the filter intent unambiguous).
+
+    Each registry entry is resolved first — terok-shield's ``COMMANDS``
+    are lazy references whose ``handler`` / ``standalone_only`` only
+    materialise on resolution.
     """
+    resolved = (_resolve_shield_command(cmd) for cmd in _SHIELD_REGISTRY)
     return tuple(
         _adapt_shield_command(cmd)
-        for cmd in _SHIELD_REGISTRY
+        for cmd in resolved
         if not _shield_standalone_only(cmd) and cmd.handler is not None
     )
 
@@ -141,28 +166,28 @@ _SANDBOX_VERBS: tuple[CommandDef, ...] = (
     CommandDef(
         name="install-hooks",
         help="Install OCI hooks for the shield firewall",
-        handler=_handle_shield_setup,
+        handler=LazyHandler("terok_sandbox.commands.shield:_handle_shield_setup"),
     ),
     CommandDef(
         name="uninstall-hooks",
         help="Remove OCI hooks previously installed by install-hooks",
-        handler=_handle_shield_uninstall,
+        handler=LazyHandler("terok_sandbox.commands.shield:_handle_shield_uninstall"),
     ),
 )
 
 
-#: The shield command group exposed at sandbox's top level.  Composes
-#: sandbox's own ``install-hooks`` / ``uninstall-hooks`` admin verbs
-#: with every non-standalone-only entry from shield's own registry.
-#: Adding a new shield verb (e.g. ``terok-shield`` grows a new
-#: per-container action) flows into sandbox CLI zero-edit.
-SHIELD_COMMANDS: tuple[CommandDef, ...] = (
-    CommandDef(
-        name="shield",
-        help="Egress firewall management",
-        children=_SANDBOX_VERBS + _imported_shield_children(),
-    ),
+#: The shield command group — sandbox's own admin verbs plus every
+#: non-standalone-only entry from terok-shield's own registry.  Adding a
+#: new shield verb flows into the sandbox CLI zero-edit.  Referenced by a
+#: lazy ``source`` from [`commands.COMMANDS`][terok_sandbox.commands.COMMANDS],
+#: so this whole module (and terok-shield) loads only for ``shield`` verbs.
+SHIELD: CommandDef = CommandDef(
+    name="shield",
+    help="Egress firewall management",
+    children=_SANDBOX_VERBS + _imported_shield_children(),
 )
 
+SHIELD_COMMANDS: tuple[CommandDef, ...] = (SHIELD,)
 
-__all__ = ["SHIELD_COMMANDS"]
+
+__all__ = ["SHIELD", "SHIELD_COMMANDS"]

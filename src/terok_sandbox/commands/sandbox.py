@@ -17,22 +17,15 @@ this so they install everything in one call.
 from __future__ import annotations
 
 import dataclasses
+from typing import TYPE_CHECKING
 
-from .._setup import (
-    EXIT_MANUAL_STEP_NEEDED,
-    print_apparmor_install_hint,
-    print_selinux_install_hint,
-    run_legacy_install_cleanup_phase,
-    run_prereq_report,
-    run_shield_install_phase,
-    run_shield_uninstall_phase,
-    run_supervisor_install_phase,
-    run_supervisor_uninstall_phase,
-)
+from terok_util import LazyHandler
+
 from .._util._selinux import SelinuxStatus
-from ..config import SandboxConfig, credentials_passphrase, credentials_use_keyring
 from ._types import ArgDef, CommandDef
-from .credentials import _run_credentials_setup_phase
+
+if TYPE_CHECKING:
+    from ..config import SandboxConfig
 
 
 def _handle_sandbox_setup(
@@ -80,7 +73,18 @@ def _handle_sandbox_setup(
             override.  Defaults to the layered config — passed through
             so terok's config stays the single source of truth for paths.
     """
+    from .._setup import (
+        EXIT_MANUAL_STEP_NEEDED,
+        print_apparmor_install_hint,
+        print_selinux_install_hint,
+        run_legacy_install_cleanup_phase,
+        run_prereq_report,
+        run_shield_install_phase,
+        run_supervisor_install_phase,
+    )
+    from ..config import SandboxConfig, credentials_passphrase, credentials_use_keyring
     from ..setup_stamp import write_stamp
+    from .credentials import _run_credentials_setup_phase
 
     if cfg is None:
         cfg = SandboxConfig()
@@ -209,6 +213,11 @@ def _handle_sandbox_uninstall(
     The git gate has no host-side install, so there is no gate uninstall
     phase — the legacy sweep removes any pre-supervisor gate units.
     """
+    from .._setup import (
+        run_legacy_install_cleanup_phase,
+        run_shield_uninstall_phase,
+        run_supervisor_uninstall_phase,
+    )
     from ..setup_stamp import clear_stamp
 
     # ``cfg`` is accepted for handler-dispatch uniformity but unused: the
@@ -238,7 +247,7 @@ SETUP_COMMANDS: tuple[CommandDef, ...] = (
     CommandDef(
         name="setup",
         help="Install supervisor hooks + shield hooks in one step",
-        handler=_handle_sandbox_setup,
+        handler=LazyHandler("terok_sandbox.commands.sandbox:_handle_sandbox_setup"),
         args=(
             ArgDef(name="--no-shield", action="store_true", help="Skip shield install"),
             ArgDef(
@@ -272,10 +281,16 @@ SETUP_COMMANDS: tuple[CommandDef, ...] = (
     CommandDef(
         name="uninstall",
         help="Remove supervisor hooks + shield hooks in one step",
-        handler=_handle_sandbox_uninstall,
+        handler=LazyHandler("terok_sandbox.commands.sandbox:_handle_sandbox_uninstall"),
         args=(ArgDef(name="--no-shield", action="store_true", help="Skip shield uninstall"),),
     ),
 )
 
+#: Per-verb lazy-dispatch entry point resolved by ``commands.COMMANDS``
+#: via its ``source`` string (see that module).  Co-located with the
+#: registry tuple above so the verb definition stays the single source.
+SETUP: CommandDef = SETUP_COMMANDS[0]
+UNINSTALL: CommandDef = SETUP_COMMANDS[1]
 
-__all__ = ["SETUP_COMMANDS"]
+
+__all__ = ["SETUP", "UNINSTALL", "SETUP_COMMANDS"]

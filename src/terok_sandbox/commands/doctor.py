@@ -7,9 +7,14 @@ from __future__ import annotations
 
 import subprocess  # nosec B404 — doctor probes shell out via subprocess.run — doctor probes (probe_cmd subprocess.run)
 import sys
+from typing import TYPE_CHECKING
 
-from ..config import SandboxConfig
+from terok_util import LazyHandler
+
 from ._types import CommandDef
+
+if TYPE_CHECKING:
+    from ..config import SandboxConfig
 
 
 def _handle_doctor(*, cfg: SandboxConfig | None = None) -> None:
@@ -26,6 +31,7 @@ def _handle_doctor(*, cfg: SandboxConfig | None = None) -> None:
     valid resting state (no live containers).  Per-container probes
     run from inside the container.
     """
+    from ..config import SandboxConfig
     from ..doctor import make_recovery_acknowledged_check, sandbox_doctor_checks
     from ..launch import make_stray_sidecar_check
 
@@ -80,10 +86,15 @@ DOCTOR_COMMANDS: tuple[CommandDef, ...] = (
     CommandDef(
         name="doctor",
         help="Run sandbox health checks",
-        handler=_handle_doctor,
+        handler=LazyHandler("terok_sandbox.commands.doctor:_handle_doctor"),
         group="doctor",
     ),
 )
 
+#: Per-verb lazy-dispatch entry point resolved by ``commands.COMMANDS``
+#: via its ``source`` string (see that module).  Co-located with the
+#: registry tuple above so the verb definition stays the single source.
+DOCTOR: CommandDef = DOCTOR_COMMANDS[0]
 
-__all__ = ["DOCTOR_COMMANDS"]
+
+__all__ = ["DOCTOR", "DOCTOR_COMMANDS"]

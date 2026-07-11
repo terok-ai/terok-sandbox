@@ -22,13 +22,16 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
-from .._yaml import update_section as _yaml_update_section
-from ..config import SandboxConfig
+from terok_util import LazyHandler
+
 from ..operator_cli import setup_invocation
-from ..vault.store.encryption import PassphraseSource
 from ._types import CommandDef
+
+if TYPE_CHECKING:
+    from ..config import SandboxConfig
+    from ..vault.store.encryption import PassphraseSource
 
 #: The chooser-offered subset of [`PassphraseSource`][terok_sandbox.vault.store.encryption.PassphraseSource].
 #: ``systemd-creds`` is auto-detected (not offered); ``passphrase-command``
@@ -136,6 +139,7 @@ def _handle_credentials_encrypt_db(
     """
     import warnings
 
+    from ..config import SandboxConfig
     from ..vault.store.encryption import encrypt_in_place, is_plaintext_sqlite
 
     if cfg is None:
@@ -482,6 +486,7 @@ def _post_setup_recovery_hint(cfg: SandboxConfig | None = None) -> None:
     the nudge, while an already-acked host stays quiet.
     """
     from .._stage import bold
+    from ..config import SandboxConfig
     from ..vault.store.recovery import acknowledged
 
     if cfg is None:
@@ -510,6 +515,7 @@ def _persist_mode_choice(mode: SetupTier, passphrase: str) -> None:
     resolution chain can't see two tiers claiming ownership.
     """
     from .. import config as _config
+    from .._yaml import update_section as _yaml_update_section
     from ..paths import config_file_paths
 
     user_config = next((p for label, p in config_file_paths() if label == "user"), None)
@@ -616,11 +622,18 @@ CREDENTIALS_COMMANDS: tuple[CommandDef, ...] = (
                     "Migrate a legacy plaintext credentials DB to SQLCipher-encrypted "
                     "(deprecated in 0.8.0, removed in 0.9.0)"
                 ),
-                handler=_handle_credentials_encrypt_db,
+                handler=LazyHandler(
+                    "terok_sandbox.commands.credentials:_handle_credentials_encrypt_db"
+                ),
             ),
         ),
     ),
 )
 
+#: Per-verb lazy-dispatch entry point resolved by ``commands.COMMANDS``
+#: via its ``source`` string (see that module).  Co-located with the
+#: registry tuple above so the verb definition stays the single source.
+CREDENTIALS: CommandDef = CREDENTIALS_COMMANDS[0]
 
-__all__ = ["CREDENTIALS_COMMANDS", "_run_credentials_setup_phase"]
+
+__all__ = ["CREDENTIALS", "CREDENTIALS_COMMANDS", "_run_credentials_setup_phase"]

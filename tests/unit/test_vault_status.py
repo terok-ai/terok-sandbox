@@ -345,7 +345,7 @@ class TestHandleVaultStatusText:
         """``cfg=None`` constructs a default ``SandboxConfig`` rather than crashing."""
         cfg = _status_cfg(db_error=RuntimeError("locked"))
         with (
-            patch("terok_sandbox.commands.vault.SandboxConfig", return_value=cfg) as ctor,
+            patch("terok_sandbox.config.SandboxConfig", return_value=cfg) as ctor,
             patch(
                 "terok_sandbox.vault.store.recovery.RecoveryStatus.load",
                 return_value=_recovery(),

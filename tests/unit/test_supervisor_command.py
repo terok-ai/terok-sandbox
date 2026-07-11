@@ -16,6 +16,8 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from terok_util import LazyHandler
+
 from terok_sandbox.commands.supervisor import SUPERVISOR_COMMANDS, _handle_supervisor
 
 
@@ -74,5 +76,7 @@ class TestRegistration:
         cmd = SUPERVISOR_COMMANDS[0]
         assert cmd.name == "supervisor"
         assert cmd.group == "internal"
-        assert cmd.handler is _handle_supervisor
+        # Registered lazily — the target resolves to the real handler at
+        # dispatch, keeping the spawn path off the handler's imports.
+        assert cmd.handler == LazyHandler("terok_sandbox.commands.supervisor:_handle_supervisor")
         assert tuple(a.name for a in cmd.args) == ("container_id", "sidecar_path")

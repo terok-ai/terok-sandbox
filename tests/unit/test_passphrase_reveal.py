@@ -317,10 +317,8 @@ class TestDefaultConfigConstruction:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Passing ``cfg=None`` runs the lazy ``SandboxConfig()`` construction."""
-        from terok_sandbox.commands import vault as vault_cmds
-
         sentinel = _cfg(tmp_path)
-        monkeypatch.setattr(vault_cmds, "SandboxConfig", lambda: sentinel)
+        monkeypatch.setattr("terok_sandbox.config.SandboxConfig", lambda: sentinel)
         _handle_vault_passphrase_reveal(allow_redirect=True)
         # Marker still missing (no SAVED typed), but the handler had to
         # construct the cfg itself to even get this far.
@@ -332,10 +330,8 @@ class TestDefaultConfigConstruction:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """``cfg=None`` ack flow lands the marker against the default config."""
-        from terok_sandbox.commands import vault as vault_cmds
-
         sentinel = _cfg(tmp_path)
-        monkeypatch.setattr(vault_cmds, "SandboxConfig", lambda: sentinel)
+        monkeypatch.setattr("terok_sandbox.config.SandboxConfig", lambda: sentinel)
         _handle_vault_passphrase_acknowledge()
         assert acknowledged(sentinel.vault_recovery_marker_file)
 
