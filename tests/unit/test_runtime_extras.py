@@ -702,3 +702,21 @@ class TestBypassNetworkArgs:
         """Pasta mode emits ``--map-host-loopback``."""
         args = bypass_network_args(9418)
         assert any("--map-host-loopback" in a for a in args)
+
+
+def test_container_states_failure_surfaces_stderr(monkeypatch, capsys) -> None:
+    """The failure reason reaches stderr instead of vanishing into DEVNULL."""
+    import subprocess
+
+    from terok_sandbox.runtime.podman import PodmanRuntime
+
+    def boom(argv, **kwargs):
+        raise subprocess.CalledProcessError(
+            125, argv, stderr="Error: configure storage: 'overlay' is not supported over overlayfs"
+        )
+
+    monkeypatch.setattr(subprocess, "check_output", boom)
+    assert PodmanRuntime().container_states("demo") is None
+    err = capsys.readouterr().err
+    assert "podman ps failed (exit 125)" in err
+    assert "mount_program" in err or "overlay" in err

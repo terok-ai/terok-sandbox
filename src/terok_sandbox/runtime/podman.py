@@ -1146,10 +1146,23 @@ class PodmanRuntime:
                     "{{.Names}} {{.State}}",
                     "--no-trunc",
                 ],
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
                 text=True,
             )
-        except (subprocess.CalledProcessError, FileNotFoundError):
+        except FileNotFoundError:
+            print("podman not found on PATH", file=sys.stderr)
+            return None
+        except subprocess.CalledProcessError as exc:
+            # The reason must reach the operator: a DEVNULLed stderr once
+            # reduced a storage-configuration error ("'overlay' is not
+            # supported over overlayfs, a mount_program is required") to a
+            # bare "runtime unavailable" that took an interactive session
+            # inside the matrix slot to diagnose.
+            detail = (exc.stderr or "").strip().splitlines()
+            print(
+                f"podman ps failed (exit {exc.returncode})" + (f": {detail[-1]}" if detail else ""),
+                file=sys.stderr,
+            )
             return None
 
         result: dict[str, str] = {}
