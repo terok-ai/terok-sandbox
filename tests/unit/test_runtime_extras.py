@@ -233,6 +233,22 @@ class TestContainerStates:
     """``PodmanRuntime.container_states`` batch-parses name+state pairs."""
 
     @patch("terok_sandbox.runtime.podman.subprocess.check_output")
+    def test_failure_surfaces_stderr(self, mock_co, capsys) -> None:
+        """The failure reason reaches stderr instead of vanishing into DEVNULL."""
+        mock_co.side_effect = subprocess.CalledProcessError(
+            125,
+            ["podman", "ps"],
+            stderr=(
+                "Error: configure storage: 'overlay' is not supported over "
+                "overlayfs, a mount_program is required"
+            ),
+        )
+        assert PodmanRuntime().container_states("demo") is None
+        err = capsys.readouterr().err
+        assert "podman ps failed (exit 125)" in err
+        assert "a mount_program is required" in err
+
+    @patch("terok_sandbox.runtime.podman.subprocess.check_output")
     def test_parses_two_columns(self, mock_co) -> None:
         """Each space-separated row becomes one dict entry, state lowercased."""
         mock_co.return_value = "task-a Running\ntask-b Exited\n"
