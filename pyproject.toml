@@ -1,6 +1,6 @@
 [build-system]
-requires = ["poetry-core>=2.0.0", "poetry-dynamic-versioning>=1.0.0,<2.0.0"]
-build-backend = "poetry_dynamic_versioning.backend"
+requires = ["hatchling>=1.27", "hatch-vcs>=0.5"]
+build-backend = "hatchling.build"
 
 [project]
 name = "terok-sandbox"
@@ -14,8 +14,23 @@ maintainers = [
     {name = "Jiri Vyskocil", email = "jiri@vyskocil.com"},
 ]
 keywords = ["podman", "containers", "sandbox", "security", "isolation"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Security",
+    "Topic :: System :: Systems Administration",
+    "Typing :: Typed",
+]
 requires-python = ">=3.12,<4.0"
-dynamic = ["version", "classifiers"]
+dynamic = ["version"]
 # Dependency pins follow the policy in AGENTS.md ("Dependency Pinning &
 # pyproject.toml Hygiene").  Keep the dependency list comment-free.
 dependencies = [
@@ -45,55 +60,52 @@ Security = "https://github.com/terok-ai/terok-sandbox/security/policy"
 [project.scripts]
 terok-sandbox = "terok_sandbox.cli:main"
 
-[tool.poetry]
-classifiers = [
-    "Development Status :: 3 - Alpha",
-    "Environment :: Console",
-    "Intended Audience :: Developers",
-    "Intended Audience :: System Administrators",
-    "Operating System :: POSIX :: Linux",
-    "Programming Language :: Python",
-    "Topic :: Security",
-    "Topic :: System :: Systems Administration",
-    "Typing :: Typed",
+[dependency-groups]
+dev = [
+    "ruff>=0.15.20",
+    "bandit>=1.7",
+    "docstr-coverage>=2.3.2,<3",
+    "complexipy>=6.0.1",
+    "vulture>=2.12",
+    "reuse>=6.2.0,<7",
+    "tach>=0.35.0,<0.36",
+    "import-linter>=2.13",
+    "pre-commit>=4.0",
+    "mypy>=2.1.0,<3.0",
+    # Transitive of pre-commit; 21.2.4 ships with a broken split where
+    # `virtualenv.discovery.builtin` references `.discover` but `discover.py`
+    # was extracted to a separate `python_discovery` package and isn't in
+    # the wheel.  Importing it on Python 3.14 (Fedora 43 default) crashes
+    # every sdist build-isolation in the matrix runner.
+    "virtualenv!=21.2.4",
+]
+test = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "pytest-cov>=4.0",
+    "pytest-timeout>=2.0",
+]
+docs = [
+    "properdocs>=1.6.7",
+    "mkdocs-material>=9.7.6",
+    "mkdocstrings[python]>=0.26",
+    "mkdocs-literate-nav>=0.6",
+    "mkdocs-section-index>=0.3",
+    "mkdocs-terok>=0.7.4,<0.8",
 ]
 
-packages = [
-  { include = "terok_sandbox", from = "src" },
-]
-version = "0.4.2a1"
+[tool.uv]
+default-groups = ["dev", "test"]
 
-[tool.poetry.group.dev.dependencies]
-ruff = ">=0.15.20"
-bandit = ">=1.7"
-docstr-coverage = "^2.3.2"
-complexipy = ">=6.0.1"
-vulture = ">=2.12"
-reuse = "^6.2.0"
-tach = "^0.35.0"
-import-linter = ">=2.13"
-pre-commit = ">=4.0"
-mypy = ">=2.1.0,<3.0"
-# Transitive of pre-commit; 21.2.4 ships with a broken split where
-# `virtualenv.discovery.builtin` references `.discover` but `discover.py`
-# was extracted to a separate `python_discovery` package and isn't in
-# the wheel.  Importing it on Python 3.14 (Fedora 43 default) crashes
-# every sdist build-isolation in the matrix runner.
-virtualenv = "!=21.2.4"
+[tool.hatch.metadata]
+allow-direct-references = true
 
-[tool.poetry.group.test.dependencies]
-pytest = ">=9.1.1"
-pytest-asyncio = ">=1.4.0"
-pytest-cov = ">=4.0"
-pytest-timeout = ">=2.0"
+[tool.hatch.version]
+source = "vcs"
+fallback-version = "0.4.2a1"
 
-[tool.poetry.group.docs.dependencies]
-properdocs = ">=1.6.7"
-mkdocs-material = ">=9.7.6"
-mkdocstrings = {extras = ["python"], version = ">=0.26"}
-mkdocs-literate-nav = ">=0.6"
-mkdocs-section-index = ">=0.3"
-mkdocs-terok = "^0.7.4"
+[tool.hatch.build.targets.wheel]
+packages = ["src/terok_sandbox"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests/unit", "tests/integration"]
@@ -165,12 +177,3 @@ disallow_incomplete_defs = true
 disable_error_code = ["import-untyped"]
 pretty = true
 show_error_codes = true
-
-[tool.poetry-dynamic-versioning]
-enable = true
-vcs = "git"
-pattern = "^v(?P<base>\\d+\\.\\d+\\.\\d+)(?:(?P<stage>a)(?P<revision>\\d+))?$"
-style = "pep440"
-
-[tool.poetry-dynamic-versioning.substitution]
-folders = [{path = "src"}]
