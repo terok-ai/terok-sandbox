@@ -19,4 +19,5 @@ class TestMintGateToken:
         int(token.removeprefix("terok-g-"), 16)
 
     def test_tokens_are_unique(self) -> None:
-        assert mint_gate_token() != mint_gate_token()
+        first, second = mint_gate_token(), mint_gate_token()
+        assert first != second
