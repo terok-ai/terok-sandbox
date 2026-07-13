@@ -119,6 +119,11 @@ COMMANDS: CommandTree = CommandTree(
             help="Run the per-container supervisor (internal; spawned by the OCI hook)",
             source="terok_sandbox.commands.supervisor:SUPERVISOR",
         ),
+        CommandDef(
+            name="supervise-child",
+            help="Run one hardened supervisor service (internal; spawned by the supervisor)",
+            source="terok_sandbox.commands.supervisor:SUPERVISE_CHILD",
+        ),
     ]
 )
 
@@ -175,7 +180,9 @@ _LAZY: dict[str, str] = {
     "_validate_scope_name": "ssh:_validate_scope_name",
     # supervisor
     "SUPERVISOR_COMMANDS": "supervisor:SUPERVISOR_COMMANDS",
+    "SUPERVISE_CHILD": "supervisor:SUPERVISE_CHILD",
     "_handle_supervisor": "supervisor:_handle_supervisor",
+    "_handle_supervise_child": "supervisor:_handle_supervise_child",
     # vault
     "VAULT_COMMANDS": "vault:VAULT_COMMANDS",
     "SessionProvisionResult": "vault:SessionProvisionResult",
