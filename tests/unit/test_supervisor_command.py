@@ -22,6 +22,7 @@ from terok_sandbox.commands.supervisor import (
     SUPERVISE_CHILD,
     SUPERVISOR,
     SUPERVISOR_COMMANDS,
+    _handle_supervise_child,
     _handle_supervisor,
 )
 
@@ -71,6 +72,22 @@ class TestHandleSupervisor:
         run.assert_called_once_with("cid", Path("/sidecar.json"))
         # The object asyncio.run drove is exactly what run_supervisor returned.
         asyncio_run.assert_called_once_with(sentinel.return_value)
+
+
+class TestHandleSuperviseChild:
+    """The CLI handler bridges to ``run_child`` and returns its exit code."""
+
+    def test_forwards_args_and_returns_exit_code(self) -> None:
+        """``service`` / ``container_id`` pass through; ``sidecar_path`` becomes a ``Path``."""
+        with (
+            patch("terok_sandbox.supervisor.children.run_child", return_value=4) as run_child,
+            patch("logging.basicConfig") as basic_config,
+        ):
+            rc = _handle_supervise_child("vault", "abc123", "/run/terok/sidecar/demo.json")
+
+        assert rc == 4
+        run_child.assert_called_once_with("vault", "abc123", Path("/run/terok/sidecar/demo.json"))
+        basic_config.assert_called_once()
 
 
 class TestRegistration:

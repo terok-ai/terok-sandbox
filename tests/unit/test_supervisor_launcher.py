@@ -25,6 +25,7 @@ from terok_sandbox.supervisor.launcher import (
 )
 
 _SIDECAR = Path("/state/sidecar/demo.json")
+_RUNTIME_DIR = Path("/run/user/1000/terok/sandbox")
 
 
 def _spy_exec() -> tuple[AsyncMock, list[list[str]]]:
@@ -124,7 +125,7 @@ class TestSystemdRunLauncher:
     def test_available_when_all_three_signals_present(self) -> None:
         which_p, init_p, mgr_p = self._patch_signals(on_path=True, is_init=True, user_mgr=True)
         with which_p, init_p, mgr_p:
-            assert SystemdRunLauncher.is_available() is True
+            assert SystemdRunLauncher.is_available(_RUNTIME_DIR) is True
 
     @pytest.mark.parametrize(
         ("on_path", "is_init", "user_mgr"),
@@ -141,7 +142,7 @@ class TestSystemdRunLauncher:
             on_path=on_path, is_init=is_init, user_mgr=user_mgr
         )
         with which_p, init_p, mgr_p:
-            assert SystemdRunLauncher.is_available() is False
+            assert SystemdRunLauncher.is_available(_RUNTIME_DIR) is False
 
 
 class TestDefaultLauncher:
@@ -152,7 +153,7 @@ class TestDefaultLauncher:
         with patch(
             "terok_sandbox.supervisor.launcher.SystemdRunLauncher.is_available", return_value=True
         ):
-            assert isinstance(default_launcher(), SystemdRunLauncher)
+            assert isinstance(default_launcher(_RUNTIME_DIR), SystemdRunLauncher)
 
     def test_auto_falls_back_to_direct_on_non_systemd(
         self, monkeypatch: pytest.MonkeyPatch
@@ -161,7 +162,7 @@ class TestDefaultLauncher:
         with patch(
             "terok_sandbox.supervisor.launcher.SystemdRunLauncher.is_available", return_value=False
         ):
-            assert isinstance(default_launcher(), DirectLauncher)
+            assert isinstance(default_launcher(_RUNTIME_DIR), DirectLauncher)
 
     def test_env_forces_direct_even_when_systemd_available(
         self, monkeypatch: pytest.MonkeyPatch
@@ -170,7 +171,7 @@ class TestDefaultLauncher:
         with patch(
             "terok_sandbox.supervisor.launcher.SystemdRunLauncher.is_available", return_value=True
         ):
-            assert isinstance(default_launcher(), DirectLauncher)
+            assert isinstance(default_launcher(_RUNTIME_DIR), DirectLauncher)
 
     def test_env_forces_systemd_even_when_probe_says_no(
         self, monkeypatch: pytest.MonkeyPatch
@@ -179,4 +180,24 @@ class TestDefaultLauncher:
         with patch(
             "terok_sandbox.supervisor.launcher.SystemdRunLauncher.is_available", return_value=False
         ):
-            assert isinstance(default_launcher(), SystemdRunLauncher)
+            assert isinstance(default_launcher(_RUNTIME_DIR), SystemdRunLauncher)
+
+
+class TestUserManagerSocket:
+    """The user-manager probe path derives from the sidecar runtime_dir, not getuid()."""
+
+    def test_derives_xdg_runtime_dir_from_sidecar_runtime_dir(self) -> None:
+        from terok_sandbox.supervisor.launcher import _user_manager_socket
+
+        # runtime_dir = <XDG_RUNTIME_DIR>/terok/sandbox → socket under <XDG_RUNTIME_DIR>.
+        assert _user_manager_socket(Path("/run/user/1000/terok/sandbox")) == Path(
+            "/run/user/1000/systemd/private"
+        )
+
+    def test_ignores_process_uid(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Even with getuid()==0 (the rootless-namespace trap), the path uses runtime_dir."""
+        from terok_sandbox.supervisor import launcher
+
+        monkeypatch.setattr(launcher.os, "getuid", lambda: 0, raising=False)
+        sock = launcher._user_manager_socket(Path("/run/user/1000/terok/sandbox"))
+        assert "1000" in str(sock) and "/run/user/0/" not in str(sock)

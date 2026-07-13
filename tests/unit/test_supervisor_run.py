@@ -236,6 +236,71 @@ class TestTerminateChildren:
             await _terminate_children([handle])
         proc.kill.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_external_cancellation_kills_children_and_reraises(self) -> None:
+        """Cancelling the teardown kills the children (no orphans) and re-raises.
+
+        Distinct from the grace timeout: an outer cancellation must
+        propagate, not be swallowed as if it were an internal timeout.
+        """
+        proc = _FakeProc()
+        proc.terminate = MagicMock()  # never exits on its own → the wait blocks
+        handle = ChildHandle(service="s", process=proc)
+        task = asyncio.create_task(_terminate_children([handle]))
+        await asyncio.sleep(0)  # let it SIGTERM and reach the shared wait
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        proc.kill.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_shared_grace_window_not_per_child(self) -> None:
+        """All children wait within one grace window, not len(handles) × grace."""
+        procs = [_FakeProc() for _ in range(4)]
+        for p in procs:
+            p.terminate = MagicMock()  # none exit on their own
+        handles = [ChildHandle(service=f"s{i}", process=p) for i, p in enumerate(procs)]
+        with patch("terok_sandbox.supervisor.main._CHILD_TERM_GRACE_S", 0.05):
+            # 4 children × 0.05s sequential would be 0.2s; one shared window is ~0.05s.
+            await asyncio.wait_for(_terminate_children(handles), timeout=0.15)
+        for p in procs:
+            p.kill.assert_called_once()
+
+
+class TestSupervise:
+    """``_supervise`` races the monitors and logs (not raises) a monitor failure."""
+
+    @pytest.mark.asyncio
+    async def test_monitor_task_exception_is_logged_not_raised(self) -> None:
+        from terok_sandbox.supervisor.main import _supervise
+
+        handle = ChildHandle(service="s", process=_FakeProc())  # never exits on its own
+        stop = asyncio.Event()
+        # podman-wait arm raises a non-cancellation error → the await loop
+        # must swallow+log it, and the pending monitors get cancelled.
+        with patch(
+            "terok_sandbox.supervisor.main._wait_for_container",
+            AsyncMock(side_effect=ValueError("boom")),
+        ):
+            await _supervise("cid", [handle], stop)  # must return, not raise
+
+
+class TestKillChildren:
+    """``_kill_children`` SIGKILLs live children and reaps them; skips the dead."""
+
+    @pytest.mark.asyncio
+    async def test_kills_and_reaps_live_skips_dead(self) -> None:
+        from terok_sandbox.supervisor.main import _kill_children
+
+        live = _FakeProc()
+        dead = _FakeProc(exit_code=0)
+        await _kill_children(
+            [ChildHandle(service="live", process=live), ChildHandle(service="dead", process=dead)]
+        )
+        live.kill.assert_called_once()
+        assert live.returncode is not None
+        dead.kill.assert_not_called()
+
 
 class TestInstallSignalHandlers:
     """``_install_signal_handlers`` wires SIGTERM/SIGINT onto the running loop."""
@@ -260,6 +325,24 @@ class TestInstallSignalHandlers:
             _install_signal_handlers(event)
         assert signal.SIGTERM in registered
         assert signal.SIGINT in registered
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_signal_signal_when_unsupported(self) -> None:
+        """Where the loop can't register handlers, it falls back to signal.signal."""
+        import signal
+
+        event = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        fell_back: list[int] = []
+        with (
+            patch.object(loop, "add_signal_handler", side_effect=NotImplementedError),
+            patch(
+                "terok_sandbox.supervisor.main.signal.signal",
+                side_effect=lambda s, _h: fell_back.append(s),
+            ),
+        ):
+            _install_signal_handlers(event)
+        assert signal.SIGTERM in fell_back and signal.SIGINT in fell_back
 
 
 class TestWaitForContainer:

@@ -246,7 +246,7 @@ def load_sidecar(sidecar_path: Path) -> SidecarConfig | None:
             ipc_mode=ipc_mode,
             db_path=db_path,
             runtime_dir=runtime_dir,
-            scope_id=raw.get("scope_id") or None,
+            scope_id=str(raw["scope_id"]) if raw.get("scope_id") else None,
             project_id=str(raw.get("project_id") or ""),
             task_id=str(raw.get("task_id") or ""),
             tcp_port=(int(raw["tcp_port"]) if raw.get("tcp_port") is not None else None),

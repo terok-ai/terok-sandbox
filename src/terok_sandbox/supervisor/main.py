@@ -102,7 +102,7 @@ async def run_supervisor(container_id: str, sidecar_path: Path) -> int:
         container_id, cfg.container_name, sidecar_path, cfg.runtime_dir
     )
     services = _select_services(cfg, SERVICE_NAMES)
-    launcher = default_launcher()
+    launcher = default_launcher(cfg.runtime_dir)
     stop_event = asyncio.Event()
     _install_signal_handlers(stop_event)
 
@@ -191,23 +191,39 @@ async def _terminate_children(handles: list[ChildHandle]) -> None:
     """SIGTERM the children in reverse launch order, escalating to SIGKILL.
 
     Reverse order mirrors the old in-process teardown: the notifier /
-    hub go down before the secret-holders (vault, signer).  A child that
-    ignores SIGTERM past the grace window is killed so a wedged service
-    can't stall the supervisor's exit.
+    hub go down before the secret-holders (vault, signer).  All children
+    then get a *single* shared grace window to exit — waiting on them
+    concurrently, so a wedged bundle can't stall exit for
+    ``len(handles) * grace`` — and any survivor is killed.
+
+    An external cancellation (the enclosing task being cancelled) is
+    honoured: the children are killed so none is orphaned, then the
+    ``CancelledError`` is re-raised rather than swallowed as if it were
+    the internal grace timeout.
     """
-    for handle in reversed(handles):
+    live = [h for h in reversed(handles) if h.process.returncode is None]
+    for handle in live:
+        with contextlib.suppress(ProcessLookupError):
+            handle.process.terminate()
+    waits = asyncio.gather(*(h.process.wait() for h in live))
+    try:
+        await asyncio.wait_for(waits, timeout=_CHILD_TERM_GRACE_S)
+    except TimeoutError:
+        await _kill_children(live)
+    except asyncio.CancelledError:
+        await _kill_children(live)
+        raise
+
+
+async def _kill_children(handles: list[ChildHandle]) -> None:
+    """SIGKILL any child still running and reap it, swallowing races."""
+    for handle in handles:
         if handle.process.returncode is not None:
             continue
         with contextlib.suppress(ProcessLookupError):
-            handle.process.terminate()
-    for handle in reversed(handles):
-        try:
-            await asyncio.wait_for(handle.process.wait(), timeout=_CHILD_TERM_GRACE_S)
-        except (TimeoutError, asyncio.CancelledError):
-            with contextlib.suppress(ProcessLookupError):
-                handle.process.kill()
-            with contextlib.suppress(Exception):
-                await handle.process.wait()
+            handle.process.kill()
+        with contextlib.suppress(Exception):
+            await handle.process.wait()
 
 
 # ── Internal helpers ────────────────────────────────────────────────────

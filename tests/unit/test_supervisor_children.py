@@ -23,8 +23,11 @@ import pytest
 from terok_sandbox.supervisor.children import (
     SERVICE_NAMES,
     _ensure_socket_dirs,
+    _install_signal_handlers,
     _run_clearance,
     _run_gate,
+    _run_signer,
+    _run_vault,
     _run_verdict,
     run_child,
 )
@@ -51,6 +54,20 @@ def _socket_cfg(tmp_path: Path, **extra: object) -> SidecarConfig:
         scope_id="proj",
         project_id="proj",
         **extra,
+    )
+
+
+def _tcp_cfg(tmp_path: Path, **extra: object) -> SidecarConfig:
+    kw: dict[str, object] = {"tcp_port": 22001, "ssh_signer_port": 22002}
+    kw.update(extra)  # let callers override the ports (e.g. set one to None)
+    return SidecarConfig(
+        container_name="demo",
+        ipc_mode="tcp",
+        db_path=tmp_path / "vault.db",
+        runtime_dir=tmp_path / "rt" / "sandbox",
+        scope_id="proj",
+        project_id="proj",
+        **kw,  # type: ignore[arg-type]
     )
 
 
@@ -209,6 +226,12 @@ class TestGateRunner:
         with pytest.raises(RuntimeError, match="gate_port"):
             await _run_gate(cfg, paths, _preset_stop())
 
+    @pytest.mark.asyncio
+    async def test_unwired_gate_raises(self, tmp_path: Path, paths: SupervisorPaths) -> None:
+        """The gate runner refuses to start without gate_base_path + gate_token."""
+        with pytest.raises(RuntimeError, match="gate wiring"):
+            await _run_gate(_socket_cfg(tmp_path), paths, _preset_stop())
+
 
 class TestEnsureSocketDirs:
     """``_ensure_socket_dirs`` creates each service's socket parent at 0o700."""
@@ -250,3 +273,192 @@ class TestRunChildGuards:
             "terok_sandbox.supervisor.children._RUNNERS", {"vault": _boom}, clear=False
         ):
             assert run_child("vault", "abc123def456", sidecar) == 4
+
+    def test_happy_path_runs_the_service_and_returns_ok(self, tmp_path: Path) -> None:
+        """A clean run hardens, binds the socket dir, runs the service, exits 0.
+
+        Drives ``run_child`` end-to-end with a no-op runner, so the real
+        ``harden_self`` (partial in this rootless container — exercising the
+        debug branch), ``load_sidecar``, socket-dir setup, and signal wiring
+        all run.  ``runtime_dir`` stays under ``tmp_path`` for isolation.
+        """
+        sidecar = tmp_path / "demo.json"
+        sidecar.write_text(
+            json.dumps(
+                {
+                    "container_name": "demo",
+                    "ipc_mode": "socket",
+                    "db_path": str(tmp_path / "vault.db"),
+                    "runtime_dir": str(tmp_path / "rt" / "sandbox"),
+                }
+            )
+        )
+        ran: list[bool] = []
+
+        async def _noop(cfg: object, paths: object, stop: object) -> None:
+            ran.append(True)
+
+        with patch.dict(
+            "terok_sandbox.supervisor.children._RUNNERS", {"vault": _noop}, clear=False
+        ):
+            assert run_child("vault", "abc123def456", sidecar) == 0
+        assert ran == [True]
+        # the vault socket dir was created + tightened
+        vault_dir = tmp_path / "rt" / "sandbox" / "run" / "demo"
+        assert vault_dir.is_dir()
+        assert (vault_dir.stat().st_mode & 0o777) == 0o700
+
+    def test_partial_hardening_is_logged_not_fatal(self, tmp_path: Path) -> None:
+        """A partial harden (e.g. mlockall denied) logs at debug and still runs."""
+        from terok_util import HardeningReport
+
+        sidecar = tmp_path / "demo.json"
+        sidecar.write_text(
+            json.dumps(
+                {
+                    "container_name": "demo",
+                    "ipc_mode": "socket",
+                    "db_path": str(tmp_path / "vault.db"),
+                    "runtime_dir": str(tmp_path / "rt" / "sandbox"),
+                }
+            )
+        )
+
+        async def _noop(cfg: object, paths: object, stop: object) -> None: ...
+
+        partial = HardeningReport(no_dump=True, no_core=True, memory_locked=False)
+        with (
+            patch("terok_sandbox.supervisor.children.harden_self", return_value=partial),
+            patch.dict("terok_sandbox.supervisor.children._RUNNERS", {"vault": _noop}, clear=False),
+        ):
+            assert run_child("vault", "abc123def456", sidecar) == 0
+
+
+class TestVaultRunner:
+    """``_run_vault`` builds the proxy with the sidecar transport, then tears it down."""
+
+    @pytest.mark.asyncio
+    async def test_socket_mode_builds_and_stops_proxy(
+        self, tmp_path: Path, paths: SupervisorPaths
+    ) -> None:
+        captured: dict[str, object] = {}
+
+        class _StubVault:
+            def __init__(self, **kw: object) -> None:
+                captured.update(kw)
+
+            async def start(self) -> None: ...
+            async def stop(self) -> None:
+                captured["stopped"] = True
+
+        with patch("terok_sandbox.vault.daemon.token_broker.VaultProxy", _StubVault):
+            await _run_vault(_socket_cfg(tmp_path), paths, _preset_stop())
+        assert captured["db_path"] == (tmp_path / "vault.db")
+        assert captured["scope_id"] == "proj"
+        assert captured["stopped"] is True
+
+    @pytest.mark.asyncio
+    async def test_tcp_mode_binds_loopback_port(
+        self, tmp_path: Path, paths: SupervisorPaths
+    ) -> None:
+        from terok_sandbox.vault.daemon.token_broker import TcpBind
+
+        captured: dict[str, object] = {}
+
+        class _StubVault:
+            def __init__(self, **kw: object) -> None:
+                captured.update(kw)
+
+            async def start(self) -> None: ...
+            async def stop(self) -> None: ...
+
+        with patch("terok_sandbox.vault.daemon.token_broker.VaultProxy", _StubVault):
+            await _run_vault(_tcp_cfg(tmp_path), paths, _preset_stop())
+        assert isinstance(captured["bind"], TcpBind)
+        assert captured["bind"].port == 22001  # type: ignore[attr-defined]
+
+    @pytest.mark.asyncio
+    async def test_tcp_mode_without_port_raises(
+        self, tmp_path: Path, paths: SupervisorPaths
+    ) -> None:
+        with pytest.raises(RuntimeError, match="tcp_port"):
+            await _run_vault(_tcp_cfg(tmp_path, tcp_port=None), paths, _preset_stop())
+
+
+class TestSignerRunner:
+    """``_run_signer`` starts the SSH-agent server and closes it on stop."""
+
+    @pytest.mark.asyncio
+    async def test_socket_mode_starts_and_closes_server(
+        self, tmp_path: Path, paths: SupervisorPaths
+    ) -> None:
+        server = MagicMock(close=MagicMock(), wait_closed=AsyncMock())
+        with patch(
+            "terok_sandbox.vault.ssh.signer.start_ssh_signer",
+            new=AsyncMock(return_value=server),
+        ) as start:
+            await _run_signer(_socket_cfg(tmp_path), paths, _preset_stop())
+        start.assert_awaited_once()
+        server.close.assert_called_once()
+        server.wait_closed.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_tcp_mode_passes_loopback_port(
+        self, tmp_path: Path, paths: SupervisorPaths
+    ) -> None:
+        server = MagicMock(close=MagicMock(), wait_closed=AsyncMock())
+        with patch(
+            "terok_sandbox.vault.ssh.signer.start_ssh_signer",
+            new=AsyncMock(return_value=server),
+        ) as start:
+            await _run_signer(_tcp_cfg(tmp_path), paths, _preset_stop())
+        assert start.await_args.kwargs["host"] == "127.0.0.1"
+        assert start.await_args.kwargs["port"] == 22002
+
+    @pytest.mark.asyncio
+    async def test_tcp_mode_without_port_raises(
+        self, tmp_path: Path, paths: SupervisorPaths
+    ) -> None:
+        with pytest.raises(RuntimeError, match="ssh_signer_port"):
+            await _run_signer(_tcp_cfg(tmp_path, ssh_signer_port=None), paths, _preset_stop())
+
+
+class TestChildSignalHandlers:
+    """``_install_signal_handlers`` wires SIGTERM/SIGINT onto the running loop."""
+
+    def test_no_running_loop_is_a_soft_noop(self) -> None:
+        stop = asyncio.Event()
+        _install_signal_handlers(stop)
+        assert not stop.is_set()
+
+    @pytest.mark.asyncio
+    async def test_registers_handlers_on_the_running_loop(self) -> None:
+        import signal
+
+        stop = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        registered: list[int] = []
+        with patch.object(
+            loop, "add_signal_handler", side_effect=lambda s, _cb: registered.append(s)
+        ):
+            _install_signal_handlers(stop)
+        assert signal.SIGTERM in registered
+        assert signal.SIGINT in registered
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_signal_signal_when_unsupported(self) -> None:
+        """Where the loop can't add signal handlers, it falls back to signal.signal."""
+        import signal
+
+        stop = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        fell_back: list[int] = []
+        with (
+            patch.object(loop, "add_signal_handler", side_effect=NotImplementedError),
+            patch(
+                "terok_sandbox.supervisor.children.signal.signal",
+                side_effect=lambda s, _h: fell_back.append(s),
+            ),
+        ):
+            _install_signal_handlers(stop)
+        assert signal.SIGTERM in fell_back and signal.SIGINT in fell_back

@@ -74,7 +74,7 @@ _LAUNCHER_ENV = "TEROK_SUPERVISOR_LAUNCHER"
 _SYSTEMD_INIT_MARKER = Path("/run/systemd/system")
 
 
-def _user_manager_socket() -> Path:
+def _user_manager_socket(runtime_dir: Path) -> Path:
     """The current user's systemd manager private socket.
 
     ``systemd-run --user`` talks to the per-user manager over this
@@ -82,9 +82,16 @@ def _user_manager_socket() -> Path:
     lingering-enabled user, or an active login session) and ``--user``
     scopes will work.  Without it — the common OCI-hook case, spawned
     with no session — ``--user`` would fail, so we must not pick systemd.
+
+    The ``XDG_RUNTIME_DIR`` (``/run/user/<uid>``) is taken from the
+    sidecar's *runtime_dir* (``<XDG_RUNTIME_DIR>/terok/sandbox``), **not**
+    from ``os.getuid()`` — the supervisor runs under crun's rootless user
+    namespace where ``getuid()`` reads 0 and would misroute the probe to
+    ``/run/user/0``, mis-detecting the manager as absent and silently
+    dropping the systemd scope ceiling.  The launch path carries the
+    correct value for exactly this reason.
     """
-    runtime = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
-    return Path(runtime) / "systemd" / "private"
+    return runtime_dir.parent.parent / "systemd" / "private"
 
 
 @dataclass(frozen=True)
@@ -143,7 +150,7 @@ class SystemdRunLauncher:
         self._fallback = DirectLauncher()
 
     @staticmethod
-    def is_available() -> bool:
+    def is_available(runtime_dir: Path) -> bool:
         """``True`` only when a user ``systemd-run`` scope will actually work.
 
         Three preconditions, cheapest first — all filesystem checks, no
@@ -152,10 +159,11 @@ class SystemdRunLauncher:
         1. ``systemd-run`` is on ``$PATH``.
         2. The host booted with systemd as PID 1 (``/run/systemd/system``);
            a non-systemd init fails this.
-        3. A per-user systemd manager is running (its private socket
-           exists); the OCI hook usually runs with no session, so this
-           weeds out the "systemd installed but ``--user`` unreachable"
-           trap the naive ``$PATH`` check would fall into.
+        3. A per-user systemd manager is running (its private socket,
+           derived from the sidecar *runtime_dir*, exists); the OCI hook
+           usually runs with no session, so this weeds out the "systemd
+           installed but ``--user`` unreachable" trap the naive ``$PATH``
+           check would fall into.
 
         Any miss means [`default_launcher`][terok_sandbox.supervisor.launcher.default_launcher]
         picks the direct path instead.
@@ -163,7 +171,7 @@ class SystemdRunLauncher:
         return (
             shutil.which("systemd-run") is not None
             and _SYSTEMD_INIT_MARKER.is_dir()
-            and _user_manager_socket().exists()
+            and _user_manager_socket(runtime_dir).exists()
         )
 
     async def launch(self, service: str, container_id: str, sidecar_path: Path) -> ChildHandle:
@@ -186,7 +194,7 @@ class SystemdRunLauncher:
         return ChildHandle(service=service, process=process)
 
 
-def default_launcher() -> ProcessLauncher:
+def default_launcher(runtime_dir: Path) -> ProcessLauncher:
     """Pick the launcher the host supports, honouring an operator override.
 
     ``TEROK_SUPERVISOR_LAUNCHER`` forces the choice — ``direct`` or
@@ -194,16 +202,17 @@ def default_launcher() -> ProcessLauncher:
     one behaviour everywhere.  The default, ``auto``, uses the systemd
     scope ceiling only when
     [`SystemdRunLauncher.is_available`][terok_sandbox.supervisor.launcher.SystemdRunLauncher.is_available]
-    confirms a usable user manager, and the plain direct spawn otherwise
-    (non-systemd hosts, sessionless hooks).  Both harden every child
-    identically; only the cgroup ceiling differs.
+    confirms a usable user manager (probed via the sidecar *runtime_dir*,
+    not ``getuid()``), and the plain direct spawn otherwise (non-systemd
+    hosts, sessionless hooks).  Both harden every child identically; only
+    the cgroup ceiling differs.
     """
     choice = os.environ.get(_LAUNCHER_ENV, "auto").strip().lower()
     if choice == "direct":
         return DirectLauncher()
     if choice == "systemd":
         return SystemdRunLauncher()
-    if SystemdRunLauncher.is_available():
+    if SystemdRunLauncher.is_available(runtime_dir):
         return SystemdRunLauncher()
     return DirectLauncher()
 
