@@ -1002,7 +1002,8 @@ class TestGeneratePassphrase:
 
     def test_each_call_is_distinct(self) -> None:
         """Sequential calls must not return the same value."""
-        assert generate_passphrase() != generate_passphrase()
+        first, second = generate_passphrase(), generate_passphrase()
+        assert first != second
 
 
 class TestProvisionPassphrase:

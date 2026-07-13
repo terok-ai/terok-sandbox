@@ -37,8 +37,11 @@ class TestContainerIdentity:
     def test_eq_by_name(self) -> None:
         """Handles with the same name compare equal and share a hash."""
         runtime = PodmanRuntime()
-        assert runtime.container("c") == runtime.container("c")
-        assert hash(runtime.container("c")) == hash(runtime.container("c"))
+        # Two separate handles, deliberately: the point is that equality is
+        # by name, not by identity.
+        first, second = runtime.container("c"), runtime.container("c")
+        assert first == second
+        assert hash(first) == hash(second)
 
     def test_ne_different_name(self) -> None:
         """Handles with different names compare unequal."""
@@ -62,8 +65,9 @@ class TestImageIdentity:
     def test_eq_by_ref(self) -> None:
         """Images with the same ref compare equal."""
         runtime = PodmanRuntime()
-        assert runtime.image("sha256:abc") == runtime.image("sha256:abc")
-        assert hash(runtime.image("sha256:abc")) == hash(runtime.image("sha256:abc"))
+        first, second = runtime.image("sha256:abc"), runtime.image("sha256:abc")
+        assert first == second
+        assert hash(first) == hash(second)
 
     def test_ne_non_image(self) -> None:
         """Images are not equal to arbitrary objects."""

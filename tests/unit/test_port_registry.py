@@ -184,10 +184,15 @@ def test_resolve_auto_allocates_distinct() -> None:
 
 
 def test_resolve_cached() -> None:
-    """Second call returns the same cached result."""
-    assert reg.resolve_service_ports(None, None, None) == reg.resolve_service_ports(
-        None, None, None
-    )
+    """Second call returns the same cached result -- the object, not a copy.
+
+    Equality would not have proved caching: it only says the second call
+    computed something equal.  Identity says it did not compute at all,
+    which is what the cache promises.
+    """
+    first = reg.resolve_service_ports(None, None, None)
+    second = reg.resolve_service_ports(None, None, None)
+    assert first is second
 
 
 def test_resolve_explicit() -> None:
