@@ -28,7 +28,7 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, NoReturn
 
 from .._util import log_debug, log_warning
 from .protocol import (
@@ -215,11 +215,51 @@ def bypass_network_args(gate_port: int | None) -> list[str]:
     ]
 
 
+# ── Init binary (podman run --init) ───────────────────────────────────────
+
+_INIT_BINARY = "catatonit"
+_INIT_HELPER_DIRS: tuple[Path, ...] = (
+    Path("/usr/local/libexec/podman"),
+    Path("/usr/local/lib/podman"),
+    Path("/usr/libexec/podman"),
+    Path("/usr/lib/podman"),
+)
+"""Podman's default ``helper_binaries_dir`` search order (containers.conf)."""
+
+
+def find_init_binary() -> str | None:
+    """Locate the init binary ``podman run --init`` would inject, or ``None``.
+
+    Deliberately conservative: only the directories podman searches *by
+    default* are probed — claiming ``--init`` on a hunch (say, a PATH
+    hit podman itself would not honour) would fail the launch outright,
+    while a false negative merely degrades it.  The probe has two
+    callers with one contract: [`Sandbox`][terok_sandbox.sandbox.Sandbox]
+    launches pass ``--init`` only when it hits, and
+    ``terok-sandbox setup`` warns when it misses — a catatonit-less
+    host still works, its containers just take the full grace period
+    plus a force-kill on every stop.  Hosts with a custom
+    ``helper_binaries_dir`` land on that same degraded-but-working
+    side.
+    """
+    for directory in _INIT_HELPER_DIRS:
+        candidate = directory / _INIT_BINARY
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return None
+
+
 # ── Timeouts / constants ──────────────────────────────────────────────────
 
 _DEFAULT_LOGIN_COMMAND: tuple[str, ...] = ("tmux", "new-session", "-A", "-s", "main")
 _START_TIMEOUT = 30
-_STOP_TIMEOUT_BUFFER = 5
+_STOP_POLL_INTERVAL = 0.5
+_STOP_KILL_TIMEOUT = 15
+_STOP_CLEANUP_TIMEOUT = 60
+_STOP_PROBE_TIMEOUT = 5
+_STATE_ABSENT = "absent"
+"""Probe verdict for a container podman no longer knows — confirmed down,
+distinct from both a live state string and a no-verdict ``None``."""
 _CONTAINER_REMOVE_TIMEOUT = 120
 _IMAGES_FORMAT = "{{.Repository}}\t{{.Tag}}\t{{.ID}}\t{{.Size}}\t{{.Created}}"
 
@@ -422,32 +462,118 @@ class PodmanContainer:
             )
 
     def stop(self, *, timeout: int = 10) -> None:
-        """Stop the container, SIGKILL after *timeout* seconds.
+        """Stop the container: SIGTERM, then SIGKILL after *timeout* seconds.
+
+        The ``podman stop`` client gets no single wall-clock budget —
+        how long a stop may take is decided by *watching the container*,
+        not by guessing.  The grace period belongs to the container;
+        once it expires the SIGKILL has been sent, so the container must
+        leave ``running`` within ``_STOP_KILL_TIMEOUT``.  From the
+        moment it is no longer running, what remains is podman-side
+        teardown (unmounts, network, poststop hooks), which gets its own
+        ``_STOP_CLEANUP_TIMEOUT`` — teardown time is unrelated to the
+        grace period, so one must never eat into the other.
 
         Every lifecycle failure surfaces as [`RuntimeError`][RuntimeError]; see
         [`start`][terok_sandbox.runtime.podman.PodmanContainer.start] for the rationale.
         """
         log_debug(f"PodmanContainer.stop({self.name}, timeout={timeout})")
         try:
-            proc = subprocess.run(  # nosec B603 B607 — argv built from fixed verbs + caller-controlled scope/container names — binary PATH lookup is the cross-distro contract
+            proc = subprocess.Popen(  # nosec B603 B607 — argv built from fixed verbs + caller-controlled scope/container names — binary PATH lookup is the cross-distro contract
                 ["podman", "stop", "--time", str(timeout), self.name],
-                check=False,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
                 text=True,
-                timeout=timeout + _STOP_TIMEOUT_BUFFER,
             )
         except FileNotFoundError as exc:
             raise RuntimeError(f"podman stop {self.name!r} failed: podman not found") from exc
-        except subprocess.TimeoutExpired as exc:
-            raise RuntimeError(
-                f"podman stop {self.name!r} timed out after {timeout + _STOP_TIMEOUT_BUFFER}s"
-            ) from exc
+        stderr = self._watch_stop(proc, grace=timeout)
         if proc.returncode != 0:
             raise RuntimeError(
                 f"podman stop {self.name!r} failed "
-                f"(rc={proc.returncode}): {(proc.stderr or '').strip() or '<no output>'}"
+                f"(rc={proc.returncode}): {stderr.strip() or '<no output>'}"
             )
+
+    def _watch_stop(self, proc: subprocess.Popen[str], *, grace: int) -> str:
+        """Babysit a running ``podman stop`` client; return its stderr.
+
+        Polls the container state to tell which phase the stop is in and
+        holds each phase to its own deadline: alive → the kill must land
+        by grace + ``_STOP_KILL_TIMEOUT``; dead → the client must return
+        within ``_STOP_CLEANUP_TIMEOUT``.  A probe that yields no verdict
+        (inspect hung or errored) changes nothing — the current phase is
+        kept — but a hard ceiling of both budgets combined still bounds
+        the wait when the state stays unobservable.  A blown deadline
+        kills the client and raises [`RuntimeError`][RuntimeError] naming
+        the wedged phase.
+        """
+        kill_deadline = time.monotonic() + grace + _STOP_KILL_TIMEOUT
+        hard_deadline = kill_deadline + _STOP_CLEANUP_TIMEOUT
+        cleanup_deadline: float | None = None
+        while True:
+            try:
+                _, stderr = proc.communicate(timeout=_STOP_POLL_INTERVAL)
+                return stderr or ""
+            except subprocess.TimeoutExpired:
+                pass
+            now = time.monotonic()
+            if now >= hard_deadline:
+                self._abort_stop(
+                    proc,
+                    f"no stop verdict {_STOP_KILL_TIMEOUT + _STOP_CLEANUP_TIMEOUT}s "
+                    f"past the {grace}s grace period",
+                )
+            if cleanup_deadline is not None:
+                if now >= cleanup_deadline:
+                    self._abort_stop(
+                        proc,
+                        f"container stopped, but podman cleanup did not finish "
+                        f"within {_STOP_CLEANUP_TIMEOUT}s",
+                    )
+            elif (verdict := self._probe_stop_state()) is None:
+                pass  # no verdict — keep the current phase and keep waiting
+            elif verdict in ("running", "paused"):
+                if now >= kill_deadline:
+                    self._abort_stop(
+                        proc,
+                        f"container still running {_STOP_KILL_TIMEOUT}s "
+                        f"past the {grace}s grace period",
+                    )
+            else:
+                cleanup_deadline = now + _STOP_CLEANUP_TIMEOUT
+
+    def _probe_stop_state(self) -> str | None:
+        """Bounded state probe for the stop watch — never hangs, never guesses.
+
+        Three-way verdict: a state string for a container podman can
+        inspect, ``_STATE_ABSENT`` for one it no longer knows (confirmed
+        down — e.g. an ``--rm`` container that already left), and
+        ``None`` when there is *no verdict* (inspect timed out or podman
+        is unreachable).  The unbounded [`state`][terok_sandbox.runtime.podman.PodmanContainer.state]
+        property is deliberately not reused: an inspect that hangs while
+        podman holds the container lock mid-stop would hang the whole
+        watch, and its error-collapses-to-``None`` contract would count
+        a failed probe as a stopped container.
+        """
+        try:
+            out = subprocess.check_output(  # nosec B603 B607 — argv built from fixed verbs + caller-controlled scope/container names — binary PATH lookup is the cross-distro contract
+                ["podman", "inspect", "-f", "{{.State.Status}}", self.name],
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=_STOP_PROBE_TIMEOUT,
+            ).strip()
+        except subprocess.CalledProcessError:
+            return _STATE_ABSENT
+        except (subprocess.TimeoutExpired, OSError):
+            return None
+        return out.lower() if out else None
+
+    def _abort_stop(self, proc: subprocess.Popen[str], reason: str) -> NoReturn:
+        """Kill a wedged ``podman stop`` client and raise the phase verdict."""
+        proc.kill()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.communicate(timeout=_STOP_POLL_INTERVAL)
+        raise RuntimeError(f"podman stop {self.name!r} aborted: {reason}")
 
     def wait(self, timeout: float | None = None) -> int:
         """Block until the container exits; return its exit code.

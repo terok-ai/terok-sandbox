@@ -70,6 +70,7 @@ def run_prereq_report(cfg: SandboxConfig) -> SelinuxCheckResult:
     """
     print("Prerequisites:")
     _report_host_binaries()
+    _report_init_binary()
     _report_firewall_binaries()
     if cfg.experimental:
         _report_krun_binaries()
@@ -85,6 +86,25 @@ def _report_host_binaries() -> None:
                 s.ok(path)
             else:
                 s.missing("not on PATH")
+
+
+def _report_init_binary() -> None:
+    """Stage line for catatonit — missing degrades stops, never blocks.
+
+    Managed launches pass ``--init`` only when
+    [`find_init_binary`][terok_sandbox.runtime.podman.find_init_binary]
+    hits, so a host without catatonit still works — its containers just
+    ignore SIGTERM and take the full grace period plus a force-kill on
+    every stop.  Worth a warning here, where the operator can still fix
+    it with one package install.
+    """
+    from .runtime.podman import find_init_binary
+
+    with _stage_line("catatonit") as s:
+        if path := find_init_binary():
+            s.ok(path)
+        else:
+            s.warn("not found — container stops degrade to grace-period timeout + force-kill")
 
 
 def _report_binary_checks(probe: Callable[[], Iterable[BinaryCheck]]) -> None:
