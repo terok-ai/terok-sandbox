@@ -67,6 +67,20 @@ class TestLoadSidecar:
         )
         assert load_sidecar(path) is None
 
+    def test_allow_debugger_flag_parsed(self, tmp_path: Path) -> None:
+        """The debug-mode opt-in round-trips; absent means fully hardened."""
+        base = {
+            "container_name": "demo",
+            "ipc_mode": "socket",
+            "db_path": "/home/dev/.terok/vault.db",
+            "runtime_dir": "/run/user/1000/terok/sandbox",
+        }
+        assert load_sidecar(_write_sidecar(tmp_path, base)).allow_debugger is False  # type: ignore[union-attr]
+        assert (
+            load_sidecar(_write_sidecar(tmp_path, {**base, "allow_debugger": True})).allow_debugger  # type: ignore[union-attr]
+            is True
+        )
+
     def test_null_ipc_mode_defaults_to_socket(self, tmp_path: Path) -> None:
         """A JSON ``null`` ipc_mode falls back to the default, not the literal ``"None"``."""
         path = _write_sidecar(

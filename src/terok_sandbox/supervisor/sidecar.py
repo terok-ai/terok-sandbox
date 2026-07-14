@@ -72,6 +72,10 @@ class SidecarConfig:
     """The single token the gate validates.  Travels only via the
     sidecar; ``None`` when the gate is not wired."""
     dossier_path: Path | None = None
+    allow_debugger: bool = False
+    """Debug mode — the children leave themselves ptrace-able instead of
+    clearing the dumpable flag, so a debugger can attach.  ``False`` (fully
+    hardened) unless the launch path opted the task in."""
 
 
 @dataclass(frozen=True)
@@ -227,6 +231,7 @@ def _build_config(raw: dict, sidecar_path: Path) -> SidecarConfig:
         gate_base_path=_optional_absolute_path(raw, "gate_base_path", sidecar_path),
         gate_token=str(raw["gate_token"]) if raw.get("gate_token") else None,
         dossier_path=_optional_absolute_path(raw, "dossier_path", sidecar_path),
+        allow_debugger=bool(raw.get("allow_debugger")),
     )
 
 

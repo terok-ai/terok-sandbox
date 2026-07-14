@@ -336,6 +336,37 @@ class TestRunChildGuards:
         ):
             assert run_child("vault", "abc123def456", sidecar) == 0
 
+    def test_debug_mode_passes_allow_debugger_to_harden(self, tmp_path: Path) -> None:
+        """A debug-mode sidecar makes the child harden with allow_debugger=True."""
+        from terok_util import HardeningReport
+
+        sidecar = tmp_path / "demo.json"
+        sidecar.write_text(
+            json.dumps(
+                {
+                    "container_name": "demo",
+                    "ipc_mode": "socket",
+                    "db_path": str(tmp_path / "vault.db"),
+                    "runtime_dir": str(tmp_path / "rt" / "sandbox"),
+                    "allow_debugger": True,
+                }
+            )
+        )
+        captured: dict[str, bool] = {}
+
+        def _fake_harden(*, allow_debugger: bool = False) -> HardeningReport:
+            captured["allow_debugger"] = allow_debugger
+            return HardeningReport(no_dump=not allow_debugger, no_core=True, memory_locked=True)
+
+        async def _noop(cfg: object, paths: object, stop: object) -> None: ...
+
+        with (
+            patch("terok_sandbox.supervisor.children.harden_self", side_effect=_fake_harden),
+            patch.dict("terok_sandbox.supervisor.children._RUNNERS", {"vault": _noop}, clear=False),
+        ):
+            assert run_child("vault", "abc123def456", sidecar) == 0
+        assert captured["allow_debugger"] is True
+
 
 class TestVaultRunner:
     """``_run_vault`` builds the proxy with the sidecar transport, then tears it down."""

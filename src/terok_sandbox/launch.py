@@ -486,6 +486,7 @@ def write_sidecar(
     gate_base_path: str | None = None,
     gate_token: str | None = None,
     gate_port: int | None = None,
+    allow_debugger: bool = False,
 ) -> Path | None:
     """Persist the per-container sidecar config the supervisor reads.
 
@@ -513,6 +514,8 @@ def write_sidecar(
     fresh per container via ``bind(0)``.  Gate config travels only
     when the gate is wired — the supervisor composes the gate iff
     both ``gate_base_path`` and ``gate_token`` are present.
+    ``allow_debugger`` records debug mode: the supervisor children then
+    leave themselves ptrace-able instead of clearing the dumpable flag.
 
     Best-effort: a write failure logs to stderr and returns ``None``;
     callers pick their own policy (`compose` rolls back and aborts the
@@ -561,6 +564,10 @@ def write_sidecar(
         payload["gate_token"] = gate_token
     if gate_port is not None:
         payload["gate_port"] = gate_port
+    if allow_debugger:
+        # Debug mode: the supervisor children leave themselves ptrace-able so
+        # a debugger can attach.  Absent (the default) means fully hardened.
+        payload["allow_debugger"] = True
 
     target = sidecar_dir / f"{container_name}.json"
     # The payload can carry a live gate_token, so the file must not be

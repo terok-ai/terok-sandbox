@@ -240,20 +240,13 @@ def run_child(service: str, container_id: str, sidecar_path: Path) -> int:
     """Harden, build the one *service*, run it until SIGTERM; return an exit code.
 
     The synchronous entry the ``supervise-child`` CLI verb calls via
-    ``asyncio.run``.  Hardens *before* any secret is mapped, then loads
-    the sidecar the parent pinned and drives the single service's
-    lifecycle.  A start failure returns
+    ``asyncio.run``.  Loads the sidecar the parent pinned (config, not
+    secrets), hardens the process *before* the runner opens the credential
+    store or binds a socket — honouring the sidecar's debug-mode opt-out —
+    then drives the single service's lifecycle.  A start failure returns
     ``_EXIT_START_FAILED`` (4) so the parent can log it and carry on,
-    exactly as the in-process bundle degraded one service without taking
-    the rest down.
+    degrading one service without taking the rest down.
     """
-    report = harden_self()
-    if not report.fully_hardened:
-        # Expected in a rootless container (mlockall needs CAP_IPC_LOCK);
-        # log at debug so the operator can confirm the floor on hosts
-        # where it should have taken.
-        _logger.debug("%s child hardening partial: %s", service, report)
-
     runner = _RUNNERS.get(service)
     if runner is None:
         _logger.error("unknown supervisor child service %r", service)
@@ -263,6 +256,14 @@ def run_child(service: str, container_id: str, sidecar_path: Path) -> int:
     if cfg is None:
         _logger.error("%s child: no usable sidecar at %s", service, sidecar_path)
         return _EXIT_BAD_SIDECAR
+
+    report = harden_self(allow_debugger=cfg.allow_debugger)
+    if not cfg.allow_debugger and not report.fully_hardened:
+        # Expected in a rootless container (mlockall needs CAP_IPC_LOCK);
+        # log at debug so the operator can confirm the floor on hosts
+        # where it should have taken.  (Debug mode drops no_dump on
+        # purpose, so a partial report is not noteworthy there.)
+        _logger.debug("%s child hardening partial: %s", service, report)
 
     paths = SupervisorPaths.for_container(
         container_id, cfg.container_name, sidecar_path, cfg.runtime_dir
