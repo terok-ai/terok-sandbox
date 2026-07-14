@@ -21,11 +21,11 @@ A child does exactly one thing:
    one service it owns, and run that service's asyncio loop.
 3. Await ``SIGTERM`` from the parent, then stop the service and exit 0.
 
-The service classes are imported and driven exactly as the in-process
-bundle drove them — only the process boundary is new.  IPC is unchanged
-because every service already binds a per-container filesystem socket
-(or loopback port); a child in a separate process binds the identical
-path the container reaches.
+The service classes are constructed and driven the standard way — only
+the process boundary is new.  IPC is unchanged because every service
+already binds a per-container filesystem socket (or loopback port); a
+child in a separate process binds the identical path the container
+reaches.
 
 The five children map onto the six former services: ``clearance`` owns
 the hub *and* the desktop notifier/subscriber (they share the clearance
@@ -308,15 +308,15 @@ def _ensure_socket_dirs(service: str, paths: SupervisorPaths) -> None:
 
 
 def _install_signal_handlers(stop: asyncio.Event) -> None:
-    """Wire SIGTERM/SIGINT into *stop* on the running loop (soft-fail if none)."""
+    """Set *stop* on SIGTERM/SIGINT — a no-op when called outside a loop.
+
+    The soft-fail lets the helper be called from a synchronous context
+    (its own tests) without wiring anything; under ``asyncio.run`` there
+    is always a running loop.
+    """
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         return
     for sig in (signal.SIGTERM, signal.SIGINT):
-        try:
-            loop.add_signal_handler(sig, stop.set)
-        except RuntimeError:
-            # ``NotImplementedError`` (restricted / non-Unix loops) is a
-            # ``RuntimeError`` subclass, so this single except covers it.
-            signal.signal(sig, lambda *_: stop.set())
+        loop.add_signal_handler(sig, stop.set)

@@ -14,9 +14,8 @@ protocol, one per host flavour:
   systemd (Alpine / OpenRC, minimal container images) and on systemd
   hosts where no user manager is reachable (the OCI hook usually runs
   with no login session).  Every child still hardens itself
-  ([`harden_self`][terok_util.harden_self]) and, where the host has the
-  policy installed, transitions into its own SELinux domain; only the
-  cgroup resource ceiling is absent.
+  ([`harden_self`][terok_util.harden_self]); only the cgroup resource
+  ceiling is absent.
 * [`SystemdRunLauncher`][terok_sandbox.supervisor.launcher.SystemdRunLauncher] —
   wraps the same argv in ``systemd-run --user --scope`` so the child also
   lands in its own transient scope with kernel-enforced resource limits

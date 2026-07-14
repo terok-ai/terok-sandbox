@@ -451,21 +451,3 @@ class TestChildSignalHandlers:
             _install_signal_handlers(stop)
         assert signal.SIGTERM in registered
         assert signal.SIGINT in registered
-
-    @pytest.mark.asyncio
-    async def test_falls_back_to_signal_signal_when_unsupported(self) -> None:
-        """Where the loop can't add signal handlers, it falls back to signal.signal."""
-        import signal
-
-        stop = asyncio.Event()
-        loop = asyncio.get_running_loop()
-        fell_back: list[int] = []
-        with (
-            patch.object(loop, "add_signal_handler", side_effect=NotImplementedError),
-            patch(
-                "terok_sandbox.supervisor.children.signal.signal",
-                side_effect=lambda s, _h: fell_back.append(s),
-            ),
-        ):
-            _install_signal_handlers(stop)
-        assert signal.SIGTERM in fell_back and signal.SIGINT in fell_back
