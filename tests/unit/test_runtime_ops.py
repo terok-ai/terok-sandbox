@@ -276,9 +276,10 @@ class TestContainerStop:
         proc = _stop_client(hanging_polls=1000)
         mock_popen.return_value = proc
         mock_clock.side_effect = [0.0, 10.0 + _STOP_KILL_TIMEOUT + 1.0]
+        container = PodmanRuntime().container("c1")
 
         with pytest.raises(RuntimeError, match="still running"):
-            PodmanRuntime().container("c1").stop(timeout=10)
+            container.stop(timeout=10)
         proc.kill.assert_called_once()
 
     @patch.object(PodmanContainer, "_probe_stop_state", return_value="exited")
@@ -289,9 +290,10 @@ class TestContainerStop:
         proc = _stop_client(hanging_polls=1000)
         mock_popen.return_value = proc
         mock_clock.side_effect = [0.0, 1.0, 1.0 + _STOP_CLEANUP_TIMEOUT + 1.0]
+        container = PodmanRuntime().container("c1")
 
         with pytest.raises(RuntimeError, match="cleanup did not finish"):
-            PodmanRuntime().container("c1").stop(timeout=10)
+            container.stop(timeout=10)
         proc.kill.assert_called_once()
 
     @patch.object(PodmanContainer, "_probe_stop_state", return_value="exited")
@@ -332,9 +334,10 @@ class TestContainerStop:
         past_kill = 10.0 + _STOP_KILL_TIMEOUT + 1.0
         past_ceiling = 10.0 + _STOP_KILL_TIMEOUT + _STOP_CLEANUP_TIMEOUT + 1.0
         mock_clock.side_effect = [0.0, past_kill, past_ceiling]
+        container = PodmanRuntime().container("c1")
 
         with pytest.raises(RuntimeError, match="no stop verdict"):
-            PodmanRuntime().container("c1").stop(timeout=10)
+            container.stop(timeout=10)
         proc.kill.assert_called_once()
 
 
