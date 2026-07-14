@@ -173,6 +173,10 @@ class SupervisorPaths:
         )
 
 
+class _BadSidecar(Exception):
+    """A sidecar field failed validation — the reason is already logged."""
+
+
 def load_sidecar(sidecar_path: Path) -> SidecarConfig | None:
     """Read and parse the sidecar JSON at *sidecar_path*.
 
@@ -180,7 +184,9 @@ def load_sidecar(sidecar_path: Path) -> SidecarConfig | None:
     ``terok.sandbox.sidecar`` annotation, so the supervisor never
     guesses — it opens the named file directly.  Returns ``None`` on
     any I/O / schema failure; ``run_supervisor`` surfaces that as
-    exit-code 2.
+    exit-code 2.  The per-field validation lives in helpers that raise
+    [`_BadSidecar`][terok_sandbox.supervisor.sidecar._BadSidecar] on the
+    first bad value, so this reader stays a flat read → validate → build.
     """
     try:
         with sidecar_path.open(encoding="utf-8") as fh:
@@ -192,75 +198,95 @@ def load_sidecar(sidecar_path: Path) -> SidecarConfig | None:
         _logger.error("sidecar is not a JSON object: %s", sidecar_path)
         return None
     try:
-        container_name = str(raw.get("container_name", "")).strip()
-        if not container_name:
-            _logger.error("sidecar missing required container_name: %s", sidecar_path)
-            return None
-        # ``container_name`` is interpolated into ``runtime_dir/run/<name>``
-        # and that directory is mkdir'd, chmod'd, and rmtree'd by the
-        # supervisor.  Reject a name that is absolute or carries a path
-        # separator / parent-dir reference so a malformed sidecar can't
-        # redirect those filesystem operations outside the runtime dir.
-        if "/" in container_name or container_name in (".", ".."):
-            _logger.error(
-                "sidecar container_name is not a safe path component, got %r: %s",
-                container_name,
-                sidecar_path,
-            )
-            return None
-        ipc_mode = str(raw.get("ipc_mode", "socket"))
-        if ipc_mode not in ("socket", "tcp"):
-            _logger.error(
-                "sidecar ipc_mode must be 'socket' or 'tcp', got %r: %s",
-                ipc_mode,
-                sidecar_path,
-            )
-            return None
-        # Refuse relative paths — the supervisor takes ``rmtree`` over
-        # ``runtime_dir`` and binds sockets under it; a malformed sidecar
-        # with a relative path would resolve against whatever cwd the
-        # OCI hook spawned us with (typically ``/``), which is nowhere
-        # we want to touch.
-        db_path = _require_absolute_path(raw, "db_path", sidecar_path)
-        runtime_dir = _require_absolute_path(raw, "runtime_dir", sidecar_path)
-        if db_path is None or runtime_dir is None:
-            return None
-        dossier_raw = raw.get("dossier_path")
-        if dossier_raw:
-            dossier_path = _require_absolute_path(raw, "dossier_path", sidecar_path)
-            if dossier_path is None:
-                return None
-        else:
-            dossier_path = None
-        # ``gate_base_path`` becomes ``git http-backend``'s
-        # ``GIT_PROJECT_ROOT`` — refuse a relative path for the same
-        # reason as ``db_path`` / ``runtime_dir``.
-        if raw.get("gate_base_path"):
-            gate_base_path = _require_absolute_path(raw, "gate_base_path", sidecar_path)
-            if gate_base_path is None:
-                return None
-        else:
-            gate_base_path = None
-        return SidecarConfig(
-            container_name=container_name,
-            ipc_mode=ipc_mode,
-            db_path=db_path,
-            runtime_dir=runtime_dir,
-            scope_id=str(raw["scope_id"]) if raw.get("scope_id") else None,
-            project_id=str(raw.get("project_id") or ""),
-            task_id=str(raw.get("task_id") or ""),
-            tcp_port=(int(raw["tcp_port"]) if raw.get("tcp_port") is not None else None),
-            ssh_signer_port=(
-                int(raw["ssh_signer_port"]) if raw.get("ssh_signer_port") is not None else None
-            ),
-            gate_port=(int(raw["gate_port"]) if raw.get("gate_port") is not None else None),
-            gate_base_path=gate_base_path,
-            gate_token=(str(raw["gate_token"]) if raw.get("gate_token") else None),
-            dossier_path=dossier_path,
-        )
+        return _build_config(raw, sidecar_path)
+    except _BadSidecar:
+        return None
     except (KeyError, TypeError, ValueError):
         _logger.exception("sidecar schema error in %s", sidecar_path)
         return None
+
+
+def _build_config(raw: dict, sidecar_path: Path) -> SidecarConfig:
+    """Assemble a [`SidecarConfig`][terok_sandbox.supervisor.sidecar.SidecarConfig].
+
+    Each field validator raises [`_BadSidecar`][terok_sandbox.supervisor.sidecar._BadSidecar]
+    on a bad value (kwargs evaluate left-to-right, so the first failure
+    wins, exactly as the old sequential guards did).
+    """
+    return SidecarConfig(
+        container_name=_safe_container_name(raw, sidecar_path),
+        ipc_mode=_checked_ipc_mode(raw, sidecar_path),
+        db_path=_required_absolute_path(raw, "db_path", sidecar_path),
+        runtime_dir=_required_absolute_path(raw, "runtime_dir", sidecar_path),
+        scope_id=str(raw["scope_id"]) if raw.get("scope_id") else None,
+        project_id=str(raw.get("project_id") or ""),
+        task_id=str(raw.get("task_id") or ""),
+        tcp_port=_optional_int(raw, "tcp_port"),
+        ssh_signer_port=_optional_int(raw, "ssh_signer_port"),
+        gate_port=_optional_int(raw, "gate_port"),
+        gate_base_path=_optional_absolute_path(raw, "gate_base_path", sidecar_path),
+        gate_token=str(raw["gate_token"]) if raw.get("gate_token") else None,
+        dossier_path=_optional_absolute_path(raw, "dossier_path", sidecar_path),
+    )
+
+
+def _safe_container_name(raw: dict, sidecar_path: Path) -> str:
+    """The container name, rejected if empty or not a safe path component.
+
+    It is interpolated into ``runtime_dir/run/<name>`` — a dir the
+    supervisor mkdir's, chmod's, and rmtree's — so an absolute name or one
+    carrying a separator / parent-dir reference could redirect those
+    filesystem operations outside the runtime dir.
+    """
+    name = str(raw.get("container_name", "")).strip()
+    if not name:
+        _logger.error("sidecar missing required container_name: %s", sidecar_path)
+        raise _BadSidecar
+    if "/" in name or name in (".", ".."):
+        _logger.error(
+            "sidecar container_name is not a safe path component, got %r: %s", name, sidecar_path
+        )
+        raise _BadSidecar
+    return name
+
+
+def _checked_ipc_mode(raw: dict, sidecar_path: Path) -> str:
+    """The transport mode, restricted to ``socket`` / ``tcp``."""
+    mode = str(raw.get("ipc_mode", "socket"))
+    if mode not in ("socket", "tcp"):
+        _logger.error("sidecar ipc_mode must be 'socket' or 'tcp', got %r: %s", mode, sidecar_path)
+        raise _BadSidecar
+    return mode
+
+
+def _optional_int(raw: dict, key: str) -> int | None:
+    """``int(raw[key])`` when present, else ``None``."""
+    return int(raw[key]) if raw.get(key) is not None else None
+
+
+def _required_absolute_path(raw: dict, key: str, sidecar_path: Path) -> Path:
+    """A required absolute path — raise [`_BadSidecar`][terok_sandbox.supervisor.sidecar._BadSidecar] otherwise.
+
+    Refuse a relative path: the supervisor ``rmtree``s ``runtime_dir`` and
+    binds sockets under it, so a relative value would resolve against
+    whatever cwd the OCI hook spawned us with (typically ``/``).
+    """
+    path = _require_absolute_path(raw, key, sidecar_path)
+    if path is None:
+        raise _BadSidecar
+    return path
+
+
+def _optional_absolute_path(raw: dict, key: str, sidecar_path: Path) -> Path | None:
+    """An absolute path when the key is present + truthy, else ``None``.
+
+    Present-but-relative is a hard error (same reasoning as
+    [`_required_absolute_path`][terok_sandbox.supervisor.sidecar._required_absolute_path]);
+    an absent key is fine (``gate_base_path`` / ``dossier_path`` are optional).
+    """
+    if not raw.get(key):
+        return None
+    return _required_absolute_path(raw, key, sidecar_path)
 
 
 def _require_absolute_path(raw: dict, key: str, sidecar_path: Path) -> Path | None:

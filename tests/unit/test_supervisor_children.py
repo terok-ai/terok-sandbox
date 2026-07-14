@@ -223,14 +223,17 @@ class TestGateRunner:
             gate_base_path=tmp_path / "mirrors",
             gate_token="terok-g-abc",
         )
+        stop = _preset_stop()
         with pytest.raises(RuntimeError, match="gate_port"):
-            await _run_gate(cfg, paths, _preset_stop())
+            await _run_gate(cfg, paths, stop)
 
     @pytest.mark.asyncio
     async def test_unwired_gate_raises(self, tmp_path: Path, paths: SupervisorPaths) -> None:
         """The gate runner refuses to start without gate_base_path + gate_token."""
+        cfg = _socket_cfg(tmp_path)
+        stop = _preset_stop()
         with pytest.raises(RuntimeError, match="gate wiring"):
-            await _run_gate(_socket_cfg(tmp_path), paths, _preset_stop())
+            await _run_gate(cfg, paths, stop)
 
 
 class TestEnsureSocketDirs:
@@ -381,8 +384,10 @@ class TestVaultRunner:
     async def test_tcp_mode_without_port_raises(
         self, tmp_path: Path, paths: SupervisorPaths
     ) -> None:
+        cfg = _tcp_cfg(tmp_path, tcp_port=None)
+        stop = _preset_stop()
         with pytest.raises(RuntimeError, match="tcp_port"):
-            await _run_vault(_tcp_cfg(tmp_path, tcp_port=None), paths, _preset_stop())
+            await _run_vault(cfg, paths, stop)
 
 
 class TestSignerRunner:
@@ -419,8 +424,10 @@ class TestSignerRunner:
     async def test_tcp_mode_without_port_raises(
         self, tmp_path: Path, paths: SupervisorPaths
     ) -> None:
+        cfg = _tcp_cfg(tmp_path, ssh_signer_port=None)
+        stop = _preset_stop()
         with pytest.raises(RuntimeError, match="ssh_signer_port"):
-            await _run_signer(_tcp_cfg(tmp_path, ssh_signer_port=None), paths, _preset_stop())
+            await _run_signer(cfg, paths, stop)
 
 
 class TestChildSignalHandlers:

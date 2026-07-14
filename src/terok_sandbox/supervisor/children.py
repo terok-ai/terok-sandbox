@@ -46,9 +46,13 @@ from terok_util import harden_self
 from .sidecar import SupervisorPaths, load_sidecar
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
     from .sidecar import SidecarConfig
+
+    #: One service's runner — build the service and run it until *stop* is set.
+    _Runner = Callable[[SidecarConfig, SupervisorPaths, asyncio.Event], Awaitable[None]]
 
 _logger = logging.getLogger("terok-supervisor.child")
 
@@ -220,7 +224,7 @@ async def _run_signer(cfg: SidecarConfig, paths: SupervisorPaths, stop: asyncio.
 #: it), gate before vault (the container clones through the gate first),
 #: vault and signer last (secret-holders come up once their consumers are
 #: waiting).  The keys are the wire vocabulary of ``supervise-child``.
-_RUNNERS = {
+_RUNNERS: dict[str, _Runner] = {
     "verdict": _run_verdict,
     "clearance": _run_clearance,
     "gate": _run_gate,
@@ -268,7 +272,7 @@ def run_child(service: str, container_id: str, sidecar_path: Path) -> int:
 
 async def _drive(
     service: str,
-    runner: object,
+    runner: _Runner,
     cfg: SidecarConfig,
     paths: SupervisorPaths,
 ) -> int:
@@ -277,7 +281,7 @@ async def _drive(
     stop = asyncio.Event()
     _install_signal_handlers(stop)
     try:
-        await runner(cfg, paths, stop)  # type: ignore[operator]
+        await runner(cfg, paths, stop)
     except Exception:
         _logger.exception("%s child failed", service)
         return _EXIT_START_FAILED
@@ -312,5 +316,7 @@ def _install_signal_handlers(stop: asyncio.Event) -> None:
     for sig in (signal.SIGTERM, signal.SIGINT):
         try:
             loop.add_signal_handler(sig, stop.set)
-        except (RuntimeError, NotImplementedError):
+        except RuntimeError:
+            # ``NotImplementedError`` (restricted / non-Unix loops) is a
+            # ``RuntimeError`` subclass, so this single except covers it.
             signal.signal(sig, lambda *_: stop.set())
