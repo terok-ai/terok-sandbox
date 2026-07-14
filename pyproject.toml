@@ -34,9 +34,9 @@ dynamic = ["version"]
 # Dependency pins follow the policy in AGENTS.md ("Dependency Pinning &
 # pyproject.toml Hygiene").  Keep the dependency list comment-free.
 dependencies = [
-    "terok-util @ git+https://github.com/sliwowitz/terok-util.git@feat/supervisor-process-split",
-    "terok-shield @ git+https://github.com/sliwowitz/terok-shield.git@feat/supervisor-process-split",
-    "terok-clearance @ git+https://github.com/sliwowitz/terok-clearance.git@feat/supervisor-process-split",
+    "terok-util @ https://github.com/terok-ai/terok-util/releases/download/v0.3.1a1/terok_util-0.3.1a1-py3-none-any.whl",
+    "terok-shield @ https://github.com/terok-ai/terok-shield/releases/download/v0.8.0a4/terok_shield-0.8.0a4-py3-none-any.whl",
+    "terok-clearance @ https://github.com/terok-ai/terok-clearance/releases/download/v0.8.0a4/terok_clearance-0.8.0a4-py3-none-any.whl",
     "platformdirs~=4.10",
     "aiohttp~=3.14.1",
     "cryptography~=49.0",
@@ -102,7 +102,7 @@ allow-direct-references = true
 
 [tool.hatch.version]
 source = "vcs"
-fallback-version = "0.5.0a4"
+fallback-version = "0.5.0a5"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/terok_sandbox"]
