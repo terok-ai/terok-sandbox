@@ -16,7 +16,8 @@ import io
 import shlex
 import subprocess  # nosec B404 — container exec for ready-marker probing — container exec for ready-marker probing
 import tarfile
-from dataclasses import dataclass, field
+import warnings
+from dataclasses import InitVar, dataclass, field
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import TYPE_CHECKING
@@ -293,7 +294,15 @@ class RunSpec:
     blocks the per-container broker/signer with "No route to host".
     """
 
-    def __post_init__(self) -> None:
+    gpu_enabled: InitVar[bool | None] = None
+    """Deprecated constructor alias for ``gpus`` (the pre-vendor bool knob).
+
+    ``gpu_enabled=True`` maps to ``gpus="all"`` and emits a
+    ``DeprecationWarning``.  Deprecated since 0.5.0; will be removed
+    in terok-sandbox 0.7.0.
+    """
+
+    def __post_init__(self, gpu_enabled: bool | None) -> None:
         """Snapshot ``annotations`` so a caller-owned dict can't mutate the spec.
 
         Callers may legitimately pass a plain ``dict`` (Pydantic, JSON-load,
@@ -301,8 +310,18 @@ class RunSpec:
         reference.  Take a copy, wrap it in a ``MappingProxyType``, and
         write it back through ``object.__setattr__`` since the dataclass
         itself is ``frozen=True``.
+
+        Also folds the deprecated ``gpu_enabled`` bool into ``gpus``.
         """
         object.__setattr__(self, "annotations", MappingProxyType(dict(self.annotations)))
+        if gpu_enabled is not None:
+            warnings.warn(
+                "RunSpec(gpu_enabled=...) is deprecated, to be removed in "
+                'terok-sandbox 0.7.0; use gpus="all" / vendor names',
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            object.__setattr__(self, "gpus", "all" if gpu_enabled else None)
 
 
 # ---------------------------------------------------------------------------

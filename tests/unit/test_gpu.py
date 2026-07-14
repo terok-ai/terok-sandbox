@@ -69,6 +69,9 @@ def _host(
     cdi_kinds: frozenset[str] = frozenset(),
     kfd: bool = False,
     intel_node: bool = False,
+    nvidia_hook: bool = False,
+    nvidia_dev: bool = False,
+    by_path: bool = False,
     tmp_path: Path,
 ) -> Iterator[None]:
     """Patch the host probes to a synthetic GPU inventory."""
@@ -80,10 +83,26 @@ def _host(
         vendor = drm / "renderD128" / "device" / "vendor"
         vendor.parent.mkdir(parents=True)
         vendor.write_text("0x8086\n")
+    hooks_dir = tmp_path / "hooks.d"
+    if nvidia_hook:
+        hooks_dir.mkdir()
+        (hooks_dir / "oci-nvidia-hook.json").write_text("{}")
+    dev_dir = tmp_path / "dev"
+    dev_dir.mkdir(exist_ok=True)
+    if nvidia_dev:
+        for node in ("nvidiactl", "nvidia0", "nvidia1", "nvidia-uvm"):
+            (dev_dir / node).touch()
+    by_path_dir = tmp_path / "by-path"
+    if by_path:
+        by_path_dir.mkdir()
     with (
         patch("terok_sandbox.runtime.gpu._declared_cdi_kinds", return_value=cdi_kinds),
         patch("terok_sandbox.runtime.gpu._KFD_DEVICE", kfd_path),
         patch("terok_sandbox.runtime.gpu._DRM_SYSFS", drm),
+        patch("terok_sandbox.runtime.gpu._NVIDIA_LEGACY_HOOK_DIRS", (hooks_dir,)),
+        patch("terok_sandbox.runtime.gpu._NVIDIA_CTL_DEVICE", dev_dir / "nvidiactl"),
+        patch("terok_sandbox.runtime.gpu._NVIDIA_DEV_DIR", dev_dir),
+        patch("terok_sandbox.runtime.gpu._DRI_BY_PATH_DIR", by_path_dir),
     ):
         yield
 
@@ -112,11 +131,29 @@ class TestGpuRunArgs:
         assert ("-e", "NVIDIA_VISIBLE_DEVICES=all") in _pairs(args)
         assert ("-e", "NVIDIA_DRIVER_CAPABILITIES=all") in _pairs(args)
 
-    def test_nvidia_without_cdi_raises(self, tmp_path: Path) -> None:
-        """Explicit nvidia without a CDI spec fails before launch."""
-        with patch("terok_sandbox.runtime.gpu._declared_cdi_kinds", return_value=frozenset()):
+    def test_nvidia_without_any_tier_raises(self, tmp_path: Path) -> None:
+        """Explicit nvidia with no CDI, no hook, and no devices fails before launch."""
+        with _host(tmp_path=tmp_path):
             with pytest.raises(GpuConfigError, match="nvidia-ctk"):
                 gpu_run_args(("nvidia",))
+
+    def test_nvidia_legacy_hook_emits_env_only(self, tmp_path: Path) -> None:
+        """The pre-CDI OCI hook tier needs only the trigger env vars."""
+        with _host(nvidia_hook=True, nvidia_dev=True, tmp_path=tmp_path):
+            args = gpu_run_args(("nvidia",))
+        assert ("-e", "NVIDIA_VISIBLE_DEVICES=all") in _pairs(args)
+        assert "--device" not in args
+
+    def test_nvidia_raw_devices_fallback(self, tmp_path: Path) -> None:
+        """Driver loaded but no toolkit → every /dev/nvidia* node is passed."""
+        with _host(nvidia_dev=True, tmp_path=tmp_path):
+            args = gpu_run_args(("nvidia",))
+        pairs = _pairs(args)
+        devices = [v for f, v in pairs if f == "--device"]
+        assert str(tmp_path / "dev" / "nvidiactl") in devices
+        assert str(tmp_path / "dev" / "nvidia0") in devices
+        assert str(tmp_path / "dev" / "nvidia-uvm") in devices
+        assert ("-e", "NVIDIA_VISIBLE_DEVICES=all") in pairs
 
     def test_amd_prefers_cdi(self, tmp_path: Path) -> None:
         """AMD uses ``amd.com/gpu`` when amd-ctk generated a spec."""
@@ -161,6 +198,19 @@ class TestGpuRunArgs:
             with pytest.raises(GpuConfigError, match="i915"):
                 gpu_run_args(("intel",))
 
+    def test_raw_dri_recipes_mount_by_path(self, tmp_path: Path) -> None:
+        """Raw AMD/Intel recipes mount /dev/dri/by-path read-only when present."""
+        with _host(kfd=True, by_path=True, tmp_path=tmp_path):
+            args = gpu_run_args(("amd",))
+        by_path = tmp_path / "by-path"
+        assert ("-v", f"{by_path}:{by_path}:ro") in _pairs(args)
+
+    def test_no_by_path_dir_no_mount(self, tmp_path: Path) -> None:
+        """Hosts without /dev/dri/by-path get no dangling mount."""
+        with _host(kfd=True, tmp_path=tmp_path):
+            args = gpu_run_args(("amd",))
+        assert "-v" not in args
+
     def test_amd_plus_intel_dedups_shared_args(self, tmp_path: Path) -> None:
         """Vendors sharing ``/dev/dri`` and keep-groups emit them once."""
         with _host(kfd=True, intel_node=True, tmp_path=tmp_path):
@@ -203,6 +253,12 @@ class TestDetectGpuVendors:
         """Nothing detected → empty set, no exception."""
         with _host(tmp_path=tmp_path):
             assert detect_gpu_vendors() == frozenset()
+
+    @pytest.mark.parametrize("marker", ["nvidia_hook", "nvidia_dev"])
+    def test_nvidia_fallback_markers_count(self, tmp_path: Path, marker: str) -> None:
+        """The legacy hook and raw device nodes both detect nvidia without CDI."""
+        with _host(**{marker: True}, tmp_path=tmp_path):
+            assert detect_gpu_vendors() == frozenset({"nvidia"})
 
     def test_non_intel_render_node_does_not_count(self, tmp_path: Path) -> None:
         """A render node from another vendor doesn't enable intel."""

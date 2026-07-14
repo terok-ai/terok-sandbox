@@ -56,6 +56,15 @@ class TestRunSpec:
         spec = _make_spec()
         assert spec.unrestricted is True
 
+    def test_deprecated_gpu_enabled_alias_maps_to_gpus(self) -> None:
+        """``gpu_enabled=True`` still works but warns and folds into ``gpus``."""
+        with pytest.warns(DeprecationWarning, match="gpu_enabled"):
+            spec = _make_spec(gpu_enabled=True)
+        assert spec.gpus == "all"
+        with pytest.warns(DeprecationWarning, match="gpu_enabled"):
+            spec = _make_spec(gpu_enabled=False)
+        assert spec.gpus is None
+
     def test_restricted_mode(self) -> None:
         """Restricted spec carries through the frozen dataclass."""
         spec = _make_spec(unrestricted=False)
