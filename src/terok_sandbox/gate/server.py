@@ -32,7 +32,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from socketserver import ThreadingMixIn
-from typing import IO, Any
+from typing import IO, Any, cast
 
 from .._util._selinux import socket_selinux_context
 
@@ -320,22 +320,22 @@ def _make_handler_class(
                 return
 
             # All three streams are guaranteed by ``subprocess.PIPE`` above.
-            assert proc.stdin is not None  # nosec B101 — type narrowing; subprocess.PIPE guarantees non-None
-            assert proc.stdout is not None  # nosec B101 — type narrowing; subprocess.PIPE guarantees non-None
-            assert proc.stderr is not None  # nosec B101 — type narrowing; subprocess.PIPE guarantees non-None
+            stdin = cast(IO[bytes], proc.stdin)
+            stdout = cast(IO[bytes], proc.stdout)
+            stderr = cast(IO[bytes], proc.stderr)
 
-            _stream_request_body(self.rfile, proc.stdin, content_length)
-            proc.stdin.close()
+            _stream_request_body(self.rfile, stdin, content_length)
+            stdin.close()
 
-            status_code, headers = _parse_cgi_headers(proc.stdout)
+            status_code, headers = _parse_cgi_headers(stdout)
             self.send_response(status_code)
             for key, val in headers:
                 self.send_header(key, val)
             self.end_headers()
 
-            _stream_response_body(proc.stdout, self.wfile)
+            _stream_response_body(stdout, self.wfile)
 
-            stderr_output = proc.stderr.read()
+            stderr_output = stderr.read()
             try:
                 proc.wait(timeout=_CGI_WAIT_TIMEOUT)
             except subprocess.TimeoutExpired:
