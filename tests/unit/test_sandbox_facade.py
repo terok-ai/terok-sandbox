@@ -289,6 +289,23 @@ class TestSandbox:
 
         assert "--rm" in mock_run.call_args[0][0]
 
+    def test_run_injects_init_process(self) -> None:
+        """Every managed launch runs behind podman's ``--init``.
+
+        The spec command must not be namespace-init itself: the kernel
+        ignores default-disposition signals for init, so without a real
+        pid1 a stop's SIGTERM is a no-op and every stop burns the full
+        grace period before the SIGKILL.
+        """
+        with (
+            patch("subprocess.run") as mock_run,
+            patch("builtins.print"),
+            patch("terok_sandbox.integrations.shield.ShieldManager.pre_start", return_value=[]),
+        ):
+            Sandbox().run(_make_spec())
+
+        assert "--init" in mock_run.call_args[0][0]
+
     def test_run_omits_hostname_by_default(self) -> None:
         """Without an explicit hostname, --hostname is absent (podman picks one)."""
         with (

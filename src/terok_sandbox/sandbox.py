@@ -481,6 +481,12 @@ class Sandbox:
         cmd: list[str] = ["podman", verb] + (["-d"] if verb == "run" else [])
         if spec.ephemeral:
             cmd.append("--rm")
+        # A real init as pid1: the spec's command runs as a *child* of
+        # podman's init binary, so SIGTERM actually terminates it.
+        # Without this the command itself is namespace-init, the kernel
+        # ignores default-disposition signals for init, and every
+        # ``podman stop`` burns the full grace period before SIGKILL.
+        cmd.append("--init")
         cmd += podman_userns_args()
 
         # ``--runtime`` must come before the image to be honoured; emit
