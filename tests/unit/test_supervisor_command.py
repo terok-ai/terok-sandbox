@@ -18,7 +18,13 @@ from unittest.mock import MagicMock, patch
 
 from terok_util import LazyHandler
 
-from terok_sandbox.commands.supervisor import SUPERVISOR_COMMANDS, _handle_supervisor
+from terok_sandbox.commands.supervisor import (
+    SUPERVISE_CHILD,
+    SUPERVISOR,
+    SUPERVISOR_COMMANDS,
+    _handle_supervise_child,
+    _handle_supervisor,
+)
 
 
 class TestHandleSupervisor:
@@ -68,15 +74,45 @@ class TestHandleSupervisor:
         asyncio_run.assert_called_once_with(sentinel.return_value)
 
 
-class TestRegistration:
-    """The verb is registered under the hidden ``internal`` group."""
+class TestHandleSuperviseChild:
+    """The CLI handler bridges to ``run_child`` and returns its exit code."""
 
-    def test_single_internal_command(self) -> None:
-        assert len(SUPERVISOR_COMMANDS) == 1
-        cmd = SUPERVISOR_COMMANDS[0]
-        assert cmd.name == "supervisor"
-        assert cmd.group == "internal"
+    def test_forwards_args_and_returns_exit_code(self) -> None:
+        """``service`` / ``container_id`` pass through; ``sidecar_path`` becomes a ``Path``."""
+        with (
+            patch("terok_sandbox.supervisor.children.run_child", return_value=4) as run_child,
+            patch("logging.basicConfig") as basic_config,
+        ):
+            rc = _handle_supervise_child("vault", "abc123", "/run/terok/sidecar/demo.json")
+
+        assert rc == 4
+        run_child.assert_called_once_with("vault", "abc123", Path("/run/terok/sidecar/demo.json"))
+        basic_config.assert_called_once()
+
+
+class TestRegistration:
+    """Both internal verbs are registered under the hidden ``internal`` group."""
+
+    def test_registers_supervisor_and_supervise_child(self) -> None:
+        assert SUPERVISOR_COMMANDS == (SUPERVISOR, SUPERVISE_CHILD)
+        assert all(cmd.group == "internal" for cmd in SUPERVISOR_COMMANDS)
+
+    def test_supervisor_verb_shape(self) -> None:
+        assert SUPERVISOR.name == "supervisor"
         # Registered lazily — the target resolves to the real handler at
         # dispatch, keeping the spawn path off the handler's imports.
-        assert cmd.handler == LazyHandler("terok_sandbox.commands.supervisor:_handle_supervisor")
-        assert tuple(a.name for a in cmd.args) == ("container_id", "sidecar_path")
+        assert SUPERVISOR.handler == LazyHandler(
+            "terok_sandbox.commands.supervisor:_handle_supervisor"
+        )
+        assert tuple(a.name for a in SUPERVISOR.args) == ("container_id", "sidecar_path")
+
+    def test_supervise_child_verb_shape(self) -> None:
+        assert SUPERVISE_CHILD.name == "supervise-child"
+        assert SUPERVISE_CHILD.handler == LazyHandler(
+            "terok_sandbox.commands.supervisor:_handle_supervise_child"
+        )
+        assert tuple(a.name for a in SUPERVISE_CHILD.args) == (
+            "service",
+            "container_id",
+            "sidecar_path",
+        )

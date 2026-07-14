@@ -54,6 +54,50 @@ class TestLoadSidecar:
         assert cfg.tcp_port is None
         assert cfg.ssh_signer_port is None
 
+    def test_null_container_name_is_rejected(self, tmp_path: Path) -> None:
+        """A JSON ``null`` container_name is missing, not the literal ``"None"``."""
+        path = _write_sidecar(
+            tmp_path,
+            {
+                "container_name": None,
+                "ipc_mode": "socket",
+                "db_path": "/home/dev/.terok/vault.db",
+                "runtime_dir": "/run/user/1000/terok/sandbox",
+            },
+        )
+        assert load_sidecar(path) is None
+
+    def test_allow_debugger_flag_parsed(self, tmp_path: Path) -> None:
+        """The debug-mode opt-in round-trips; absent means fully hardened."""
+        base = {
+            "container_name": "demo",
+            "ipc_mode": "socket",
+            "db_path": "/home/dev/.terok/vault.db",
+            "runtime_dir": "/run/user/1000/terok/sandbox",
+        }
+        default = load_sidecar(_write_sidecar(tmp_path, base))
+        assert default is not None
+        assert default.allow_debugger is False
+
+        opted_in = load_sidecar(_write_sidecar(tmp_path, {**base, "allow_debugger": True}))
+        assert opted_in is not None
+        assert opted_in.allow_debugger is True
+
+    def test_null_ipc_mode_defaults_to_socket(self, tmp_path: Path) -> None:
+        """A JSON ``null`` ipc_mode falls back to the default, not the literal ``"None"``."""
+        path = _write_sidecar(
+            tmp_path,
+            {
+                "container_name": "demo",
+                "ipc_mode": None,
+                "db_path": "/home/dev/.terok/vault.db",
+                "runtime_dir": "/run/user/1000/terok/sandbox",
+            },
+        )
+        cfg = load_sidecar(path)
+        assert isinstance(cfg, SidecarConfig)
+        assert cfg.ipc_mode == "socket"
+
     def test_tcp_mode_parses_port(self, tmp_path: Path) -> None:
         """TCP-mode sidecar carries per-container ``tcp_port`` +
         ``ssh_signer_port`` (allocated by the launch path via bind(0))."""

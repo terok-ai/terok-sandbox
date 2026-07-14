@@ -354,28 +354,59 @@ depends_on = [
     "terok_sandbox.supervisor",
 ]
 
-# ── Supervisor — per-container service composition (in-process). ────
-# Pulls together VaultProxy + ClearanceHub + VerdictServer + the
-# desktop notifier; reaches across the integrations adapters to keep
-# the cross-package import surface contained.
+# ── Supervisor — per-container service composition (process-per-service). ──
+# The parent launches one hardened child per service; ``children`` holds
+# the per-service composition that reaches across the integrations
+# adapters, ``launcher`` the spawn mechanics, ``sidecar`` the shared
+# config/paths vocabulary both parent and children read.
 [[modules]]
 path = "terok_sandbox.supervisor"
 layer = "core"
 depends_on = [
     "terok_sandbox.supervisor.main",
+    "terok_sandbox.supervisor.sidecar",
     "terok_sandbox.integrations.shield",
     "terok_sandbox.paths",
 ]
 
+# Parent process-supervisor — launches, monitors, and tears down the
+# children; no service imports of its own.
 [[modules]]
 path = "terok_sandbox.supervisor.main"
 layer = "core"
 depends_on = [
+    "terok_sandbox.supervisor.children",
+    "terok_sandbox.supervisor.launcher",
+    "terok_sandbox.supervisor.sidecar",
+]
+
+# Per-service child runners — the cross-package service composition
+# (clearance hub/verdict, vault proxy, SSH signer, git gate) lives here,
+# one process each.
+[[modules]]
+path = "terok_sandbox.supervisor.children"
+layer = "core"
+depends_on = [
+    "terok_sandbox.supervisor.sidecar",
     "terok_sandbox.integrations.clearance",
     "terok_sandbox.vault.daemon.token_broker",
     "terok_sandbox.vault.ssh.signer",
+    "terok_sandbox.gate.server",
     "terok_sandbox._util._selinux",
 ]
+
+# Child spawn mechanics (Direct + systemd-run scope) — stdlib only.
+[[modules]]
+path = "terok_sandbox.supervisor.launcher"
+layer = "foundation"
+depends_on = []
+
+# Sidecar config schema + per-container path resolution — read by both
+# the parent and the children; stdlib only.
+[[modules]]
+path = "terok_sandbox.supervisor.sidecar"
+layer = "foundation"
+depends_on = []
 
 # Round-trip YAML writer for setup-time config.yml edits.
 [[modules]]
@@ -427,6 +458,7 @@ depends_on = [
 path = "terok_sandbox"
 layer = "surface"
 depends_on = [
+    "terok_sandbox.cli",
     "terok_sandbox.commands",
     "terok_sandbox.launch",
     "terok_sandbox.sandbox",

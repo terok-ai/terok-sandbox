@@ -245,7 +245,7 @@ def _validate_container_name(container: str) -> None:
     ``rmtree``'d.  A name carrying a path separator or parent-ref could
     redirect those filesystem operations outside their roots, so reject it
     before anything is touched.  Mirrors the supervisor-side guard in
-    [`load_sidecar`][terok_sandbox.supervisor.main.load_sidecar].
+    [`load_sidecar`][terok_sandbox.supervisor.sidecar.load_sidecar].
     """
     if not container or "/" in container or container in (".", ".."):
         raise SystemExit(f"unsafe container name (not a single path component): {container!r}")
@@ -486,13 +486,14 @@ def write_sidecar(
     gate_base_path: str | None = None,
     gate_token: str | None = None,
     gate_port: int | None = None,
+    allow_debugger: bool = False,
 ) -> Path | None:
     """Persist the per-container sidecar config the supervisor reads.
 
     The canonical writer for the whole package chain — `compose` calls
     it for standalone sandbox runs and terok-executor's
     ``AgentRunner.launch_prepared`` calls it for terok tasks — so the
-    schema [`load_sidecar`][terok_sandbox.supervisor.main.load_sidecar]
+    schema [`load_sidecar`][terok_sandbox.supervisor.sidecar.load_sidecar]
     parses has exactly one producer.
 
     Path: ``<cfg.state_dir>/sidecar/<container-name>.json``.  Returns
@@ -508,11 +509,13 @@ def write_sidecar(
 
     Socket paths are NOT carried in the sidecar — the supervisor
     derives them from the container name + runtime dir via
-    [`SupervisorPaths.for_container`][terok_sandbox.supervisor.main.SupervisorPaths.for_container].
+    [`SupervisorPaths.for_container`][terok_sandbox.supervisor.sidecar.SupervisorPaths.for_container].
     TCP ports ARE carried because the launch path allocates them
     fresh per container via ``bind(0)``.  Gate config travels only
     when the gate is wired — the supervisor composes the gate iff
     both ``gate_base_path`` and ``gate_token`` are present.
+    ``allow_debugger`` records debug mode: the supervisor children then
+    leave themselves ptrace-able instead of clearing the dumpable flag.
 
     Best-effort: a write failure logs to stderr and returns ``None``;
     callers pick their own policy (`compose` rolls back and aborts the
@@ -561,6 +564,10 @@ def write_sidecar(
         payload["gate_token"] = gate_token
     if gate_port is not None:
         payload["gate_port"] = gate_port
+    if allow_debugger:
+        # Debug mode: the supervisor children leave themselves ptrace-able so
+        # a debugger can attach.  Absent (the default) means fully hardened.
+        payload["allow_debugger"] = True
 
     target = sidecar_dir / f"{container_name}.json"
     # The payload can carry a live gate_token, so the file must not be
