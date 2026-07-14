@@ -79,6 +79,50 @@ class TestPrereqReport:
         assert "git" in out
         assert "ssh-keygen" in out
 
+    def test_reports_catatonit_path_when_found(
+        self,
+        bare_cfg: SandboxConfig,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr("terok_sandbox._setup.shutil.which", lambda _n: None)
+        with (
+            patch("terok_sandbox.integrations.shield.check_firewall_binaries", return_value=()),
+            patch(
+                "terok_sandbox.runtime.podman.find_init_binary",
+                return_value="/usr/libexec/podman/catatonit",
+            ),
+            patch(
+                "terok_sandbox._setup.check_selinux_status",
+                return_value=MagicMock(status=SelinuxStatus.NOT_APPLICABLE_TCP_MODE),
+            ),
+        ):
+            run_prereq_report(bare_cfg)
+        out = capsys.readouterr().out
+        assert "catatonit" in out
+        assert "/usr/libexec/podman/catatonit" in out
+
+    def test_warns_on_missing_catatonit(
+        self,
+        bare_cfg: SandboxConfig,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Missing catatonit warns about degraded stops — setup still proceeds."""
+        monkeypatch.setattr("terok_sandbox._setup.shutil.which", lambda _n: None)
+        with (
+            patch("terok_sandbox.integrations.shield.check_firewall_binaries", return_value=()),
+            patch("terok_sandbox.runtime.podman.find_init_binary", return_value=None),
+            patch(
+                "terok_sandbox._setup.check_selinux_status",
+                return_value=MagicMock(status=SelinuxStatus.NOT_APPLICABLE_TCP_MODE),
+            ),
+        ):
+            run_prereq_report(bare_cfg)
+        out = capsys.readouterr().out
+        assert "catatonit" in out
+        assert "degrade" in out
+
     def test_reports_firewall_binaries_via_shield(
         self,
         bare_cfg: SandboxConfig,

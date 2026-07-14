@@ -215,6 +215,40 @@ def bypass_network_args(gate_port: int | None) -> list[str]:
     ]
 
 
+# ── Init binary (podman run --init) ───────────────────────────────────────
+
+_INIT_BINARY = "catatonit"
+_INIT_HELPER_DIRS: tuple[Path, ...] = (
+    Path("/usr/local/libexec/podman"),
+    Path("/usr/local/lib/podman"),
+    Path("/usr/libexec/podman"),
+    Path("/usr/lib/podman"),
+)
+"""Podman's default ``helper_binaries_dir`` search order (containers.conf)."""
+
+
+def find_init_binary() -> str | None:
+    """Locate the init binary ``podman run --init`` would inject, or ``None``.
+
+    Deliberately conservative: only the directories podman searches *by
+    default* are probed — claiming ``--init`` on a hunch (say, a PATH
+    hit podman itself would not honour) would fail the launch outright,
+    while a false negative merely degrades it.  The probe has two
+    callers with one contract: [`Sandbox`][terok_sandbox.sandbox.Sandbox]
+    launches pass ``--init`` only when it hits, and
+    ``terok-sandbox setup`` warns when it misses — a catatonit-less
+    host still works, its containers just take the full grace period
+    plus a force-kill on every stop.  Hosts with a custom
+    ``helper_binaries_dir`` land on that same degraded-but-working
+    side.
+    """
+    for directory in _INIT_HELPER_DIRS:
+        candidate = directory / _INIT_BINARY
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
 # ── Timeouts / constants ──────────────────────────────────────────────────
 
 _DEFAULT_LOGIN_COMMAND: tuple[str, ...] = ("tmux", "new-session", "-A", "-s", "main")

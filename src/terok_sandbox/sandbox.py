@@ -28,6 +28,7 @@ from .runtime import ContainerRuntime, PodmanRuntime
 from .runtime.podman import (
     bypass_network_args,
     check_gpu_error,
+    find_init_binary,
     gpu_run_args,
     redact_env_args,
 )
@@ -483,10 +484,13 @@ class Sandbox:
             cmd.append("--rm")
         # A real init as pid1: the spec's command runs as a *child* of
         # podman's init binary, so SIGTERM actually terminates it.
-        # Without this the command itself is namespace-init, the kernel
+        # Without one the command itself is namespace-init, the kernel
         # ignores default-disposition signals for init, and every
-        # ``podman stop`` burns the full grace period before SIGKILL.
-        cmd.append("--init")
+        # ``podman stop`` burns the full grace period before SIGKILL —
+        # the degraded (but working) service a catatonit-less host
+        # gets; setup warns about it rather than blocking the launch.
+        if find_init_binary() is not None:
+            cmd.append("--init")
         cmd += podman_userns_args()
 
         # ``--runtime`` must come before the image to be honoured; emit

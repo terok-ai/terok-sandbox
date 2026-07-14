@@ -29,6 +29,14 @@ FAKE_STATE_DIR = MOCK_BASE / "state"
 FAKE_TEROK_STATE_DIR = MOCK_BASE / "terok-state"
 """Fake state root used by token-file path tests."""
 
+# ── Real containers (integration tests) ──────────────────────────────────────
+
+PODMAN_BASE_IMAGE = "docker.io/library/alpine:latest"
+"""Minimal image real-podman integration tests launch containers from."""
+
+PODMAN_PULL_TIMEOUT = 300
+"""Seconds allowed for the one-per-session base-image pull."""
+
 # ── Nonexistent / missing paths ──────────────────────────────────────────────
 
 NONEXISTENT_DIR = Path("/nonexistent")

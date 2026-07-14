@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
@@ -17,6 +18,7 @@ from terok_sandbox.runtime.podman import (
     _STOP_CLEANUP_TIMEOUT,
     _STOP_KILL_TIMEOUT,
     PodmanContainer,
+    find_init_binary,
 )
 
 
@@ -154,6 +156,31 @@ class TestContainerStart:
         with pytest.raises(RuntimeError, match=r"timed out after \d+s") as exc_info:
             PodmanRuntime().container("c1").start()
         assert isinstance(exc_info.value.__cause__, subprocess.TimeoutExpired)
+
+
+class TestFindInitBinary:
+    """The probe mirrors podman's default helper-binaries search — nothing more."""
+
+    def test_finds_catatonit_in_helper_dir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """First helper dir containing the binary wins."""
+        from terok_sandbox.runtime import podman as podman_mod
+
+        (tmp_path / "catatonit").touch()
+        monkeypatch.setattr(podman_mod, "_INIT_HELPER_DIRS", (tmp_path,))
+
+        assert find_init_binary() == str(tmp_path / "catatonit")
+
+    def test_missing_everywhere_returns_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No helper dir has it → None; PATH is deliberately not consulted."""
+        from terok_sandbox.runtime import podman as podman_mod
+
+        monkeypatch.setattr(podman_mod, "_INIT_HELPER_DIRS", (tmp_path,))
+
+        assert find_init_binary() is None
 
 
 def _stop_client(*, returncode: int = 0, stderr: str = "", hanging_polls: int = 0) -> MagicMock:

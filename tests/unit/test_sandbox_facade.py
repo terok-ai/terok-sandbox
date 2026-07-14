@@ -290,7 +290,7 @@ class TestSandbox:
         assert "--rm" in mock_run.call_args[0][0]
 
     def test_run_injects_init_process(self) -> None:
-        """Every managed launch runs behind podman's ``--init``.
+        """A managed launch runs behind podman's ``--init`` when catatonit exists.
 
         The spec command must not be namespace-init itself: the kernel
         ignores default-disposition signals for init, so without a real
@@ -301,10 +301,26 @@ class TestSandbox:
             patch("subprocess.run") as mock_run,
             patch("builtins.print"),
             patch("terok_sandbox.integrations.shield.ShieldManager.pre_start", return_value=[]),
+            patch(
+                "terok_sandbox.sandbox.find_init_binary",
+                return_value="/usr/libexec/podman/catatonit",
+            ),
         ):
             Sandbox().run(_make_spec())
 
         assert "--init" in mock_run.call_args[0][0]
+
+    def test_run_without_catatonit_falls_back_to_no_init(self) -> None:
+        """No catatonit → no ``--init``: degraded stops beat refused launches."""
+        with (
+            patch("subprocess.run") as mock_run,
+            patch("builtins.print"),
+            patch("terok_sandbox.integrations.shield.ShieldManager.pre_start", return_value=[]),
+            patch("terok_sandbox.sandbox.find_init_binary", return_value=None),
+        ):
+            Sandbox().run(_make_spec())
+
+        assert "--init" not in mock_run.call_args[0][0]
 
     def test_run_omits_hostname_by_default(self) -> None:
         """Without an explicit hostname, --hostname is absent (podman picks one)."""
