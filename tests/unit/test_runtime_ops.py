@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import subprocess
-from unittest.mock import patch
+from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
 
@@ -14,7 +14,9 @@ from terok_sandbox import PodmanRuntime
 from terok_sandbox.runtime.podman import (
     _DEFAULT_LOGIN_COMMAND,
     _START_TIMEOUT,
-    _STOP_TIMEOUT_BUFFER,
+    _STOP_CLEANUP_TIMEOUT,
+    _STOP_KILL_TIMEOUT,
+    PodmanContainer,
 )
 
 
@@ -154,57 +156,106 @@ class TestContainerStart:
         assert isinstance(exc_info.value.__cause__, subprocess.TimeoutExpired)
 
 
-class TestContainerStop:
-    """PodmanContainer.stop delegates to ``podman stop --time``."""
+def _stop_client(*, returncode: int = 0, stderr: str = "", hanging_polls: int = 0) -> MagicMock:
+    """Fake ``podman stop`` Popen: hang *hanging_polls* communicate() calls, then exit."""
+    proc = MagicMock()
+    proc.returncode = returncode
+    proc.communicate.side_effect = [
+        *([subprocess.TimeoutExpired("podman stop", 1)] * hanging_polls),
+        ("", stderr),
+    ]
+    return proc
 
-    @patch("terok_sandbox.runtime.podman.subprocess.run")
-    def test_calls_podman_stop_with_default_timeout(self, mock_run) -> None:
-        """Default timeout is 10 seconds."""
-        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stderr="")
+
+class TestContainerStop:
+    """PodmanContainer.stop watches the container state, not a wall clock."""
+
+    @patch("terok_sandbox.runtime.podman.subprocess.Popen")
+    def test_calls_podman_stop_with_default_timeout(self, mock_popen) -> None:
+        """Default grace period is 10 seconds."""
+        mock_popen.return_value = _stop_client()
         PodmanRuntime().container("proj-cli-1").stop()
 
-        mock_run.assert_called_once_with(
+        mock_popen.assert_called_once_with(
             ["podman", "stop", "--time", "10", "proj-cli-1"],
-            check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             text=True,
-            timeout=10 + _STOP_TIMEOUT_BUFFER,
         )
 
-    @patch("terok_sandbox.runtime.podman.subprocess.run")
-    def test_custom_timeout(self, mock_run) -> None:
-        """Custom *timeout* feeds into both the argv and the subprocess timeout."""
-        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stderr="")
+    @patch("terok_sandbox.runtime.podman.subprocess.Popen")
+    def test_custom_timeout(self, mock_popen) -> None:
+        """Custom *timeout* feeds the ``--time`` argument."""
+        mock_popen.return_value = _stop_client()
         PodmanRuntime().container("c1").stop(timeout=30)
 
-        args = mock_run.call_args[0][0]
-        assert args == ["podman", "stop", "--time", "30", "c1"]
-        assert mock_run.call_args[1]["timeout"] == 30 + _STOP_TIMEOUT_BUFFER
+        assert mock_popen.call_args[0][0] == ["podman", "stop", "--time", "30", "c1"]
 
-    @patch("terok_sandbox.runtime.podman.subprocess.run")
-    def test_failure_raises_runtimeerror(self, mock_run) -> None:
+    @patch("terok_sandbox.runtime.podman.subprocess.Popen")
+    def test_failure_raises_runtimeerror(self, mock_popen) -> None:
         """Non-zero returncode is translated to [`RuntimeError`][RuntimeError]."""
-        mock_run.return_value = subprocess.CompletedProcess(
-            args=[], returncode=125, stderr="Error: no such container\n"
-        )
+        mock_popen.return_value = _stop_client(returncode=125, stderr="Error: no such container\n")
         with pytest.raises(RuntimeError, match="no such container"):
             PodmanRuntime().container("gone").stop()
 
-    @patch("terok_sandbox.runtime.podman.subprocess.run")
-    def test_missing_podman_is_runtimeerror(self, mock_run) -> None:
+    @patch("terok_sandbox.runtime.podman.subprocess.Popen")
+    def test_missing_podman_is_runtimeerror(self, mock_popen) -> None:
         """Missing podman is normalised to RuntimeError (chains the original)."""
-        mock_run.side_effect = FileNotFoundError("podman")
+        mock_popen.side_effect = FileNotFoundError("podman")
 
         with pytest.raises(RuntimeError, match="podman not found") as exc_info:
             PodmanRuntime().container("c1").stop()
         assert isinstance(exc_info.value.__cause__, FileNotFoundError)
 
-    @patch("terok_sandbox.runtime.podman.subprocess.run")
-    def test_timeout_is_runtimeerror(self, mock_run) -> None:
-        """Timeout is normalised to RuntimeError with the elapsed seconds."""
-        mock_run.side_effect = subprocess.TimeoutExpired("podman", 15)
+    @patch.object(PodmanContainer, "state", new_callable=PropertyMock, return_value="running")
+    @patch("terok_sandbox.runtime.podman.time.monotonic")
+    @patch("terok_sandbox.runtime.podman.subprocess.Popen")
+    def test_grace_period_is_never_cut_short(self, mock_popen, mock_clock, _state) -> None:
+        """A running container gets its whole grace period plus the kill margin.
 
-        with pytest.raises(RuntimeError, match=r"timed out after \d+s") as exc_info:
-            PodmanRuntime().container("c1").stop()
-        assert isinstance(exc_info.value.__cause__, subprocess.TimeoutExpired)
+        Regression guard for the old grace+5s wall-clock guess: a stop
+        that is *legitimately* still terminating well past that mark
+        must be waited out, not aborted.
+        """
+        mock_popen.return_value = _stop_client(hanging_polls=2)
+        mock_clock.side_effect = [0.0, 12.0, 20.0]
+
+        PodmanRuntime().container("c1").stop(timeout=10)
+
+        mock_popen.return_value.kill.assert_not_called()
+
+    @patch.object(PodmanContainer, "state", new_callable=PropertyMock, return_value="running")
+    @patch("terok_sandbox.runtime.podman.time.monotonic")
+    @patch("terok_sandbox.runtime.podman.subprocess.Popen")
+    def test_wedged_kill_aborts(self, mock_popen, mock_clock, _state) -> None:
+        """Still ``running`` past grace + kill margin → the client is killed."""
+        proc = _stop_client(hanging_polls=1000)
+        mock_popen.return_value = proc
+        mock_clock.side_effect = [0.0, 10.0 + _STOP_KILL_TIMEOUT + 1.0]
+
+        with pytest.raises(RuntimeError, match="still running"):
+            PodmanRuntime().container("c1").stop(timeout=10)
+        proc.kill.assert_called_once()
+
+    @patch.object(PodmanContainer, "state", new_callable=PropertyMock, return_value="exited")
+    @patch("terok_sandbox.runtime.podman.time.monotonic")
+    @patch("terok_sandbox.runtime.podman.subprocess.Popen")
+    def test_wedged_cleanup_aborts(self, mock_popen, mock_clock, _state) -> None:
+        """Container dead but the client never returns → cleanup deadline fires."""
+        proc = _stop_client(hanging_polls=1000)
+        mock_popen.return_value = proc
+        mock_clock.side_effect = [0.0, 1.0, 1.0 + _STOP_CLEANUP_TIMEOUT + 1.0]
+
+        with pytest.raises(RuntimeError, match="cleanup did not finish"):
+            PodmanRuntime().container("c1").stop(timeout=10)
+        proc.kill.assert_called_once()
+
+    @patch.object(PodmanContainer, "state", new_callable=PropertyMock, return_value="exited")
+    @patch("terok_sandbox.runtime.podman.subprocess.Popen")
+    def test_early_death_enters_cleanup_phase(self, mock_popen, _state) -> None:
+        """A container that dies inside the grace period finishes cleanly."""
+        mock_popen.return_value = _stop_client(hanging_polls=1)
+
+        PodmanRuntime().container("c1").stop(timeout=10)
+
+        mock_popen.return_value.kill.assert_not_called()

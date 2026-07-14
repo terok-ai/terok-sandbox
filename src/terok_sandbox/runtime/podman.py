@@ -28,7 +28,7 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, NoReturn
 
 from .._util import log_debug, log_warning
 from .protocol import (
@@ -219,7 +219,9 @@ def bypass_network_args(gate_port: int | None) -> list[str]:
 
 _DEFAULT_LOGIN_COMMAND: tuple[str, ...] = ("tmux", "new-session", "-A", "-s", "main")
 _START_TIMEOUT = 30
-_STOP_TIMEOUT_BUFFER = 5
+_STOP_POLL_INTERVAL = 0.5
+_STOP_KILL_TIMEOUT = 15
+_STOP_CLEANUP_TIMEOUT = 60
 _CONTAINER_REMOVE_TIMEOUT = 120
 _IMAGES_FORMAT = "{{.Repository}}\t{{.Tag}}\t{{.ID}}\t{{.Size}}\t{{.Created}}"
 
@@ -422,32 +424,77 @@ class PodmanContainer:
             )
 
     def stop(self, *, timeout: int = 10) -> None:
-        """Stop the container, SIGKILL after *timeout* seconds.
+        """Stop the container: SIGTERM, then SIGKILL after *timeout* seconds.
+
+        The ``podman stop`` client gets no single wall-clock budget —
+        how long a stop may take is decided by *watching the container*,
+        not by guessing.  The grace period belongs to the container;
+        once it expires the SIGKILL has been sent, so the container must
+        leave ``running`` within ``_STOP_KILL_TIMEOUT``.  From the
+        moment it is no longer running, what remains is podman-side
+        teardown (unmounts, network, poststop hooks), which gets its own
+        ``_STOP_CLEANUP_TIMEOUT`` — teardown time is unrelated to the
+        grace period, so one must never eat into the other.
 
         Every lifecycle failure surfaces as [`RuntimeError`][RuntimeError]; see
         [`start`][terok_sandbox.runtime.podman.PodmanContainer.start] for the rationale.
         """
         log_debug(f"PodmanContainer.stop({self.name}, timeout={timeout})")
         try:
-            proc = subprocess.run(  # nosec B603 B607 — argv built from fixed verbs + caller-controlled scope/container names — binary PATH lookup is the cross-distro contract
+            proc = subprocess.Popen(  # nosec B603 B607 — argv built from fixed verbs + caller-controlled scope/container names — binary PATH lookup is the cross-distro contract
                 ["podman", "stop", "--time", str(timeout), self.name],
-                check=False,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
                 text=True,
-                timeout=timeout + _STOP_TIMEOUT_BUFFER,
             )
         except FileNotFoundError as exc:
             raise RuntimeError(f"podman stop {self.name!r} failed: podman not found") from exc
-        except subprocess.TimeoutExpired as exc:
-            raise RuntimeError(
-                f"podman stop {self.name!r} timed out after {timeout + _STOP_TIMEOUT_BUFFER}s"
-            ) from exc
+        stderr = self._watch_stop(proc, grace=timeout)
         if proc.returncode != 0:
             raise RuntimeError(
                 f"podman stop {self.name!r} failed "
-                f"(rc={proc.returncode}): {(proc.stderr or '').strip() or '<no output>'}"
+                f"(rc={proc.returncode}): {stderr.strip() or '<no output>'}"
             )
+
+    def _watch_stop(self, proc: subprocess.Popen[str], *, grace: int) -> str:
+        """Babysit a running ``podman stop`` client; return its stderr.
+
+        Polls the container state to tell which phase the stop is in and
+        holds each phase to its own deadline: alive → the kill must land
+        by grace + ``_STOP_KILL_TIMEOUT``; dead → the client must return
+        within ``_STOP_CLEANUP_TIMEOUT``.  A blown deadline kills the
+        client and raises [`RuntimeError`][RuntimeError] naming the wedged phase.
+        """
+        kill_deadline = time.monotonic() + grace + _STOP_KILL_TIMEOUT
+        cleanup_deadline: float | None = None
+        while True:
+            try:
+                _, stderr = proc.communicate(timeout=_STOP_POLL_INTERVAL)
+                return stderr or ""
+            except subprocess.TimeoutExpired:
+                pass
+            now = time.monotonic()
+            if cleanup_deadline is not None:
+                if now >= cleanup_deadline:
+                    self._abort_stop(
+                        proc,
+                        f"container stopped, but podman cleanup did not finish "
+                        f"within {_STOP_CLEANUP_TIMEOUT}s",
+                    )
+            elif self.state not in ("running", "paused"):
+                cleanup_deadline = now + _STOP_CLEANUP_TIMEOUT
+            elif now >= kill_deadline:
+                self._abort_stop(
+                    proc,
+                    f"container still running {_STOP_KILL_TIMEOUT}s past the {grace}s grace period",
+                )
+
+    def _abort_stop(self, proc: subprocess.Popen[str], reason: str) -> NoReturn:
+        """Kill a wedged ``podman stop`` client and raise the phase verdict."""
+        proc.kill()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.communicate(timeout=_STOP_POLL_INTERVAL)
+        raise RuntimeError(f"podman stop {self.name!r} aborted: {reason}")
 
     def wait(self, timeout: float | None = None) -> int:
         """Block until the container exits; return its exit code.
