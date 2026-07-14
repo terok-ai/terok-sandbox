@@ -25,11 +25,10 @@ from terok_util import podman_userns_args
 
 from .config import SandboxConfig
 from .runtime import ContainerRuntime, PodmanRuntime
+from .runtime.gpu import GpuSelector, check_gpu_error, gpu_run_args
 from .runtime.podman import (
     bypass_network_args,
-    check_gpu_error,
     find_init_binary,
-    gpu_run_args,
     redact_env_args,
 )
 
@@ -222,8 +221,8 @@ class RunSpec:
     task_dir: Path
     """Host-side task directory (for shield state, logs, etc.)."""
 
-    gpu_enabled: bool = False
-    """Whether to pass GPU device args to podman."""
+    gpus: GpuSelector = None
+    """GPU vendors to pass through — normalized via [`normalize_gpus`][terok_sandbox.runtime.gpu.normalize_gpus]."""
 
     memory: str | None = None
     """Podman ``--memory`` value (e.g. ``"4g"``, ``"512m"``).  ``None`` = unlimited."""
@@ -534,7 +533,7 @@ class Sandbox:
                     f"intentionally disabled for this run."
                 ) from None
 
-        cmd += gpu_run_args(enabled=spec.gpu_enabled)
+        cmd += gpu_run_args(spec.gpus)
 
         if spec.memory is not None:
             cmd += ["--memory", spec.memory]

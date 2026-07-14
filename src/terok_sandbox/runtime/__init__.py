@@ -9,6 +9,15 @@ modules directly.
 
 from __future__ import annotations
 
+from .gpu import (
+    GPU_VENDORS,
+    GpuConfigError,
+    GpuSelector,
+    GpuVendor,
+    check_gpu_available,
+    detect_gpu_vendors,
+    normalize_gpus,
+)
 from .krun import FakeKrunTransport, KrunContainer, KrunRuntime, KrunTransport
 from .krun_transport import (
     DEFAULT_GUEST_SSHD_PORT,
@@ -21,10 +30,8 @@ from .krun_transport import (
 from .null import NullRuntime
 from .podman import (
     ContainerEvent,
-    GpuConfigError,
     PodmanEventStream,
     PodmanRuntime,
-    check_gpu_available,
 )
 from .protocol import (
     Container,
@@ -65,6 +72,11 @@ __all__ = [
     "DEFAULT_SSH_USER",
     # Error types that remain public
     "GpuConfigError",
-    # GPU/CDI probes
+    # GPU passthrough — selector types, probes, normalization
+    "GPU_VENDORS",
+    "GpuSelector",
+    "GpuVendor",
     "check_gpu_available",
+    "detect_gpu_vendors",
+    "normalize_gpus",
 ]

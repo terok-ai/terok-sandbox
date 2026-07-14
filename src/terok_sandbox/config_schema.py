@@ -35,6 +35,7 @@ their own sections.  The topmost layer (terok) flips back to
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -50,6 +51,46 @@ and cgroup-minimum checks stay with podman.
 
 _CPUS_RE = re.compile(r"\d+(\.\d+)?")
 """Format check for ``run.cpus`` — non-negative decimal."""
+
+type GpuVendor = Literal["nvidia", "amd", "intel"]
+
+GPU_VENDORS: tuple[GpuVendor, ...] = ("nvidia", "amd", "intel")
+"""Recognised ``run.gpus`` vendor tokens, in canonical (emission) order."""
+
+type GpuSelector = tuple[GpuVendor, ...] | Literal["all"] | None
+"""Normalized ``run.gpus`` value: explicit vendors, auto-detect, or off.
+
+The vocabulary lives here, next to the field it types; the host-probing
+and podman-arg side of the story is [`terok_sandbox.runtime.gpu`][terok_sandbox.runtime.gpu].
+"""
+
+
+def normalize_gpus(value: bool | str | Sequence[str] | None) -> GpuSelector:
+    """Normalize a raw ``run.gpus`` value into a [`GpuSelector`][terok_sandbox.config_schema.GpuSelector].
+
+    Accepts the shapes a YAML config or CLI flag produces: booleans,
+    a single token (``"all"``, ``"nvidia"``, …), a comma-separated
+    token string, or a list of tokens.  Raises ``ValueError`` on an
+    unknown vendor token so misconfiguration surfaces at parse time,
+    not at launch.
+    """
+    if value is None or value is False:
+        return None
+    if value is True:
+        return "all"
+    parts = [value] if isinstance(value, str) else list(value)
+    tokens = [tok for part in parts for raw in part.split(",") if (tok := raw.strip().lower())]
+    if not tokens:
+        return None
+    if "all" in tokens:
+        return "all"
+    if unknown := [tok for tok in tokens if tok not in GPU_VENDORS]:
+        raise ValueError(
+            f"run.gpus: unknown GPU vendor(s) {unknown!r}; "
+            f"expected 'all', true, or any of {list(GPU_VENDORS)}"
+        )
+    return tuple(vendor for vendor in GPU_VENDORS if vendor in tokens)
+
 
 ServicesMode = Literal["tcp", "socket"]
 """Type alias for the ``services.mode`` Literal; re-exported from
@@ -287,9 +328,13 @@ class RawRunSection(BaseModel):
     shutdown_timeout: int = Field(
         default=10, description="Seconds to wait before SIGKILL on container stop"
     )
-    gpus: str | bool | None = Field(
+    gpus: str | bool | list[str] | None = Field(
         default=None,
-        description='GPU passthrough: ``true``, ``"all"``, or omit to disable',
+        description=(
+            'GPU passthrough: ``"all"``/``true`` (every vendor detected on the '
+            'host), a vendor name (``"nvidia"``, ``"amd"``, ``"intel"``), or a '
+            "list of vendor names; omit to disable"
+        ),
     )
     memory: str | None = Field(
         default=None,
@@ -334,6 +379,20 @@ class RawRunSection(BaseModel):
         ),
     )
     hooks: RawHooksSection = Field(default_factory=RawHooksSection)
+
+    @field_validator("gpus", mode="after")
+    @classmethod
+    def _validate_gpus_tokens(
+        cls, v: str | bool | list[str] | None
+    ) -> str | bool | list[str] | None:
+        """Reject unknown GPU vendor tokens at parse time.
+
+        Delegates to [`normalize_gpus`][terok_sandbox.config_schema.normalize_gpus]
+        (the launch-path normalizer) so config validation and launch
+        behaviour can never disagree; the raw shape is preserved.
+        """
+        normalize_gpus(v)
+        return v
 
     @field_validator("memory", "cpus", mode="before")
     @classmethod

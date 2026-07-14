@@ -13,7 +13,8 @@ import pytest
 
 from terok_sandbox import GpuConfigError, SandboxConfig
 from terok_sandbox.runtime import ContainerRemoveResult
-from terok_sandbox.runtime.podman import check_gpu_error, redact_env_args
+from terok_sandbox.runtime.gpu import check_gpu_error
+from terok_sandbox.runtime.podman import redact_env_args
 from terok_sandbox.sandbox import (
     READY_MARKER,
     LifecycleHooks,
@@ -47,7 +48,7 @@ class TestRunSpec:
     def test_frozen(self) -> None:
         spec = _make_spec()
         assert spec.container_name == "test-ctr"
-        assert spec.gpu_enabled is False
+        assert spec.gpus is None
         assert spec.extra_args == ()
 
     def test_security_defaults(self) -> None:

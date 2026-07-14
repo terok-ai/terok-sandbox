@@ -216,7 +216,9 @@ depends_on = [
 [[modules]]
 path = "terok_sandbox.runtime"
 layer = "core"
-depends_on = []
+depends_on = [
+    "terok_sandbox.config_schema",
+]
 
 # Shield adapter (cross-package — terok_shield boundary)
 [[modules]]
