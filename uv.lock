@@ -2344,8 +2344,8 @@ dependencies = [
 
 [[package]]
 name = "terok-util"
-version = "0.3.1.dev65+gad67354db"
-source = { git = "https://github.com/sliwowitz/terok-util.git?rev=feat%2Fsupervisor-process-split#ad67354dbcace2c4fa96a7bcffa63464e0ad019d" }
+version = "0.3.1.dev69+g5e89ed041"
+source = { git = "https://github.com/sliwowitz/terok-util.git?rev=feat%2Fsupervisor-process-split#5e89ed0414f411d20a179b07a31a3a4e28184cba" }
 dependencies = [
     { name = "jinja2" },
     { name = "platformdirs" },
