@@ -21,6 +21,7 @@ phase writes before re-keying.
 from __future__ import annotations
 
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -98,6 +99,163 @@ your encryption is only as strong as the filesystem layer
 
 Type `yes` to confirm, anything else to choose a different tier:"""
 
+#: Tiers a frontend may provision programmatically via
+#: [`provision_passphrase_tier`][terok_sandbox.commands.credentials.provision_passphrase_tier].
+#: The plaintext ``config`` tier is deliberately absent — it requires the
+#: interactive plaintext-on-disk confirmation and stays a CLI-only choice.
+ProvisionableTier = Literal["session-file", "keyring", "systemd-creds"]
+
+_PROVISIONABLE_TIERS: frozenset[str] = frozenset({"session-file", "keyring", "systemd-creds"})
+
+
+@dataclass(frozen=True)
+class TierProvisionResult:
+    """Outcome of [`provision_passphrase_tier`][terok_sandbox.commands.credentials.provision_passphrase_tier].
+
+    ``generated`` drives the caller's follow-up duty: a minted value
+    must be *revealed* to the operator (it is their recovery key) and
+    acknowledged via
+    [`terok_sandbox.vault.store.recovery.acknowledge`][terok_sandbox.vault.store.recovery.acknowledge]
+    once they confirm it is saved off-host.
+    """
+
+    passphrase: str
+    """The value now landed on the tier — mint or caller-supplied."""
+
+    source: PassphraseSource
+    """Which tier holds it, in resolution-chain vocabulary."""
+
+    generated: bool
+    """``True`` iff this call minted the value (caller passed ``None``)."""
+
+
+def provision_passphrase_tier(
+    cfg: SandboxConfig | None = None,
+    *,
+    tier: str,
+    passphrase: str | None = None,
+) -> TierProvisionResult:
+    """Land a passphrase on *tier* with no terminal interaction whatsoever.
+
+    The programmatic sibling of the setup chooser, built for GUI/TUI
+    frontends that own the conversation themselves: no ``/dev/tty``
+    announce, no ack prompt, no stdout side channel.  The caller shows
+    the returned value in its own reveal surface and records the
+    operator's confirmation through
+    [`terok_sandbox.vault.store.recovery.acknowledge`][terok_sandbox.vault.store.recovery.acknowledge].
+
+    *passphrase* ``None`` mints a fresh
+    [`generate_passphrase`][terok_sandbox.vault.store.encryption.generate_passphrase]
+    value.  When the credentials DB already exists encrypted, the
+    supplied value must open it — a mint could never match, so ``None``
+    raises [`NoPassphraseError`][terok_sandbox.vault.store.encryption.NoPassphraseError]
+    and a mismatch raises
+    [`WrongPassphraseError`][terok_sandbox.vault.store.encryption.WrongPassphraseError]
+    *before* anything lands on the tier.  This closes the fresh-install
+    trapdoor where an "unlock"-shaped prompt silently keys a brand-new
+    vault to an unvalidated string.
+
+    Raises [`ValueError`][ValueError] for a tier outside
+    [`ProvisionableTier`][terok_sandbox.commands.credentials.ProvisionableTier]
+    and [`RuntimeError`][RuntimeError] when the chosen backend
+    (systemd-creds, OS keyring) is unreachable.
+    """
+    from ..config import SandboxConfig
+    from ..vault.store import systemd_creds as _systemd_creds
+    from ..vault.store.db import CredentialDB
+    from ..vault.store.encryption import (
+        NoPassphraseError,
+        generate_passphrase,
+        is_plaintext_sqlite,
+        store_passphrase_in_keyring,
+    )
+
+    if tier not in _PROVISIONABLE_TIERS:
+        raise ValueError(
+            f"cannot provision tier {tier!r};"
+            f" expected one of: {', '.join(sorted(_PROVISIONABLE_TIERS))}"
+        )
+    if cfg is None:
+        cfg = SandboxConfig()
+
+    generated = passphrase is None
+    if cfg.db_path.exists() and not is_plaintext_sqlite(cfg.db_path):
+        if passphrase is None:
+            raise NoPassphraseError(
+                f"{cfg.db_path} is already encrypted — a freshly minted passphrase"
+                " could never open it; pass the existing passphrase explicitly"
+            )
+        # Raises WrongPassphraseError on mismatch — before the write, so
+        # a bad value never lands on any tier.
+        CredentialDB(cfg.db_path, passphrase=passphrase).close()
+    if passphrase is None:
+        passphrase = generate_passphrase()
+
+    if tier == "systemd-creds":
+        if not _systemd_creds.is_available():
+            raise RuntimeError(
+                "systemd-creds is unavailable (needs systemd ≥ 257 with the"
+                " Varlink io.systemd.Credentials interface); choose a different tier"
+            )
+        _systemd_creds.seal(passphrase, cfg.vault_systemd_creds_file, key_mode="auto")
+        return TierProvisionResult(passphrase, "systemd-creds", generated)
+
+    if tier == "keyring":
+        if not store_passphrase_in_keyring(passphrase):
+            raise RuntimeError(
+                "OS keyring is unreachable or denied; choose a different storage mode"
+            )
+        _persist_mode_choice("keyring", passphrase)
+        return TierProvisionResult(passphrase, "keyring", generated)
+
+    from .._yaml import write_secret_text
+
+    write_secret_text(cfg.vault_passphrase_file, passphrase + "\n")
+    return TierProvisionResult(passphrase, "session-file", generated)
+
+
+def credentials_provisioned(cfg: SandboxConfig | None = None) -> bool:
+    """Return ``True`` iff setup's credentials phase has nothing left to provision.
+
+    The pre-flight probe for frontends that want to collect the tier
+    choice *before* dispatching ``setup`` non-interactively: ``True``
+    when the DB is already SQLCipher-encrypted or some tier of the
+    resolution chain already holds a passphrase, ``False`` when a
+    non-TTY setup run would fail closed asking for a tier.
+    """
+    from ..config import SandboxConfig
+    from ..vault.store.encryption import is_plaintext_sqlite
+
+    if cfg is None:
+        cfg = SandboxConfig()
+    if cfg.db_path.exists() and not is_plaintext_sqlite(cfg.db_path):
+        return True
+    return _resolve_existing(cfg) is not None
+
+
+def _resolve_existing(cfg: SandboxConfig) -> tuple[str, PassphraseSource] | None:
+    """Return the ``(passphrase, source)`` an existing tier resolves, or ``None``.
+
+    A thin cfg-threading wrapper over
+    [`resolve_passphrase_with_source`][terok_sandbox.vault.store.encryption.resolve_passphrase_with_source]
+    (never the interactive prompt tier), so provisioning reuses whatever
+    a previous run — or a frontend that provisioned in-process — already
+    landed, instead of minting over it.  Configured-but-broken durable
+    tiers propagate their fail-closed ``WrongPassphraseError``.
+    """
+    from ..vault.store.encryption import resolve_passphrase_with_source
+
+    passphrase, source = resolve_passphrase_with_source(
+        passphrase_file=cfg.vault_passphrase_file,
+        systemd_creds_file=cfg.vault_systemd_creds_file,
+        use_keyring=cfg.credentials_use_keyring,
+        passphrase_command=cfg.credentials_passphrase_command,
+        config_fallback=cfg.credentials_passphrase,
+    )
+    if passphrase is None or source is None:
+        return None
+    return passphrase, source
+
 
 def _handle_credentials_encrypt_db(
     *,
@@ -117,9 +275,14 @@ def _handle_credentials_encrypt_db(
        said exactly which tier to use, so honour it.  ``systemd-creds``
        refuses if unavailable; ``session-file`` skips the silent-default
        refusal below.
-    2. ``systemd-creds`` auto-detect — the strongest option when present;
+    2. A tier that already resolves — reuse it silently.  A frontend
+       (the TUI chooser) may have provisioned in-process just before
+       dispatching setup, and a previous run's keyring entry or sealed
+       credential is equally authoritative; minting over either would
+       orphan the value the operator already saved.
+    3. ``systemd-creds`` auto-detect — the strongest option when present;
        asking when the answer is unambiguous just slows the operator down.
-    3. Interactive chooser on a TTY; otherwise hard-fail with an
+    4. Interactive chooser on a TTY; otherwise hard-fail with an
        actionable hint.  Earlier releases silently fell through to
        ``session-file`` here, which generates a fresh passphrase that
        the operator never sees and that evaporates on the next reboot.
@@ -198,6 +361,10 @@ def _select_and_provision(
 
     if passphrase_tier is not None:
         return _provision_explicit_tier(cfg, tier=passphrase_tier, echo_passphrase=echo_passphrase)
+
+    if (existing := _resolve_existing(cfg)) is not None:
+        passphrase, source = existing
+        return passphrase, source, False
 
     if _systemd_creds.is_available():
         passphrase, source = _provision_systemd_creds_tier(cfg, echo_passphrase=echo_passphrase)
@@ -596,6 +763,16 @@ def _run_credentials_setup_phase(
         _handle_credentials_encrypt_db(
             cfg=cfg, echo_passphrase=echo_passphrase, passphrase_tier=passphrase_tier
         )
+    except SystemExit as exc:
+        # The chooser and the explicit-tier guards refuse via SystemExit
+        # carrying a multi-line operator hint.  Let it escape and the
+        # stage line above never terminates — the hint glues onto the
+        # aggregator's failure banner as one garbled line.  Finish the
+        # line, print the hint on its own lines, report phase failure.
+        print(" — FAILED")
+        if exc.code not in (None, 0):
+            print(exc.code if isinstance(exc.code, str) else f"  exit code {exc.code}")
+        return False
     except Exception as exc:  # noqa: BLE001
         print(f" — FAILED: {exc}")
         if "database is locked" in str(exc).lower():
@@ -636,4 +813,12 @@ CREDENTIALS_COMMANDS: tuple[CommandDef, ...] = (
 CREDENTIALS: CommandDef = CREDENTIALS_COMMANDS[0]
 
 
-__all__ = ["CREDENTIALS", "CREDENTIALS_COMMANDS", "_run_credentials_setup_phase"]
+__all__ = [
+    "CREDENTIALS",
+    "CREDENTIALS_COMMANDS",
+    "ProvisionableTier",
+    "TierProvisionResult",
+    "_run_credentials_setup_phase",
+    "credentials_provisioned",
+    "provision_passphrase_tier",
+]

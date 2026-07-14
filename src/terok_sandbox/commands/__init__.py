@@ -137,12 +137,15 @@ COMMANDS: CommandTree = CommandTree(
 _LAZY: dict[str, str] = {
     # credentials
     "CREDENTIALS_COMMANDS": "credentials:CREDENTIALS_COMMANDS",
+    "TierProvisionResult": "credentials:TierProvisionResult",
     "_ask_passphrase_mode": "credentials:_ask_passphrase_mode",
     "_back_up_plaintext_db": "credentials:_back_up_plaintext_db",
     "_handle_credentials_encrypt_db": "credentials:_handle_credentials_encrypt_db",
     "_persist_mode_choice": "credentials:_persist_mode_choice",
     "_provision_passphrase": "credentials:_provision_passphrase",
     "_run_credentials_setup_phase": "credentials:_run_credentials_setup_phase",
+    "credentials_provisioned": "credentials:credentials_provisioned",
+    "provision_passphrase_tier": "credentials:provision_passphrase_tier",  # nosec: B105 — export-map import paths, never secrets
     # doctor
     "DOCTOR_COMMANDS": "doctor:DOCTOR_COMMANDS",
     "_handle_doctor": "doctor:_handle_doctor",

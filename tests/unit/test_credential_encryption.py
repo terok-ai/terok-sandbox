@@ -2635,3 +2635,301 @@ class TestCredentialsCommandCoverageGaps:
         # The cleanup branch must have unlinked the partial tarball.
         backups = list(db_path.parent.glob("*.plaintext-backup-*.tar.gz"))
         assert backups == []
+
+
+class TestProvisionPassphraseTier:
+    """``provision_passphrase_tier`` — the no-terminal provisioning API for TUI frontends."""
+
+    @staticmethod
+    def _make_encrypted_db(cfg) -> None:
+        """Create a minimal SQLCipher DB at ``cfg.db_path`` keyed with ``_PASSPHRASE``."""
+        cfg.db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = open_sqlcipher(cfg.db_path, _PASSPHRASE)
+        conn.execute("CREATE TABLE t (x INTEGER)")
+        conn.commit()
+        conn.close()
+
+    def test_unknown_tier_fails_fast(self, tmp_path: Path) -> None:
+        """The plaintext ``config`` tier (and typos) are rejected before anything runs."""
+        from terok_sandbox.commands import provision_passphrase_tier
+
+        with pytest.raises(ValueError, match="cannot provision tier 'config'"):
+            provision_passphrase_tier(_make_cfg(tmp_path), tier="config")
+
+    def test_session_file_mints_when_no_passphrase_given(self, tmp_path: Path) -> None:
+        """``passphrase=None`` mints; the caller gets the value back for its reveal surface."""
+        from terok_sandbox.commands import provision_passphrase_tier
+
+        cfg = _make_cfg(tmp_path)
+        result = provision_passphrase_tier(cfg, tier="session-file")
+        assert result.generated is True
+        assert result.source == "session-file"
+        assert cfg.vault_passphrase_file.read_text().rstrip("\n") == result.passphrase
+        # A mint is ~256 bits of token_urlsafe, never something short.
+        assert len(result.passphrase) > 20
+
+    def test_session_file_accepts_caller_supplied_value(self, tmp_path: Path) -> None:
+        """A typed (twice-confirmed by the frontend) value lands verbatim, generated=False."""
+        from terok_sandbox.commands import provision_passphrase_tier
+
+        cfg = _make_cfg(tmp_path)
+        result = provision_passphrase_tier(cfg, tier="session-file", passphrase=_PASSPHRASE)
+        assert result.generated is False
+        assert cfg.vault_passphrase_file.read_text().rstrip("\n") == _PASSPHRASE
+
+    def test_keyring_stores_and_persists_mode_choice(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Keyring tier stores the value and flips ``use_keyring`` in config.yml."""
+        from terok_sandbox.commands import credentials as cred_cmds
+        from terok_sandbox.commands.credentials import provision_passphrase_tier
+
+        stored: dict[str, str] = {}
+        monkeypatch.setattr(
+            "terok_sandbox.vault.store.encryption.store_passphrase_in_keyring",
+            lambda pw: stored.update(pw=pw) or True,
+        )
+        persisted: dict[str, str] = {}
+        monkeypatch.setattr(
+            cred_cmds,
+            "_persist_mode_choice",
+            lambda mode, pw: persisted.update(mode=mode),
+        )
+        result = provision_passphrase_tier(_make_cfg(tmp_path), tier="keyring")
+        assert result.source == "keyring" and result.generated is True
+        assert stored["pw"] == result.passphrase
+        assert persisted["mode"] == "keyring"
+
+    def test_keyring_unreachable_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A dead Secret Service raises instead of silently losing the value."""
+        from terok_sandbox.commands import provision_passphrase_tier
+
+        monkeypatch.setattr(
+            "terok_sandbox.vault.store.encryption.store_passphrase_in_keyring",
+            lambda _pw: False,
+        )
+        with pytest.raises(RuntimeError, match="keyring is unreachable"):
+            provision_passphrase_tier(_make_cfg(tmp_path), tier="keyring")
+
+    def test_systemd_creds_unavailable_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Explicitly asking for systemd-creds on an old host refuses loudly."""
+        from terok_sandbox.commands import provision_passphrase_tier
+
+        _disable_systemd_creds(monkeypatch)
+        with pytest.raises(RuntimeError, match="systemd-creds is unavailable"):
+            provision_passphrase_tier(_make_cfg(tmp_path), tier="systemd-creds")
+
+    def test_systemd_creds_seals_the_mint(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Available systemd-creds → mint is sealed to the configured credential file."""
+        from terok_sandbox.commands import provision_passphrase_tier
+
+        sealed: dict[str, object] = {}
+        monkeypatch.setattr("terok_sandbox.vault.store.systemd_creds.is_available", lambda: True)
+        monkeypatch.setattr(
+            "terok_sandbox.vault.store.systemd_creds.seal",
+            lambda pw, path, key_mode: sealed.update(pw=pw, path=path, key_mode=key_mode),
+        )
+        cfg = _make_cfg(tmp_path)
+        result = provision_passphrase_tier(cfg, tier="systemd-creds")
+        assert result.source == "systemd-creds" and result.generated is True
+        assert sealed["pw"] == result.passphrase
+        assert sealed["path"] == cfg.vault_systemd_creds_file
+
+    def test_encrypted_db_refuses_a_mint(self, tmp_path: Path) -> None:
+        """No fresh mint can ever open an existing DB — fail before anything lands."""
+        from terok_sandbox.commands import provision_passphrase_tier
+
+        cfg = _make_cfg(tmp_path)
+        self._make_encrypted_db(cfg)
+        with pytest.raises(NoPassphraseError, match="already encrypted"):
+            provision_passphrase_tier(cfg, tier="session-file")
+        assert not cfg.vault_passphrase_file.exists()
+
+    def test_encrypted_db_rejects_a_wrong_value(self, tmp_path: Path) -> None:
+        """The fresh-install trapdoor, closed: a mismatch never lands on any tier."""
+        from terok_sandbox.commands import provision_passphrase_tier
+
+        cfg = _make_cfg(tmp_path)
+        self._make_encrypted_db(cfg)
+        with pytest.raises(WrongPassphraseError):
+            provision_passphrase_tier(cfg, tier="session-file", passphrase="wrong-guess")
+        assert not cfg.vault_passphrase_file.exists()
+
+    def test_encrypted_db_accepts_the_matching_value(self, tmp_path: Path) -> None:
+        """The real key validates against the DB, then lands on the chosen tier."""
+        from terok_sandbox.commands import provision_passphrase_tier
+
+        cfg = _make_cfg(tmp_path)
+        self._make_encrypted_db(cfg)
+        result = provision_passphrase_tier(cfg, tier="session-file", passphrase=_PASSPHRASE)
+        assert result.generated is False
+        assert cfg.vault_passphrase_file.read_text().rstrip("\n") == _PASSPHRASE
+
+
+class TestCredentialsProvisioned:
+    """``credentials_provisioned`` — the frontends' pre-flight probe before dispatching setup."""
+
+    def test_false_on_a_fresh_host(self, tmp_path: Path) -> None:
+        """No DB, no tier → a non-TTY setup would fail closed, so the probe says False."""
+        from terok_sandbox.commands import credentials_provisioned
+
+        assert credentials_provisioned(_make_cfg(tmp_path)) is False
+
+    def test_true_when_db_already_encrypted(self, tmp_path: Path) -> None:
+        """An encrypted DB short-circuits the whole credentials phase."""
+        from terok_sandbox.commands import credentials_provisioned
+
+        cfg = _make_cfg(tmp_path)
+        TestProvisionPassphraseTier._make_encrypted_db(cfg)
+        assert credentials_provisioned(cfg) is True
+
+    def test_true_when_a_tier_resolves(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A provisioned session file counts even before any DB exists."""
+        import terok_sandbox.vault.store.encryption as _enc
+        from terok_sandbox.commands import credentials_provisioned, provision_passphrase_tier
+
+        # The autouse chain-isolation fixture blanks the file tier;
+        # restore the real reader — this test *is about* the file tier.
+        monkeypatch.setattr(_enc, "load_passphrase_from_file", load_passphrase_from_file)
+        cfg = _make_cfg(tmp_path)
+        provision_passphrase_tier(cfg, tier="session-file")
+        assert credentials_provisioned(cfg) is True
+
+
+class TestSelectAndProvisionReusesExistingTier:
+    """Setup's tier selection reuses whatever already resolves instead of re-asking."""
+
+    def test_session_file_reused_without_chooser(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pre-provisioned tier + non-TTY setup → no chooser, no fail-closed refusal."""
+        import terok_sandbox.vault.store.encryption as _enc
+        from terok_sandbox.commands.credentials import (
+            _select_and_provision,
+            provision_passphrase_tier,
+        )
+
+        # Restore the file-tier reader blanked by the chain-isolation fixture.
+        monkeypatch.setattr(_enc, "load_passphrase_from_file", load_passphrase_from_file)
+        cfg = _make_cfg(tmp_path)
+        provisioned = provision_passphrase_tier(cfg, tier="session-file")
+        _disable_systemd_creds(monkeypatch)
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)  # chooser would SystemExit
+        passphrase, source, auto_generated = _select_and_provision(
+            cfg, passphrase_tier=None, echo_passphrase=False
+        )
+        assert (passphrase, source, auto_generated) == (
+            provisioned.passphrase,
+            "session-file",
+            False,
+        )
+
+    def test_config_tier_reused_without_chooser(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A configured plaintext fallback also pre-empts the chooser on re-runs."""
+        from terok_sandbox.commands.credentials import _select_and_provision
+
+        cfg = _make_cfg(tmp_path, passphrase="configured-key")
+        _disable_systemd_creds(monkeypatch)
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+        passphrase, source, auto_generated = _select_and_provision(
+            cfg, passphrase_tier=None, echo_passphrase=False
+        )
+        assert (passphrase, source, auto_generated) == ("configured-key", "config", False)
+
+
+class TestCredentialsSetupPhaseSystemExit:
+    """The stage line must terminate cleanly when the handler refuses via SystemExit."""
+
+    def test_system_exit_hint_prints_on_its_own_lines(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The chooser's multi-line refusal must not glue onto the ``→ credentials`` line."""
+        from terok_sandbox.commands import credentials as commands
+
+        hint = "setup: running non-interactively but no passphrase tier was chosen.\n  pick one"
+
+        def _refuse(**_kw: object) -> None:
+            raise SystemExit(hint)
+
+        monkeypatch.setattr(commands, "_handle_credentials_encrypt_db", _refuse)
+        assert commands._run_credentials_setup_phase(_make_cfg(tmp_path)) is False
+
+        out = capsys.readouterr().out
+        assert "→ credentials — FAILED\n" in out
+        assert hint in out
+
+    def test_integer_exit_code_is_reported(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A bare numeric SystemExit still terminates the line and names the code."""
+        from terok_sandbox.commands import credentials as commands
+
+        def _refuse(**_kw: object) -> None:
+            raise SystemExit(3)
+
+        monkeypatch.setattr(commands, "_handle_credentials_encrypt_db", _refuse)
+        assert commands._run_credentials_setup_phase(_make_cfg(tmp_path)) is False
+
+        out = capsys.readouterr().out
+        assert "→ credentials — FAILED\n" in out
+        assert "exit code 3" in out
+
+
+class TestKeyringBackendAvailable:
+    """``keyring_backend_available`` — the chooser's should-we-offer-keyring probe."""
+
+    def test_fail_backend_reports_unavailable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from keyring.backends import fail
+
+        from terok_sandbox.vault.store.encryption import keyring_backend_available
+
+        monkeypatch.setattr("keyring.get_keyring", lambda: fail.Keyring())
+        assert keyring_backend_available() is False
+
+    def test_null_backend_reports_unavailable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from keyring.backends import null
+
+        from terok_sandbox.vault.store.encryption import keyring_backend_available
+
+        monkeypatch.setattr("keyring.get_keyring", lambda: null.Keyring())
+        assert keyring_backend_available() is False
+
+    def test_real_backend_reports_available(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import keyring.backend
+
+        from terok_sandbox.vault.store.encryption import keyring_backend_available
+
+        class _InMemory(keyring.backend.KeyringBackend):
+            priority = 1
+
+            def get_password(self, service, username):  # noqa: D102
+                return None
+
+            def set_password(self, service, username, password):  # noqa: D102
+                return None
+
+            def delete_password(self, service, username):  # noqa: D102
+                return None
+
+        monkeypatch.setattr("keyring.get_keyring", lambda: _InMemory())
+        assert keyring_backend_available() is True
+
+    def test_import_failure_degrades_to_unavailable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """No keyring package at all → probe answers False instead of raising."""
+        from terok_sandbox.vault.store.encryption import keyring_backend_available
+
+        def _boom() -> None:
+            raise RuntimeError("no backend")
+
+        monkeypatch.setattr("keyring.get_keyring", _boom)
+        assert keyring_backend_available() is False
