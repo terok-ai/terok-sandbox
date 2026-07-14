@@ -6,10 +6,10 @@
 Equivalent to the ``terok-sandbox`` console script, but reachable
 through the interpreter that is already running the package.  The split
 supervisor spawns its children this way
-([`DirectLauncher`][terok_sandbox.supervisor.launcher.DirectLauncher]
-uses ``[sys.executable, "-m", "terok_sandbox", …]``) so a child lands on
-the exact interpreter and environment of its parent, with no dependence
-on ``terok-sandbox`` being resolvable on ``$PATH``.
+([`launch_child`][terok_sandbox.supervisor.launcher.launch_child] uses
+``[sys.executable, "-m", "terok_sandbox", …]``) so a child lands on the
+exact interpreter and environment of its parent, with no dependence on
+``terok-sandbox`` being resolvable on ``$PATH``.
 """
 
 from __future__ import annotations

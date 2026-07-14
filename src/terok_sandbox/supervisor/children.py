@@ -11,7 +11,7 @@ convenience services (the desktop notifier), so a bug in any of them
 exposed all of them.
 
 Each service now runs in its own process, launched by the parent
-supervisor through a [`ProcessLauncher`][terok_sandbox.supervisor.launcher.ProcessLauncher].
+supervisor via [`launch_child`][terok_sandbox.supervisor.launcher.launch_child].
 A child does exactly one thing:
 
 1. [`harden_self`][terok_util.harden_self] — clear the dumpable flag,

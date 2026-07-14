@@ -53,9 +53,9 @@ def _handle_supervisor(container_id: str, sidecar_path: str) -> int:
 def _handle_supervise_child(service: str, container_id: str, sidecar_path: str) -> int:
     """Bridge from the CLI parser to [`run_child`][terok_sandbox.supervisor.children.run_child].
 
-    One hardened service process — spawned by the parent supervisor's
-    [`ProcessLauncher`][terok_sandbox.supervisor.launcher.ProcessLauncher],
-    not by operators (though it is debuggable by hand the same way the
+    One hardened service process — spawned by the parent supervisor via
+    [`launch_child`][terok_sandbox.supervisor.launcher.launch_child], not
+    by operators (though it is debuggable by hand the same way the
     ``supervisor`` verb is).
     """
     from ..supervisor.children import run_child

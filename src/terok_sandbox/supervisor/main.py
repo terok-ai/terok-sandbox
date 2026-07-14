@@ -4,9 +4,9 @@
 """The parent supervisor — ``run_supervisor(container_id, sidecar_path)``.
 
 Once a single asyncio loop composing every service, the supervisor is
-now a *supervisor of processes*: it launches one hardened child per
-service through a [`ProcessLauncher`][terok_sandbox.supervisor.launcher.ProcessLauncher]
-and owns only their lifecycle.  Each child
+now a *supervisor of processes*: it
+[`launch_child`][terok_sandbox.supervisor.launcher.launch_child]s one
+hardened child per service and owns only their lifecycle.  Each child
 ([`run_child`][terok_sandbox.supervisor.children.run_child]) hardens
 itself, rebuilds its one service from the sidecar, and runs it until the
 parent signals stop — so a bug in the desktop notifier can no longer
@@ -41,10 +41,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .children import SERVICE_NAMES, _install_signal_handlers
+from .launcher import launch_child
 from .sidecar import SidecarConfig, SupervisorPaths, load_sidecar
 
 if TYPE_CHECKING:
-    from .launcher import ChildHandle, ProcessLauncher
+    from .launcher import ChildHandle
 
 _logger = logging.getLogger("terok-supervisor")
 
@@ -86,8 +87,6 @@ async def run_supervisor(container_id: str, sidecar_path: Path) -> int:
     [`run_child`][terok_sandbox.supervisor.children.run_child], one
     process each.
     """
-    from .launcher import default_launcher
-
     cfg = load_sidecar(sidecar_path)
     if cfg is None:
         _logger.error(
@@ -101,13 +100,12 @@ async def run_supervisor(container_id: str, sidecar_path: Path) -> int:
         container_id, cfg.container_name, sidecar_path, cfg.runtime_dir
     )
     services = _select_services(cfg, SERVICE_NAMES)
-    launcher = default_launcher(cfg.runtime_dir)
     stop_event = asyncio.Event()
     _install_signal_handlers(stop_event)
 
     handles: list[ChildHandle] = []
     try:
-        handles = await _launch_children(launcher, services, container_id, sidecar_path)
+        handles = await _launch_children(services, container_id, sidecar_path)
         if not handles:
             _logger.error(
                 "supervisor: no child could be launched for %s — exiting so the wrapper retries",
@@ -131,7 +129,6 @@ def _select_services(cfg: SidecarConfig, service_names: tuple[str, ...]) -> tupl
 
 
 async def _launch_children(
-    launcher: ProcessLauncher,
     services: tuple[str, ...],
     container_id: str,
     sidecar_path: Path,
@@ -145,7 +142,7 @@ async def _launch_children(
     handles: list[ChildHandle] = []
     for service in services:
         try:
-            handles.append(await launcher.launch(service, container_id, sidecar_path))
+            handles.append(await launch_child(service, container_id, sidecar_path))
         except Exception:
             _logger.exception("failed to launch %s child — continuing without it", service)
     return handles

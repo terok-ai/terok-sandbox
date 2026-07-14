@@ -4,9 +4,9 @@
 """Tests for the parent supervisor — [`run_supervisor`][terok_sandbox.supervisor.main.run_supervisor].
 
 The parent now supervises *processes*: it launches one child per
-service through a [`ProcessLauncher`][terok_sandbox.supervisor.launcher.ProcessLauncher],
+service via [`launch_child`][terok_sandbox.supervisor.launcher.launch_child],
 monitors them racing ``podman wait``, and terminates them in reverse
-launch order.  These tests stub the launcher with fake child processes —
+launch order.  These tests stub the spawn with fake child processes —
 the contract is "launch the right service set, run until the container
 exits, then tear the children down."  The per-service construction lives
 in ``test_supervisor_children.py``; the spawn mechanics in
@@ -74,15 +74,15 @@ class _FakeProc:
         return self.returncode or 0
 
 
-class _FakeLauncher:
-    """Records launches; fails the services named in *fail*."""
+class _FakeSpawner:
+    """A ``launch_child`` stand-in: records launches, fails the services in *fail*."""
 
     def __init__(self, *, fail: frozenset[str] = frozenset()) -> None:
         self.launched: list[str] = []
         self.handles: list[ChildHandle] = []
         self._fail = fail
 
-    async def launch(self, service: str, container_id: str, sidecar_path: Path) -> ChildHandle:
+    async def __call__(self, service: str, container_id: str, sidecar_path: Path) -> ChildHandle:
         if service in self._fail:
             raise OSError(f"spawn failed for {service}")
         handle = ChildHandle(service=service, process=_FakeProc())
@@ -130,40 +130,40 @@ class TestSelectServices:
 @pytest.mark.asyncio
 async def test_runs_until_container_exits_and_terminates_children(sidecar: Path) -> None:
     """Happy path: launch the gate-less set, await ``podman wait``, SIGTERM all."""
-    launcher = _FakeLauncher()
+    spawn = _FakeSpawner()
     with (
-        patch("terok_sandbox.supervisor.launcher.default_launcher", return_value=launcher),
+        patch("terok_sandbox.supervisor.main.launch_child", spawn),
         patch("terok_sandbox.supervisor.main._wait_for_container", AsyncMock(return_value=0)),
         patch("terok_sandbox.supervisor.main._install_signal_handlers"),
     ):
         rc = await run_supervisor("abc123def456", sidecar)
     assert rc == 0
-    assert launcher.launched == ["verdict", "clearance", "vault", "signer"]
-    for handle in launcher.handles:
+    assert spawn.launched == ["verdict", "clearance", "vault", "signer"]
+    for handle in spawn.handles:
         handle.process.terminate.assert_called_once()
 
 
 @pytest.mark.asyncio
 async def test_one_failed_launch_costs_only_that_child(sidecar: Path) -> None:
     """A single service that won't spawn degrades to the rest still running."""
-    launcher = _FakeLauncher(fail=frozenset({"vault"}))
+    spawn = _FakeSpawner(fail=frozenset({"vault"}))
     with (
-        patch("terok_sandbox.supervisor.launcher.default_launcher", return_value=launcher),
+        patch("terok_sandbox.supervisor.main.launch_child", spawn),
         patch("terok_sandbox.supervisor.main._wait_for_container", AsyncMock(return_value=0)),
         patch("terok_sandbox.supervisor.main._install_signal_handlers"),
     ):
         rc = await run_supervisor("abc123def456", sidecar)
     assert rc == 0
-    assert "vault" not in launcher.launched
-    assert launcher.launched == ["verdict", "clearance", "signer"]
+    assert "vault" not in spawn.launched
+    assert spawn.launched == ["verdict", "clearance", "signer"]
 
 
 @pytest.mark.asyncio
 async def test_no_child_launched_returns_rc_3(sidecar: Path) -> None:
     """Every launch failing ⇒ rc 3 so the wrapper's retry loop gets a go."""
-    launcher = _FakeLauncher(fail=frozenset({"verdict", "clearance", "vault", "signer"}))
+    spawn = _FakeSpawner(fail=frozenset({"verdict", "clearance", "vault", "signer"}))
     with (
-        patch("terok_sandbox.supervisor.launcher.default_launcher", return_value=launcher),
+        patch("terok_sandbox.supervisor.main.launch_child", spawn),
         patch("terok_sandbox.supervisor.main._install_signal_handlers"),
     ):
         rc = await run_supervisor("abc123def456", sidecar)
@@ -178,21 +178,21 @@ async def test_all_children_dying_unblocks_the_supervisor(sidecar: Path) -> None
     ``all children exited`` arm of ``_supervise`` is what unblocks
     teardown.
     """
-    launcher = _FakeLauncher()
+    spawn = _FakeSpawner()
 
     async def _never_returns(_cid: str) -> int:
         await asyncio.Event().wait()
         return 0
 
     async def _kill_children_soon() -> None:
-        # Let ``_launch_children`` populate ``launcher.handles`` first,
+        # Let ``_launch_children`` populate ``spawn.handles`` first,
         # then make every child exit so ``_await_all_children`` fires.
         await asyncio.sleep(0.05)
-        for handle in launcher.handles:
+        for handle in spawn.handles:
             handle.process._finish(4)
 
     with (
-        patch("terok_sandbox.supervisor.launcher.default_launcher", return_value=launcher),
+        patch("terok_sandbox.supervisor.main.launch_child", spawn),
         patch("terok_sandbox.supervisor.main._wait_for_container", _never_returns),
         patch("terok_sandbox.supervisor.main._install_signal_handlers"),
     ):
