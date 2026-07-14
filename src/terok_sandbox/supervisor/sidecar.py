@@ -189,8 +189,8 @@ def load_sidecar(sidecar_path: Path) -> SidecarConfig | None:
     guesses — it opens the named file directly.  Returns ``None`` on
     any I/O / schema failure; ``run_supervisor`` surfaces that as
     exit-code 2.  The per-field validation lives in helpers that raise
-    [`_BadSidecar`][terok_sandbox.supervisor.sidecar._BadSidecar] on the
-    first bad value, so this reader stays a flat read → validate → build.
+    ``_BadSidecar`` on the first bad value, so this reader stays a flat
+    read → validate → build.
     """
     try:
         with sidecar_path.open(encoding="utf-8") as fh:
@@ -213,8 +213,8 @@ def load_sidecar(sidecar_path: Path) -> SidecarConfig | None:
 def _build_config(raw: dict, sidecar_path: Path) -> SidecarConfig:
     """Assemble a [`SidecarConfig`][terok_sandbox.supervisor.sidecar.SidecarConfig].
 
-    Each field validator raises [`_BadSidecar`][terok_sandbox.supervisor.sidecar._BadSidecar]
-    on a bad value (kwargs evaluate left-to-right, so the first failure
+    Each field validator raises ``_BadSidecar`` on a bad value (kwargs
+    evaluate left-to-right, so the first failure
     wins, exactly as the old sequential guards did).
     """
     return SidecarConfig(
@@ -272,7 +272,7 @@ def _optional_int(raw: dict, key: str) -> int | None:
 
 
 def _required_absolute_path(raw: dict, key: str, sidecar_path: Path) -> Path:
-    """A required absolute path — raise [`_BadSidecar`][terok_sandbox.supervisor.sidecar._BadSidecar] otherwise.
+    """A required absolute path — raise ``_BadSidecar`` otherwise.
 
     Refuse a relative path: the supervisor ``rmtree``s ``runtime_dir`` and
     binds sockets under it, so a relative value would resolve against

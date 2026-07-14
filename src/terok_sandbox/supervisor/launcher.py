@@ -5,7 +5,7 @@
 
 Each service runs as its own ``python -m terok_sandbox supervise-child
 <service> <container_id> <sidecar_path>`` process on the *parent's* own
-interpreter — ``-m`` resolves through [`terok_sandbox.__main__`][]
+interpreter — ``-m`` resolves through ``terok_sandbox.__main__``
 whatever the install layout, so a child needs neither ``terok-sandbox``
 on ``$PATH`` nor a rendered wrapper.
 
