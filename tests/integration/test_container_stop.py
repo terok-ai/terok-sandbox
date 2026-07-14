@@ -82,12 +82,14 @@ def launch_sleeper(podman_image: str) -> Iterator[Callable[..., str]]:
 
     def _launch(*, init: bool) -> str:
         name = f"terok-sandbox-stoptest-{uuid.uuid4().hex[:8]}"
+        # Registered before the run: a failed or timed-out launch can
+        # still have created the container, and teardown must reap it.
+        names.append(name)
         argv = ["podman", "run", "-d", "--name", name]
         if init:
             argv.append("--init")
         argv += [podman_image, "sleep", "3600"]
         subprocess.run(argv, check=True, capture_output=True, timeout=LAUNCH_TIMEOUT)
-        names.append(name)
         return name
 
     yield _launch

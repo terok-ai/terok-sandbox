@@ -244,7 +244,7 @@ def find_init_binary() -> str | None:
     """
     for directory in _INIT_HELPER_DIRS:
         candidate = directory / _INIT_BINARY
-        if candidate.is_file():
+        if candidate.is_file() and os.access(candidate, os.X_OK):
             return str(candidate)
     return None
 
@@ -256,6 +256,10 @@ _START_TIMEOUT = 30
 _STOP_POLL_INTERVAL = 0.5
 _STOP_KILL_TIMEOUT = 15
 _STOP_CLEANUP_TIMEOUT = 60
+_STOP_PROBE_TIMEOUT = 5
+_STATE_ABSENT = "absent"
+"""Probe verdict for a container podman no longer knows — confirmed down,
+distinct from both a live state string and a no-verdict ``None``."""
 _CONTAINER_REMOVE_TIMEOUT = 120
 _IMAGES_FORMAT = "{{.Repository}}\t{{.Tag}}\t{{.ID}}\t{{.Size}}\t{{.Created}}"
 
@@ -496,10 +500,15 @@ class PodmanContainer:
         Polls the container state to tell which phase the stop is in and
         holds each phase to its own deadline: alive → the kill must land
         by grace + ``_STOP_KILL_TIMEOUT``; dead → the client must return
-        within ``_STOP_CLEANUP_TIMEOUT``.  A blown deadline kills the
-        client and raises [`RuntimeError`][RuntimeError] naming the wedged phase.
+        within ``_STOP_CLEANUP_TIMEOUT``.  A probe that yields no verdict
+        (inspect hung or errored) changes nothing — the current phase is
+        kept — but a hard ceiling of both budgets combined still bounds
+        the wait when the state stays unobservable.  A blown deadline
+        kills the client and raises [`RuntimeError`][RuntimeError] naming
+        the wedged phase.
         """
         kill_deadline = time.monotonic() + grace + _STOP_KILL_TIMEOUT
+        hard_deadline = kill_deadline + _STOP_CLEANUP_TIMEOUT
         cleanup_deadline: float | None = None
         while True:
             try:
@@ -508,6 +517,12 @@ class PodmanContainer:
             except subprocess.TimeoutExpired:
                 pass
             now = time.monotonic()
+            if now >= hard_deadline:
+                self._abort_stop(
+                    proc,
+                    f"no stop verdict {_STOP_KILL_TIMEOUT + _STOP_CLEANUP_TIMEOUT}s "
+                    f"past the {grace}s grace period",
+                )
             if cleanup_deadline is not None:
                 if now >= cleanup_deadline:
                     self._abort_stop(
@@ -515,13 +530,43 @@ class PodmanContainer:
                         f"container stopped, but podman cleanup did not finish "
                         f"within {_STOP_CLEANUP_TIMEOUT}s",
                     )
-            elif self.state not in ("running", "paused"):
+            elif (verdict := self._probe_stop_state()) is None:
+                pass  # no verdict — keep the current phase and keep waiting
+            elif verdict in ("running", "paused"):
+                if now >= kill_deadline:
+                    self._abort_stop(
+                        proc,
+                        f"container still running {_STOP_KILL_TIMEOUT}s "
+                        f"past the {grace}s grace period",
+                    )
+            else:
                 cleanup_deadline = now + _STOP_CLEANUP_TIMEOUT
-            elif now >= kill_deadline:
-                self._abort_stop(
-                    proc,
-                    f"container still running {_STOP_KILL_TIMEOUT}s past the {grace}s grace period",
-                )
+
+    def _probe_stop_state(self) -> str | None:
+        """Bounded state probe for the stop watch — never hangs, never guesses.
+
+        Three-way verdict: a state string for a container podman can
+        inspect, ``_STATE_ABSENT`` for one it no longer knows (confirmed
+        down — e.g. an ``--rm`` container that already left), and
+        ``None`` when there is *no verdict* (inspect timed out or podman
+        is unreachable).  The unbounded [`state`][terok_sandbox.runtime.podman.PodmanContainer.state]
+        property is deliberately not reused: an inspect that hangs while
+        podman holds the container lock mid-stop would hang the whole
+        watch, and its error-collapses-to-``None`` contract would count
+        a failed probe as a stopped container.
+        """
+        try:
+            out = subprocess.check_output(  # nosec B603 B607 — argv built from fixed verbs + caller-controlled scope/container names — binary PATH lookup is the cross-distro contract
+                ["podman", "inspect", "-f", "{{.State.Status}}", self.name],
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=_STOP_PROBE_TIMEOUT,
+            ).strip()
+        except subprocess.CalledProcessError:
+            return _STATE_ABSENT
+        except (subprocess.TimeoutExpired, OSError):
+            return None
+        return out.lower() if out else None
 
     def _abort_stop(self, proc: subprocess.Popen[str], reason: str) -> NoReturn:
         """Kill a wedged ``podman stop`` client and raise the phase verdict."""
