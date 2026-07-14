@@ -29,8 +29,10 @@ if TYPE_CHECKING:
 
 #: The argv that re-invokes this package on the running interpreter, so a
 #: child is found by ``-m`` regardless of how the parent was installed
-#: (editable, venv, system).
-_SELF_ARGV: tuple[str, ...] = (sys.executable, "-m", "terok_sandbox")
+#: (editable, venv, system).  ``-P`` (PYTHONSAFEPATH) keeps the launch cwd
+#: off ``sys.path`` so a stray ``terok_sandbox.py`` there cannot shadow the
+#: installed package before the child even hardens itself.
+_SELF_ARGV: tuple[str, ...] = (sys.executable, "-P", "-m", "terok_sandbox")
 
 
 @dataclass(frozen=True)

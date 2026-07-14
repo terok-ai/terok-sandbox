@@ -45,6 +45,7 @@ class TestLaunchChild:
         assert calls == [
             [
                 sys.executable,
+                "-P",
                 "-m",
                 "terok_sandbox",
                 "supervise-child",
