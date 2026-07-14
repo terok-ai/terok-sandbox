@@ -24,7 +24,6 @@ import pytest
 
 from terok_sandbox.supervisor.launcher import ChildHandle
 from terok_sandbox.supervisor.main import (
-    _install_signal_handlers,
     _select_services,
     _terminate_children,
     _wait_for_container,
@@ -300,49 +299,6 @@ class TestKillChildren:
         live.kill.assert_called_once()
         assert live.returncode is not None
         dead.kill.assert_not_called()
-
-
-class TestInstallSignalHandlers:
-    """``_install_signal_handlers`` wires SIGTERM/SIGINT onto the running loop."""
-
-    def test_no_running_loop_is_a_soft_noop(self) -> None:
-        """Called outside a loop it returns without raising."""
-        event = asyncio.Event()
-        _install_signal_handlers(event)
-        assert not event.is_set()
-
-    @pytest.mark.asyncio
-    async def test_registers_handlers_on_the_running_loop(self) -> None:
-        """With a running loop, SIGTERM/SIGINT are registered as handlers."""
-        import signal
-
-        event = asyncio.Event()
-        loop = asyncio.get_running_loop()
-        registered: list[int] = []
-        with patch.object(
-            loop, "add_signal_handler", side_effect=lambda s, _cb: registered.append(s)
-        ):
-            _install_signal_handlers(event)
-        assert signal.SIGTERM in registered
-        assert signal.SIGINT in registered
-
-    @pytest.mark.asyncio
-    async def test_falls_back_to_signal_signal_when_unsupported(self) -> None:
-        """Where the loop can't register handlers, it falls back to signal.signal."""
-        import signal
-
-        event = asyncio.Event()
-        loop = asyncio.get_running_loop()
-        fell_back: list[int] = []
-        with (
-            patch.object(loop, "add_signal_handler", side_effect=NotImplementedError),
-            patch(
-                "terok_sandbox.supervisor.main.signal.signal",
-                side_effect=lambda s, _h: fell_back.append(s),
-            ),
-        ):
-            _install_signal_handlers(event)
-        assert signal.SIGTERM in fell_back and signal.SIGINT in fell_back
 
 
 class TestWaitForContainer:

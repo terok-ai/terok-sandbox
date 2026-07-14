@@ -238,7 +238,8 @@ def _safe_container_name(raw: dict, sidecar_path: Path) -> str:
     carrying a separator / parent-dir reference could redirect those
     filesystem operations outside the runtime dir.
     """
-    name = str(raw.get("container_name", "")).strip()
+    raw_name = raw.get("container_name")
+    name = str(raw_name).strip() if raw_name is not None else ""
     if not name:
         _logger.error("sidecar missing required container_name: %s", sidecar_path)
         raise _BadSidecar
@@ -252,7 +253,8 @@ def _safe_container_name(raw: dict, sidecar_path: Path) -> str:
 
 def _checked_ipc_mode(raw: dict, sidecar_path: Path) -> str:
     """The transport mode, restricted to ``socket`` / ``tcp``."""
-    mode = str(raw.get("ipc_mode", "socket"))
+    raw_mode = raw.get("ipc_mode")
+    mode = "socket" if raw_mode is None else str(raw_mode)
     if mode not in ("socket", "tcp"):
         _logger.error("sidecar ipc_mode must be 'socket' or 'tcp', got %r: %s", mode, sidecar_path)
         raise _BadSidecar

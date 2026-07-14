@@ -37,10 +37,10 @@ import asyncio
 import contextlib
 import logging
 import shutil
-import signal
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .children import SERVICE_NAMES, _install_signal_handlers
 from .sidecar import SidecarConfig, SupervisorPaths, load_sidecar
 
 if TYPE_CHECKING:
@@ -86,7 +86,6 @@ async def run_supervisor(container_id: str, sidecar_path: Path) -> int:
     [`run_child`][terok_sandbox.supervisor.children.run_child], one
     process each.
     """
-    from .children import SERVICE_NAMES
     from .launcher import default_launcher
 
     cfg = load_sidecar(sidecar_path)
@@ -227,29 +226,6 @@ async def _kill_children(handles: list[ChildHandle]) -> None:
 
 
 # ── Internal helpers ────────────────────────────────────────────────────
-
-
-def _install_signal_handlers(stop_event: asyncio.Event) -> None:
-    """Wire SIGTERM/SIGINT into *stop_event* on the running loop.
-
-    Soft-fails when no running loop is present (e.g. when imported
-    outside ``asyncio.run`` for testing) — callers handle the signal
-    chain themselves in that case.
-    """
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        return
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        try:
-            loop.add_signal_handler(sig, stop_event.set)
-        except RuntimeError:
-            # Windows / restricted execution environments — fall back to
-            # signal.signal so at least one of the two paths fires.
-            # ``NotImplementedError`` is a ``RuntimeError`` subclass, so
-            # this single except still covers add_signal_handler's
-            # "not implemented on this platform" path.
-            signal.signal(sig, lambda *_: stop_event.set())
 
 
 async def _wait_for_container(container_id: str) -> int:
