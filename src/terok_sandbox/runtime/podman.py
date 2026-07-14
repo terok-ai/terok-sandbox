@@ -253,6 +253,12 @@ def find_init_binary() -> str | None:
 
 _DEFAULT_LOGIN_COMMAND: tuple[str, ...] = ("tmux", "new-session", "-A", "-s", "main")
 _START_TIMEOUT = 30
+_PROBE_TIMEOUT = 30
+"""Ceiling for read-only podman queries (inspect / ps).  They answer in
+milliseconds from a healthy podman; only a wedged one (stale storage
+lock, dead storage) blocks longer, and an unbounded probe then hangs
+whatever thread asked — a TUI froze this way (terok#1181).  On timeout a
+probe degrades to its no-answer value, same as any other probe failure."""
 _STOP_POLL_INTERVAL = 0.5
 _STOP_KILL_TIMEOUT = 15
 _STOP_CLEANUP_TIMEOUT = 60
@@ -331,9 +337,10 @@ class PodmanContainer:
                 ["podman", "inspect", "-f", "{{.State.Status}}", self.name],
                 stderr=subprocess.DEVNULL,
                 text=True,
+                timeout=_PROBE_TIMEOUT,
             ).strip()
             return out.lower() if out else None
-        except (subprocess.CalledProcessError, FileNotFoundError):
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
             return None
 
     @property
@@ -344,8 +351,9 @@ class PodmanContainer:
                 ["podman", "inspect", "-f", "{{.State.Running}}", self.name],
                 stderr=subprocess.DEVNULL,
                 text=True,
+                timeout=_PROBE_TIMEOUT,
             ).strip()
-        except (subprocess.CalledProcessError, FileNotFoundError):
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
             return False
         return out.lower() == "true"
 
@@ -357,8 +365,9 @@ class PodmanContainer:
                 ["podman", "inspect", "-f", "{{.Image}}", self.name],
                 stderr=subprocess.DEVNULL,
                 text=True,
+                timeout=_PROBE_TIMEOUT,
             ).strip()
-        except (subprocess.CalledProcessError, FileNotFoundError):
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
             return None
         return self._runtime.image(out) if out else None
 
@@ -401,9 +410,10 @@ class PodmanContainer:
                 ["podman", "inspect", "-f", "{{.Id}}", self.name],
                 stderr=subprocess.DEVNULL,
                 text=True,
+                timeout=_PROBE_TIMEOUT,
             ).strip()
             return out or None
-        except (subprocess.CalledProcessError, FileNotFoundError):
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
             return None
 
     @property
@@ -422,8 +432,9 @@ class PodmanContainer:
                 ["podman", "inspect", "-f", "{{json .Mounts}}", self.name],
                 stderr=subprocess.DEVNULL,
                 text=True,
+                timeout=_PROBE_TIMEOUT,
             ).strip()
-        except (subprocess.CalledProcessError, FileNotFoundError):
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
             return []
         try:
             entries = json.loads(out) if out else []
@@ -692,8 +703,9 @@ class PodmanImage:
                 ["podman", "inspect", "-f", "{{.Id}}", self.ref],
                 stderr=subprocess.DEVNULL,
                 text=True,
+                timeout=_PROBE_TIMEOUT,
             ).strip()
-        except (subprocess.CalledProcessError, FileNotFoundError):
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
             return None
         return out or None
 
@@ -1049,8 +1061,9 @@ class PodmanRuntime:
                 ],
                 stderr=subprocess.DEVNULL,
                 text=True,
+                timeout=_PROBE_TIMEOUT,
             )
-        except (subprocess.CalledProcessError, FileNotFoundError):
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
             return []
         return [PodmanContainer(name, runtime=self) for name in out.strip().splitlines() if name]
 
@@ -1255,8 +1268,8 @@ class PodmanRuntime:
         Returns:
             ``{}`` when the query succeeded but no container matched, ``None``
             when the query itself failed (podman missing, or ``podman ps``
-            erroring — e.g. on storage-lock contention with a concurrent
-            build).  Callers must not read a failure as "no containers":
+            erroring or hanging — e.g. on storage-lock contention with a
+            concurrent build).  Callers must not read a failure as "no containers":
             a status display that does so degrades every task to "not found"
             for as long as the runtime is busy (terok#1134).
         """
@@ -1274,9 +1287,13 @@ class PodmanRuntime:
                 ],
                 stderr=subprocess.PIPE,
                 text=True,
+                timeout=_PROBE_TIMEOUT,
             )
         except FileNotFoundError:
             print("podman not found on PATH", file=sys.stderr)
+            return None
+        except subprocess.TimeoutExpired:
+            print(f"podman ps gave no answer within {_PROBE_TIMEOUT}s", file=sys.stderr)
             return None
         except subprocess.CalledProcessError as exc:
             # The reason must reach the operator: a DEVNULLed stderr once

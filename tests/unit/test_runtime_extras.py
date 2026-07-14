@@ -228,6 +228,14 @@ class TestContainersWithPrefix:
         """Podman error → empty list."""
         assert PodmanRuntime().containers_with_prefix("p") == []
 
+    @patch(
+        "terok_sandbox.runtime.podman.subprocess.check_output",
+        side_effect=subprocess.TimeoutExpired("podman", 30),
+    )
+    def test_returns_empty_on_wedged_podman(self, _co) -> None:
+        """A podman that answers nothing within the probe ceiling → empty list."""
+        assert PodmanRuntime().containers_with_prefix("p") == []
+
 
 class TestContainerStates:
     """``PodmanRuntime.container_states`` batch-parses name+state pairs."""
@@ -282,6 +290,15 @@ class TestContainerStates:
         """``podman ps`` erroring (e.g. lock contention during a build) → ``None``."""
         assert PodmanRuntime().container_states("p") is None
 
+    @patch(
+        "terok_sandbox.runtime.podman.subprocess.check_output",
+        side_effect=subprocess.TimeoutExpired("podman", 30),
+    )
+    def test_returns_none_on_timeout_with_reason(self, _co, capsys) -> None:
+        """A wedged podman → ``None``, and the reason reaches stderr."""
+        assert PodmanRuntime().container_states("p") is None
+        assert "no answer within" in capsys.readouterr().err
+
 
 class TestContainerState:
     """``Container.state`` returns a single container's state or ``None``."""
@@ -300,6 +317,22 @@ class TestContainerState:
     def test_podman_missing_is_none(self, _co) -> None:
         """Missing podman → ``None``."""
         assert PodmanRuntime().container("foo").state is None
+
+    @patch(
+        "terok_sandbox.runtime.podman.subprocess.check_output",
+        side_effect=subprocess.TimeoutExpired("podman", 30),
+    )
+    def test_wedged_podman_is_none(self, _co) -> None:
+        """A podman blocking past the probe ceiling → ``None``, not a hang."""
+        assert PodmanRuntime().container("foo").state is None
+
+    @patch("terok_sandbox.runtime.podman.subprocess.check_output", return_value="Running\n")
+    def test_probe_is_time_bounded(self, mock_co) -> None:
+        """The inspect call carries the probe timeout — a wedged podman cannot hang the caller."""
+        from terok_sandbox.runtime.podman import _PROBE_TIMEOUT
+
+        assert PodmanRuntime().container("foo").state == "running"
+        assert mock_co.call_args.kwargs["timeout"] == _PROBE_TIMEOUT
 
 
 class TestContainerRunning:
