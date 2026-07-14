@@ -75,11 +75,13 @@ class TestLoadSidecar:
             "db_path": "/home/dev/.terok/vault.db",
             "runtime_dir": "/run/user/1000/terok/sandbox",
         }
-        assert load_sidecar(_write_sidecar(tmp_path, base)).allow_debugger is False  # type: ignore[union-attr]
-        assert (
-            load_sidecar(_write_sidecar(tmp_path, {**base, "allow_debugger": True})).allow_debugger  # type: ignore[union-attr]
-            is True
-        )
+        default = load_sidecar(_write_sidecar(tmp_path, base))
+        assert default is not None
+        assert default.allow_debugger is False
+
+        opted_in = load_sidecar(_write_sidecar(tmp_path, {**base, "allow_debugger": True}))
+        assert opted_in is not None
+        assert opted_in.allow_debugger is True
 
     def test_null_ipc_mode_defaults_to_socket(self, tmp_path: Path) -> None:
         """A JSON ``null`` ipc_mode falls back to the default, not the literal ``"None"``."""

@@ -365,10 +365,6 @@ class TestWaitForContainer:
                 "terok_sandbox.supervisor.main.asyncio.create_subprocess_exec",
                 AsyncMock(return_value=proc),
             ),
-            patch(
-                "terok_sandbox.supervisor.main.asyncio.wait_for",
-                AsyncMock(side_effect=TimeoutError),
-            ),
             pytest.raises(asyncio.CancelledError),
         ):
             await _wait_for_container("abc123")
