@@ -209,24 +209,27 @@ class TestCacheAutoRebuild:
 
         gate = GitGate(scope="proj", gate_path=gate_dir, clone_cache_base=tmp_path / "clone-cache")
 
-        ok = MagicMock(returncode=0)
-        with patch(
-            "terok_sandbox.gate.mirror.subprocess.run",
-            side_effect=[
-                subprocess.CalledProcessError(128, "git", stderr=b"fatal: bad ref\n"),
-                ok,  # git clone
-                ok,  # rev-parse --verify HEAD
-            ],
-        ) as mock_run:
+        seen: list[list[str]] = []
+
+        def fake_git(cmd: list[str], **_kwargs: object) -> MagicMock:
+            """Fail the in-place update; model clone recreating the cache dir."""
+            seen.append(cmd)
+            if "set-url" in cmd:
+                raise subprocess.CalledProcessError(128, "git", stderr=b"fatal: bad ref\n")
+            if "clone" in cmd:
+                # the stale cache must be gone before the re-clone recreates it
+                assert not cache_dir.exists()
+                cache_dir.mkdir(parents=True)
+            return MagicMock(returncode=0)
+
+        with patch("terok_sandbox.gate.mirror.subprocess.run", side_effect=fake_git):
             result = gate._refresh_clone_cache()
 
         assert result is None
-        cmds = [call.args[0] for call in mock_run.call_args_list]
-        assert "set-url" in cmds[0]
-        assert "clone" in cmds[1]
-        assert "rev-parse" in cmds[2]
-        # the stale cache was removed before the (mocked) re-clone
-        assert not cache_dir.exists()
+        assert "set-url" in seen[0]
+        assert "clone" in seen[1]
+        assert "rev-parse" in seen[2]
+        assert cache_dir.exists()
 
     def test_rebuild_failure_reports_and_removes_cache(self, tmp_path: Path) -> None:
         """When the rebuild fails too, the error surfaces and no half-built cache remains."""
