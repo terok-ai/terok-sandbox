@@ -125,6 +125,7 @@ layer = "foundation"
 depends_on = [
     "terok_sandbox.vault.store.migrations",
     "terok_sandbox.vault.store.encryption",
+    "terok_sandbox.vault.store.tiers",
 ]
 
 [[modules]]
@@ -132,10 +133,21 @@ path = "terok_sandbox.vault.store.migrations"
 layer = "foundation"
 depends_on = []
 
+# Vault.store.tiers — the passphrase-tier registry: pure vocabulary
+# (StrEnum + traits), zero dependencies by design so every layer can
+# speak it.
+[[modules]]
+path = "terok_sandbox.vault.store.tiers"
+layer = "foundation"
+depends_on = []
+
 [[modules]]
 path = "terok_sandbox.vault.store.encryption"
 layer = "foundation"
-depends_on = ["terok_sandbox.vault.store.systemd_creds"]
+depends_on = [
+    "terok_sandbox.vault.store.systemd_creds",
+    "terok_sandbox.vault.store.tiers",
+]
 
 # Vault.store.recovery — sidecar marker + the ``RecoveryStatus`` bundle
 # (marker presence + resolved passphrase source) used by every surface
@@ -150,6 +162,21 @@ depends_on = [
     "terok_sandbox._yaml",
     "terok_sandbox.config",
     "terok_sandbox.vault.store.encryption",
+    "terok_sandbox.vault.store.tiers",
+]
+
+# Vault.store.status — the one vault-state picture every surface
+# renders: lock classification, chain table with shadowing, warning
+# catalog.  Consumes the resolver, the recovery bundle, and the tier
+# registry; receives ``SandboxConfig`` (default-fill ``cfg=None``).
+[[modules]]
+path = "terok_sandbox.vault.store.status"
+layer = "foundation"
+depends_on = [
+    "terok_sandbox.config",
+    "terok_sandbox.vault.store.encryption",
+    "terok_sandbox.vault.store.recovery",
+    "terok_sandbox.vault.store.tiers",
 ]
 
 [[modules]]
@@ -318,10 +345,13 @@ path = "terok_sandbox.commands.shield"
 layer = "surface"
 depends_on = []
 
+# ``vault passphrase change`` ends with the same announce + ack
+# conversation setup's provisioning phase owns — same precedent as
+# ``commands.sandbox`` reusing the credentials setup phase.
 [[modules]]
 path = "terok_sandbox.commands.vault"
 layer = "surface"
-depends_on = []
+depends_on = ["terok_sandbox.commands.credentials"]
 
 [[modules]]
 path = "terok_sandbox.commands.ssh"

@@ -31,7 +31,7 @@ import dataclasses
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .encryption import PassphraseSource
+from .tiers import PassphraseTier
 
 if TYPE_CHECKING:
     from ...config import SandboxConfig
@@ -79,7 +79,7 @@ class RecoveryStatus:
     acknowledged: bool
     """``True`` iff the zero-byte marker file is present."""
 
-    source: PassphraseSource | None
+    source: PassphraseTier | None
     """Whichever resolver tier unlocked the chain right now, or ``None`` if locked."""
 
     resolve_error: str | None = None
@@ -101,7 +101,7 @@ class RecoveryStatus:
         restarts.  Severity should escalate accordingly on every
         surface that renders this status.
         """
-        return self.source == "session-file"
+        return self.source is PassphraseTier.SESSION_FILE
 
     @property
     def urgent(self) -> bool:

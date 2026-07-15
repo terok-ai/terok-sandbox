@@ -110,7 +110,7 @@ class TestCommandRegistry:
         passphrase = _RESOLVED.find_at(("vault", "passphrase"))
         names = {c.name for c in passphrase.children}
         # ``destroy`` folded into ``vault lock`` (lock now clears every tier).
-        assert {"seal", "to-keyring", "reveal", "acknowledge"} == names
+        assert {"seal", "to-keyring", "reveal", "acknowledge", "change"} == names
 
 
 # ---------------------------------------------------------------------------

@@ -17,26 +17,28 @@ top-to-bottom and stops at the first hit:
    `systemd-creds(1)`.  Machine-bound
    (TPM2 or host key), survives reboot, no keyring needed.  Written
    by `vault passphrase seal`.  Requires systemd ≥ 257.
-3. **OS keyring** — `(service=terok-sandbox, username=credentials-db)`,
-   used only when `credentials.use_keyring: true` is set in `config.yml`.
+3. **OS keyring** — `(service=terok-sandbox, username=credentials-db)`.
+   On by default (an empty keyring simply doesn't resolve); set
+   `credentials.use_keyring: false` in `config.yml` to keep the chain
+   away from Secret Service entirely.
 4. **passphrase_command** — operator-supplied shell command set as
    `credentials.passphrase_command` in `config.yml`.  Same shape as
    `git config credential.helper`, ssh pinentry, or `BORG_PASSCOMMAND`
-   — one field plugs `pass`, `bw`, `op`, `vault kv`, or any cloud
-   secret-manager CLI into the resolver without per-backend code in
-   the sandbox.  See [Headless setup](#headless-setup-data-center-terminals)
+   — one field plugs a plain secret file (`cat /path/to/file`),
+   `pass`, `bw`, `op`, `vault kv`, or any cloud secret-manager CLI
+   into the resolver without per-backend code in the sandbox.  See
+   [Headless setup](#headless-setup-data-center-terminals)
    below for the canonical recipe.  Fails closed when the helper is
    configured but exits non-zero / times out — silent fall-through
-   to plaintext would be an unannounced security downgrade.
-5. **Config fallback** — `credentials.passphrase` in `config.yml`.
-   Plaintext-on-disk; only as strong as filesystem-layer protection
-   (LUKS / signed image / permissions).  `vault status` and sickbay
-   permanently surface a WARNING when this tier is configured.
-   **Last-resort** on hosts with no systemd-creds and no usable
-   helper — prefer `passphrase_command` whenever the operator has
-   `pass`, `bw`, `op`, or a cloud secret-manager CLI available.
-6. **Interactive prompt** — `*`-masked, TTY only.  CLI calls;
+   to a weaker tier would be an unannounced security downgrade.
+5. **Interactive prompt** — `*`-masked, TTY only.  CLI calls;
    non-interactive supervisors fail loud instead.
+
+!!! note "The plaintext `credentials.passphrase` tier was removed"
+    Configs that still set it are rejected with migration directions:
+    move the value into its own file (mode 600) and point
+    `passphrase_command: cat /path/to/that/file` at it.  Same trust
+    boundary (filesystem-level protection), one tier instead of two.
 
 ## Headless setup (data-center terminals)
 
@@ -123,11 +125,47 @@ fallback):
 |--------|-----------------|
 | `[k]` OS keyring *(default)*      | desktop with a working Secret Service / Keychain |
 | `[s]` session-unlock              | servers with no keyring; one `vault unlock` per boot |
-| `[c]` config file                 | last-resort plaintext-on-disk; requires `yes` confirmation |
+
+(Headless hosts that want a file-based store skip the chooser and set
+`credentials.passphrase_command: cat /path/to/secret-file` instead —
+see [Headless setup](#headless-setup-data-center-terminals).)
 
 Either branch **auto-generates the passphrase** and prints it once
 ("write this down") — that's your recovery key for rebuilds and other
 hosts.
+
+## Changing the passphrase
+
+```bash
+terok-sandbox vault passphrase change
+```
+
+One verb does the whole rotation: it resolves the current passphrase
+from the chain (prompting only when the vault is locked — retyping a
+value the same shell can print with `vault passphrase reveal` would be
+theatre), asks for the new one (typed-and-confirmed, or Enter to
+generate), **re-encrypts the credentials DB** under the new key, and
+rewrites every tier that stored the old one.  The recovery
+acknowledgement is dropped and re-run — the copy you saved before is
+now the wrong passphrase.
+
+Ground rules the verb enforces:
+
+- **Nothing changes on failure.**  A wrong current passphrase or a
+  busy DB aborts before anything is touched.
+- **Running tasks hold the vault open.**  Re-encryption needs
+  exclusive access; with a live task the verb refuses with a
+  `database is locked` hint (`fuser -v` the DB, stop the task, re-run).
+  Tasks that resolved the old passphrase keep using it until
+  restarted; new tasks pick up the new one automatically.
+- **`passphrase_command` blocks the change.**  The helper's secret
+  lives in a store you own (`pass`, 1Password, a cloud vault) that
+  terok cannot write to — update the secret there first, or remove
+  the `passphrase_command` wiring, then re-run.
+- A tier that can't take the new value (keyring denied, systemd-creds
+  host regressed) is **purged and reported** rather than left holding
+  the old passphrase, and the verb exits non-zero so the failure can't
+  scroll past.
 
 ## Changing tiers (move the passphrase to a different backend)
 
@@ -187,8 +225,8 @@ terok-sandbox vault lock
 ```
 
 Clears every tier in one go (session file *plus* keyring, sealed
-systemd-creds, `credentials.passphrase`, and
-`credentials.passphrase_command`) and drops the recovery marker.  The
+systemd-creds, and the `credentials.passphrase_command` wiring) and
+drops the recovery marker.  The
 underlying secret stays put in whichever store the helper points at
 (`pass`, 1Password, Vault, …) — only the resolver wiring is removed.
 Without this step, the next per-container supervisor to spawn would
@@ -216,19 +254,15 @@ terok-sandbox vault passphrase seal --key=auto        # seal; drops the session 
 terok-sandbox vault passphrase acknowledge            # re-confirm the recovery key
 terok-sandbox vault passphrase to-keyring             # one verb, no chooser
 
-# → passphrase_command (headless; helper points at pass / bw / op / cloud CLI):
+# → passphrase_command (headless; helper points at a file, pass / bw / op / cloud CLI):
 pass insert -m terok-sandbox/vault-passphrase         # or your helper's
                                                        #   "store this secret" verb
 yq -yi '.credentials.passphrase_command = "pass show terok-sandbox/vault-passphrase"' \
   ~/.config/terok/config.yml
-
-# → config.yml plaintext (last-resort; requires `yes` confirmation):
-terok-sandbox setup     # chooser → [c] → type "yes" to accept the trust boundary
 ```
 
 Run `terok-sandbox vault status` afterwards to confirm the header
-reads `Vault: unlocked — passphrase via <new-tier>` — and to verify no
-stale plaintext warning is still pointing at `config.yml`.
+reads `Vault: unlocked — passphrase via <new-tier>`.
 
 ## Recovering from a lost passphrase
 

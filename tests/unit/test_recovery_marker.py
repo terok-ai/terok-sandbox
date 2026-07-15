@@ -24,15 +24,17 @@ import pytest
 
 from terok_sandbox import RecoveryStatus, SandboxConfig
 from terok_sandbox.vault.store.recovery import acknowledge, acknowledged, forget
+from terok_sandbox.vault.store.tiers import PassphraseTier
 
 
-def _cfg(tmp_path: Path, *, passphrase: str | None = "any-value") -> SandboxConfig:
+def _cfg(tmp_path: Path, *, unlocked: bool = True) -> SandboxConfig:
     """Sandbox config rooted under *tmp_path*.
 
-    The marker is independent of the passphrase; the *passphrase*
-    keyword is kept on the helper signature only so the locked-vault
-    branch (where the rest of the chain would be inoperative anyway)
-    can be exercised explicitly.
+    The marker is independent of the passphrase; the *unlocked* keyword
+    switches the keyring tier (which the conftest stub resolves to a
+    deterministic passphrase) on or off, so the locked-vault branch
+    (where the rest of the chain would be inoperative anyway) can be
+    exercised explicitly.
     """
     return SandboxConfig(
         state_dir=tmp_path / "state",
@@ -40,8 +42,7 @@ def _cfg(tmp_path: Path, *, passphrase: str | None = "any-value") -> SandboxConf
         config_dir=tmp_path / "cfg",
         vault_dir=tmp_path / "vault",
         services_mode="socket",
-        credentials_passphrase=passphrase,
-        credentials_use_keyring=False,
+        credentials_use_keyring=unlocked,
     )
 
 
@@ -111,7 +112,7 @@ class TestRecoveryStatusMarkerMethods:
         Closing the loop quickly matters more than gating on a working
         resolver chain; the marker just records "operator confirmed".
         """
-        cfg = _cfg(tmp_path, passphrase=None)
+        cfg = _cfg(tmp_path, unlocked=False)
         RecoveryStatus.acknowledge(cfg)
         assert RecoveryStatus.is_acknowledged(cfg) is True
 
@@ -146,12 +147,12 @@ class TestRecoveryStatus:
     """``RecoveryStatus.load`` bundles the marker + resolved source for every surface."""
 
     def test_acked_durable_tier_not_urgent(self, tmp_path: Path) -> None:
-        """Acknowledged + config tier → not urgent (durable, ack present)."""
+        """Acknowledged + keyring tier → not urgent (durable, ack present)."""
         cfg = _cfg(tmp_path)
         RecoveryStatus.acknowledge(cfg)
         status = RecoveryStatus.load(cfg)
         assert status.acknowledged is True
-        assert status.source == "config"
+        assert status.source is PassphraseTier.KEYRING
         assert status.session_only is False
         assert status.urgent is False
 
@@ -175,7 +176,9 @@ class TestRecoveryStatus:
         # by patching the resolver entry point directly.
         cfg = _cfg(tmp_path)
         monkeypatch.setattr(
-            enc, "resolve_passphrase_with_source", lambda **_kw: ("p4ss", "session-file")
+            enc,
+            "resolve_passphrase_with_source",
+            lambda **_kw: ("p4ss", PassphraseTier.SESSION_FILE),
         )
         status = RecoveryStatus.load(cfg)
         assert status.session_only is True
@@ -193,13 +196,15 @@ class TestRecoveryStatus:
         cfg = _cfg(tmp_path)
         RecoveryStatus.acknowledge(cfg)
         monkeypatch.setattr(
-            enc, "resolve_passphrase_with_source", lambda **_kw: ("p4ss", "session-file")
+            enc,
+            "resolve_passphrase_with_source",
+            lambda **_kw: ("p4ss", PassphraseTier.SESSION_FILE),
         )
         assert RecoveryStatus.load(cfg).urgent is False
 
     def test_locked_vault_source_is_none(self, tmp_path: Path) -> None:
         """No resolvable passphrase → source=None, not urgent (locked-vault check owns it)."""
-        status = RecoveryStatus.load(_cfg(tmp_path, passphrase=None))
+        status = RecoveryStatus.load(_cfg(tmp_path, unlocked=False))
         assert status.source is None
         assert status.session_only is False
         assert status.urgent is False
@@ -263,7 +268,7 @@ class TestRecoveryStatus:
     def test_clean_resolution_has_no_resolve_error(self, tmp_path: Path) -> None:
         """A chain that resolves (or yields nothing) reports resolve_error=None."""
         assert RecoveryStatus.load(_cfg(tmp_path)).resolve_error is None
-        assert RecoveryStatus.load(_cfg(tmp_path, passphrase=None)).resolve_error is None
+        assert RecoveryStatus.load(_cfg(tmp_path, unlocked=False)).resolve_error is None
 
 
 class TestNoOfflineOracle:
@@ -282,9 +287,13 @@ class TestNoOfflineOracle:
         assert cfg.vault_recovery_marker_file.read_bytes() == b""
 
     def test_marker_does_not_change_with_passphrase(self, tmp_path: Path) -> None:
-        """Two installs with different passphrases produce identical marker bytes."""
-        cfg_a = _cfg(tmp_path / "a", passphrase="alpha")
-        cfg_b = _cfg(tmp_path / "b", passphrase="beta")
+        """Two independent installs produce identical (empty) marker bytes.
+
+        Nothing passphrase-derived is written, so the bytes cannot vary
+        with the vault's passphrase — there is no signal to compare.
+        """
+        cfg_a = _cfg(tmp_path / "a")
+        cfg_b = _cfg(tmp_path / "b")
         RecoveryStatus.acknowledge(cfg_a)
         RecoveryStatus.acknowledge(cfg_b)
         assert (

@@ -78,17 +78,19 @@ _LAZY: dict[str, str] = {
     "yaml_update_section": "_yaml:update_section",
     # CLI registry + vault passphrase workflows
     "CommandTree": "commands:CommandTree",
-    "SessionShadow": "commands:SessionShadow",
+    "PassphraseChangeResult": "commands:PassphraseChangeResult",  # nosec: B105 — export-map import paths, never secrets
+    "ProvisioningPlan": "commands:ProvisioningPlan",
     "TierProvisionResult": "commands:TierProvisionResult",
-    "clear_redundant_session_file": "commands:clear_redundant_session_file",
+    "TierRewrite": "commands:TierRewrite",
+    "change_passphrase": "commands:change_passphrase",  # nosec: B105 — export-map import paths, never secrets
     "credentials_provisioned": "commands:credentials_provisioned",
     "handle_vault_seal": "commands:handle_vault_seal",
     "handle_vault_to_keyring": "commands:handle_vault_to_keyring",
+    "plan_provisioning": "commands:plan_provisioning",
     "provision_passphrase_tier": "commands:provision_passphrase_tier",  # nosec: B105 — export-map import paths, never secrets
     "provision_session_passphrase": "commands:provision_session_passphrase",
     "purge_passphrase_tiers": "commands:purge_passphrase_tiers",
     "sandbox_uninstall": "commands:_handle_sandbox_uninstall",
-    "session_shadow_state": "commands:session_shadow_state",
     # Config
     "CONTAINER_RUNTIME_DIR": "config:CONTAINER_RUNTIME_DIR",
     "SandboxConfig": "config:SandboxConfig",
@@ -174,8 +176,17 @@ _LAZY: dict[str, str] = {
     "WrongPassphraseError": "vault.store.encryption:WrongPassphraseError",
     "keyring_backend_available": "vault.store.encryption:keyring_backend_available",
     "RecoveryStatus": "vault.store.recovery:RecoveryStatus",
+    "ChainRow": "vault.store.status:ChainRow",
+    "SessionShadow": "vault.store.status:SessionShadow",
+    "VaultState": "vault.store.status:VaultState",
+    "VaultStatus": "vault.store.status:VaultStatus",
+    "VaultWarning": "vault.store.status:VaultWarning",
+    "VaultWarningKind": "vault.store.status:VaultWarningKind",
+    "clear_redundant_session_file": "vault.store.status:clear_redundant_session_file",
+    "session_shadow_state": "vault.store.status:session_shadow_state",
     "systemd_creds_available": "vault.store.systemd_creds:is_available",
     "systemd_creds_has_tpm2": "vault.store.systemd_creds:has_tpm2",
+    "PassphraseTier": "vault.store.tiers:PassphraseTier",
 }
 
 
@@ -217,11 +228,16 @@ if TYPE_CHECKING:
     )
     from ._yaml import update_section as yaml_update_section
     from .commands import (
+        PassphraseChangeResult,
+        ProvisioningPlan,
         TierProvisionResult,
+        TierRewrite,
         _handle_sandbox_uninstall as sandbox_uninstall,
+        change_passphrase,
         credentials_provisioned,
         handle_vault_seal,
         handle_vault_to_keyring,
+        plan_provisioning,
         provision_passphrase_tier,
         purge_passphrase_tiers,
     )
@@ -286,10 +302,19 @@ if TYPE_CHECKING:
         keyring_backend_available,
     )
     from .vault.store.recovery import RecoveryStatus
+    from .vault.store.status import (
+        ChainRow,
+        SessionShadow,
+        VaultState,
+        VaultStatus,
+        VaultWarning,
+        VaultWarningKind,
+    )
     from .vault.store.systemd_creds import (
         has_tpm2 as systemd_creds_has_tpm2,
         is_available as systemd_creds_available,
     )
+    from .vault.store.tiers import PassphraseTier
 
 
 __all__ = [
@@ -353,14 +378,26 @@ __all__ = [
     "is_ssh_url",
     # Credentials + vault
     "CODEX_SHARED_OAUTH_MARKER",
+    "ChainRow",
     "CredentialDB",
     "NoPassphraseError",
     "PHANTOM_CREDENTIALS_MARKER",
+    "PassphraseChangeResult",
+    "PassphraseTier",
+    "ProvisioningPlan",
     "RecoveryStatus",
+    "SessionShadow",
     "TierProvisionResult",
+    "TierRewrite",
+    "VaultState",
+    "VaultStatus",
+    "VaultWarning",
+    "VaultWarningKind",
     "WrongPassphraseError",
+    "change_passphrase",
     "credentials_provisioned",
     "keyring_backend_available",
+    "plan_provisioning",
     "provision_passphrase_tier",
     "systemd_creds_available",
     "systemd_creds_has_tpm2",

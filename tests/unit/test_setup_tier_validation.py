@@ -16,15 +16,16 @@ from unittest.mock import patch
 import pytest
 
 from terok_sandbox.commands.sandbox import _handle_sandbox_setup, _validate_passphrase_tier
+from terok_sandbox.vault.store.tiers import PROVISIONABLE_TIERS
 
 
 class TestValidatePassphraseTier:
     """Direct coverage for the small validator helper."""
 
     def test_known_tier_passes(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Each member of ``_EXPLICIT_TIERS`` survives validation (with systemd-creds patched)."""
+        """Each member of ``PROVISIONABLE_TIERS`` survives validation (with systemd-creds patched)."""
         monkeypatch.setattr("terok_sandbox.vault.store.systemd_creds.is_available", lambda: True)
-        for tier in ("session-file", "keyring", "config", "systemd-creds"):
+        for tier in PROVISIONABLE_TIERS:
             _validate_passphrase_tier(tier)  # must not raise
 
     def test_unknown_tier_raises(self) -> None:

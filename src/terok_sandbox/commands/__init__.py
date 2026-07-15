@@ -137,6 +137,7 @@ COMMANDS: CommandTree = CommandTree(
 _LAZY: dict[str, str] = {
     # credentials
     "CREDENTIALS_COMMANDS": "credentials:CREDENTIALS_COMMANDS",
+    "ProvisioningPlan": "credentials:ProvisioningPlan",
     "TierProvisionResult": "credentials:TierProvisionResult",
     "_ask_passphrase_mode": "credentials:_ask_passphrase_mode",
     "_back_up_plaintext_db": "credentials:_back_up_plaintext_db",
@@ -145,6 +146,7 @@ _LAZY: dict[str, str] = {
     "_provision_passphrase": "credentials:_provision_passphrase",
     "_run_credentials_setup_phase": "credentials:_run_credentials_setup_phase",
     "credentials_provisioned": "credentials:credentials_provisioned",
+    "plan_provisioning": "credentials:plan_provisioning",
     "provision_passphrase_tier": "credentials:provision_passphrase_tier",  # nosec: B105 — export-map import paths, never secrets
     # doctor
     "DOCTOR_COMMANDS": "doctor:DOCTOR_COMMANDS",
@@ -188,18 +190,18 @@ _LAZY: dict[str, str] = {
     "_handle_supervise_child": "supervisor:_handle_supervise_child",
     # vault
     "VAULT_COMMANDS": "vault:VAULT_COMMANDS",
+    "PassphraseChangeResult": "vault:PassphraseChangeResult",  # nosec: B105 — export-map import paths, never secrets
     "SessionProvisionResult": "vault:SessionProvisionResult",
-    "SessionShadow": "vault:SessionShadow",
+    "TierRewrite": "vault:TierRewrite",
     "_forget_config_tier_updates": "vault:_forget_config_tier_updates",
     "_handle_vault_list": "vault:_handle_vault_list",
     "_handle_vault_lock": "vault:_handle_vault_lock",
     "_handle_vault_unlock": "vault:_handle_vault_unlock",
-    "clear_redundant_session_file": "vault:clear_redundant_session_file",
+    "change_passphrase": "vault:change_passphrase",  # nosec: B105 — export-map import paths, never secrets
     "handle_vault_seal": "vault:handle_vault_seal",
     "handle_vault_to_keyring": "vault:handle_vault_to_keyring",
     "provision_session_passphrase": "vault:provision_session_passphrase",
     "purge_passphrase_tiers": "vault:purge_passphrase_tiers",
-    "session_shadow_state": "vault:session_shadow_state",
 }
 
 
@@ -228,7 +230,7 @@ def __dir__() -> list[str]:
 
 if TYPE_CHECKING:
     # Eager view of the lazily re-exported surface for type checkers / IDEs.
-    from .credentials import CREDENTIALS_COMMANDS
+    from .credentials import CREDENTIALS_COMMANDS, ProvisioningPlan, plan_provisioning
     from .doctor import DOCTOR_COMMANDS
     from .gate import GATE_COMMANDS
     from .launch import LAUNCH_COMMANDS
@@ -238,14 +240,14 @@ if TYPE_CHECKING:
     from .supervisor import SUPERVISOR_COMMANDS
     from .vault import (
         VAULT_COMMANDS,
+        PassphraseChangeResult,
         SessionProvisionResult,
-        SessionShadow,
-        clear_redundant_session_file,
+        TierRewrite,
+        change_passphrase,
         handle_vault_seal,
         handle_vault_to_keyring,
         provision_session_passphrase,
         purge_passphrase_tiers,
-        session_shadow_state,
     )
 
 
@@ -272,12 +274,14 @@ __all__ = [
     "SUPERVISOR_COMMANDS",
     "VAULT_COMMANDS",
     # Vault passphrase workflows (public, non-underscore surface)
+    "PassphraseChangeResult",
+    "ProvisioningPlan",
     "SessionProvisionResult",
-    "SessionShadow",
-    "clear_redundant_session_file",
+    "TierRewrite",
+    "change_passphrase",
     "handle_vault_seal",
     "handle_vault_to_keyring",
+    "plan_provisioning",
     "provision_session_passphrase",
     "purge_passphrase_tiers",
-    "session_shadow_state",
 ]
