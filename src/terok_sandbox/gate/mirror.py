@@ -540,6 +540,12 @@ class GitGate:
         checks out nothing.  The happy path costs one local ref lookup;
         the upstream roundtrip runs only when HEAD is actually dangling.
 
+        A detached HEAD lands on the heal path deliberately: a mirror
+        gate's HEAD must be a *symref* — ``git clone`` and ``remote
+        set-head --auto`` only work off the advertised symref — so
+        re-pointing a detached HEAD at upstream's default branch is the
+        required normalisation, not collateral damage.
+
         Returns ``None`` when HEAD is healthy or was healed, or a failure
         description otherwise — a gate whose HEAD stays dangling breaks
         every fresh clone, so ``sync()`` reports it as a sync failure
@@ -569,6 +575,23 @@ class GitGate:
                 return (
                     f"gate HEAD {target or '(unset)'!r} is dangling and upstream's "
                     "default branch could not be determined"
+                )
+            # The advertised default must exist in the gate before HEAD is
+            # re-pointed at it — otherwise the "heal" would just swap one
+            # dangling symref for another and report success (possible when
+            # upstream's HEAD moved between our fetch and the ls-remote).
+            missing = (
+                subprocess.run(  # nosec B603 B607 — argv built from fixed verbs + repo-relative paths — binary PATH lookup is the cross-distro contract
+                    ["git", "-C", gate_dir, "show-ref", "--verify", "--quiet", upstream_head],
+                    capture_output=True,
+                    timeout=10,
+                ).returncode
+                != 0
+            )
+            if missing:
+                return (
+                    f"gate HEAD {target or '(unset)'!r} is dangling and upstream's "
+                    f"default branch {upstream_head!r} is not present in the gate"
                 )
             subprocess.run(  # nosec B603 B607 — argv built from fixed verbs + repo-relative paths — binary PATH lookup is the cross-distro contract
                 ["git", "-C", gate_dir, "symbolic-ref", "HEAD", upstream_head],
