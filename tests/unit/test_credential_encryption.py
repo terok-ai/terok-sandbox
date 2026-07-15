@@ -2653,8 +2653,18 @@ class TestProvisionPassphraseTier:
         """The plaintext ``config`` tier (and typos) are rejected before anything runs."""
         from terok_sandbox.commands import provision_passphrase_tier
 
+        cfg = _make_cfg(tmp_path)
         with pytest.raises(ValueError, match="cannot provision tier 'config'"):
-            provision_passphrase_tier(_make_cfg(tmp_path), tier="config")
+            provision_passphrase_tier(cfg, tier="config")
+
+    def test_empty_passphrase_refused_on_every_tier(self, tmp_path: Path) -> None:
+        """An explicit ``""`` never lands anywhere — SQLCipher reads it as no encryption."""
+        from terok_sandbox.commands import provision_passphrase_tier
+
+        cfg = _make_cfg(tmp_path)
+        with pytest.raises(ValueError, match="empty passphrase"):
+            provision_passphrase_tier(cfg, tier="session-file", passphrase="")
+        assert not cfg.vault_passphrase_file.exists()
 
     def test_session_file_mints_when_no_passphrase_given(self, tmp_path: Path) -> None:
         """``passphrase=None`` mints; the caller gets the value back for its reveal surface."""
@@ -2710,8 +2720,9 @@ class TestProvisionPassphraseTier:
             "terok_sandbox.vault.store.encryption.store_passphrase_in_keyring",
             lambda _pw: False,
         )
+        cfg = _make_cfg(tmp_path)
         with pytest.raises(RuntimeError, match="keyring is unreachable"):
-            provision_passphrase_tier(_make_cfg(tmp_path), tier="keyring")
+            provision_passphrase_tier(cfg, tier="keyring")
 
     def test_systemd_creds_unavailable_raises(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2719,9 +2730,10 @@ class TestProvisionPassphraseTier:
         """Explicitly asking for systemd-creds on an old host refuses loudly."""
         from terok_sandbox.commands import provision_passphrase_tier
 
+        cfg = _make_cfg(tmp_path)
         _disable_systemd_creds(monkeypatch)
         with pytest.raises(RuntimeError, match="systemd-creds is unavailable"):
-            provision_passphrase_tier(_make_cfg(tmp_path), tier="systemd-creds")
+            provision_passphrase_tier(cfg, tier="systemd-creds")
 
     def test_systemd_creds_seals_the_mint(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

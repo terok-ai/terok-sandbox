@@ -157,8 +157,9 @@ def provision_passphrase_tier(
 
     Raises [`ValueError`][ValueError] for a tier outside
     [`ProvisionableTier`][terok_sandbox.commands.credentials.ProvisionableTier]
-    and [`RuntimeError`][RuntimeError] when the chosen backend
-    (systemd-creds, OS keyring) is unreachable.
+    or an explicit empty passphrase (SQLCipher reads ``""`` as "no
+    encryption"), and [`RuntimeError`][RuntimeError] when the chosen
+    backend (systemd-creds, OS keyring) is unreachable.
     """
     from ..config import SandboxConfig
     from ..vault.store import systemd_creds as _systemd_creds
@@ -175,6 +176,11 @@ def provision_passphrase_tier(
             f"cannot provision tier {tier!r};"
             f" expected one of: {', '.join(sorted(_PROVISIONABLE_TIERS))}"
         )
+    if passphrase == "":
+        # The keyring and systemd-creds writers refuse an empty value
+        # themselves; guard the session-file tier to the same standard
+        # so no branch can report success while leaving nothing usable.
+        raise ValueError("refusing to provision an empty passphrase")
     if cfg is None:
         cfg = SandboxConfig()
 
@@ -222,6 +228,13 @@ def credentials_provisioned(cfg: SandboxConfig | None = None) -> bool:
     when the DB is already SQLCipher-encrypted or some tier of the
     resolution chain already holds a passphrase, ``False`` when a
     non-TTY setup run would fail closed asking for a tier.
+
+    Not infallible: a configured-but-broken durable tier (an
+    unsealable systemd-creds credential, a dead ``passphrase_command``)
+    propagates its fail-closed
+    [`WrongPassphraseError`][terok_sandbox.vault.store.encryption.WrongPassphraseError]
+    — callers should surface that as a hard failure, not read it as
+    ``False``.
     """
     from ..config import SandboxConfig
     from ..vault.store.encryption import is_plaintext_sqlite
