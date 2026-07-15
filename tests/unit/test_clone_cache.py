@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -262,6 +263,35 @@ class TestCacheAutoRebuild:
         assert "fatal: broken" in result
         assert not cache_dir.exists()
 
+    def test_branch_mismatch_falls_back_to_rebuild(self, tmp_path: Path) -> None:
+        """A cache that lands on the wrong branch is discarded and rebuilt."""
+        gate_dir = tmp_path / "gate" / "proj.git"
+        gate_dir.mkdir(parents=True)
+        cache_dir = tmp_path / "clone-cache" / "proj"
+        cache_dir.mkdir(parents=True)
+
+        gate = GitGate(scope="proj", gate_path=gate_dir, clone_cache_base=tmp_path / "clone-cache")
+
+        def fake_git(cmd: list[str], **_kwargs: object) -> MagicMock:
+            """Report a default of 'main' but a checkout stuck on 'master'."""
+            stdout = ""
+            if "symbolic-ref" in cmd:
+                stdout = (
+                    "refs/remotes/origin/main\n"
+                    if "refs/remotes/origin/HEAD" in cmd
+                    else "master\n"
+                )
+            if "clone" in cmd:
+                cache_dir.mkdir(parents=True)
+            return MagicMock(returncode=0, stdout=stdout)
+
+        with patch("terok_sandbox.gate.mirror.subprocess.run", side_effect=fake_git) as mock_run:
+            result = gate._refresh_clone_cache()
+
+        assert result is None
+        assert any("clone" in call.args[0] for call in mock_run.call_args_list)
+        assert cache_dir.exists()
+
     def test_rebuild_refuses_empty_checkout_cache(self, tmp_path: Path) -> None:
         """A gate with a dangling HEAD must not yield a 'successful' empty cache.
 
@@ -343,6 +373,56 @@ class TestGateHeadSelfHeal:
             assert gate._heal_gate_head(env={}) is None
 
         mock_query.assert_not_called()
+
+    def test_dangling_head_healed_from_upstream(self, tmp_path: Path) -> None:
+        """A dangling HEAD is re-pointed at upstream's advertised default branch.
+
+        Direct exercise of the repair path: recent git updates a mirror's
+        HEAD during fetch itself, so the rename end-to-end test may never
+        reach the heal — older git (the real-world failure) does.
+        """
+        import subprocess
+
+        upstream, gate_dir = _make_upstream_and_gate(tmp_path)
+        subprocess.run(
+            ["git", "-C", str(gate_dir), "symbolic-ref", "HEAD", "refs/heads/nonexistent"],
+            check=True,
+            capture_output=True,
+        )
+        gate = GitGate(scope="proj", gate_path=gate_dir, upstream_url=str(upstream))
+
+        assert gate._heal_gate_head(env=os.environ.copy()) is None
+
+        head = subprocess.run(
+            ["git", "-C", str(gate_dir), "symbolic-ref", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        assert head == "refs/heads/master"
+
+    def test_dangling_head_unreachable_upstream_reports_error(self, tmp_path: Path) -> None:
+        """When the default branch cannot be determined, heal returns an error."""
+        import subprocess
+
+        _, gate_dir = _make_upstream_and_gate(tmp_path)
+        git = ["git", "-C", str(gate_dir)]
+        subprocess.run(
+            [*git, "symbolic-ref", "HEAD", "refs/heads/nonexistent"],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            [*git, "remote", "set-url", "origin", str(tmp_path / "gone")],
+            check=True,
+            capture_output=True,
+        )
+        gate = GitGate(scope="proj", gate_path=gate_dir, upstream_url=str(tmp_path / "gone"))
+
+        error = gate._heal_gate_head(env=os.environ.copy())
+
+        assert error is not None
+        assert "could not be determined" in error
 
 
 class TestForceReinitClearsCache:
