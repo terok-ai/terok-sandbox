@@ -745,6 +745,12 @@ def change_passphrase(
     # see vault.store.recovery), so the change flow must drop it.
     forget_recovery_marker(cfg.vault_recovery_marker_file)
 
+    # Stamp the rekey so health surfaces can flag supervisors spawned
+    # before it — they keep the passphrase they resolved at spawn.
+    from .._yaml import write_secret_text
+
+    write_secret_text(cfg.vault_rekey_stamp_file, "")
+
     return PassphraseChangeResult(
         passphrase=new, generated=generated, rekeyed=db_exists, rewrites=rewrites
     )

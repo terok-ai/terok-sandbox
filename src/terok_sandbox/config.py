@@ -417,6 +417,20 @@ class SandboxConfig:
         """
         return self.runtime_dir / "vault.passphrase"
 
+    @property
+    def vault_rekey_stamp_file(self) -> Path:
+        """Return the marker whose mtime records the last passphrase change.
+
+        Touched by [`change_passphrase`][terok_sandbox.commands.vault.change_passphrase]
+        so health surfaces can flag supervisors that were spawned *before*
+        the rekey — they keep the passphrase they resolved at spawn and
+        need a restart to pick up the new one.  Lives under
+        ``runtime_dir`` deliberately: it vanishes on reboot together
+        with every process it could possibly indict, so a stale stamp
+        can never outlive the problem it describes.
+        """
+        return self.runtime_dir / "vault.rekeyed_at"
+
     def container_runtime_dir(self, container_name: str) -> Path:
         """Host-side per-container runtime dir, bind-mounted at ``/run/terok``.
 

@@ -187,6 +187,8 @@ class TestChangePassphrase:
         assert _opens_with(cfg, NEW) and not _opens_with(cfg, OLD)
         # The confirmed-saved marker referred to the old passphrase.
         assert not acknowledged(cfg.vault_recovery_marker_file)
+        # The rekey stamp lets health surfaces flag pre-rekey supervisors.
+        assert cfg.vault_rekey_stamp_file.exists()
 
     def test_minted_when_new_is_omitted(self, tmp_path: Path) -> None:
         cfg = _cfg(tmp_path)
