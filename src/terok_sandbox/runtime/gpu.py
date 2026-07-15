@@ -109,9 +109,16 @@ _KEEP_GROUPS_HINT = (
     "is only supported by the crun OCI runtime.  Install crun and set\n"
     "'run.runtime: crun' in project.yml (or make crun podman's default)."
 )
+_NVIDIA_HOOK_HINT = (
+    "Hint: the NVIDIA container hook failed to inject the GPU.  On rootless\n"
+    "podman the toolkit must be configured with 'no-cgroups = true' under\n"
+    "[nvidia-container-cli] in /etc/nvidia-container-runtime/config.toml\n"
+    "(host admin action), and the toolkit must match the installed driver."
+)
 
 _CDI_ERROR_PATTERNS = ("cdi.k8s.io", _NVIDIA_GPU_KIND, _AMD_GPU_KIND, _INTEL_GPU_KIND, "CDI")
 _KEEP_GROUPS_ERROR_PATTERNS = ("keep-groups", "keep_original_groups")
+_NVIDIA_HOOK_ERROR_PATTERNS = ("nvidia-container-cli", "nvidia-container-runtime-hook")
 
 
 class GpuConfigError(RuntimeError):
@@ -166,8 +173,10 @@ def check_gpu_available() -> bool:
 def check_gpu_error(exc: subprocess.CalledProcessError) -> None:
     """Raise [`GpuConfigError`][terok_sandbox.runtime.gpu.GpuConfigError] if *exc* looks like a GPU launch issue.
 
-    Recognises CDI misconfiguration and the crun-only ``keep-groups``
-    rejection; does nothing when the error matches neither.  Defensively
+    Recognises CDI misconfiguration, the crun-only ``keep-groups``
+    rejection, and legacy NVIDIA hook failures (typically the rootless
+    ``no-cgroups`` requirement); does nothing when the error matches
+    none of them.  Defensively
     handles both ``bytes`` and ``str`` stderr so callers that ran
     subprocess with ``text=True`` are not punished with an
     ``AttributeError`` on ``.decode``.
@@ -179,6 +188,8 @@ def check_gpu_error(exc: subprocess.CalledProcessError) -> None:
     hint = None
     if any(pat in stderr for pat in _KEEP_GROUPS_ERROR_PATTERNS):
         hint = _KEEP_GROUPS_HINT
+    elif any(pat in stderr for pat in _NVIDIA_HOOK_ERROR_PATTERNS):
+        hint = _NVIDIA_HOOK_HINT
     elif any(pat in stderr for pat in _CDI_ERROR_PATTERNS):
         hint = _CDI_HINT
     if hint is not None:

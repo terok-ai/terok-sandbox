@@ -397,6 +397,21 @@ class TestCheckGpuError:
             check_gpu_error(exc)
         assert "crun" in excinfo.value.hint
 
+    def test_nvidia_hook_failure_hints_at_rootless_config(self) -> None:
+        """A legacy-hook failure maps to the no-cgroups/toolkit hint."""
+        exc = subprocess.CalledProcessError(
+            returncode=126,
+            cmd=["podman", "run"],
+            stderr=(
+                b"Error: OCI runtime error: crun: error executing hook "
+                b"/usr/bin/nvidia-container-runtime-hook (exit code: 1): "
+                b"nvidia-container-cli: container error: cgroup subsystem devices not found"
+            ),
+        )
+        with pytest.raises(GpuConfigError) as excinfo:
+            check_gpu_error(exc)
+        assert "no-cgroups" in excinfo.value.hint
+
     def test_unrelated_error_does_not_raise(self) -> None:
         """Non-GPU stderr passes through silently."""
         exc = subprocess.CalledProcessError(
