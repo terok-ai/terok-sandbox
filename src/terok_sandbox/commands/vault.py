@@ -967,6 +967,7 @@ def _handle_vault_status(*, cfg: SandboxConfig | None = None, as_json: bool = Fa
                         for warning in status.warnings
                     ],
                     "credentials": list(status.providers) if status.providers is not None else None,
+                    "ssh_keys": status.ssh_keys,
                     "db_path": str(status.db_path),
                 },
                 indent=2,
@@ -1023,6 +1024,7 @@ def _print_vault_status(status: VaultStatus) -> None:
             f" ({', '.join(sanitize_tty(p) for p in status.providers)})" if status.providers else ""
         )
         print(f"  Credentials: {len(status.providers)} stored{listing}")
+        print(f"  SSH keys:    {status.ssh_keys} stored")
 
 
 def _handle_vault_list(

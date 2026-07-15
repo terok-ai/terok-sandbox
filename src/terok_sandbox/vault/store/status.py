@@ -29,9 +29,11 @@ different remedies, so the classification keeps them apart:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal
 
 # The function calls go through the module namespace (not by-value
@@ -319,6 +321,16 @@ class VaultStatus:
     """Sorted provider slugs stored in the vault; ``None`` when the DB
     couldn't be read (locked / error)."""
 
+    credential_types: Mapping[str, str] | None
+    """``provider → type`` (``api_key`` / ``oauth_token`` / …), read in
+    the same DB pass as ``providers`` so no renderer ever pays a second
+    SQLCipher key derivation just to label a row.  ``None`` exactly
+    when ``providers`` is."""
+
+    ssh_keys: int | None
+    """Count of stored SSH keypairs, from the same DB pass.  ``None``
+    exactly when ``providers`` is."""
+
     warnings: tuple[VaultWarning, ...]
 
     @classmethod
@@ -365,10 +377,10 @@ class VaultStatus:
         shadow = session_shadow_state(cfg) if any(row.shadowed for row in rows) else None
 
         db_exists = cfg.db_path.exists()
-        lock_reason, providers, db_error = _classify_db_access(cfg, recovery, db_exists=db_exists)
-        if db_error is not None:
+        access = _classify_db_access(cfg, recovery, db_exists=db_exists)
+        if access.db_error is not None:
             state = VaultState.ERROR
-        elif lock_reason is None:
+        elif access.lock_reason is None:
             state = VaultState.UNLOCKED
         elif not db_exists and recovery.source is None and recovery.resolve_error is None:
             state = VaultState.UNPROVISIONED
@@ -377,31 +389,46 @@ class VaultStatus:
 
         return cls(
             state=state,
-            lock_reason=lock_reason,
-            db_error=db_error,
+            lock_reason=access.lock_reason,
+            db_error=access.db_error,
             source=recovery.source,
             chain=rows,
             shadow=shadow,
             recovery=recovery,
             db_path=cfg.db_path,
             db_exists=db_exists,
-            providers=providers,
+            providers=access.providers,
+            credential_types=access.credential_types,
+            ssh_keys=access.ssh_keys,
             warnings=_build_warnings(recovery, shadow),
         )
 
 
+@dataclass(frozen=True)
+class _DbAccess:
+    """What one best-effort DB open established — the classifier's answers."""
+
+    lock_reason: str | None = None
+    providers: tuple[str, ...] | None = None
+    credential_types: Mapping[str, str] | None = None
+    ssh_keys: int | None = None
+    db_error: str | None = None
+
+
 def _classify_db_access(
     cfg: SandboxConfig, recovery: RecoveryStatus, *, db_exists: bool
-) -> tuple[str | None, tuple[str, ...] | None, str | None]:
-    """One best-effort DB open, three answers: ``(lock_reason, providers, db_error)``.
+) -> _DbAccess:
+    """One best-effort DB open, every answer the status needs.
 
     - ``lock_reason`` set — the vault can't be opened *because of the
       passphrase*: nothing in any tier (provision one), the resolved
       value doesn't open the DB (typo / foreign DB — re-enter the right
       one), or a configured tier is unreadable (fail-closed from the
       resolver, carried in via ``recovery.resolve_error``).
-    - ``providers`` set — the DB opened (or doesn't exist yet while a
-      tier is ready); sorted provider slugs, empty on a fresh install.
+    - ``providers`` / ``credential_types`` / ``ssh_keys`` set — the DB
+      opened (or doesn't exist yet while a tier is ready); all three
+      come from the same open so no caller pays a second SQLCipher key
+      derivation for the details.
     - ``db_error`` set — the DB failed for a non-passphrase reason
       (schema drift, permissions); surfaced verbatim.
 
@@ -413,43 +440,44 @@ def _classify_db_access(
     # scanners (Sonar S2068) don't misread the assignment.
     no_tier_reason = "no passphrase in any tier"
     if recovery.resolve_error is not None:
-        return f"a configured tier is unreadable — {recovery.resolve_error}", None, None
+        return _DbAccess(lock_reason=f"a configured tier is unreadable — {recovery.resolve_error}")
     if recovery.source is None:
-        return no_tier_reason, None, None
+        return _DbAccess(lock_reason=no_tier_reason)
     if not db_exists:
-        return None, (), None
+        return _DbAccess(providers=(), credential_types=MappingProxyType({}), ssh_keys=0)
     try:
         db = cfg.open_credential_db(prompt_on_tty=False)
     except WrongPassphraseError:
-        return (
-            f"the passphrase via {recovery.source} does not open the DB"
-            " — wrong key, or a DB from another install",
-            None,
-            None,
+        return _DbAccess(
+            lock_reason=(
+                f"the passphrase via {recovery.source} does not open the DB"
+                " — wrong key, or a DB from another install"
+            )
         )
     except NoPassphraseError:
         # Tier vanished between the resolve and the open — plain lock.
-        return no_tier_reason, None, None
+        return _DbAccess(lock_reason=no_tier_reason)
     # ``Exception`` only: with ``prompt_on_tty=False`` no prompt path can
     # raise ``SystemExit`` here, and catching it would stringify an
     # explicit exit from a lower layer into a status line.
     except Exception as exc:  # noqa: BLE001 - non-passphrase failure, surfaced verbatim
-        return None, None, str(exc)
+        return _DbAccess(db_error=str(exc))
     try:
-        providers = tuple(
-            sorted(
-                {
-                    provider
-                    for cs in db.list_credential_sets()
-                    for provider in db.list_credentials(cs)
-                }
-            )
-        )
+        types: dict[str, str] = {}
+        for credential_set in db.list_credential_sets():
+            for provider in db.list_credentials(credential_set):
+                row = db.load_credential(credential_set, provider)
+                types.setdefault(provider, str(row.get("type", "unknown")) if row else "unknown")
+        ssh_keys = db.count_ssh_keys()
     except Exception as exc:  # noqa: BLE001 - a mid-read failure is a DB fault, not a lock
-        return None, None, str(exc)
+        return _DbAccess(db_error=str(exc))
     finally:
         db.close()
-    return None, providers, None
+    return _DbAccess(
+        providers=tuple(sorted(types)),
+        credential_types=MappingProxyType(types),
+        ssh_keys=ssh_keys,
+    )
 
 
 __all__ = [

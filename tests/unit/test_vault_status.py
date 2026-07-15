@@ -181,20 +181,20 @@ class TestClassifyDbAccess:
     def test_broken_tier_reports_resolve_error(self) -> None:
         """A fail-closed resolver (broken seal / dead helper) is named, not just 'locked'."""
         cfg = MagicMock()
-        reason, providers, db_error = _classify_db_access(
+        access = _classify_db_access(
             cfg,
             _recovery(resolve_error="sealed credential present but could not be unsealed"),
             db_exists=True,
         )
-        assert reason is not None and "unreadable" in reason
-        assert "could not be unsealed" in reason
-        assert providers is None and db_error is None
+        assert access.lock_reason is not None and "unreadable" in access.lock_reason
+        assert "could not be unsealed" in access.lock_reason
+        assert access.providers is None and access.db_error is None
         cfg.open_credential_db.assert_not_called()  # nothing to try — resolution already failed
 
     def test_no_passphrase_anywhere(self) -> None:
-        reason, providers, db_error = _classify_db_access(MagicMock(), _recovery(), db_exists=True)
-        assert reason == "no passphrase in any tier"
-        assert providers is None and db_error is None
+        access = _classify_db_access(MagicMock(), _recovery(), db_exists=True)
+        assert access.lock_reason == "no passphrase in any tier"
+        assert access.providers is None and access.db_error is None
 
     def test_missing_db_with_ready_tier_never_opens(self) -> None:
         """A fresh install with a resolving tier is 'unlocked' *without* touching SQLite.
@@ -203,11 +203,10 @@ class TestClassifyDbAccess:
         must never be the write that defines the vault's encryption key.
         """
         cfg = MagicMock()
-        reason, providers, db_error = _classify_db_access(
-            cfg, _recovery(source="keyring"), db_exists=False
-        )
-        assert reason is None and db_error is None
-        assert providers == ()
+        access = _classify_db_access(cfg, _recovery(source="keyring"), db_exists=False)
+        assert access.lock_reason is None and access.db_error is None
+        assert access.providers == ()
+        assert access.ssh_keys == 0 and dict(access.credential_types or {}) == {}
         cfg.open_credential_db.assert_not_called()
 
     def test_wrong_passphrase_names_the_tier(self) -> None:
@@ -216,11 +215,10 @@ class TestClassifyDbAccess:
 
         cfg = MagicMock()
         cfg.open_credential_db.side_effect = WrongPassphraseError("could not decrypt")
-        reason, providers, db_error = _classify_db_access(
-            cfg, _recovery(source="keyring"), db_exists=True
-        )
-        assert reason is not None and "via keyring does not open the DB" in reason
-        assert providers is None and db_error is None
+        access = _classify_db_access(cfg, _recovery(source="keyring"), db_exists=True)
+        assert access.lock_reason is not None
+        assert "via keyring does not open the DB" in access.lock_reason
+        assert access.providers is None and access.db_error is None
 
     def test_open_no_passphrase_race_is_plain_lock(self) -> None:
         """A tier that vanishes between the resolve and the open is a plain lock."""
@@ -228,11 +226,9 @@ class TestClassifyDbAccess:
 
         cfg = MagicMock()
         cfg.open_credential_db.side_effect = NoPassphraseError("tier gone")
-        reason, providers, db_error = _classify_db_access(
-            cfg, _recovery(source="keyring"), db_exists=True
-        )
-        assert reason == "no passphrase in any tier"
-        assert providers is None and db_error is None
+        access = _classify_db_access(cfg, _recovery(source="keyring"), db_exists=True)
+        assert access.lock_reason == "no passphrase in any tier"
+        assert access.providers is None and access.db_error is None
 
     def test_system_exit_propagates(self) -> None:
         """An explicit exit from a lower layer must not be stringified into status."""
@@ -245,13 +241,18 @@ class TestClassifyDbAccess:
         db = MagicMock()
         db.list_credential_sets.return_value = ["default"]
         db.list_credentials.return_value = ["github", "openai"]
+        db.load_credential.side_effect = lambda _cs, provider: {"type": f"{provider}-type"}
+        db.count_ssh_keys.return_value = 3
         cfg = MagicMock()
         cfg.open_credential_db.return_value = db
-        reason, providers, db_error = _classify_db_access(
-            cfg, _recovery(source="keyring"), db_exists=True
-        )
-        assert reason is None and db_error is None
-        assert providers == ("github", "openai")
+        access = _classify_db_access(cfg, _recovery(source="keyring"), db_exists=True)
+        assert access.lock_reason is None and access.db_error is None
+        assert access.providers == ("github", "openai")
+        assert dict(access.credential_types or {}) == {
+            "github": "github-type",
+            "openai": "openai-type",
+        }
+        assert access.ssh_keys == 3
         db.close.assert_called_once()
 
     def test_mid_read_failure_is_db_error(self) -> None:
@@ -260,11 +261,9 @@ class TestClassifyDbAccess:
         db.list_credential_sets.side_effect = RuntimeError("corrupt page")
         cfg = MagicMock()
         cfg.open_credential_db.return_value = db
-        reason, providers, db_error = _classify_db_access(
-            cfg, _recovery(source="keyring"), db_exists=True
-        )
-        assert reason is None and providers is None
-        assert db_error is not None and "corrupt page" in db_error
+        access = _classify_db_access(cfg, _recovery(source="keyring"), db_exists=True)
+        assert access.lock_reason is None and access.providers is None
+        assert access.db_error is not None and "corrupt page" in access.db_error
         db.close.assert_called_once()
 
 
