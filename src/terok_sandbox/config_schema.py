@@ -82,13 +82,13 @@ def normalize_gpus(value: bool | str | Sequence[str] | None) -> GpuSelector:
     tokens = [tok for part in parts for raw in part.split(",") if (tok := raw.strip().lower())]
     if not tokens:
         return None
-    if "all" in tokens:
-        return "all"
-    if unknown := [tok for tok in tokens if tok not in GPU_VENDORS]:
+    if unknown := [tok for tok in tokens if tok != "all" and tok not in GPU_VENDORS]:
         raise ValueError(
             f"run.gpus: unknown GPU vendor(s) {unknown!r}; "
             f"expected 'all', true, or any of {list(GPU_VENDORS)}"
         )
+    if "all" in tokens:
+        return "all"
     return tuple(vendor for vendor in GPU_VENDORS if vendor in tokens)
 
 
@@ -379,6 +379,21 @@ class RawRunSection(BaseModel):
         ),
     )
     hooks: RawHooksSection = Field(default_factory=RawHooksSection)
+
+    @field_validator("gpus", mode="before")
+    @classmethod
+    def _reject_numeric_gpus(cls, v: Any) -> Any:
+        """Reject numeric YAML shapes (``gpus: 1``) before bool coercion.
+
+        Pydantic's lax mode would coerce ``0``/``1``/``1.0`` through the
+        ``bool`` branch and silently enable (or disable) every GPU; only
+        explicit booleans, selector strings, and lists carry meaning here.
+        """
+        if isinstance(v, int | float) and not isinstance(v, bool):
+            raise ValueError(
+                f"gpus {v!r}: expected true/false, 'all', vendor names, or a list of vendors"
+            )
+        return v
 
     @field_validator("gpus", mode="after")
     @classmethod

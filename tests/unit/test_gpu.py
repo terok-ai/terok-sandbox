@@ -54,10 +54,11 @@ class TestNormalizeGpus:
         """Emission order is fixed regardless of the input order."""
         assert normalize_gpus(["intel", "nvidia", "amd"]) == ("nvidia", "amd", "intel")
 
-    def test_unknown_vendor_raises(self) -> None:
-        """A typo'd vendor fails at parse time with the token in the message."""
+    @pytest.mark.parametrize("value", ["matrox", "all,matrox", ["all", "matrox"]])
+    def test_unknown_vendor_raises(self, value: object) -> None:
+        """A typo'd vendor fails at parse time — even alongside ``all``."""
         with pytest.raises(ValueError, match="matrox"):
-            normalize_gpus("matrox")
+            normalize_gpus(value)  # type: ignore[arg-type]
 
 
 # ── Podman args per vendor ─────────────────────────────────────────────────
@@ -306,7 +307,7 @@ class TestCheckGpuAvailable:
         ):
             assert check_gpu_available() is False
 
-    def test_returns_false_when_podman_missing(self) -> None:
+    def test_returns_false_when_podman_missing(self, tmp_path: Path) -> None:
         """No podman → no GPU; never raises."""
         with (
             patch(
@@ -315,19 +316,19 @@ class TestCheckGpuAvailable:
             ),
             patch(
                 "terok_sandbox.runtime.gpu._CDI_DEFAULT_DIRS",
-                (Path("/nonexistent-cdi-a"), Path("/nonexistent-cdi-b")),
+                (tmp_path / "missing-cdi-a", tmp_path / "missing-cdi-b"),
             ),
         ):
             assert check_gpu_available() is False
 
-    def test_returns_false_when_podman_errors(self) -> None:
+    def test_returns_false_when_podman_errors(self, tmp_path: Path) -> None:
         """A non-zero ``podman info`` falls back to scanning default dirs."""
         err = subprocess.CalledProcessError(returncode=1, cmd=["podman", "info"], stderr=b"boom")
         with (
             patch("terok_sandbox.runtime.gpu.subprocess.run", side_effect=err),
             patch(
                 "terok_sandbox.runtime.gpu._CDI_DEFAULT_DIRS",
-                (Path("/nonexistent-cdi-a"),),
+                (tmp_path / "missing-cdi-a",),
             ),
         ):
             assert check_gpu_available() is False

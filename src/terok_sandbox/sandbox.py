@@ -298,7 +298,8 @@ class RunSpec:
     """Deprecated constructor alias for ``gpus`` (the pre-vendor bool knob).
 
     ``gpu_enabled=True`` maps to ``gpus="all"`` and emits a
-    ``DeprecationWarning``.  Deprecated since 0.5.0; will be removed
+    ``DeprecationWarning``; combining it with an explicit ``gpus``
+    raises ``ValueError``.  Deprecated since 0.5.0; will be removed
     in terok-sandbox 0.7.0.
     """
 
@@ -315,6 +316,10 @@ class RunSpec:
         """
         object.__setattr__(self, "annotations", MappingProxyType(dict(self.annotations)))
         if gpu_enabled is not None:
+            if self.gpus is not None:
+                raise ValueError(
+                    "RunSpec: pass either gpus or the deprecated gpu_enabled, not both"
+                )
             warnings.warn(
                 "RunSpec(gpu_enabled=...) is deprecated, to be removed in "
                 'terok-sandbox 0.7.0; use gpus="all" / vendor names',
