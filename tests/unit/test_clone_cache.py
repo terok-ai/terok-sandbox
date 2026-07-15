@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -48,7 +48,7 @@ class TestRefreshCloneCache:
     """Verify _refresh_clone_cache creates or updates the cache."""
 
     def test_creates_cache_via_git_clone(self, tmp_path: Path) -> None:
-        """When cache dir doesn't exist, git clone is invoked."""
+        """When cache dir doesn't exist, git clone is invoked, then HEAD verified."""
         gate_dir = tmp_path / "gate" / "proj.git"
         gate_dir.mkdir(parents=True)
         cache_base = tmp_path / "clone-cache"
@@ -64,11 +64,13 @@ class TestRefreshCloneCache:
             result = gate._refresh_clone_cache()
 
         assert result is None
-        mock_run.assert_called_once()
-        cmd = mock_run.call_args[0][0]
+        # clone → rev-parse --verify HEAD (guards against empty-checkout clones)
+        assert mock_run.call_count == 2
+        cmd = mock_run.call_args_list[0].args[0]
         assert cmd[0:2] == ["git", "clone"]
         assert cmd[2].startswith("file:///") and str(gate_dir.name) in cmd[2]
         assert str(cache_base / "proj") in cmd
+        assert "rev-parse" in mock_run.call_args_list[1].args[0]
 
     def test_fetches_when_cache_exists(self, tmp_path: Path) -> None:
         """When cache dir already exists, git fetch is used instead of clone."""
@@ -168,6 +170,192 @@ class TestRefreshCloneCache:
         """With no clone_cache_base, _refresh_clone_cache reports it is unconfigured."""
         gate = GitGate(scope="proj", gate_path="/tmp/terok-testing/gate/proj.git")
         assert gate._refresh_clone_cache() == "no clone cache configured"
+
+
+def _make_upstream_and_gate(tmp_path: Path, *, branch: str = "master") -> tuple[Path, Path]:
+    """Create a real one-commit upstream repo and a ``--mirror`` gate of it."""
+    import subprocess
+
+    upstream = tmp_path / "upstream"
+    subprocess.run(["git", "init", "-b", branch, str(upstream)], check=True, capture_output=True)
+    (upstream / "file.txt").write_text("v1\n")
+    git = ["git", "-C", str(upstream)]
+    subprocess.run([*git, "add", "."], check=True, capture_output=True)
+    subprocess.run(
+        [*git, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "v1"],
+        check=True,
+        capture_output=True,
+    )
+    gate_dir = tmp_path / "gate" / "proj.git"
+    subprocess.run(
+        ["git", "clone", "--mirror", str(upstream), str(gate_dir)],
+        check=True,
+        capture_output=True,
+    )
+    return upstream, gate_dir
+
+
+class TestCacheAutoRebuild:
+    """Any incremental-refresh failure discards the cache and rebuilds it."""
+
+    def test_incremental_failure_falls_back_to_rebuild(self, tmp_path: Path) -> None:
+        """A failing in-place update triggers a from-scratch clone, not an error."""
+        import subprocess
+
+        gate_dir = tmp_path / "gate" / "proj.git"
+        gate_dir.mkdir(parents=True)
+        cache_dir = tmp_path / "clone-cache" / "proj"
+        cache_dir.mkdir(parents=True)
+
+        gate = GitGate(scope="proj", gate_path=gate_dir, clone_cache_base=tmp_path / "clone-cache")
+
+        ok = MagicMock(returncode=0)
+        with patch(
+            "terok_sandbox.gate.mirror.subprocess.run",
+            side_effect=[
+                subprocess.CalledProcessError(128, "git", stderr=b"fatal: bad ref\n"),
+                ok,  # git clone
+                ok,  # rev-parse --verify HEAD
+            ],
+        ) as mock_run:
+            result = gate._refresh_clone_cache()
+
+        assert result is None
+        cmds = [call.args[0] for call in mock_run.call_args_list]
+        assert "set-url" in cmds[0]
+        assert "clone" in cmds[1]
+        assert "rev-parse" in cmds[2]
+        # the stale cache was removed before the (mocked) re-clone
+        assert not cache_dir.exists()
+
+    def test_rebuild_failure_reports_and_removes_cache(self, tmp_path: Path) -> None:
+        """When the rebuild fails too, the error surfaces and no half-built cache remains."""
+        import subprocess
+
+        gate_dir = tmp_path / "gate" / "proj.git"
+        gate_dir.mkdir(parents=True)
+        cache_dir = tmp_path / "clone-cache" / "proj"
+        cache_dir.mkdir(parents=True)
+
+        gate = GitGate(scope="proj", gate_path=gate_dir, clone_cache_base=tmp_path / "clone-cache")
+
+        with patch(
+            "terok_sandbox.gate.mirror.subprocess.run",
+            side_effect=subprocess.CalledProcessError(128, "git", stderr=b"fatal: broken\n"),
+        ):
+            result = gate._refresh_clone_cache()
+
+        assert result is not None
+        assert "fatal: broken" in result
+        assert not cache_dir.exists()
+
+    def test_rebuild_refuses_empty_checkout_cache(self, tmp_path: Path) -> None:
+        """A gate with a dangling HEAD must not yield a 'successful' empty cache.
+
+        ``git clone`` exits 0 against such a gate but checks out nothing;
+        the post-clone HEAD verification turns that into a reported
+        failure and removes the unusable cache.
+        """
+        import subprocess
+
+        _, gate_dir = _make_upstream_and_gate(tmp_path)
+        subprocess.run(
+            ["git", "-C", str(gate_dir), "symbolic-ref", "HEAD", "refs/heads/nonexistent"],
+            check=True,
+            capture_output=True,
+        )
+        cache_base = tmp_path / "clone-cache"
+        gate = GitGate(scope="proj", gate_path=gate_dir, clone_cache_base=cache_base)
+
+        result = gate._refresh_clone_cache()
+
+        assert result is not None
+        assert not (cache_base / "proj").exists()
+
+
+class TestGateHeadSelfHeal:
+    """sync() re-points the gate's HEAD after an upstream default-branch rename."""
+
+    def test_upstream_rename_heals_head_and_cache(self, tmp_path: Path) -> None:
+        """End-to-end: upstream renames its default branch; plain sync recovers."""
+        import subprocess
+
+        upstream, gate_dir = _make_upstream_and_gate(tmp_path)
+        cache_base = tmp_path / "clone-cache"
+        gate = GitGate(
+            scope="proj",
+            gate_path=gate_dir,
+            upstream_url=str(upstream),
+            clone_cache_base=cache_base,
+        )
+
+        first = gate.sync()
+        assert first["success"] is True and first["cache_refreshed"] is True
+
+        subprocess.run(
+            ["git", "-C", str(upstream), "branch", "-m", "master", "trunk"],
+            check=True,
+            capture_output=True,
+        )
+
+        second = gate.sync()
+
+        assert second["success"] is True
+        assert second["cache_error"] is None
+        assert second["cache_refreshed"] is True
+        head = subprocess.run(
+            ["git", "-C", str(gate_dir), "symbolic-ref", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        assert head == "refs/heads/trunk"
+        assert (cache_base / "proj" / "file.txt").read_text() == "v1\n"
+
+    def test_valid_head_is_left_alone(self, tmp_path: Path) -> None:
+        """The happy path never contacts upstream or rewrites a healthy HEAD."""
+        _, gate_dir = _make_upstream_and_gate(tmp_path)
+        gate = GitGate(scope="proj", gate_path=gate_dir, upstream_url=str(gate_dir))
+
+        with patch("terok_sandbox.gate.mirror._query_upstream_head_ref") as mock_query:
+            gate._heal_gate_head(env={})
+
+        mock_query.assert_not_called()
+
+
+class TestForceReinitClearsCache:
+    """force_reinit recreates the clone cache along with the bare mirror."""
+
+    def test_force_reinit_removes_cache_dir(self, tmp_path: Path) -> None:
+        gate_dir = tmp_path / "gate" / "proj.git"
+        gate_dir.mkdir(parents=True)
+        cache_dir = tmp_path / "clone-cache" / "proj"
+        cache_dir.mkdir(parents=True)
+        (cache_dir / "stale.txt").write_text("stale\n")
+
+        gate = GitGate(
+            scope="proj",
+            gate_path=gate_dir,
+            upstream_url="git@github.com:org/repo.git",
+            clone_cache_base=tmp_path / "clone-cache",
+        )
+
+        with (
+            patch.object(gate, "_validate_gate"),
+            patch.object(gate, "_ssh_env", return_value={}),
+            patch("terok_sandbox.gate.mirror._clone_gate_mirror"),
+            patch.object(
+                gate,
+                "sync_branches",
+                return_value={"success": True, "updated_branches": ["all"], "errors": []},
+            ),
+            patch.object(gate, "_heal_gate_head"),
+            patch.object(gate, "_refresh_clone_cache", return_value=None),
+        ):
+            result = gate.sync(force_reinit=True)
+
+        assert result["success"] is True
+        assert not cache_dir.exists()
 
 
 class TestSyncIntegration:
