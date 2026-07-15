@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import socket
 import subprocess
 from unittest.mock import patch
@@ -117,25 +118,47 @@ class TestContainerStates:
         assert "a mount_program is required" in err
 
     @patch("terok_sandbox.runtime.podman.subprocess.check_output")
-    def test_parses_two_columns(self, mock_co) -> None:
-        """Each space-separated row becomes one dict entry, state lowercased."""
-        mock_co.return_value = "task-a Running\ntask-b Exited\n"
+    def test_parses_json_rows(self, mock_co) -> None:
+        """Each JSON row becomes one dict entry keyed by first name, state lowercased.
+
+        The raw ``State`` field is what podman 3.4 and 5 agree on — the
+        ``{{.State}}`` template prints ``Up 2 minutes ago`` on 3.4.
+        """
+        mock_co.return_value = json.dumps(
+            [
+                {"Names": ["task-a"], "State": "Running"},
+                {"Names": ["task-b"], "State": "exited"},
+            ]
+        )
         assert PodmanRuntime().container_states("task") == {
             "task-a": "running",
             "task-b": "exited",
         }
 
     @patch("terok_sandbox.runtime.podman.subprocess.check_output")
-    def test_skips_malformed_lines(self, mock_co) -> None:
-        """Lines without a state column are skipped."""
-        mock_co.return_value = "good Running\nmalformed-no-state\n"
+    def test_skips_malformed_rows(self, mock_co) -> None:
+        """Rows without names or a state string are skipped."""
+        mock_co.return_value = json.dumps(
+            [
+                {"Names": ["good"], "State": "running"},
+                {"Names": [], "State": "running"},
+                {"Names": ["no-state"]},
+            ]
+        )
         assert PodmanRuntime().container_states("p") == {"good": "running"}
 
     @patch("terok_sandbox.runtime.podman.subprocess.check_output")
     def test_no_matches_is_empty_dict(self, mock_co) -> None:
         """A successful query with no matching containers → ``{}``, not ``None``."""
-        mock_co.return_value = ""
+        mock_co.return_value = "[]\n"
         assert PodmanRuntime().container_states("p") == {}
+
+    @patch("terok_sandbox.runtime.podman.subprocess.check_output")
+    def test_unparsable_output_is_none_with_reason(self, mock_co, capsys) -> None:
+        """Non-JSON output → ``None`` (a failed query, not "no containers")."""
+        mock_co.return_value = "garbage not json"
+        assert PodmanRuntime().container_states("p") is None
+        assert "unparsable JSON" in capsys.readouterr().err
 
     @patch("terok_sandbox.runtime.podman.subprocess.check_output", side_effect=FileNotFoundError)
     def test_returns_none_when_podman_missing(self, _co) -> None:

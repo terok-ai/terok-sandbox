@@ -1163,6 +1163,12 @@ class PodmanRuntime:
         — single ``podman ps -a`` instead of N inspects.  Backend-specific;
         not part of the [`ContainerRuntime`][terok_sandbox.ContainerRuntime] protocol.
 
+        Reads ``--format json`` and the raw ``State`` field rather than the
+        ``{{.State}}`` template: the template is presentation-layer and
+        version-unstable (podman 3.4 renders a running container as
+        ``Up 2 minutes ago``, so every task displayed as stopped there),
+        while the JSON field carries the bare state on every podman version.
+
         Returns:
             ``{}`` when the query succeeded but no container matched, ``None``
             when the query itself failed (podman missing, or ``podman ps``
@@ -1180,8 +1186,7 @@ class PodmanRuntime:
                     "--filter",
                     f"name=^{prefix}-",
                     "--format",
-                    "{{.Names}} {{.State}}",
-                    "--no-trunc",
+                    "json",
                 ],
                 stderr=subprocess.PIPE,
                 text=True,
@@ -1206,11 +1211,18 @@ class PodmanRuntime:
             )
             return None
 
+        try:
+            rows = json.loads(out) or []
+        except ValueError:
+            print("podman ps returned unparsable JSON", file=sys.stderr)
+            return None
+
         result: dict[str, str] = {}
-        for line in out.strip().splitlines():
-            parts = line.split(None, 1)
-            if len(parts) == 2:
-                result[parts[0]] = parts[1].lower()
+        for row in rows:
+            names = row.get("Names") or []
+            state = row.get("State")
+            if names and isinstance(state, str):
+                result[names[0]] = state.lower()
         return result
 
     def events(self, prefix: str) -> PodmanEventStream:
