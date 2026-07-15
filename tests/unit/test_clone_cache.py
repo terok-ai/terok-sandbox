@@ -401,8 +401,13 @@ class TestGateHeadSelfHeal:
         ).stdout.strip()
         assert head == "refs/heads/master"
 
-    def test_heal_repair_failure_returns_error(self, tmp_path: Path) -> None:
-        """A failing symbolic-ref repair surfaces as an error description."""
+    def test_heal_refuses_absent_default_branch(self, tmp_path: Path) -> None:
+        """The heal never swaps one dangling symref for another.
+
+        When upstream advertises a default branch the gate doesn't have
+        (HEAD moved between fetch and ls-remote), re-pointing HEAD at it
+        would report a false success — refuse and keep HEAD as-is.
+        """
         import subprocess
 
         _, gate_dir = _make_upstream_and_gate(tmp_path)
@@ -413,9 +418,62 @@ class TestGateHeadSelfHeal:
         )
         gate = GitGate(scope="proj", gate_path=gate_dir, upstream_url=str(gate_dir))
 
-        # git refuses symrefs outside refs/ — the repair call itself fails
-        with patch("terok_sandbox.gate.mirror._query_upstream_head_ref", return_value="not-a-ref"):
+        with patch(
+            "terok_sandbox.gate.mirror._query_upstream_head_ref",
+            return_value="refs/heads/ghost",
+        ):
             error = gate._heal_gate_head(env=os.environ.copy())
+
+        assert error is not None
+        assert "not present in the gate" in error
+        head = subprocess.run(
+            ["git", "-C", str(gate_dir), "symbolic-ref", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        assert head == "refs/heads/nonexistent"
+
+    def test_detached_head_is_normalised(self, tmp_path: Path) -> None:
+        """A detached gate HEAD is re-pointed at upstream's default branch.
+
+        Mirrors need a *symref* HEAD — clone and ``set-head --auto`` only
+        work off the advertised symref — so detached counts as heal-worthy.
+        """
+        import subprocess
+
+        upstream, gate_dir = _make_upstream_and_gate(tmp_path)
+        git = ["git", "-C", str(gate_dir)]
+        commit = subprocess.run(
+            [*git, "rev-parse", "refs/heads/master"], check=True, capture_output=True, text=True
+        ).stdout.strip()
+        subprocess.run(
+            [*git, "update-ref", "--no-deref", "HEAD", commit], check=True, capture_output=True
+        )
+        gate = GitGate(scope="proj", gate_path=gate_dir, upstream_url=str(upstream))
+
+        assert gate._heal_gate_head(env=os.environ.copy()) is None
+
+        head = subprocess.run(
+            [*git, "symbolic-ref", "HEAD"], check=True, capture_output=True, text=True
+        ).stdout.strip()
+        assert head == "refs/heads/master"
+
+    def test_heal_repair_failure_returns_error(self, tmp_path: Path) -> None:
+        """A git failure inside the heal surfaces as an error description."""
+        import subprocess
+
+        gate = GitGate(
+            scope="proj",
+            gate_path=tmp_path / "gate" / "proj.git",
+            upstream_url="git@example.com:x/y.git",
+        )
+
+        with patch(
+            "terok_sandbox.gate.mirror.subprocess.run",
+            side_effect=subprocess.TimeoutExpired("git", 10),
+        ):
+            error = gate._heal_gate_head(env={})
 
         assert error is not None
         assert "heal failed" in error
