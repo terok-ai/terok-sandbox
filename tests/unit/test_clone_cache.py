@@ -401,6 +401,35 @@ class TestGateHeadSelfHeal:
         ).stdout.strip()
         assert head == "refs/heads/master"
 
+    def test_heal_repair_failure_returns_error(self, tmp_path: Path) -> None:
+        """A failing symbolic-ref repair surfaces as an error description."""
+        import subprocess
+
+        _, gate_dir = _make_upstream_and_gate(tmp_path)
+        subprocess.run(
+            ["git", "-C", str(gate_dir), "symbolic-ref", "HEAD", "refs/heads/nonexistent"],
+            check=True,
+            capture_output=True,
+        )
+        gate = GitGate(scope="proj", gate_path=gate_dir, upstream_url=str(gate_dir))
+
+        # git refuses symrefs outside refs/ — the repair call itself fails
+        with patch("terok_sandbox.gate.mirror._query_upstream_head_ref", return_value="not-a-ref"):
+            error = gate._heal_gate_head(env=os.environ.copy())
+
+        assert error is not None
+        assert "heal failed" in error
+
+    def test_query_upstream_head_without_symref_yields_none(self) -> None:
+        """Servers that advertise HEAD's hash but no symref resolve to None."""
+        from terok_sandbox.gate.mirror import _query_upstream_head_ref
+
+        with patch(
+            "terok_sandbox.gate.mirror.subprocess.run",
+            return_value=MagicMock(returncode=0, stdout="abc123\tHEAD\n"),
+        ):
+            assert _query_upstream_head_ref("/tmp/terok-testing/gate/proj.git", env={}) is None
+
     def test_dangling_head_unreachable_upstream_reports_error(self, tmp_path: Path) -> None:
         """When the default branch cannot be determined, heal returns an error."""
         import subprocess
