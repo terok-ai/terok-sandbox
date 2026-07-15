@@ -298,15 +298,15 @@ def _make_log_handler(base: Path) -> object:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 2b. git_gate — gate dir removal failure logging
+# 2b. git_gate — gate dir removal failure propagation
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-class TestGateDirRemovalWarning:
-    """Verify logger.warning when shutil.rmtree fails during force_reinit."""
+class TestGateDirRemovalFailure:
+    """force_reinit propagates rmtree failures instead of pressing on."""
 
-    def test_rmtree_failure_logs_warning(self, tmp_path: Path) -> None:
-        """Failed gate dir removal logs a warning and continues."""
+    def test_rmtree_failure_propagates(self, tmp_path: Path) -> None:
+        """A failed gate dir removal aborts the sync — no rebuild over stale data."""
         from terok_sandbox.gate.mirror import GitGate
 
         gate_dir = tmp_path / "gate" / "myproject.git"
@@ -319,19 +319,11 @@ class TestGateDirRemovalWarning:
 
         with (
             unittest.mock.patch("shutil.rmtree", side_effect=PermissionError("nope")),
-            unittest.mock.patch("terok_sandbox.gate.mirror._clone_gate_mirror"),
-            unittest.mock.patch("terok_sandbox.gate.mirror.logger") as mock_logger,
+            unittest.mock.patch("terok_sandbox.gate.mirror._clone_gate_mirror") as mock_clone,
         ):
-            try:
+            with pytest.raises(PermissionError):
                 gate.sync(force_reinit=True)
-            except Exception:
-                pass  # clone may fail; we only care about the warning
-            rmtree_warnings = [
-                c
-                for c in mock_logger.warning.call_args_list
-                if "Failed to remove gate dir" in str(c)
-            ]
-            assert len(rmtree_warnings) == 1
+            mock_clone.assert_not_called()
 
 
 # ═══════════════════════════════════════════════════════════════════════════

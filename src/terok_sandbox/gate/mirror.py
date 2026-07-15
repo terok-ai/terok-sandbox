@@ -291,6 +291,12 @@ class GitGate:
 
         A remoteless gate that already exists is a proper no-op: nothing
         re-initialises, and the returned branch list is empty.
+
+        ``force_reinit`` recreates the whole local footprint — the bare
+        mirror *and* the clone cache — so a hopeless state can always be
+        recovered with one flag.  Deletion failures propagate: rebuilding
+        over stale or partial data would silently defeat the point of a
+        from-scratch recovery.
         """
         self._validate_gate()
 
@@ -300,13 +306,12 @@ class GitGate:
 
         env = self._ssh_env()
         created = False
-        if force_reinit and gate_exists:
-            try:
-                if gate_dir.is_dir():
-                    shutil.rmtree(gate_dir)
-            except Exception as exc:
-                logger.warning(f"Failed to remove gate dir {gate_dir}: {exc}")
-            gate_exists = False
+        if force_reinit:
+            if gate_exists:
+                shutil.rmtree(gate_dir)
+                gate_exists = False
+            if self.cache_path is not None and self.cache_path.exists():
+                shutil.rmtree(self.cache_path)
 
         if not gate_exists:
             if self._upstream_url:
@@ -331,11 +336,19 @@ class GitGate:
             }
 
         sync_result = self.sync_branches(branches)
+        success = sync_result["success"]
+        errors = sync_result["errors"]
+
+        # A dangling gate HEAD breaks every fresh clone of the gate, so a
+        # failed heal is a sync failure, not a footnote.
+        if success and (head_error := self._heal_gate_head(env)):
+            errors.append(head_error)
+            success = False
 
         # Refresh the non-bare clone cache from the bare mirror (best-effort).
         cache_error: str | None = None
         cache_refreshed = False
-        if sync_result["success"] and self._clone_cache_base:
+        if success and self._clone_cache_base:
             cache_error = self._refresh_clone_cache()
             cache_refreshed = cache_error is None
 
@@ -343,83 +356,12 @@ class GitGate:
             "path": str(gate_dir),
             "upstream_url": self._upstream_url,
             "created": created,
-            "success": sync_result["success"],
+            "success": success,
             "updated_branches": sync_result["updated_branches"],
-            "errors": sync_result["errors"],
+            "errors": errors,
             "cache_refreshed": cache_refreshed,
             "cache_error": cache_error,
         }
-
-    def _refresh_clone_cache(self) -> str | None:
-        """Refresh the non-bare clone cache from the local bare mirror.
-
-        Creates the cache via ``git clone`` if it doesn't exist, or
-        fetches updates if it does.  Returns ``None`` on success or a
-        failure description (including git's stderr) otherwise.
-        Failures are logged and swallowed — the cache is purely an
-        optimization for faster task startup — but the description is
-        returned so ``sync()`` can surface it to the operator.
-        """
-        cache_dir = self.cache_path
-        if cache_dir is None:
-            return "no clone cache configured"
-
-        gate_file_url = self._gate_path.resolve().as_uri()
-        try:
-            cache_dir.parent.mkdir(parents=True, exist_ok=True)
-
-            if not cache_dir.exists():
-                logger.info("Creating clone cache at %s", cache_dir)
-                subprocess.run(  # nosec B603 B607 — argv built from fixed verbs + repo-relative paths — binary PATH lookup is the cross-distro contract
-                    ["git", "clone", gate_file_url, str(cache_dir)],
-                    check=True,
-                    capture_output=True,
-                    timeout=300,
-                )
-            else:
-                # Ensure origin points to current bare mirror
-                subprocess.run(  # nosec B603 B607 — argv built from fixed verbs + repo-relative paths — binary PATH lookup is the cross-distro contract
-                    ["git", "-C", str(cache_dir), "remote", "set-url", "origin", gate_file_url],
-                    check=True,
-                    capture_output=True,
-                    timeout=10,
-                )
-                subprocess.run(  # nosec B603 B607 — argv built from fixed verbs + repo-relative paths — binary PATH lookup is the cross-distro contract
-                    ["git", "-C", str(cache_dir), "fetch", "--all", "--prune"],
-                    check=True,
-                    capture_output=True,
-                    timeout=120,
-                )
-                # ``fetch`` never touches ``refs/remotes/origin/HEAD`` — only
-                # ``clone`` creates it, and the mirror's default branch can
-                # move after the cache was cloned.  Re-resolve it explicitly
-                # or the reset below fails on caches missing the ref.
-                subprocess.run(  # nosec B603 B607 — argv built from fixed verbs + repo-relative paths — binary PATH lookup is the cross-distro contract
-                    ["git", "-C", str(cache_dir), "remote", "set-head", "origin", "--auto"],
-                    check=True,
-                    capture_output=True,
-                    timeout=30,
-                )
-                # Update working tree to match fetched HEAD — the cache is
-                # copied as-is into task workspaces, so stale files matter.
-                subprocess.run(  # nosec B603 B607 — argv built from fixed verbs + repo-relative paths — binary PATH lookup is the cross-distro contract
-                    ["git", "-C", str(cache_dir), "reset", "--hard", "origin/HEAD"],
-                    check=True,
-                    capture_output=True,
-                    timeout=30,
-                )
-                # Remove untracked/ignored files so the cache stays pristine.
-                subprocess.run(  # nosec B603 B607 — argv built from fixed verbs + repo-relative paths — binary PATH lookup is the cross-distro contract
-                    ["git", "-C", str(cache_dir), "clean", "-ffdx"],
-                    check=True,
-                    capture_output=True,
-                    timeout=30,
-                )
-            return None
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
-            error = _describe_git_failure(exc)
-            logger.warning("Clone cache refresh failed (non-fatal): %s", error)
-            return error
 
     def sync_branches(self, branches: list[str] | None = None) -> BranchSyncResult:
         """Sync specific branches in the gate from upstream.
@@ -587,6 +529,183 @@ class GitGate:
 
         except Exception:
             return None
+
+    def _heal_gate_head(self, env: dict) -> str | None:
+        """Re-point the gate's ``HEAD`` after an upstream default-branch rename.
+
+        ``git remote update --prune`` moves the mirror's branch refs but
+        never touches its ``HEAD`` symref, so a rename upstream leaves it
+        dangling — and everything that asks the gate for its HEAD (clone
+        cache ``set-head``, fresh task clones) then fails or silently
+        checks out nothing.  The happy path costs one local ref lookup;
+        the upstream roundtrip runs only when HEAD is actually dangling.
+
+        Returns ``None`` when HEAD is healthy or was healed, or a failure
+        description otherwise — a gate whose HEAD stays dangling breaks
+        every fresh clone, so ``sync()`` reports it as a sync failure
+        rather than pressing on quietly.
+        """
+        gate_dir = str(self._gate_path)
+        try:
+            target = subprocess.run(  # nosec B603 B607 — argv built from fixed verbs + repo-relative paths — binary PATH lookup is the cross-distro contract
+                ["git", "-C", gate_dir, "symbolic-ref", "--quiet", "HEAD"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            ).stdout.strip()
+            dangling = not target or (
+                subprocess.run(  # nosec B603 B607 — argv built from fixed verbs + repo-relative paths — binary PATH lookup is the cross-distro contract
+                    ["git", "-C", gate_dir, "show-ref", "--verify", "--quiet", target],
+                    capture_output=True,
+                    timeout=10,
+                ).returncode
+                != 0
+            )
+            if not dangling:
+                return None
+
+            upstream_head = _query_upstream_head_ref(gate_dir, env)
+            if upstream_head is None:
+                return (
+                    f"gate HEAD {target or '(unset)'!r} is dangling and upstream's "
+                    "default branch could not be determined"
+                )
+            subprocess.run(  # nosec B603 B607 — argv built from fixed verbs + repo-relative paths — binary PATH lookup is the cross-distro contract
+                ["git", "-C", gate_dir, "symbolic-ref", "HEAD", upstream_head],
+                check=True,
+                capture_output=True,
+                timeout=10,
+            )
+            logger.info("Gate HEAD healed: %s -> %s", target or "(unset)", upstream_head)
+            return None
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
+            return f"gate HEAD heal failed: {_describe_git_failure(exc)}"
+
+    def _refresh_clone_cache(self) -> str | None:
+        """Refresh the non-bare clone cache from the local bare mirror.
+
+        The cache exists purely to make task startup fast, so it is never
+        worth preserving in a broken state: the happy path is a cheap
+        in-place update, and *any* failure there discards the cache and
+        rebuilds it from the gate (a local ``file://`` clone).  Returns
+        ``None`` on success, or a failure description (including git's
+        stderr) only when the rebuild itself failed too.
+        """
+        cache_dir = self.cache_path
+        if cache_dir is None:
+            return "no clone cache configured"
+
+        gate_file_url = self._gate_path.resolve().as_uri()
+        if cache_dir.exists():
+            try:
+                self._update_cache_in_place(cache_dir, gate_file_url)
+                return None
+            except (
+                subprocess.CalledProcessError,
+                subprocess.TimeoutExpired,
+                OSError,
+                RuntimeError,
+            ) as exc:
+                logger.warning(
+                    "Clone cache update failed; rebuilding from scratch: %s",
+                    _describe_git_failure(exc),
+                )
+        return self._rebuild_cache(cache_dir, gate_file_url)
+
+    def _update_cache_in_place(self, cache_dir: Path, gate_file_url: str) -> None:
+        """Fast-forward an existing cache working tree to the gate's default branch.
+
+        Raises on any git failure, and ``RuntimeError`` if the cache ends
+        up on a branch other than the gate's default — the caller answers
+        every failure the same way (discard and rebuild), so no per-step
+        handling here.
+        """
+        # Ensure origin points to current bare mirror
+        subprocess.run(  # nosec B603 B607 — argv built from fixed verbs + repo-relative paths — binary PATH lookup is the cross-distro contract
+            ["git", "-C", str(cache_dir), "remote", "set-url", "origin", gate_file_url],
+            check=True,
+            capture_output=True,
+            timeout=10,
+        )
+        subprocess.run(  # nosec B603 B607 — argv built from fixed verbs + repo-relative paths — binary PATH lookup is the cross-distro contract
+            ["git", "-C", str(cache_dir), "fetch", "--all", "--prune"],
+            check=True,
+            capture_output=True,
+            timeout=120,
+        )
+        # ``fetch`` never touches ``refs/remotes/origin/HEAD`` — only
+        # ``clone`` creates it, and the mirror's default branch can
+        # move after the cache was cloned.  Re-resolve it explicitly
+        # or the branch alignment below targets a stale default.
+        subprocess.run(  # nosec B603 B607 — argv built from fixed verbs + repo-relative paths — binary PATH lookup is the cross-distro contract
+            ["git", "-C", str(cache_dir), "remote", "set-head", "origin", "--auto"],
+            check=True,
+            capture_output=True,
+            timeout=30,
+        )
+        branch = _resolve_origin_default_branch(cache_dir)
+        # The cache is copied as-is into task workspaces, so the checked-out
+        # branch *name* matters, not just the tree: after a default-branch
+        # rename, hard-resetting the old branch would hand tasks the right
+        # files under a branch that no longer exists upstream.  ``-B``
+        # resets the branch to the remote tip and ``-f`` discards local
+        # edits — together, the hard reset this refresh always performed.
+        subprocess.run(  # nosec B603 B607 — argv built from fixed verbs + repo-relative paths — binary PATH lookup is the cross-distro contract
+            ["git", "-C", str(cache_dir), "checkout", "-q", "-f", "-B", branch, f"origin/{branch}"],
+            check=True,
+            capture_output=True,
+            timeout=30,
+        )
+        # Remove untracked/ignored files so the cache stays pristine.
+        subprocess.run(  # nosec B603 B607 — argv built from fixed verbs + repo-relative paths — binary PATH lookup is the cross-distro contract
+            ["git", "-C", str(cache_dir), "clean", "-ffdx"],
+            check=True,
+            capture_output=True,
+            timeout=30,
+        )
+        current = subprocess.run(  # nosec B603 B607 — argv built from fixed verbs + repo-relative paths — binary PATH lookup is the cross-distro contract
+            ["git", "-C", str(cache_dir), "symbolic-ref", "--short", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        ).stdout.strip()
+        if current != branch:
+            raise RuntimeError(f"clone cache is on {current!r} after refresh, expected {branch!r}")
+
+    def _rebuild_cache(self, cache_dir: Path, gate_file_url: str) -> str | None:
+        """Build the cache from scratch with a fresh clone of the gate.
+
+        A cache that cannot be built whole must not exist at all: a fresh
+        ``git clone`` exits 0 even when the remote's HEAD is unresolvable,
+        leaving an *empty* working tree that would seed empty task
+        workspaces.  The post-clone ``rev-parse`` catches that, and any
+        failure removes the half-built cache so task startup falls back
+        to a full clone instead of copying garbage.
+        """
+        try:
+            if cache_dir.exists():
+                shutil.rmtree(cache_dir)
+            cache_dir.parent.mkdir(parents=True, exist_ok=True)
+            logger.info("Creating clone cache at %s", cache_dir)
+            subprocess.run(  # nosec B603 B607 — argv built from fixed verbs + repo-relative paths — binary PATH lookup is the cross-distro contract
+                ["git", "clone", gate_file_url, str(cache_dir)],
+                check=True,
+                capture_output=True,
+                timeout=300,
+            )
+            subprocess.run(  # nosec B603 B607 — argv built from fixed verbs + repo-relative paths — binary PATH lookup is the cross-distro contract
+                ["git", "-C", str(cache_dir), "rev-parse", "--verify", "HEAD"],
+                check=True,
+                capture_output=True,
+                timeout=10,
+            )
+            return None
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
+            error = _describe_git_failure(exc)
+            logger.warning("Clone cache rebuild failed (non-fatal): %s", error)
+            shutil.rmtree(cache_dir, ignore_errors=True)
+            return error
 
 
 # ---------- Public predicates ----------
@@ -773,6 +892,47 @@ def _describe_git_failure(exc: Exception) -> str:
         stderr = stderr.decode("utf-8", errors="replace")
     detail = (stderr or "").strip()
     return f"{exc}: {detail}" if detail else str(exc)
+
+
+def _query_upstream_head_ref(gate_dir: str, env: dict) -> str | None:
+    """Ask upstream which ref its HEAD points at (e.g. ``refs/heads/main``).
+
+    Runs ``git ls-remote --symref origin HEAD`` inside the gate so the
+    mirror's own origin URL and the caller's SSH env do the routing.
+    Returns ``None`` when upstream is unreachable or advertises no
+    symref (very old servers) — callers treat that as "cannot heal".
+    """
+    result = subprocess.run(  # nosec B603 B607 — argv built from fixed verbs + repo-relative paths — binary PATH lookup is the cross-distro contract
+        ["git", "-C", gate_dir, "ls-remote", "--symref", "origin", "HEAD"],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        return None
+    for line in result.stdout.splitlines():
+        if line.startswith("ref:"):
+            # "ref: refs/heads/main\tHEAD"
+            return line.split()[1]
+    return None
+
+
+def _resolve_origin_default_branch(cache_dir: Path) -> str:
+    """Return the branch name ``refs/remotes/origin/HEAD`` points at.
+
+    Reads the local symref (no network) that ``remote set-head --auto``
+    just resolved, e.g. ``refs/remotes/origin/main`` → ``main``.  The
+    prefix strip keeps slashed branch names (``release/1.0``) intact.
+    """
+    head_ref = subprocess.run(  # nosec B603 B607 — argv built from fixed verbs + repo-relative paths — binary PATH lookup is the cross-distro contract
+        ["git", "-C", str(cache_dir), "symbolic-ref", "refs/remotes/origin/HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    ).stdout.strip()
+    return head_ref.removeprefix("refs/remotes/origin/")
 
 
 def _clone_gate_mirror(upstream_url: str, gate_dir: Path, env: dict) -> None:
