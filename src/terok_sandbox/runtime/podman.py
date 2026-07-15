@@ -40,94 +40,6 @@ from .protocol import (
     PortReservation,
 )
 
-_CDI_HINT = (
-    "Hint: NVIDIA CDI configuration appears to be missing or broken.\n"
-    "Ensure the NVIDIA Container Toolkit is installed and CDI is configured.\n"
-    "See: https://podman-desktop.io/docs/podman/gpu"
-)
-
-_NVIDIA_GPU_KIND = "nvidia.com/gpu"
-_CDI_ERROR_PATTERNS = ("cdi.k8s.io", _NVIDIA_GPU_KIND, "CDI")
-
-
-class GpuConfigError(RuntimeError):
-    """CDI/NVIDIA misconfiguration detected during container launch."""
-
-    def __init__(self, message: str, *, hint: str = _CDI_HINT) -> None:
-        """Store the CDI *hint* alongside the standard error *message*."""
-        self.hint = hint
-        super().__init__(message)
-
-
-def check_gpu_error(exc: subprocess.CalledProcessError) -> None:
-    """Raise [`GpuConfigError`][terok_sandbox.runtime.podman.GpuConfigError] if *exc* looks like a CDI/NVIDIA issue.
-
-    Does nothing if the error does not match any known CDI patterns.
-    Defensively handles both ``bytes`` and ``str`` stderr so callers
-    that ran subprocess with ``text=True`` are not punished with an
-    ``AttributeError`` on ``.decode``.
-    """
-    stderr_raw = exc.stderr or b""
-    if isinstance(stderr_raw, bytes):
-        stderr = stderr_raw.decode(errors="replace")
-    else:
-        stderr = str(stderr_raw)
-    if any(pat in stderr for pat in _CDI_ERROR_PATTERNS):
-        msg = f"Container launch failed (GPU misconfiguration):\n{stderr.strip()}\n\n{_CDI_HINT}"
-        raise GpuConfigError(msg) from exc
-
-
-_CDI_DEFAULT_DIRS: tuple[Path, ...] = (Path("/etc/cdi"), Path("/var/run/cdi"))
-
-
-def _cdi_spec_paths() -> list[Path]:
-    """Return CDI spec file paths podman is configured to scan.
-
-    Asks podman first (so a custom ``cdi_spec_dirs`` in
-    ``containers.conf`` is honoured) and falls back to the documented
-    default directories when podman is absent or its info template
-    doesn't expose ``Host.CDISpecs`` (older versions).
-    """
-    try:
-        proc = subprocess.run(  # nosec B603 B607 — podman CLI invocation matches existing pattern in this module
-            ["podman", "info", "--format", "{{json .Host.CDISpecs}}"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=True,
-        )
-        listed = json.loads(proc.stdout or "null") or []
-        if listed:
-            return [Path(p) for p in listed]
-    except (
-        FileNotFoundError,
-        subprocess.CalledProcessError,
-        subprocess.TimeoutExpired,
-        json.JSONDecodeError,
-    ):
-        pass
-    return [f for d in _CDI_DEFAULT_DIRS if d.is_dir() for f in d.iterdir() if f.is_file()]
-
-
-def check_gpu_available() -> bool:
-    """Return ``True`` when a CDI spec declares the ``nvidia.com/gpu`` kind.
-
-    Wizards call this to decide whether to offer the NVIDIA base image;
-    the on-launch [`check_gpu_error`][terok_sandbox.runtime.podman.check_gpu_error]
-    path is the authoritative one and stays in place.  Any failure
-    (missing podman, missing CDI dirs, unreadable spec) collapses to
-    ``False`` so callers can treat this as a pure yes/no signal.
-    """
-    return any(_NVIDIA_GPU_KIND in _safe_read(p) for p in _cdi_spec_paths())
-
-
-def _safe_read(path: Path) -> str:
-    try:
-        return path.read_text(errors="replace")
-    except OSError:
-        return ""
-
-
 _SENSITIVE_KEY_RE = re.compile(r"(?i)(KEY|TOKEN|SECRET|API|PASSWORD|PRIVATE)")
 _ALWAYS_REDACT_KEYS = frozenset({"CODE_REPO", "CLONE_FROM"})
 
@@ -154,20 +66,6 @@ def redact_env_args(cmd: list[str]) -> list[str]:
         else:
             out.append(arg)
     return out
-
-
-def gpu_run_args(*, enabled: bool = False) -> list[str]:
-    """Return ``podman run`` args for NVIDIA GPU passthrough."""
-    if not enabled:
-        return []
-    return [
-        "--device",
-        f"{_NVIDIA_GPU_KIND}=all",
-        "-e",
-        "NVIDIA_VISIBLE_DEVICES=all",
-        "-e",
-        "NVIDIA_DRIVER_CAPABILITIES=all",
-    ]
 
 
 _SLIRP_GATEWAY = "10.0.2.2"
@@ -1265,6 +1163,12 @@ class PodmanRuntime:
         — single ``podman ps -a`` instead of N inspects.  Backend-specific;
         not part of the [`ContainerRuntime`][terok_sandbox.ContainerRuntime] protocol.
 
+        Reads ``--format json`` and the raw ``State`` field rather than the
+        ``{{.State}}`` template: the template is presentation-layer and
+        version-unstable (podman 3.4 renders a running container as
+        ``Up 2 minutes ago``, so every task displayed as stopped there),
+        while the JSON field carries the bare state on every podman version.
+
         Returns:
             ``{}`` when the query succeeded but no container matched, ``None``
             when the query itself failed (podman missing, or ``podman ps``
@@ -1282,8 +1186,7 @@ class PodmanRuntime:
                     "--filter",
                     f"name=^{prefix}-",
                     "--format",
-                    "{{.Names}} {{.State}}",
-                    "--no-trunc",
+                    "json",
                 ],
                 stderr=subprocess.PIPE,
                 text=True,
@@ -1308,11 +1211,18 @@ class PodmanRuntime:
             )
             return None
 
+        try:
+            rows = json.loads(out) or []
+        except ValueError:
+            print("podman ps returned unparsable JSON", file=sys.stderr)
+            return None
+
         result: dict[str, str] = {}
-        for line in out.strip().splitlines():
-            parts = line.split(None, 1)
-            if len(parts) == 2:
-                result[parts[0]] = parts[1].lower()
+        for row in rows:
+            names = row.get("Names") or []
+            state = row.get("State")
+            if names and isinstance(state, str):
+                result[names[0]] = state.lower()
         return result
 
     def events(self, prefix: str) -> PodmanEventStream:

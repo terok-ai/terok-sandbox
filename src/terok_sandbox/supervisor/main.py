@@ -60,6 +60,12 @@ _PODMAN_WAIT_CANCEL_GRACE_S = 2.0
 #: SQLCipher handle, but still bounded so a wedged service can't stall exit.
 _CHILD_TERM_GRACE_S = 5.0
 
+#: Delay between retries when the ``podman wait`` *invocation* itself keeps
+#: failing (a broken nested podman under an old OCI runtime's hook env,
+#: storage-lock contention).  Watching is degraded, not fatal — teardown
+#: still arrives via the stop signal or the poststop hook.
+_PODMAN_WAIT_RETRY_S = 30.0
+
 
 # ── Entry point ─────────────────────────────────────────────────────────
 
@@ -226,46 +232,59 @@ async def _kill_children(handles: list[ChildHandle]) -> None:
 
 
 async def _wait_for_container(container_id: str) -> int:
-    """Block until ``podman wait <container_id>`` returns; surface its exit code.
+    """Block until the container exits; surface its exit code.
 
-    Returns the container's exit code (an integer; podman prints it on
-    stdout).  Treats a non-zero ``podman wait`` *invocation* exit code
-    as a soft failure — that path is rare (container ID typo, podman
-    crash) but never blocks the supervisor's clean shutdown.
+    Runs ``podman wait <container_id>`` (podman prints the container's
+    exit code on stdout).  A non-zero exit of the *invocation* is a
+    watcher failure, not a container exit — unblocking teardown on it
+    shuts a healthy bundle down.  An OCI runtime that hands hooks the
+    container's env breaks every nested podman call exactly that way
+    (crun 0.17: no rootless-marker vars, so podman thinks it is rootful
+    and dies on ``/var/lib/containers``), which made the supervisor
+    self-terminate seconds after start.  A failed invocation therefore
+    logs the degradation — loudly once, then quietly — and retries on a
+    slow clock; the stop signal and the poststop hook own teardown
+    while the watcher is blind.
     """
-    proc = await asyncio.create_subprocess_exec(
-        "podman",
-        "wait",
-        container_id,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    try:
-        stdout, stderr = await proc.communicate()
-    except asyncio.CancelledError:
-        # Stop-signal path: terminate the lingering ``podman wait``
-        # before propagating cancellation, so the subprocess doesn't
-        # outlive the supervisor and pin the container ID.  Bound the
-        # post-SIGTERM wait so a hung podman can't stall shutdown.
-        with contextlib.suppress(ProcessLookupError):
-            proc.terminate()
+    failures = 0
+    while True:
+        proc = await asyncio.create_subprocess_exec(
+            "podman",
+            "wait",
+            container_id,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
         try:
-            await asyncio.wait_for(proc.wait(), timeout=_PODMAN_WAIT_CANCEL_GRACE_S)
-        except (TimeoutError, asyncio.CancelledError):
+            stdout, stderr = await proc.communicate()
+        except asyncio.CancelledError:
+            # Stop-signal path: terminate the lingering ``podman wait``
+            # before propagating cancellation, so the subprocess doesn't
+            # outlive the supervisor and pin the container ID.  Bound the
+            # post-SIGTERM wait so a hung podman can't stall shutdown.
             with contextlib.suppress(ProcessLookupError):
-                proc.kill()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await proc.wait()
-        raise
-    if proc.returncode != 0:
-        _logger.warning(
-            "podman wait %s exited %s: %s",
+                proc.terminate()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=_PODMAN_WAIT_CANCEL_GRACE_S)
+            except (TimeoutError, asyncio.CancelledError):
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await proc.wait()
+            raise
+        if proc.returncode == 0:
+            try:
+                return int(stdout.decode().strip())
+            except ValueError:
+                return 0
+        failures += 1
+        log = _logger.error if failures == 1 else _logger.debug
+        log(
+            "podman wait %s failed (exit %s): %s — container-exit watching degraded, "
+            "retrying in %.0fs (teardown still arrives via stop signal / poststop hook)",
             container_id,
             proc.returncode,
             stderr.decode(errors="replace").strip(),
+            _PODMAN_WAIT_RETRY_S,
         )
-        return proc.returncode or 0
-    try:
-        return int(stdout.decode().strip())
-    except ValueError:
-        return 0
+        await asyncio.sleep(_PODMAN_WAIT_RETRY_S)

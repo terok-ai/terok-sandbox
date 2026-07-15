@@ -95,6 +95,29 @@ def test_run_section_rejects_legacy_podman_value() -> None:
         RawRunSection.model_validate({"runtime": "podman"})
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [(True, True), (False, False), ("all", "all"), ("nvidia,amd", "nvidia,amd"), (None, None)],
+    ids=repr,
+)
+def test_run_section_gpus_accepts_selector_shapes(value: object, expected: object) -> None:
+    """Booleans, selector strings, and None pass through unchanged."""
+    assert RawRunSection.model_validate({"gpus": value}).gpus == expected
+
+
+@pytest.mark.parametrize("value", [0, 1, 1.0], ids=repr)
+def test_run_section_gpus_rejects_numeric(value: object) -> None:
+    """``gpus: 1`` must not lax-coerce into ``True`` and enable every GPU."""
+    with pytest.raises(ValidationError, match="gpus"):
+        RawRunSection.model_validate({"gpus": value})
+
+
+def test_run_section_gpus_rejects_unknown_vendor() -> None:
+    """Unknown vendor tokens fail at parse time — even alongside ``all``."""
+    with pytest.raises(ValidationError, match="matrox"):
+        RawRunSection.model_validate({"gpus": "all,matrox"})
+
+
 def test_run_section_blank_memory_cpus_normalised_to_none() -> None:
     """An accidentally-empty ``memory: ""`` in YAML reads as None rather
     than as the literal empty string, so podman doesn't receive a bare

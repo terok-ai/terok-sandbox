@@ -329,7 +329,9 @@ class TestRunChildGuards:
 
         async def _noop(cfg: object, paths: object, stop: object) -> None: ...
 
-        partial = HardeningReport(no_dump=True, no_core=True, memory_locked=False)
+        partial = HardeningReport(
+            no_dump=True, no_core=True, memory_locked=False, no_new_privs=True
+        )
         with (
             patch("terok_sandbox.supervisor.children.harden_self", return_value=partial),
             patch.dict("terok_sandbox.supervisor.children._RUNNERS", {"vault": _noop}, clear=False),
@@ -356,7 +358,12 @@ class TestRunChildGuards:
 
         def _fake_harden(*, allow_debugger: bool = False) -> HardeningReport:
             captured["allow_debugger"] = allow_debugger
-            return HardeningReport(no_dump=not allow_debugger, no_core=True, memory_locked=True)
+            return HardeningReport(
+                no_dump=not allow_debugger,
+                no_core=True,
+                memory_locked=True,
+                no_new_privs=not allow_debugger,
+            )
 
         async def _noop(cfg: object, paths: object, stop: object) -> None: ...
 

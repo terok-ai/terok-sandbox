@@ -38,6 +38,7 @@ time.
 import contextlib
 import json
 import os
+import pwd
 import signal
 import stat
 import subprocess  # nosec B404
@@ -238,14 +239,25 @@ def _spawn_supervisor(
 def _spawn_env(host_uid: int) -> dict[str, str]:
     """Compose the env the wrapper subprocess inherits.
 
-    Pins ``DBUS_SESSION_BUS_ADDRESS`` to the operator's session bus
-    (the desktop notifier needs it) and ``XDG_RUNTIME_DIR`` to the
-    well-known per-user runtime dir.  Everything else flows from the
-    sidecar via the wrapper's argv — the env is intentionally minimal.
+    Pins ``XDG_RUNTIME_DIR`` to the well-known per-user runtime dir,
+    ``HOME`` to the operator's real home directory, and
+    ``DBUS_SESSION_BUS_ADDRESS`` to the operator's session bus (the
+    desktop notifier needs it).  Everything else flows from the sidecar
+    via the wrapper's argv — the env is intentionally minimal.
+
+    ``HOME`` must be pinned, not inherited: old OCI runtimes (crun 0.17,
+    Ubuntu 22.04) hand hooks the *container's* process env, whose
+    ``HOME=/root`` sends every ``~``-derived path the supervisor resolves
+    (vault credentials DB, SSH signer keys) into the real root's home —
+    ``EPERM`` from inside the rootless namespace.  The passwd lookup uses
+    the outer host UID against the host's ``/etc/passwd`` (hooks run with
+    the host filesystem view even in ``NS_ROOTLESS``).
     """
     env = dict(os.environ)
     runtime = Path(f"/run/user/{host_uid}")
     env["XDG_RUNTIME_DIR"] = str(runtime)
+    with contextlib.suppress(KeyError):
+        env["HOME"] = pwd.getpwuid(host_uid).pw_dir
     if not env.get("DBUS_SESSION_BUS_ADDRESS"):
         bus_path = runtime / "bus"
         if bus_path.exists():

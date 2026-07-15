@@ -319,3 +319,44 @@ class TestHookSpawn:
         mod.main()
 
         assert sidecar_path.exists()
+
+
+class TestSpawnEnv:
+    """``_spawn_env`` composes a trustworthy env for the wrapper subprocess."""
+
+    def test_home_pinned_from_host_passwd_entry(
+        self, hook_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``HOME`` comes from the host passwd entry, not the inherited env.
+
+        crun 0.17 (Ubuntu 22.04) hands hooks the *container's* process env
+        with ``HOME=/root``; inheriting it sent the supervisor's vault and
+        SSH-signer paths into the real root's home (EPERM from the rootless
+        namespace) — the regression this test pins.
+        """
+        mod = _load_hook_module()
+        monkeypatch.setenv("HOME", "/root")
+        operator_home = str(hook_root / "home")
+        fake_pwent = MagicMock(pw_dir=operator_home)
+        monkeypatch.setattr(mod.pwd, "getpwuid", lambda uid: fake_pwent)
+
+        env = mod._spawn_env(1017)
+
+        assert env["HOME"] == operator_home
+        assert env["XDG_RUNTIME_DIR"] == "/run/user/1017"
+
+    def test_missing_passwd_entry_keeps_inherited_home(
+        self, hook_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No passwd entry for the host uid → the inherited ``HOME`` survives."""
+        mod = _load_hook_module()
+        monkeypatch.setenv("HOME", "/somewhere/else")
+
+        def _no_entry(uid: int) -> object:
+            raise KeyError(uid)
+
+        monkeypatch.setattr(mod.pwd, "getpwuid", _no_entry)
+
+        env = mod._spawn_env(1017)
+
+        assert env["HOME"] == "/somewhere/else"

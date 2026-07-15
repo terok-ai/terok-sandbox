@@ -5,146 +5,22 @@
 
 from __future__ import annotations
 
+import json
 import socket
 import subprocess
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-from terok_sandbox import GpuConfigError, PodmanRuntime, check_gpu_available
+from terok_sandbox import PodmanRuntime
 from terok_sandbox.runtime import ContainerRemoveResult
 from terok_sandbox.runtime.podman import (
     _detect_rootless_network_mode,
     bypass_network_args,
-    check_gpu_error,
-    gpu_run_args,
     redact_env_args,
 )
 
 # ── Argv helpers (pure functions on the podman backend) ───────────────────
-
-
-class TestCheckGpuError:
-    """``check_gpu_error`` raises ``GpuConfigError`` only on CDI patterns."""
-
-    def test_cdi_pattern_raises(self) -> None:
-        """Stderr matching a CDI pattern triggers ``GpuConfigError``."""
-        exc = subprocess.CalledProcessError(
-            returncode=125,
-            cmd=["podman", "run"],
-            stderr=b"Error: CDI device nvidia.com/gpu=all not registered",
-        )
-        with pytest.raises(GpuConfigError) as excinfo:
-            check_gpu_error(exc)
-        assert "GPU misconfiguration" in str(excinfo.value)
-        assert excinfo.value.hint
-        assert excinfo.value.__cause__ is exc
-
-    def test_unrelated_error_does_not_raise(self) -> None:
-        """Non-CDI stderr passes through silently."""
-        exc = subprocess.CalledProcessError(
-            returncode=125,
-            cmd=["podman", "run"],
-            stderr=b"Error: image not found",
-        )
-        check_gpu_error(exc)
-
-    def test_no_stderr_does_not_raise(self) -> None:
-        """Missing stderr is treated as no CDI match."""
-        exc = subprocess.CalledProcessError(returncode=125, cmd=["podman"], stderr=None)
-        check_gpu_error(exc)
-
-    def test_text_stderr_is_handled(self) -> None:
-        """``str`` stderr (``text=True`` callers) does not trip ``.decode``."""
-        exc = subprocess.CalledProcessError(
-            returncode=125,
-            cmd=["podman", "run"],
-            stderr="Error: CDI device nvidia.com/gpu=all not registered",
-        )
-        with pytest.raises(GpuConfigError):
-            check_gpu_error(exc)
-
-
-def _fake_podman_info(stdout: str) -> subprocess.CompletedProcess[str]:
-    """Mint a ``podman info`` ``CompletedProcess`` carrying *stdout*."""
-    return subprocess.CompletedProcess(
-        args=["podman", "info"], returncode=0, stdout=stdout, stderr=""
-    )
-
-
-class TestCheckGpuAvailable:
-    """``check_gpu_available`` reads CDI spec files podman points to."""
-
-    def test_returns_true_when_nvidia_spec_listed(self, tmp_path: Path) -> None:
-        """A spec file declaring ``nvidia.com/gpu`` flips the probe to true."""
-        spec = tmp_path / "nvidia.yaml"
-        spec.write_text("cdiVersion: 0.6.0\nkind: nvidia.com/gpu\n")
-        with patch(
-            "terok_sandbox.runtime.podman.subprocess.run",
-            return_value=_fake_podman_info(f'["{spec}"]'),
-        ):
-            assert check_gpu_available() is True
-
-    def test_returns_false_when_specs_dont_mention_nvidia(self, tmp_path: Path) -> None:
-        """Other vendors' specs don't enable the NVIDIA option."""
-        spec = tmp_path / "amd.yaml"
-        spec.write_text("cdiVersion: 0.6.0\nkind: amd.com/gpu\n")
-        with patch(
-            "terok_sandbox.runtime.podman.subprocess.run",
-            return_value=_fake_podman_info(f'["{spec}"]'),
-        ):
-            assert check_gpu_available() is False
-
-    def test_returns_false_when_podman_missing(self) -> None:
-        """No podman → no GPU; never raises."""
-        with (
-            patch(
-                "terok_sandbox.runtime.podman.subprocess.run",
-                side_effect=FileNotFoundError("podman"),
-            ),
-            patch(
-                "terok_sandbox.runtime.podman._CDI_DEFAULT_DIRS",
-                (Path("/nonexistent-cdi-a"), Path("/nonexistent-cdi-b")),
-            ),
-        ):
-            assert check_gpu_available() is False
-
-    def test_returns_false_when_podman_errors(self) -> None:
-        """A non-zero ``podman info`` falls back to scanning default dirs."""
-        err = subprocess.CalledProcessError(returncode=1, cmd=["podman", "info"], stderr=b"boom")
-        with (
-            patch("terok_sandbox.runtime.podman.subprocess.run", side_effect=err),
-            patch(
-                "terok_sandbox.runtime.podman._CDI_DEFAULT_DIRS",
-                (Path("/nonexistent-cdi-a"),),
-            ),
-        ):
-            assert check_gpu_available() is False
-
-    def test_falls_back_to_default_dirs(self, tmp_path: Path) -> None:
-        """An empty ``Host.CDISpecs`` triggers a default-directory scan."""
-        cdi_dir = tmp_path / "etc-cdi"
-        cdi_dir.mkdir()
-        (cdi_dir / "nvidia.yaml").write_text("kind: nvidia.com/gpu\n")
-        with (
-            patch(
-                "terok_sandbox.runtime.podman.subprocess.run",
-                return_value=_fake_podman_info("null"),
-            ),
-            patch("terok_sandbox.runtime.podman._CDI_DEFAULT_DIRS", (cdi_dir,)),
-        ):
-            assert check_gpu_available() is True
-
-    def test_unreadable_spec_does_not_raise(self, tmp_path: Path) -> None:
-        """A spec path pointing at a directory (unreadable) collapses to false, not an exception."""
-        bogus = tmp_path / "subdir"
-        bogus.mkdir()
-        with patch(
-            "terok_sandbox.runtime.podman.subprocess.run",
-            return_value=_fake_podman_info(f'["{bogus}"]'),
-        ):
-            assert check_gpu_available() is False
 
 
 class TestRedactEnvArgs:
@@ -185,21 +61,6 @@ class TestRedactEnvArgs:
     def test_dash_e_without_kvpair_passes_through(self) -> None:
         """A dangling ``-e`` at the end does not crash the parser."""
         assert redact_env_args(["podman", "run", "-e"]) == ["podman", "run", "-e"]
-
-
-class TestGpuRunArgs:
-    """``gpu_run_args`` returns CDI args only when explicitly enabled."""
-
-    def test_disabled_default_is_empty(self) -> None:
-        """Disabled by default — no CDI flags."""
-        assert gpu_run_args() == []
-
-    def test_enabled_returns_cdi_args(self) -> None:
-        """Enabled emits ``--device nvidia.com/gpu=all`` plus env vars."""
-        args = gpu_run_args(enabled=True)
-        assert "--device" in args
-        assert "nvidia.com/gpu=all" in args
-        assert any("NVIDIA_VISIBLE_DEVICES=all" in a for a in args)
 
 
 # ── Container observation ─────────────────────────────────────────────────
@@ -257,25 +118,47 @@ class TestContainerStates:
         assert "a mount_program is required" in err
 
     @patch("terok_sandbox.runtime.podman.subprocess.check_output")
-    def test_parses_two_columns(self, mock_co) -> None:
-        """Each space-separated row becomes one dict entry, state lowercased."""
-        mock_co.return_value = "task-a Running\ntask-b Exited\n"
+    def test_parses_json_rows(self, mock_co) -> None:
+        """Each JSON row becomes one dict entry keyed by first name, state lowercased.
+
+        The raw ``State`` field is what podman 3.4 and 5 agree on — the
+        ``{{.State}}`` template prints ``Up 2 minutes ago`` on 3.4.
+        """
+        mock_co.return_value = json.dumps(
+            [
+                {"Names": ["task-a"], "State": "Running"},
+                {"Names": ["task-b"], "State": "exited"},
+            ]
+        )
         assert PodmanRuntime().container_states("task") == {
             "task-a": "running",
             "task-b": "exited",
         }
 
     @patch("terok_sandbox.runtime.podman.subprocess.check_output")
-    def test_skips_malformed_lines(self, mock_co) -> None:
-        """Lines without a state column are skipped."""
-        mock_co.return_value = "good Running\nmalformed-no-state\n"
+    def test_skips_malformed_rows(self, mock_co) -> None:
+        """Rows without names or a state string are skipped."""
+        mock_co.return_value = json.dumps(
+            [
+                {"Names": ["good"], "State": "running"},
+                {"Names": [], "State": "running"},
+                {"Names": ["no-state"]},
+            ]
+        )
         assert PodmanRuntime().container_states("p") == {"good": "running"}
 
     @patch("terok_sandbox.runtime.podman.subprocess.check_output")
     def test_no_matches_is_empty_dict(self, mock_co) -> None:
         """A successful query with no matching containers → ``{}``, not ``None``."""
-        mock_co.return_value = ""
+        mock_co.return_value = "[]\n"
         assert PodmanRuntime().container_states("p") == {}
+
+    @patch("terok_sandbox.runtime.podman.subprocess.check_output")
+    def test_unparsable_output_is_none_with_reason(self, mock_co, capsys) -> None:
+        """Non-JSON output → ``None`` (a failed query, not "no containers")."""
+        mock_co.return_value = "garbage not json"
+        assert PodmanRuntime().container_states("p") is None
+        assert "unparsable JSON" in capsys.readouterr().err
 
     @patch("terok_sandbox.runtime.podman.subprocess.check_output", side_effect=FileNotFoundError)
     def test_returns_none_when_podman_missing(self, _co) -> None:

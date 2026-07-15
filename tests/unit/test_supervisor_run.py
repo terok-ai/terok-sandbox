@@ -327,15 +327,54 @@ class TestWaitForContainer:
             assert await _wait_for_container("abc123") == 0
 
     @pytest.mark.asyncio
-    async def test_nonzero_invocation_returns_its_returncode(self) -> None:
-        proc = MagicMock()
-        proc.communicate = AsyncMock(return_value=(b"", b"no such container"))
-        proc.returncode = 125
-        with patch(
-            "terok_sandbox.supervisor.main.asyncio.create_subprocess_exec",
-            AsyncMock(return_value=proc),
+    async def test_failed_invocation_retries_instead_of_unblocking(self) -> None:
+        """A failed ``podman wait`` *invocation* is a watcher failure, not a container exit.
+
+        Regression: returning on it unblocked ``_supervise``'s teardown race,
+        so a supervisor whose nested podman was broken (crun 0.17 hook env)
+        self-terminated seconds after start and the wrapper — seeing a clean
+        exit — never restarted it.
+        """
+        broken = MagicMock()
+        broken.communicate = AsyncMock(return_value=(b"", b"mkdir /var/lib/containers: denied"))
+        broken.returncode = 125
+        healthy = MagicMock()
+        healthy.communicate = AsyncMock(return_value=(b"0\n", b""))
+        healthy.returncode = 0
+        with (
+            patch(
+                "terok_sandbox.supervisor.main.asyncio.create_subprocess_exec",
+                AsyncMock(side_effect=[broken, healthy]),
+            ),
+            patch("terok_sandbox.supervisor.main._PODMAN_WAIT_RETRY_S", 0),
         ):
-            assert await _wait_for_container("abc123") == 125
+            assert await _wait_for_container("abc123") == 0
+
+    @pytest.mark.asyncio
+    async def test_persistently_failing_invocation_never_unblocks(self) -> None:
+        """The watcher parks (degraded) while ``podman wait`` keeps failing."""
+
+        def _broken_proc(*_a, **_k):
+            proc = MagicMock()
+            proc.communicate = AsyncMock(return_value=(b"", b"permission denied"))
+            proc.returncode = 125
+            proc.terminate = MagicMock()
+            proc.wait = AsyncMock(return_value=0)
+            return proc
+
+        with (
+            patch(
+                "terok_sandbox.supervisor.main.asyncio.create_subprocess_exec",
+                AsyncMock(side_effect=_broken_proc),
+            ),
+            patch("terok_sandbox.supervisor.main._PODMAN_WAIT_RETRY_S", 0),
+        ):
+            task = asyncio.ensure_future(_wait_for_container("abc123"))
+            await asyncio.sleep(0.05)
+            assert not task.done()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
 
     @pytest.mark.asyncio
     async def test_cancellation_terminates_podman_wait(self) -> None:

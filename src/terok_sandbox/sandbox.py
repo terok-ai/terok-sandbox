@@ -16,7 +16,8 @@ import io
 import shlex
 import subprocess  # nosec B404 — container exec for ready-marker probing — container exec for ready-marker probing
 import tarfile
-from dataclasses import dataclass, field
+import warnings
+from dataclasses import InitVar, dataclass, field
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import TYPE_CHECKING
@@ -25,11 +26,10 @@ from terok_util import podman_userns_args
 
 from .config import SandboxConfig
 from .runtime import ContainerRuntime, PodmanRuntime
+from .runtime.gpu import GpuSelector, check_gpu_error, gpu_run_args
 from .runtime.podman import (
     bypass_network_args,
-    check_gpu_error,
     find_init_binary,
-    gpu_run_args,
     redact_env_args,
 )
 
@@ -222,8 +222,8 @@ class RunSpec:
     task_dir: Path
     """Host-side task directory (for shield state, logs, etc.)."""
 
-    gpu_enabled: bool = False
-    """Whether to pass GPU device args to podman."""
+    gpus: GpuSelector = None
+    """GPU vendors to pass through — normalized via [`normalize_gpus`][terok_sandbox.runtime.gpu.normalize_gpus]."""
 
     memory: str | None = None
     """Podman ``--memory`` value (e.g. ``"4g"``, ``"512m"``).  ``None`` = unlimited."""
@@ -294,7 +294,16 @@ class RunSpec:
     blocks the per-container broker/signer with "No route to host".
     """
 
-    def __post_init__(self) -> None:
+    gpu_enabled: InitVar[bool | None] = None
+    """Deprecated constructor alias for ``gpus`` (the pre-vendor bool knob).
+
+    ``gpu_enabled=True`` maps to ``gpus="all"`` and emits a
+    ``DeprecationWarning``; combining it with an explicit ``gpus``
+    raises ``ValueError``.  Deprecated since 0.5.0; will be removed
+    in terok-sandbox 0.7.0.
+    """
+
+    def __post_init__(self, gpu_enabled: bool | None) -> None:
         """Snapshot ``annotations`` so a caller-owned dict can't mutate the spec.
 
         Callers may legitimately pass a plain ``dict`` (Pydantic, JSON-load,
@@ -302,8 +311,22 @@ class RunSpec:
         reference.  Take a copy, wrap it in a ``MappingProxyType``, and
         write it back through ``object.__setattr__`` since the dataclass
         itself is ``frozen=True``.
+
+        Also folds the deprecated ``gpu_enabled`` bool into ``gpus``.
         """
         object.__setattr__(self, "annotations", MappingProxyType(dict(self.annotations)))
+        if gpu_enabled is not None:
+            if self.gpus is not None:
+                raise ValueError(
+                    "RunSpec: pass either gpus or the deprecated gpu_enabled, not both"
+                )
+            warnings.warn(
+                "RunSpec(gpu_enabled=...) is deprecated, to be removed in "
+                'terok-sandbox 0.7.0; use gpus="all" / vendor names',
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            object.__setattr__(self, "gpus", "all" if gpu_enabled else None)
 
 
 # ---------------------------------------------------------------------------
@@ -534,7 +557,7 @@ class Sandbox:
                     f"intentionally disabled for this run."
                 ) from None
 
-        cmd += gpu_run_args(enabled=spec.gpu_enabled)
+        cmd += gpu_run_args(spec.gpus)
 
         if spec.memory is not None:
             cmd += ["--memory", spec.memory]
