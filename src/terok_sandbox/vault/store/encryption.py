@@ -347,6 +347,25 @@ def load_passphrase_from_keyring() -> str | None:
         return None
 
 
+def keyring_backend_available() -> bool:
+    """Return ``True`` iff a usable OS keyring backend is reachable.
+
+    Availability probe for setup frontends (the TUI tier chooser)
+    deciding whether to *offer* the keyring tier at all.  A probe, not
+    a guarantee — the definitive answer stays with
+    [`store_passphrase_in_keyring`][terok_sandbox.vault.store.encryption.store_passphrase_in_keyring]'s
+    return value at provisioning time.  The ``fail`` and ``null``
+    backends both answer "no": they accept calls but hold nothing.
+    """
+    try:
+        import keyring  # noqa: PLC0415
+        from keyring.backends import fail, null  # noqa: PLC0415
+
+        return not isinstance(keyring.get_keyring(), (fail.Keyring, null.Keyring))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def store_passphrase_in_keyring(passphrase: str) -> bool:
     """Persist *passphrase* in the OS keyring; return ``True`` on success.
 
@@ -688,6 +707,7 @@ __all__ = [
     "forget_passphrase_in_keyring",
     "generate_passphrase",
     "is_plaintext_sqlite",
+    "keyring_backend_available",
     "load_passphrase_from_command",
     "load_passphrase_from_file",
     "load_passphrase_from_keyring",

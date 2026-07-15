@@ -79,9 +79,12 @@ _LAZY: dict[str, str] = {
     # CLI registry + vault passphrase workflows
     "CommandTree": "commands:CommandTree",
     "SessionShadow": "commands:SessionShadow",
+    "TierProvisionResult": "commands:TierProvisionResult",
     "clear_redundant_session_file": "commands:clear_redundant_session_file",
+    "credentials_provisioned": "commands:credentials_provisioned",
     "handle_vault_seal": "commands:handle_vault_seal",
     "handle_vault_to_keyring": "commands:handle_vault_to_keyring",
+    "provision_passphrase_tier": "commands:provision_passphrase_tier",  # nosec: B105 — export-map import paths, never secrets
     "provision_session_passphrase": "commands:provision_session_passphrase",
     "purge_passphrase_tiers": "commands:purge_passphrase_tiers",
     "sandbox_uninstall": "commands:_handle_sandbox_uninstall",
@@ -169,7 +172,9 @@ _LAZY: dict[str, str] = {
     "SSHKeyRow": "vault.store.db:SSHKeyRow",
     "NoPassphraseError": "vault.store.encryption:NoPassphraseError",
     "WrongPassphraseError": "vault.store.encryption:WrongPassphraseError",
+    "keyring_backend_available": "vault.store.encryption:keyring_backend_available",
     "RecoveryStatus": "vault.store.recovery:RecoveryStatus",
+    "systemd_creds_available": "vault.store.systemd_creds:is_available",
     "systemd_creds_has_tpm2": "vault.store.systemd_creds:has_tpm2",
 }
 
@@ -212,9 +217,12 @@ if TYPE_CHECKING:
     )
     from ._yaml import update_section as yaml_update_section
     from .commands import (
+        TierProvisionResult,
         _handle_sandbox_uninstall as sandbox_uninstall,
+        credentials_provisioned,
         handle_vault_seal,
         handle_vault_to_keyring,
+        provision_passphrase_tier,
         purge_passphrase_tiers,
     )
     from .config import CONTAINER_RUNTIME_DIR, SandboxConfig
@@ -272,9 +280,16 @@ if TYPE_CHECKING:
     from .vault.ssh.keypair import ensure_infra_keypair, public_line_of
     from .vault.ssh.manager import SSHInitResult, SSHManager
     from .vault.store.db import CredentialDB, SSHKeyRow
-    from .vault.store.encryption import NoPassphraseError, WrongPassphraseError
+    from .vault.store.encryption import (
+        NoPassphraseError,
+        WrongPassphraseError,
+        keyring_backend_available,
+    )
     from .vault.store.recovery import RecoveryStatus
-    from .vault.store.systemd_creds import has_tpm2 as systemd_creds_has_tpm2
+    from .vault.store.systemd_creds import (
+        has_tpm2 as systemd_creds_has_tpm2,
+        is_available as systemd_creds_available,
+    )
 
 
 __all__ = [
@@ -342,7 +357,12 @@ __all__ = [
     "NoPassphraseError",
     "PHANTOM_CREDENTIALS_MARKER",
     "RecoveryStatus",
+    "TierProvisionResult",
     "WrongPassphraseError",
+    "credentials_provisioned",
+    "keyring_backend_available",
+    "provision_passphrase_tier",
+    "systemd_creds_available",
     "systemd_creds_has_tpm2",
     "handle_vault_seal",
     "handle_vault_to_keyring",
