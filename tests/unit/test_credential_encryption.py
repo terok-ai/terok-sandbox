@@ -2933,3 +2933,24 @@ class TestKeyringBackendAvailable:
 
         monkeypatch.setattr("keyring.get_keyring", _boom)
         assert keyring_backend_available() is False
+
+
+class TestProvisioningDefaultCfg:
+    """The ``cfg=None`` default-factory branches of the new public API.
+
+    The autouse path-isolation fixture redirects ``HOME``/``XDG_*`` to a
+    fresh tmp dir, so the default ``SandboxConfig()`` these construct
+    lands in tmp by construction.
+    """
+
+    def test_provision_defaults_cfg(self) -> None:
+        from terok_sandbox.commands import provision_passphrase_tier
+
+        result = provision_passphrase_tier(tier="session-file")
+        assert result.source == "session-file" and result.generated is True
+
+    def test_credentials_provisioned_defaults_cfg(self) -> None:
+        """Default cfg + the fixture's stub keyring ("test") → provisioned."""
+        from terok_sandbox.commands import credentials_provisioned
+
+        assert credentials_provisioned() is True
