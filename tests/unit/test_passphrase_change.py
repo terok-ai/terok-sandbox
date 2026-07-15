@@ -94,16 +94,18 @@ class TestTierRegistry:
 
     def test_derived_sets(self) -> None:
         """The subsets encode the design decisions the modules rely on."""
-        assert {
+        expected_durable = {
             PassphraseTier.SYSTEMD_CREDS,
             PassphraseTier.KEYRING,
             PassphraseTier.PASSPHRASE_COMMAND,
-        } == DURABLE_TIERS
-        assert {
+        }
+        expected_provisionable = {
             PassphraseTier.SESSION_FILE,
             PassphraseTier.SYSTEMD_CREDS,
             PassphraseTier.KEYRING,
-        } == PROVISIONABLE_TIERS
+        }
+        assert expected_durable == DURABLE_TIERS
+        assert expected_provisionable == PROVISIONABLE_TIERS
         assert CHOOSER_TIERS == (PassphraseTier.SESSION_FILE, PassphraseTier.KEYRING)
 
     def test_members_are_their_string_values(self) -> None:

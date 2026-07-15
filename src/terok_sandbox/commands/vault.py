@@ -12,7 +12,7 @@ under ``vault passphrase``:
   machine-bound ``systemd-creds`` credential.
 - ``vault passphrase to-keyring`` moves it from whichever tier holds it
   now into the OS keyring (the recommended upgrade path off the
-  session-file / plaintext-config tiers).
+  session-file tier).
 - ``vault passphrase reveal`` resolves and prints the current
   passphrase (to ``/dev/tty`` by default, or stdout with
   ``--allow-redirect``) and offers to mark the recovery key as saved.
@@ -23,8 +23,8 @@ under ``vault passphrase``:
   [`change_passphrase`][terok_sandbox.commands.vault.change_passphrase]
   is the prompt-free core the TUI shares.
 ``vault lock`` clears every stored copy of the passphrase — session
-file, keyring, sealed systemd-creds credential, and plaintext config —
-so the vault becomes irrecoverable without an off-host copy.  The
+file, keyring, and the sealed systemd-creds credential — so the vault
+becomes irrecoverable without an off-host copy.  The
 machine-bound tiers are an automatic-unlock convenience on top of a
 passphrase the operator is expected to have saved; locking peels them
 away.  ``purge_passphrase_tiers`` is the prompt-free core ``lock`` and
@@ -52,7 +52,7 @@ from ._types import ArgDef, CommandDef
 
 if TYPE_CHECKING:
     from ..config import SandboxConfig
-    from ..vault.store.status import VaultStatus
+    from ..vault.store.status import ChainRow, VaultStatus
     from ..vault.store.systemd_creds import KeyMode
 
 
@@ -101,8 +101,8 @@ def provision_session_passphrase(
     Two guards, in order:
 
     1. **No-shadow.** The session tier is the highest-priority slot, so
-       writing it masks any durable tier (systemd-creds / keyring /
-       config) underneath — a reboot then wipes the session copy and the
+       writing it masks any durable tier (systemd-creds / keyring)
+       underneath — a reboot then wipes the session copy and the
        operator only *thought* the sealed key was in use.  When a durable
        tier already resolves and *force* is false, nothing is written and
        the result reports ``written=False`` + the shadowed tier.  *force*
@@ -806,30 +806,14 @@ def _rewrite_tier(cfg: SandboxConfig, tier: PassphraseTier, passphrase: str) -> 
         return TierRewrite(tier, ok=False, detail=str(exc))
 
 
-def _handle_vault_passphrase_change(*, cfg: SandboxConfig | None = None) -> None:
-    """Interactively change the vault passphrase.
+def _collect_current_passphrase(cfg: SandboxConfig) -> str:
+    """Resolve the current passphrase, prompting only when the vault is locked.
 
-    CLI ergonomics over [`change_passphrase`][terok_sandbox.commands.vault.change_passphrase]:
-    the current passphrase is prompted only when no tier resolves it
-    (retyping a value the same shell can print with
-    ``vault passphrase reveal`` would be security theatre); the new one
-    is typed-and-confirmed, or minted on empty entry and announced to
-    ``/dev/tty`` *after* the rekey succeeded.  Ends with the standard
-    recovery acknowledgement — the old confirmation died with the old
-    passphrase.
-
-    Piped usage reads one line per needed value from stdin: the current
-    passphrase first (only when the vault is locked), then the new one
-    (empty line = generate).
+    When a tier resolves it, retyping a value the same shell can print
+    with ``vault passphrase reveal`` would be security theatre — so the
+    prompt appears exactly when the chain comes up empty.
     """
-    from ..vault.store.encryption import (
-        WrongPassphraseError,
-        prompt_new_passphrase,
-        prompt_passphrase,
-    )
-    from .credentials import _announce_generated_passphrase, _maybe_acknowledge_recovery
-
-    cfg = _resolve_cfg(cfg)
+    from ..vault.store.encryption import WrongPassphraseError, prompt_passphrase
 
     try:
         current = cfg.resolve_passphrase()
@@ -839,45 +823,57 @@ def _handle_vault_passphrase_change(*, cfg: SandboxConfig | None = None) -> None
             "  Fix or remove the broken tier first — `terok-sandbox vault status`"
             " names it."
         ) from exc
-    if current is None:
-        if not cfg.db_path.exists():
-            raise SystemExit(
-                "nothing to change: no credentials DB and no stored passphrase —"
-                " run setup to provision the vault instead"
-            )
-        print("The vault is locked — enter the CURRENT passphrase first.")
-        try:
-            current = prompt_passphrase()
-        except ValueError as exc:
-            raise SystemExit(f"nothing was changed: {exc}") from None
+    if current is not None:
+        return current
+    if not cfg.db_path.exists():
+        raise SystemExit(
+            "nothing to change: no credentials DB and no stored passphrase —"
+            " run setup to provision the vault instead"
+        )
+    print("The vault is locked — enter the CURRENT passphrase first.")
+    try:
+        return prompt_passphrase()
+    except ValueError as exc:
+        raise SystemExit(f"nothing was changed: {exc}") from None
+
+
+def _collect_new_passphrase() -> str | None:
+    """Read the new passphrase: typed-and-confirmed on a TTY, one stdin line piped.
+
+    ``None`` means "mint one" — allowed only on a TTY, because the
+    minted value must be displayed on ``/dev/tty`` and the fail-closed
+    announce would only fire *after* the rekey; a piped run must refuse
+    before anything changes instead.
+    """
+    from ..vault.store.encryption import prompt_new_passphrase
 
     if sys.stdin.isatty():
         print("Enter the NEW passphrase (leave empty to generate one):")
         try:
-            new = prompt_new_passphrase()
+            return prompt_new_passphrase()
         except ValueError as exc:
             raise SystemExit(f"nothing was changed: {exc}") from None
-    else:
-        new = sys.stdin.readline().rstrip("\n") or None
-        if new is None:
-            # A minted value must be displayed on /dev/tty, and the
-            # fail-closed announce would only fire *after* the rekey —
-            # refuse before anything changes instead.
-            raise SystemExit(
-                "a generated passphrase needs a terminal to be displayed on —"
-                " supply the new passphrase on stdin, or run interactively."
-            )
+    new = sys.stdin.readline().rstrip("\n") or None
+    if new is None:
+        raise SystemExit(
+            "a generated passphrase needs a terminal to be displayed on —"
+            " supply the new passphrase on stdin, or run interactively."
+        )
+    return new
+
+
+def _change_or_exit(cfg: SandboxConfig, *, old: str, new: str | None) -> PassphraseChangeResult:
+    """Run [`change_passphrase`][terok_sandbox.commands.vault.change_passphrase]; map every refusal to a friendly exit."""
+    from ..vault.store.encryption import WrongPassphraseError
 
     try:
-        result = change_passphrase(cfg, old=current, new=new)
+        return change_passphrase(cfg, old=old, new=new)
     except WrongPassphraseError:
         raise SystemExit(
             f"that passphrase does not open {cfg.db_path} — nothing was changed."
         ) from None
-    except ValueError as exc:
+    except (ValueError, RuntimeError) as exc:
         raise SystemExit(f"nothing was changed: {exc}") from None
-    except RuntimeError as exc:
-        raise SystemExit(str(exc)) from None
     except Exception as exc:
         if "database is locked" not in str(exc).lower():
             raise
@@ -891,6 +887,27 @@ def _handle_vault_passphrase_change(*, cfg: SandboxConfig | None = None) -> None
             "  stop it (delete or stop the matching task), then re-run"
             " `vault passphrase change`."
         ) from exc
+
+
+def _handle_vault_passphrase_change(*, cfg: SandboxConfig | None = None) -> None:
+    """Interactively change the vault passphrase.
+
+    CLI ergonomics over [`change_passphrase`][terok_sandbox.commands.vault.change_passphrase]:
+    the current passphrase is prompted only when no tier resolves it,
+    the new one is typed-and-confirmed (or minted on empty entry and
+    announced to ``/dev/tty`` *after* the rekey succeeded), and the
+    flow ends with the standard recovery acknowledgement — the old
+    confirmation died with the old passphrase.
+
+    Piped usage reads one line per needed value from stdin: the current
+    passphrase first (only when the vault is locked), then the new one.
+    """
+    from .credentials import _announce_generated_passphrase, _maybe_acknowledge_recovery
+
+    cfg = _resolve_cfg(cfg)
+    current = _collect_current_passphrase(cfg)
+    new = _collect_new_passphrase()
+    result = _change_or_exit(cfg, old=current, new=new)
 
     if result.rekeyed:
         print(f"→ re-encrypted {cfg.db_path} under the new passphrase")
@@ -978,6 +995,41 @@ def _handle_vault_status(*, cfg: SandboxConfig | None = None, as_json: bool = Fa
     _print_vault_status(status)
 
 
+def _status_header(status: VaultStatus) -> str:
+    """One-line state summary for the ``Vault:`` header."""
+    from ..vault.store.status import VaultState
+
+    if status.db_error is not None:
+        return f"ERROR — {sanitize_tty(status.db_error)}"
+    if status.state is VaultState.UNPROVISIONED:
+        return "UNPROVISIONED — no credentials DB and no stored passphrase yet"
+    if status.lock_reason is not None:
+        return f"LOCKED — {sanitize_tty(status.lock_reason)}"
+    return f"unlocked — passphrase via {status.source}"
+
+
+def _chain_row_marker(row: ChainRow) -> str:
+    """The one-word annotation for a chain-table row."""
+    if row.active:
+        return "active"
+    if row.shadowed:
+        return "shadowed"
+    return "–"
+
+
+def _print_stored_secrets(status: VaultStatus) -> None:
+    """Render the credentials / SSH-key inventory lines."""
+    if status.providers is None:
+        detail = "DB unreadable — see the error above" if status.db_error else "vault locked"
+        print(f"  Credentials: {detail}")
+        return
+    listing = (
+        f" ({', '.join(sanitize_tty(p) for p in status.providers)})" if status.providers else ""
+    )
+    print(f"  Credentials: {len(status.providers)} stored{listing}")
+    print(f"  SSH keys:    {status.ssh_keys} stored")
+
+
 def _print_vault_status(status: VaultStatus) -> None:
     """Render the human-readable ``vault status`` report to stdout.
 
@@ -988,21 +1040,12 @@ def _print_vault_status(status: VaultStatus) -> None:
     """
     from ..vault.store.status import VaultState
 
-    if status.db_error is not None:
-        header = f"ERROR — {sanitize_tty(status.db_error)}"
-    elif status.state is VaultState.UNPROVISIONED:
-        header = "UNPROVISIONED — no credentials DB and no stored passphrase yet"
-    elif status.lock_reason is not None:
-        header = f"LOCKED — {sanitize_tty(status.lock_reason)}"
-    else:
-        header = f"unlocked — passphrase via {status.source}"
-    print(f"Vault: {header}")
+    print(f"Vault: {_status_header(status)}")
     db_note = "" if status.db_exists else " (created encrypted on first use)"
     print(f"  DB:  {sanitize_tty(str(status.db_path))}{db_note}")
     print("  Passphrase resolution chain:")
     for row in status.chain:
-        marker = "active" if row.active else "shadowed" if row.shadowed else "–"
-        print(f"    {row.tier:<19} {marker:<9} {sanitize_tty(row.detail)}")
+        print(f"    {row.tier:<19} {_chain_row_marker(row):<9} {sanitize_tty(row.detail)}")
     if status.state is VaultState.UNPROVISIONED:
         print("  run setup (or the TUI) to provision a vault passphrase")
     elif status.state is VaultState.LOCKED:
@@ -1016,15 +1059,7 @@ def _print_vault_status(status: VaultStatus) -> None:
     for warning in status.warnings:
         label = "note" if warning.severity == "info" else warning.severity
         print(f"  {label}: {sanitize_tty(warning.message)}")
-    if status.providers is None:
-        detail = "DB unreadable — see the error above" if status.db_error else "vault locked"
-        print(f"  Credentials: {detail}")
-    else:
-        listing = (
-            f" ({', '.join(sanitize_tty(p) for p in status.providers)})" if status.providers else ""
-        )
-        print(f"  Credentials: {len(status.providers)} stored{listing}")
-        print(f"  SSH keys:    {status.ssh_keys} stored")
+    _print_stored_secrets(status)
 
 
 def _handle_vault_list(
