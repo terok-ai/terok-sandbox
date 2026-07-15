@@ -176,7 +176,7 @@ def provision_passphrase_tier(
             f"cannot provision tier {tier!r};"
             f" expected one of: {', '.join(sorted(_PROVISIONABLE_TIERS))}"
         )
-    if passphrase == "":
+    if passphrase == "":  # nosec: B105 — rejecting the empty sentinel, not comparing a secret
         # The keyring and systemd-creds writers refuse an empty value
         # themselves; guard the session-file tier to the same standard
         # so no branch can report success while leaving nothing usable.
