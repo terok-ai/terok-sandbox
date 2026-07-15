@@ -84,6 +84,16 @@ class Container(Protocol):
         ...
 
     @property
+    def started_at(self) -> float | None:
+        """Unix timestamp of the container's last start, or ``None``.
+
+        Feeds "did this container start before event X?" health checks
+        — e.g. flagging supervisors that predate a vault passphrase
+        change and therefore still hold the old passphrase.
+        """
+        ...
+
+    @property
     def image(self) -> Image | None:
         """Handle to the image this container was created from, or ``None``."""
         ...
