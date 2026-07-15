@@ -86,19 +86,29 @@ class TestRefreshCloneCache:
             clone_cache_base=cache_base,
         )
 
-        with patch("terok_sandbox.gate.mirror.subprocess.run") as mock_run:
-            mock_run.return_value.returncode = 0
+        def fake_git(cmd: list[str], **_kwargs: object) -> MagicMock:
+            """Answer the two symref reads; everything else just succeeds."""
+            stdout = ""
+            if "symbolic-ref" in cmd:
+                stdout = (
+                    "refs/remotes/origin/main\n" if "refs/remotes/origin/HEAD" in cmd else "main\n"
+                )
+            return MagicMock(returncode=0, stdout=stdout)
+
+        with patch("terok_sandbox.gate.mirror.subprocess.run", side_effect=fake_git) as mock_run:
             result = gate._refresh_clone_cache()
 
         assert result is None
-        assert mock_run.call_count == 5
-        # set-url → fetch → set-head → reset --hard → clean -ffdx
+        assert mock_run.call_count == 7
+        # set-url → fetch → set-head → resolve default → checkout -B → clean → verify
         cmds = [call.args[0] for call in mock_run.call_args_list]
         assert "set-url" in cmds[0]
         assert "fetch" in cmds[1]
         assert "set-head" in cmds[2]
-        assert "reset" in cmds[3] and "--hard" in cmds[3]
-        assert "clean" in cmds[4] and "-ffdx" in cmds[4]
+        assert "symbolic-ref" in cmds[3]
+        assert "checkout" in cmds[4] and "-B" in cmds[4] and "origin/main" in cmds[4]
+        assert "clean" in cmds[5] and "-ffdx" in cmds[5]
+        assert "symbolic-ref" in cmds[6] and "--short" in cmds[6]
 
     def test_refreshes_cache_missing_origin_head(self, tmp_path: Path) -> None:
         """Regression: a cache without ``refs/remotes/origin/HEAD`` refreshes cleanly.
@@ -314,6 +324,15 @@ class TestGateHeadSelfHeal:
         ).stdout.strip()
         assert head == "refs/heads/trunk"
         assert (cache_base / "proj" / "file.txt").read_text() == "v1\n"
+        # the cache must follow the rename by *name* — it is copied as-is
+        # into task workspaces, so a stale branch name would ship there too
+        cache_branch = subprocess.run(
+            ["git", "-C", str(cache_base / "proj"), "symbolic-ref", "--short", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        assert cache_branch == "trunk"
 
     def test_valid_head_is_left_alone(self, tmp_path: Path) -> None:
         """The happy path never contacts upstream or rewrites a healthy HEAD."""
@@ -321,7 +340,7 @@ class TestGateHeadSelfHeal:
         gate = GitGate(scope="proj", gate_path=gate_dir, upstream_url=str(gate_dir))
 
         with patch("terok_sandbox.gate.mirror._query_upstream_head_ref") as mock_query:
-            gate._heal_gate_head(env={})
+            assert gate._heal_gate_head(env={}) is None
 
         mock_query.assert_not_called()
 
@@ -352,7 +371,7 @@ class TestForceReinitClearsCache:
                 "sync_branches",
                 return_value={"success": True, "updated_branches": ["all"], "errors": []},
             ),
-            patch.object(gate, "_heal_gate_head"),
+            patch.object(gate, "_heal_gate_head", return_value=None),
             patch.object(gate, "_refresh_clone_cache", return_value=None),
         ):
             result = gate.sync(force_reinit=True)
@@ -384,6 +403,7 @@ class TestSyncIntegration:
                 "sync_branches",
                 return_value={"success": True, "updated_branches": ["all"], "errors": []},
             ),
+            patch.object(_gate_with_cache, "_heal_gate_head", return_value=None),
             patch.object(_gate_with_cache, "_refresh_clone_cache", return_value=None) as mock_cache,
         ):
             result = _gate_with_cache.sync()
@@ -391,6 +411,25 @@ class TestSyncIntegration:
         mock_cache.assert_called_once()
         assert result["cache_refreshed"] is True
         assert result["cache_error"] is None
+
+    def test_sync_reports_head_heal_failure(self, _gate_with_cache: GitGate) -> None:
+        """An unhealable gate HEAD fails the sync and skips the cache refresh."""
+        with (
+            patch.object(_gate_with_cache, "_validate_gate"),
+            patch.object(_gate_with_cache, "_ssh_env", return_value={}),
+            patch.object(
+                _gate_with_cache,
+                "sync_branches",
+                return_value={"success": True, "updated_branches": ["all"], "errors": []},
+            ),
+            patch.object(_gate_with_cache, "_heal_gate_head", return_value="HEAD dangling"),
+            patch.object(_gate_with_cache, "_refresh_clone_cache") as mock_cache,
+        ):
+            result = _gate_with_cache.sync()
+
+        assert result["success"] is False
+        assert "HEAD dangling" in result["errors"]
+        mock_cache.assert_not_called()
 
     def test_sync_reports_cache_refresh_failure(self, _gate_with_cache: GitGate) -> None:
         with (
@@ -401,6 +440,7 @@ class TestSyncIntegration:
                 "sync_branches",
                 return_value={"success": True, "updated_branches": ["all"], "errors": []},
             ),
+            patch.object(_gate_with_cache, "_heal_gate_head", return_value=None),
             patch.object(_gate_with_cache, "_refresh_clone_cache", return_value="boom"),
         ):
             result = _gate_with_cache.sync()
@@ -422,10 +462,12 @@ class TestSyncIntegration:
                     "errors": ["timeout"],
                 },
             ),
+            patch.object(_gate_with_cache, "_heal_gate_head") as mock_heal,
             patch.object(_gate_with_cache, "_refresh_clone_cache") as mock_cache,
         ):
             result = _gate_with_cache.sync()
 
+        mock_heal.assert_not_called()
         mock_cache.assert_not_called()
         assert result["cache_refreshed"] is False
         assert result["cache_error"] is None
@@ -447,6 +489,7 @@ class TestSyncIntegration:
                 "sync_branches",
                 return_value={"success": True, "updated_branches": ["all"], "errors": []},
             ),
+            patch.object(gate, "_heal_gate_head", return_value=None),
         ):
             result = gate.sync()
 
