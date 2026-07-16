@@ -134,6 +134,8 @@ def _host(
     by_path_dir = tmp_path / "by-path"
     if by_path:
         by_path_dir.mkdir()
+        for _, (_, pci_addr) in (drm_nodes or {}).items():
+            (by_path_dir / f"pci-{pci_addr}-render").symlink_to(tmp_path / "pci_devs" / pci_addr)
     with (
         patch("terok_sandbox.runtime.gpu._declared_cdi_kinds", return_value=cdi_kinds),
         patch("terok_sandbox.runtime.gpu._KFD_DEVICE", kfd_path),
@@ -204,13 +206,21 @@ class TestGpuRunArgs:
         assert not any("kfd" in a for a in args)
 
     def test_amd_raw_fallback(self, tmp_path: Path) -> None:
-        """No AMD CDI spec falls back to the ROCm-documented device pair."""
-        with _host(kfd=True, tmp_path=tmp_path):
+        """No AMD CDI spec falls back to kfd plus the AMD render nodes."""
+        drm = {"renderD128": ("0x1002", "0000:03:00.0")}
+        with _host(kfd=True, drm_nodes=drm, tmp_path=tmp_path):
             args = gpu_run_args((("amd", None),))
         pairs = _pairs(args)
         assert ("--device", str(tmp_path / "kfd")) in pairs
-        assert ("--device", "/dev/dri") in pairs
+        assert ("--device", "/dev/dri/renderD128") in pairs
+        assert ("--device", "/dev/dri") not in pairs
         assert ("--group-add", "keep-groups") in pairs
+
+    def test_amd_kfd_without_render_nodes_raises(self, tmp_path: Path) -> None:
+        """kfd present but no AMD render node is a loud broken-state error."""
+        with _host(kfd=True, tmp_path=tmp_path):
+            with pytest.raises(GpuConfigError, match="render node"):
+                gpu_run_args((("amd", None),))
 
     def test_amd_unusable_raises(self, tmp_path: Path) -> None:
         """Explicit amd without CDI or /dev/kfd fails with the driver hint."""
@@ -225,11 +235,12 @@ class TestGpuRunArgs:
         assert ("--device", "intel.com/gpu=all") in _pairs(args)
 
     def test_intel_raw_fallback(self, tmp_path: Path) -> None:
-        """An Intel render node enables the plain ``/dev/dri`` recipe."""
+        """An Intel render node enables the vendor-scoped raw recipe."""
         with _host(intel_node=True, tmp_path=tmp_path):
             args = gpu_run_args((("intel", None),))
         pairs = _pairs(args)
-        assert ("--device", "/dev/dri") in pairs
+        assert ("--device", "/dev/dri/renderD128") in pairs
+        assert ("--device", "/dev/dri") not in pairs
         assert ("--group-add", "keep-groups") in pairs
 
     def test_intel_unusable_raises(self, tmp_path: Path) -> None:
@@ -238,32 +249,47 @@ class TestGpuRunArgs:
             with pytest.raises(GpuConfigError, match="i915"):
                 gpu_run_args((("intel", None),))
 
-    def test_raw_dri_recipes_mount_by_path(self, tmp_path: Path) -> None:
-        """Raw AMD/Intel recipes mount /dev/dri/by-path read-only when present."""
-        with _host(kfd=True, by_path=True, tmp_path=tmp_path):
+    def test_raw_dri_recipes_bind_by_path_links(self, tmp_path: Path) -> None:
+        """Raw AMD/Intel recipes bind the granted nodes' by-path links, read-only."""
+        drm = {"renderD128": ("0x1002", "0000:03:00.0")}
+        with _host(kfd=True, drm_nodes=drm, by_path=True, tmp_path=tmp_path):
             args = gpu_run_args((("amd", None),))
-        by_path = tmp_path / "by-path"
-        assert ("-v", f"{by_path}:{by_path}:ro") in _pairs(args)
+        link = tmp_path / "by-path" / "pci-0000:03:00.0-render"
+        assert ("-v", f"{link}:{link}:ro") in _pairs(args)
 
-    def test_no_by_path_dir_no_mount(self, tmp_path: Path) -> None:
-        """Hosts without /dev/dri/by-path get no dangling mount."""
-        with _host(kfd=True, tmp_path=tmp_path):
+    def test_no_by_path_links_no_mount(self, tmp_path: Path) -> None:
+        """Hosts without /dev/dri/by-path entries get no dangling binds."""
+        drm = {"renderD128": ("0x1002", "0000:03:00.0")}
+        with _host(kfd=True, drm_nodes=drm, tmp_path=tmp_path):
             args = gpu_run_args((("amd", None),))
         assert "-v" not in args
 
     def test_amd_plus_intel_dedups_shared_args(self, tmp_path: Path) -> None:
-        """Vendors sharing ``/dev/dri`` and keep-groups emit them once."""
-        with _host(kfd=True, intel_node=True, tmp_path=tmp_path):
+        """Each vendor grants its own nodes; shared keep-groups emits once."""
+        drm = {"renderD129": ("0x1002", "0000:03:00.0")}
+        with _host(kfd=True, intel_node=True, drm_nodes=drm, tmp_path=tmp_path):
             args = gpu_run_args((("amd", None), ("intel", None)))
         pairs = _pairs(args)
-        assert pairs.count(("--device", "/dev/dri")) == 1
+        assert ("--device", "/dev/dri/renderD129") in pairs
+        assert ("--device", "/dev/dri/renderD128") in pairs
         assert pairs.count(("--group-add", "keep-groups")) == 1
+
+    def test_scoped_grants_exclude_foreign_drm_nodes(self, tmp_path: Path) -> None:
+        """A third vendor's DRM node (e.g. a BMC display) is never granted."""
+        drm = {
+            "renderD129": ("0x1002", "0000:03:00.0"),
+            "renderD130": ("0x1a03", "0000:04:00.0"),
+        }
+        with _host(kfd=True, intel_node=True, drm_nodes=drm, tmp_path=tmp_path):
+            args = gpu_run_args((("amd", None), ("intel", None)))
+        assert not any("renderD130" in a for a in args)
 
     def test_all_resolves_to_detected_vendors(self, tmp_path: Path) -> None:
         """``"all"`` passes through what the host has — and only that."""
-        with _host(kfd=True, tmp_path=tmp_path):
+        drm = {"renderD128": ("0x1002", "0000:03:00.0")}
+        with _host(kfd=True, drm_nodes=drm, tmp_path=tmp_path):
             args = gpu_run_args("all")
-        assert ("--device", "/dev/dri") in _pairs(args)
+        assert ("--device", "/dev/dri/renderD128") in _pairs(args)
         assert not any("nvidia" in a for a in args)
 
     def test_all_with_no_gpus_raises(self, tmp_path: Path) -> None:
@@ -347,7 +373,9 @@ class TestDeviceGrants:
         assert ("--device", "/dev/dri/renderD129") in pairs
         assert ("--device", "/dev/dri/renderD128") not in pairs
         assert ("--device", "/dev/dri") not in pairs
-        assert "-v" not in args
+        binds = [v for f, v in pairs if f == "-v"]
+        assert any("pci-0000:03:00.0-render" in b for b in binds)
+        assert not any("pci-0000:0b:00.0-render" in b for b in binds)
         assert ("--group-add", "keep-groups") in pairs
         assert "best-effort" in capsys.readouterr().err
 
@@ -401,9 +429,15 @@ class TestDetectGpuVendors:
             cdi_kinds=frozenset({"nvidia.com/gpu"}),
             kfd=True,
             intel_node=True,
+            drm_nodes={"renderD129": ("0x1002", "0000:03:00.0")},
             tmp_path=tmp_path,
         ):
             assert detect_gpu_vendors() == frozenset({"nvidia", "amd", "intel"})
+
+    def test_kfd_without_render_node_does_not_detect_amd(self, tmp_path: Path) -> None:
+        """kfd alone (no AMD render node) no longer counts as usable amd."""
+        with _host(kfd=True, tmp_path=tmp_path):
+            assert detect_gpu_vendors() == frozenset()
 
     def test_bare_host(self, tmp_path: Path) -> None:
         """Nothing detected → empty set, no exception."""
