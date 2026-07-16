@@ -138,6 +138,7 @@ _LAZY: dict[str, str] = {
     "ExecResult": "runtime:ExecResult",
     "GPU_VENDORS": "runtime:GPU_VENDORS",
     "GpuConfigError": "runtime:GpuConfigError",
+    "GpuGrant": "runtime:GpuGrant",
     "GpuSelector": "runtime:GpuSelector",
     "GpuVendor": "runtime:GpuVendor",
     "Image": "runtime:Image",
@@ -148,6 +149,7 @@ _LAZY: dict[str, str] = {
     "TcpSSHTransport": "runtime:TcpSSHTransport",
     "check_gpu_available": "runtime:check_gpu_available",
     "detect_gpu_vendors": "runtime:detect_gpu_vendors",
+    "gpu_device_addresses": "runtime:gpu_device_addresses",
     "normalize_gpus": "runtime:normalize_gpus",
     "podman_port_resolver": "runtime:podman_port_resolver",
     # Facade
@@ -271,6 +273,7 @@ if TYPE_CHECKING:
         ContainerRuntime,
         ExecResult,
         GpuConfigError,
+        GpuGrant,
         GpuSelector,
         GpuVendor,
         Image,
@@ -281,6 +284,7 @@ if TYPE_CHECKING:
         TcpSSHTransport,
         check_gpu_available,
         detect_gpu_vendors,
+        gpu_device_addresses,
         normalize_gpus,
         podman_port_resolver,
     )
@@ -347,6 +351,7 @@ __all__ = [
     "ExecResult",
     "GPU_VENDORS",
     "GpuConfigError",
+    "GpuGrant",
     "GpuSelector",
     "GpuVendor",
     "Image",
@@ -363,6 +368,7 @@ __all__ = [
     "VolumeSpec",
     "check_gpu_available",
     "detect_gpu_vendors",
+    "gpu_device_addresses",
     "normalize_gpus",
     "podman_port_resolver",
     # Shield (sandbox-side policy classes; the egress-firewall layer lives in terok-shield)

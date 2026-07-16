@@ -17,6 +17,7 @@ from terok_sandbox import GpuConfigError, check_gpu_available
 from terok_sandbox.runtime.gpu import (
     check_gpu_error,
     detect_gpu_vendors,
+    gpu_device_addresses,
     gpu_run_args,
     normalize_gpus,
 )
@@ -38,11 +39,15 @@ class TestNormalizeGpus:
             ("all", "all"),
             ("ALL", "all"),
             (["amd", "all"], "all"),
-            ("nvidia", ("nvidia",)),
-            (" AMD ", ("amd",)),
-            ("nvidia,intel", ("nvidia", "intel")),
-            (["intel", "amd"], ("amd", "intel")),
-            (["amd", "amd"], ("amd",)),
+            ("nvidia", (("nvidia", None),)),
+            (" AMD ", (("amd", None),)),
+            ("nvidia,intel", (("nvidia", None), ("intel", None))),
+            (["intel", "amd"], (("amd", None), ("intel", None))),
+            (["amd", "amd"], (("amd", None),)),
+            ("nvidia:0", (("nvidia", 0),)),
+            ("nvidia:1,nvidia:0", (("nvidia", 0), ("nvidia", 1))),
+            ("amd,amd:1", (("amd", None),)),
+            (["intel:2", "nvidia"], (("nvidia", None), ("intel", 2))),
         ],
         ids=repr,
     )
@@ -52,13 +57,28 @@ class TestNormalizeGpus:
 
     def test_vendor_order_is_canonical(self) -> None:
         """Emission order is fixed regardless of the input order."""
-        assert normalize_gpus(["intel", "nvidia", "amd"]) == ("nvidia", "amd", "intel")
+        assert normalize_gpus(["intel", "nvidia", "amd"]) == (
+            ("nvidia", None),
+            ("amd", None),
+            ("intel", None),
+        )
 
     @pytest.mark.parametrize("value", ["matrox", "all,matrox", ["all", "matrox"]])
     def test_unknown_vendor_raises(self, value: object) -> None:
         """A typo'd vendor fails at parse time — even alongside ``all``."""
         with pytest.raises(ValueError, match="matrox"):
             normalize_gpus(value)  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("value", ["nvidia:x", "nvidia:-1", "nvidia:", "amd:0.5"])
+    def test_bad_device_index_raises(self, value: str) -> None:
+        """A malformed ``:N`` suffix fails at parse time."""
+        with pytest.raises(ValueError, match="device index"):
+            normalize_gpus(value)
+
+    def test_all_with_index_raises(self) -> None:
+        """``all`` takes no device index."""
+        with pytest.raises(ValueError, match="all"):
+            normalize_gpus("all:0")
 
 
 # ── Podman args per vendor ─────────────────────────────────────────────────
@@ -70,20 +90,39 @@ def _host(
     cdi_kinds: frozenset[str] = frozenset(),
     kfd: bool = False,
     intel_node: bool = False,
+    drm_nodes: dict[str, tuple[str, str]] | None = None,
     nvidia_hook: bool = False,
     nvidia_dev: bool = False,
+    nvidia_proc: dict[str, int | None] | None = None,
     by_path: bool = False,
     tmp_path: Path,
 ) -> Iterator[None]:
-    """Patch the host probes to a synthetic GPU inventory."""
+    """Patch the host probes to a synthetic GPU inventory.
+
+    *drm_nodes* maps render-node names to ``(pci_vendor, pci_address)``
+    pairs (built as real sysfs-style symlinks so PCI ordering is
+    exercised); *nvidia_proc* maps PCI addresses to device minors,
+    mirroring ``/proc/driver/nvidia/gpus``.
+    """
     kfd_path = tmp_path / "kfd"
     if kfd:
         kfd_path.touch()
     drm = tmp_path / "drm"
     if intel_node:
-        vendor = drm / "renderD128" / "device" / "vendor"
-        vendor.parent.mkdir(parents=True)
-        vendor.write_text("0x8086\n")
+        drm_nodes = {"renderD128": ("0x8086", "0000:00:02.0"), **(drm_nodes or {})}
+    for name, (pci_vendor, pci_addr) in (drm_nodes or {}).items():
+        pci_dir = tmp_path / "pci_devs" / pci_addr
+        pci_dir.mkdir(parents=True, exist_ok=True)
+        (pci_dir / "vendor").write_text(f"{pci_vendor}\n")
+        node_dir = drm / name
+        node_dir.mkdir(parents=True)
+        (node_dir / "device").symlink_to(pci_dir)
+    proc_gpus = tmp_path / "proc_gpus"
+    for pci_addr, minor in (nvidia_proc or {}).items():
+        gpu_dir = proc_gpus / pci_addr
+        gpu_dir.mkdir(parents=True)
+        minor_line = f"Device Minor: \t {minor}\n" if minor is not None else ""
+        (gpu_dir / "information").write_text(f"Model: \t Fake GPU\n{minor_line}")
     hooks_dir = tmp_path / "hooks.d"
     if nvidia_hook:
         hooks_dir.mkdir()
@@ -96,6 +135,8 @@ def _host(
     by_path_dir = tmp_path / "by-path"
     if by_path:
         by_path_dir.mkdir()
+        for _, (_, pci_addr) in (drm_nodes or {}).items():
+            (by_path_dir / f"pci-{pci_addr}-render").symlink_to(tmp_path / "pci_devs" / pci_addr)
     with (
         patch("terok_sandbox.runtime.gpu._declared_cdi_kinds", return_value=cdi_kinds),
         patch("terok_sandbox.runtime.gpu._KFD_DEVICE", kfd_path),
@@ -103,6 +144,7 @@ def _host(
         patch("terok_sandbox.runtime.gpu._NVIDIA_LEGACY_HOOK_DIRS", (hooks_dir,)),
         patch("terok_sandbox.runtime.gpu._NVIDIA_CTL_DEVICE", dev_dir / "nvidiactl"),
         patch("terok_sandbox.runtime.gpu._NVIDIA_DEV_DIR", dev_dir),
+        patch("terok_sandbox.runtime.gpu._NVIDIA_PROC_GPUS", proc_gpus),
         patch("terok_sandbox.runtime.gpu._DRI_BY_PATH_DIR", by_path_dir),
     ):
         yield
@@ -127,7 +169,7 @@ class TestGpuRunArgs:
             "terok_sandbox.runtime.gpu._declared_cdi_kinds",
             return_value=frozenset({"nvidia.com/gpu"}),
         ):
-            args = gpu_run_args(("nvidia",))
+            args = gpu_run_args((("nvidia", None),))
         assert ("--device", "nvidia.com/gpu=all") in _pairs(args)
         assert ("-e", "NVIDIA_VISIBLE_DEVICES=all") in _pairs(args)
         assert ("-e", "NVIDIA_DRIVER_CAPABILITIES=all") in _pairs(args)
@@ -136,19 +178,19 @@ class TestGpuRunArgs:
         """Explicit nvidia with no CDI, no hook, and no devices fails before launch."""
         with _host(tmp_path=tmp_path):
             with pytest.raises(GpuConfigError, match="nvidia-ctk"):
-                gpu_run_args(("nvidia",))
+                gpu_run_args((("nvidia", None),))
 
     def test_nvidia_legacy_hook_emits_env_only(self, tmp_path: Path) -> None:
         """The pre-CDI OCI hook tier needs only the trigger env vars."""
         with _host(nvidia_hook=True, nvidia_dev=True, tmp_path=tmp_path):
-            args = gpu_run_args(("nvidia",))
+            args = gpu_run_args((("nvidia", None),))
         assert ("-e", "NVIDIA_VISIBLE_DEVICES=all") in _pairs(args)
         assert "--device" not in args
 
     def test_nvidia_raw_devices_fallback(self, tmp_path: Path) -> None:
         """Driver loaded but no toolkit → every /dev/nvidia* node is passed."""
         with _host(nvidia_dev=True, tmp_path=tmp_path):
-            args = gpu_run_args(("nvidia",))
+            args = gpu_run_args((("nvidia", None),))
         pairs = _pairs(args)
         devices = [v for f, v in pairs if f == "--device"]
         assert str(tmp_path / "dev" / "nvidiactl") in devices
@@ -159,72 +201,96 @@ class TestGpuRunArgs:
     def test_amd_prefers_cdi(self, tmp_path: Path) -> None:
         """AMD uses ``amd.com/gpu`` when amd-ctk generated a spec."""
         with _host(cdi_kinds=frozenset({"amd.com/gpu"}), kfd=True, tmp_path=tmp_path):
-            args = gpu_run_args(("amd",))
+            args = gpu_run_args((("amd", None),))
         assert ("--device", "amd.com/gpu=all") in _pairs(args)
         assert ("--group-add", "keep-groups") in _pairs(args)
         assert not any("kfd" in a for a in args)
 
     def test_amd_raw_fallback(self, tmp_path: Path) -> None:
-        """No AMD CDI spec falls back to the ROCm-documented device pair."""
-        with _host(kfd=True, tmp_path=tmp_path):
-            args = gpu_run_args(("amd",))
+        """No AMD CDI spec falls back to kfd plus the AMD render nodes."""
+        drm = {"renderD128": ("0x1002", "0000:03:00.0")}
+        with _host(kfd=True, drm_nodes=drm, tmp_path=tmp_path):
+            args = gpu_run_args((("amd", None),))
         pairs = _pairs(args)
         assert ("--device", str(tmp_path / "kfd")) in pairs
-        assert ("--device", "/dev/dri") in pairs
+        assert ("--device", "/dev/dri/renderD128") in pairs
+        assert ("--device", "/dev/dri") not in pairs
         assert ("--group-add", "keep-groups") in pairs
+
+    def test_amd_kfd_without_render_nodes_raises(self, tmp_path: Path) -> None:
+        """kfd present but no AMD render node is a loud broken-state error."""
+        with _host(kfd=True, tmp_path=tmp_path):
+            with pytest.raises(GpuConfigError, match="render node"):
+                gpu_run_args((("amd", None),))
 
     def test_amd_unusable_raises(self, tmp_path: Path) -> None:
         """Explicit amd without CDI or /dev/kfd fails with the driver hint."""
         with _host(tmp_path=tmp_path):
             with pytest.raises(GpuConfigError, match="amdgpu"):
-                gpu_run_args(("amd",))
+                gpu_run_args((("amd", None),))
 
     def test_intel_prefers_cdi(self, tmp_path: Path) -> None:
         """Intel uses ``intel.com/gpu`` when a CDI spec declares it."""
         with _host(cdi_kinds=frozenset({"intel.com/gpu"}), tmp_path=tmp_path):
-            args = gpu_run_args(("intel",))
+            args = gpu_run_args((("intel", None),))
         assert ("--device", "intel.com/gpu=all") in _pairs(args)
 
     def test_intel_raw_fallback(self, tmp_path: Path) -> None:
-        """An Intel render node enables the plain ``/dev/dri`` recipe."""
+        """An Intel render node enables the vendor-scoped raw recipe."""
         with _host(intel_node=True, tmp_path=tmp_path):
-            args = gpu_run_args(("intel",))
+            args = gpu_run_args((("intel", None),))
         pairs = _pairs(args)
-        assert ("--device", "/dev/dri") in pairs
+        assert ("--device", "/dev/dri/renderD128") in pairs
+        assert ("--device", "/dev/dri") not in pairs
         assert ("--group-add", "keep-groups") in pairs
 
     def test_intel_unusable_raises(self, tmp_path: Path) -> None:
         """Explicit intel with no render node fails with the driver hint."""
         with _host(tmp_path=tmp_path):
             with pytest.raises(GpuConfigError, match="i915"):
-                gpu_run_args(("intel",))
+                gpu_run_args((("intel", None),))
 
-    def test_raw_dri_recipes_mount_by_path(self, tmp_path: Path) -> None:
-        """Raw AMD/Intel recipes mount /dev/dri/by-path read-only when present."""
-        with _host(kfd=True, by_path=True, tmp_path=tmp_path):
-            args = gpu_run_args(("amd",))
-        by_path = tmp_path / "by-path"
-        assert ("-v", f"{by_path}:{by_path}:ro") in _pairs(args)
+    def test_raw_dri_recipes_bind_by_path_links(self, tmp_path: Path) -> None:
+        """Raw AMD/Intel recipes bind the granted nodes' by-path links, read-only."""
+        drm = {"renderD128": ("0x1002", "0000:03:00.0")}
+        with _host(kfd=True, drm_nodes=drm, by_path=True, tmp_path=tmp_path):
+            args = gpu_run_args((("amd", None),))
+        link = tmp_path / "by-path" / "pci-0000:03:00.0-render"
+        assert ("-v", f"{link}:{link}:ro") in _pairs(args)
 
-    def test_no_by_path_dir_no_mount(self, tmp_path: Path) -> None:
-        """Hosts without /dev/dri/by-path get no dangling mount."""
-        with _host(kfd=True, tmp_path=tmp_path):
-            args = gpu_run_args(("amd",))
+    def test_no_by_path_links_no_mount(self, tmp_path: Path) -> None:
+        """Hosts without /dev/dri/by-path entries get no dangling binds."""
+        drm = {"renderD128": ("0x1002", "0000:03:00.0")}
+        with _host(kfd=True, drm_nodes=drm, tmp_path=tmp_path):
+            args = gpu_run_args((("amd", None),))
         assert "-v" not in args
 
     def test_amd_plus_intel_dedups_shared_args(self, tmp_path: Path) -> None:
-        """Vendors sharing ``/dev/dri`` and keep-groups emit them once."""
-        with _host(kfd=True, intel_node=True, tmp_path=tmp_path):
-            args = gpu_run_args(("amd", "intel"))
+        """Each vendor grants its own nodes; shared keep-groups emits once."""
+        drm = {"renderD129": ("0x1002", "0000:03:00.0")}
+        with _host(kfd=True, intel_node=True, drm_nodes=drm, tmp_path=tmp_path):
+            args = gpu_run_args((("amd", None), ("intel", None)))
         pairs = _pairs(args)
-        assert pairs.count(("--device", "/dev/dri")) == 1
+        assert ("--device", "/dev/dri/renderD129") in pairs
+        assert ("--device", "/dev/dri/renderD128") in pairs
         assert pairs.count(("--group-add", "keep-groups")) == 1
+
+    def test_scoped_grants_exclude_foreign_drm_nodes(self, tmp_path: Path) -> None:
+        """A third vendor's DRM node (e.g. a BMC display) is never granted."""
+        drm = {
+            "renderD129": ("0x1002", "0000:03:00.0"),
+            "renderD130": ("0x1a03", "0000:04:00.0"),
+        }
+        with _host(kfd=True, intel_node=True, drm_nodes=drm, tmp_path=tmp_path):
+            args = gpu_run_args((("amd", None), ("intel", None)))
+        assert not any("renderD130" in a for a in args)
 
     def test_all_resolves_to_detected_vendors(self, tmp_path: Path) -> None:
         """``"all"`` passes through what the host has — and only that."""
-        with _host(kfd=True, tmp_path=tmp_path):
+        drm = {"renderD128": ("0x1002", "0000:03:00.0")}
+        with _host(kfd=True, drm_nodes=drm, tmp_path=tmp_path):
             args = gpu_run_args("all")
-        assert ("--device", "/dev/dri") in _pairs(args)
+        assert ("--device", "/dev/dri/renderD128") in _pairs(args)
         assert not any("nvidia" in a for a in args)
 
     def test_all_with_no_gpus_raises(self, tmp_path: Path) -> None:
@@ -232,6 +298,160 @@ class TestGpuRunArgs:
         with _host(tmp_path=tmp_path):
             with pytest.raises(GpuConfigError, match="no usable GPU"):
                 gpu_run_args("all")
+
+
+# ── Per-device grants ──────────────────────────────────────────────────────
+
+
+_TRI_DRM = {
+    "renderD129": ("0x1002", "0000:03:00.0"),
+    "renderD128": ("0x1002", "0000:0b:00.0"),
+    "renderD130": ("0x8086", "0000:00:02.0"),
+}
+"""Two AMD cards (PCI order ≠ node-number order) plus one Intel card."""
+
+
+class TestDeviceGrants:
+    """``vendor:N`` grants — CDI references, env narrowing, raw best effort."""
+
+    def test_nvidia_cdi_indexed_refs(self, tmp_path: Path) -> None:
+        """On CDI hosts the index goes into the device reference and env."""
+        with _host(cdi_kinds=frozenset({"nvidia.com/gpu"}), tmp_path=tmp_path):
+            args = gpu_run_args((("nvidia", 0), ("nvidia", 1)))
+        pairs = _pairs(args)
+        assert ("--device", "nvidia.com/gpu=0") in pairs
+        assert ("--device", "nvidia.com/gpu=1") in pairs
+        assert ("--device", "nvidia.com/gpu=all") not in pairs
+        assert ("-e", "NVIDIA_VISIBLE_DEVICES=0,1") in pairs
+
+    def test_amd_cdi_indexed_ref(self, tmp_path: Path) -> None:
+        """AMD CDI grants one ``amd.com/gpu=N`` reference per index."""
+        with _host(cdi_kinds=frozenset({"amd.com/gpu"}), kfd=True, tmp_path=tmp_path):
+            args = gpu_run_args((("amd", 1),))
+        pairs = _pairs(args)
+        assert ("--device", "amd.com/gpu=1") in pairs
+        assert not any("kfd" in a for a in args)
+
+    def test_legacy_hook_indexed_env(self, tmp_path: Path) -> None:
+        """The pre-CDI hook honours index lists via its trigger env var."""
+        with _host(nvidia_hook=True, tmp_path=tmp_path):
+            args = gpu_run_args((("nvidia", 1),))
+        assert ("-e", "NVIDIA_VISIBLE_DEVICES=1") in _pairs(args)
+        assert "--device" not in args
+
+    def test_nvidia_raw_indexed_maps_pci_order_to_minor(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Raw index 0 is the PCI-first GPU even when its minor is 1."""
+        with _host(
+            nvidia_dev=True,
+            nvidia_proc={"0000:01:00.0": 1, "0000:02:00.0": 0},
+            tmp_path=tmp_path,
+        ):
+            args = gpu_run_args((("nvidia", 0),))
+        devices = [v for f, v in _pairs(args) if f == "--device"]
+        assert str(tmp_path / "dev" / "nvidia1") in devices
+        assert str(tmp_path / "dev" / "nvidia0") not in devices
+        assert str(tmp_path / "dev" / "nvidiactl") in devices
+        assert str(tmp_path / "dev" / "nvidia-uvm") in devices
+        assert ("-e", "NVIDIA_VISIBLE_DEVICES=0") in _pairs(args)
+        assert "best-effort" in capsys.readouterr().err
+
+    def test_nvidia_raw_indexed_rejects_gappy_minor_map(self, tmp_path: Path) -> None:
+        """One GPU without a readable minor rejects the whole map — a
+        silent skip would shift later indices onto the wrong device."""
+        with _host(
+            nvidia_dev=True,
+            nvidia_proc={"0000:01:00.0": 1, "0000:02:00.0": None},
+            tmp_path=tmp_path,
+        ):
+            with pytest.raises(GpuConfigError, match="0000:02:00.0.*Device Minor"):
+                gpu_run_args((("nvidia", 0),))
+
+    def test_nvidia_raw_indexed_without_minor_map_fails(self, tmp_path: Path) -> None:
+        """No procfs minor map → loud failure, not a guessed node."""
+        with _host(nvidia_dev=True, tmp_path=tmp_path):
+            with pytest.raises(GpuConfigError, match="device-minor"):
+                gpu_run_args((("nvidia", 0),))
+
+    def test_amd_raw_indexed_mounts_selected_node_only(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Raw AMD index grants kfd plus exactly the selected render node."""
+        with _host(kfd=True, drm_nodes=_TRI_DRM, by_path=True, tmp_path=tmp_path):
+            args = gpu_run_args((("amd", 0),))
+        pairs = _pairs(args)
+        assert ("--device", str(tmp_path / "kfd")) in pairs
+        assert ("--device", "/dev/dri/renderD129") in pairs
+        assert ("--device", "/dev/dri/renderD128") not in pairs
+        assert ("--device", "/dev/dri") not in pairs
+        binds = [v for f, v in pairs if f == "-v"]
+        assert any("pci-0000:03:00.0-render" in b for b in binds)
+        assert not any("pci-0000:0b:00.0-render" in b for b in binds)
+        assert ("--group-add", "keep-groups") in pairs
+        assert "best-effort" in capsys.readouterr().err
+
+    def test_intel_raw_indexed_ignores_amd_nodes(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Intel indexing counts only Intel render nodes."""
+        with _host(drm_nodes=_TRI_DRM, tmp_path=tmp_path):
+            args = gpu_run_args((("intel", 0),))
+        pairs = _pairs(args)
+        assert ("--device", "/dev/dri/renderD130") in pairs
+        assert ("--device", "/dev/dri/renderD129") not in pairs
+        assert "best-effort" in capsys.readouterr().err
+
+    def test_raw_indexed_out_of_range_lists_devices(self, tmp_path: Path) -> None:
+        """An out-of-range index names the host's actual devices."""
+        with _host(kfd=True, drm_nodes=_TRI_DRM, tmp_path=tmp_path):
+            with pytest.raises(GpuConfigError, match=r"amd:0=0000:03:00\.0"):
+                gpu_run_args((("amd", 3),))
+
+    def test_cdi_indexed_grants_do_not_warn(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The best-effort warning is a raw-tier notice only."""
+        with _host(cdi_kinds=frozenset({"amd.com/gpu"}), kfd=True, tmp_path=tmp_path):
+            gpu_run_args((("amd", 0),))
+        assert capsys.readouterr().err == ""
+
+    def test_nvidia_raw_indexed_out_of_range(self, tmp_path: Path) -> None:
+        """An index past the NVIDIA device count names the count and procfs."""
+        with _host(
+            nvidia_dev=True,
+            nvidia_proc={"0000:01:00.0": 0},
+            tmp_path=tmp_path,
+        ):
+            with pytest.raises(GpuConfigError, match=r"\[2\].*1 NVIDIA device"):
+                gpu_run_args((("nvidia", 2),))
+
+    def test_gpu_device_addresses_without_nvidia_procfs(self, tmp_path: Path) -> None:
+        """A missing /proc/driver/nvidia/gpus yields an empty nvidia tuple."""
+        with _host(drm_nodes={"renderD128": ("0x1002", "0000:03:00.0")}, tmp_path=tmp_path):
+            table = gpu_device_addresses()
+        assert table["nvidia"] == ()
+        assert table["amd"] == ("0000:03:00.0",)
+
+    def test_pci_address_falls_back_to_node_name(self, tmp_path: Path) -> None:
+        """A ``device`` entry that is not a symlink degrades to the node name."""
+        from terok_sandbox.runtime.gpu import _pci_address
+
+        node = tmp_path / "renderD128"
+        (node / "device").mkdir(parents=True)
+        assert _pci_address(node) == "renderD128"
+
+    def test_gpu_device_addresses_map(self, tmp_path: Path) -> None:
+        """The index→PCI-address table matches the raw grant ordering."""
+        with _host(
+            drm_nodes=_TRI_DRM,
+            nvidia_proc={"0000:01:00.0": 1, "0000:02:00.0": 0},
+            tmp_path=tmp_path,
+        ):
+            table = gpu_device_addresses()
+        assert table["amd"] == ("0000:03:00.0", "0000:0b:00.0")
+        assert table["intel"] == ("0000:00:02.0",)
+        assert table["nvidia"] == ("0000:01:00.0", "0000:02:00.0")
 
 
 # ── Host detection ─────────────────────────────────────────────────────────
@@ -246,9 +466,15 @@ class TestDetectGpuVendors:
             cdi_kinds=frozenset({"nvidia.com/gpu"}),
             kfd=True,
             intel_node=True,
+            drm_nodes={"renderD129": ("0x1002", "0000:03:00.0")},
             tmp_path=tmp_path,
         ):
             assert detect_gpu_vendors() == frozenset({"nvidia", "amd", "intel"})
+
+    def test_kfd_without_render_node_does_not_detect_amd(self, tmp_path: Path) -> None:
+        """kfd alone (no AMD render node) no longer counts as usable amd."""
+        with _host(kfd=True, tmp_path=tmp_path):
+            assert detect_gpu_vendors() == frozenset()
 
     def test_bare_host(self, tmp_path: Path) -> None:
         """Nothing detected → empty set, no exception."""
