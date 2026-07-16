@@ -679,6 +679,40 @@ class TestChangeHandlerPiped:
         assert "re-encrypted" in out
         assert "session file rewritten" in out
 
+    def test_tier_only_change_prints_no_rekey_line(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Pre-first-use (no DB): the tier rotates, and no re-encryption is claimed."""
+        cfg = _cfg(tmp_path)
+        _write_session(cfg, OLD)
+        monkeypatch.setattr(sys, "stdin", io.StringIO(NEW + "\n"))
+
+        _handle_vault_passphrase_change(cfg=cfg)
+
+        out = capsys.readouterr().out
+        assert "re-encrypted" not in out
+        assert "session file rewritten" in out
+        assert cfg.vault_passphrase_file.read_text(encoding="utf-8").strip() == NEW
+
+    def test_failed_tier_rewrites_exit_nonzero(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The fail-loud contract: a tier left without the new value cannot scroll past."""
+        cfg = _cfg(tmp_path, use_keyring=True)
+        _seed_db(cfg, OLD)
+        monkeypatch.setattr(encryption, "load_passphrase_from_keyring", lambda: OLD)
+        monkeypatch.setattr(encryption, "store_passphrase_in_keyring", lambda _v: False)
+        monkeypatch.setattr(encryption, "forget_passphrase_in_keyring", lambda: False)
+        monkeypatch.setattr(sys, "stdin", io.StringIO(NEW + "\n"))
+
+        with pytest.raises(SystemExit, match="could not be rewritten"):
+            _handle_vault_passphrase_change(cfg=cfg)
+
+        out = capsys.readouterr().out
+        assert "✗ keyring" in out
+        # The change itself succeeded — only the tier fan-out is incomplete.
+        assert _opens_with(cfg, NEW)
+
     def test_piped_mint_refuses_before_changing_anything(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -751,6 +785,19 @@ class TestPlanProvisioning:
         plan = plan_provisioning(_cfg(tmp_path))
 
         assert plan.auto_tier is PassphraseTier.SYSTEMD_CREDS
+
+    def test_keyring_choice_survives_a_missing_user_config(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No user-scope config file → the mode persist is a silent no-op, not a crash."""
+        from terok_sandbox.commands import credentials as credentials_mod
+
+        monkeypatch.setattr(
+            "terok_sandbox.paths.config_file_paths",
+            lambda: [("system", tmp_path / "system.yml")],
+        )
+        credentials_mod._persist_mode_choice(PassphraseTier.KEYRING)  # must not raise
+        assert not (tmp_path / "system.yml").exists()
 
     def test_existing_tier_short_circuits(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
