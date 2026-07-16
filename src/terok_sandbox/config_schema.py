@@ -94,7 +94,9 @@ def normalize_gpus(value: bool | str | Sequence[str] | None) -> GpuSelector:
     tokens = [tok for part in parts for raw in part.split(",") if (tok := raw.strip().lower())]
     if not tokens:
         return None
-    grants = dict.fromkeys(_parse_gpu_token(tok) for tok in tokens if tok != "all")
+    # dict.fromkeys deduplicates while keeping first-seen order; the
+    # grants themselves are the (vendor, index) tuple keys.
+    grants = list(dict.fromkeys(_parse_gpu_token(tok) for tok in tokens if tok != "all"))
     if "all" in tokens:
         return "all"
     whole_vendors = {vendor for vendor, index in grants if index is None}
