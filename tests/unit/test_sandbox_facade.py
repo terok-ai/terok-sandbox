@@ -68,7 +68,7 @@ class TestRunSpec:
     def test_gpus_and_gpu_enabled_together_rejected(self) -> None:
         """An explicit selector plus the deprecated alias is a caller bug."""
         with pytest.raises(ValueError, match="not both"):
-            _make_spec(gpus=("amd",), gpu_enabled=True)
+            _make_spec(gpus=(("amd", None),), gpu_enabled=True)
 
     def test_restricted_mode(self) -> None:
         """Restricted spec carries through the frozen dataclass."""

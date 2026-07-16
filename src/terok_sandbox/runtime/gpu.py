@@ -28,6 +28,16 @@ the documented raw-device recipe otherwise:
 The raw DRM recipes also mount ``/dev/dri/by-path`` read-only so
 PCI-ordered enumeration keeps working inside the container.
 
+A ``:N`` suffix (``"amd:1"``, ``"nvidia:0,nvidia:1"``) grants single
+devices instead of a vendor's whole fleet.  On CDI hosts the index is
+passed to the vendor's spec (``amd.com/gpu=1``) and means whatever the
+vendor's tooling says it means.  Without CDI the grant is **best
+effort**: terok orders a vendor's devices by PCI bus address — stable
+across launches (and across reboots for unchanged hardware) but not
+guaranteed to match ``rocm-smi``/``nvidia-smi`` numbering — mounts only
+the selected device nodes, and warns on stderr.  Inside the container
+the selected card enumerates as device 0.
+
 AMD and Intel render nodes are group-gated (``render``), so those two
 vendors additionally emit ``--group-add keep-groups`` — the
 rootless-podman way to keep the invoking user's host groups.  That flag
@@ -39,11 +49,13 @@ from __future__ import annotations
 
 import json
 import subprocess  # nosec B404 — podman CLI probe, matching the podman backend module
+import sys
 from itertools import batched
 from pathlib import Path
 
 from ..config_schema import (
     GPU_VENDORS,
+    GpuGrant,
     GpuSelector,
     GpuVendor,
     normalize_gpus,
@@ -52,11 +64,13 @@ from ..config_schema import (
 __all__ = [
     "GPU_VENDORS",
     "GpuConfigError",
+    "GpuGrant",
     "GpuSelector",
     "GpuVendor",
     "check_gpu_available",
     "check_gpu_error",
     "detect_gpu_vendors",
+    "gpu_device_addresses",
     "gpu_run_args",
     "normalize_gpus",
 ]
@@ -78,11 +92,19 @@ it lets multi-GPU users tell render nodes apart inside the container.
 """
 _DRM_SYSFS = Path("/sys/class/drm")
 _INTEL_PCI_VENDOR = "0x8086"
+_AMD_PCI_VENDOR = "0x1002"
 
 _NVIDIA_CTL_DEVICE = Path("/dev/nvidiactl")
 """Presence marker for a loaded NVIDIA kernel driver (raw fallback tier)."""
 _NVIDIA_DEV_DIR = Path("/dev")
 _NVIDIA_DEV_GLOB = "nvidia*"
+_NVIDIA_PROC_GPUS = Path("/proc/driver/nvidia/gpus")
+"""Per-GPU procfs entries, one directory per PCI address.
+
+Each ``information`` file names the GPU's ``Device Minor`` — the ``N``
+in ``/dev/nvidiaN`` — which is how the raw tier maps a PCI-ordered
+device index to its node without needing ``nvidia-smi``.
+"""
 _NVIDIA_LEGACY_HOOK_DIRS: tuple[Path, ...] = (
     Path("/usr/share/containers/oci/hooks.d"),
     Path("/etc/containers/oci/hooks.d"),
@@ -131,20 +153,40 @@ class GpuConfigError(RuntimeError):
 
 
 def gpu_run_args(gpus: GpuSelector = None) -> list[str]:
-    """Return ``podman run`` args passing the selected GPU vendors through.
+    """Return ``podman run`` args passing the selected GPU grants through.
 
     ``"all"`` resolves against [`detect_gpu_vendors`][terok_sandbox.runtime.gpu.detect_gpu_vendors]
     and raises [`GpuConfigError`][terok_sandbox.runtime.gpu.GpuConfigError] when the host
     supports none — a project that opted into GPUs should never silently
-    run without them.  Explicit vendors skip detection and raise
+    run without them.  Explicit grants skip detection and raise
     per-vendor when their prerequisites are missing.
     """
     if not gpus:
         return []
     cdi_kinds = _declared_cdi_kinds()
-    vendors = _resolve_all(cdi_kinds) if gpus == "all" else gpus
-    args = [arg for vendor in vendors for arg in _VENDOR_ARGS[vendor](cdi_kinds)]
+    grouped = dict.fromkeys(_resolve_all(cdi_kinds)) if gpus == "all" else _group_grants(gpus)
+    args = [
+        arg
+        for vendor, devices in grouped.items()
+        for arg in _VENDOR_ARGS[vendor](cdi_kinds, devices)
+    ]
     return _dedup_pairs(args)
+
+
+def _group_grants(grants: tuple[GpuGrant, ...]) -> dict[GpuVendor, tuple[int, ...] | None]:
+    """Collapse normalized grants into per-vendor device selections.
+
+    ``None`` means the whole vendor; [`normalize_gpus`][terok_sandbox.config_schema.normalize_gpus]
+    already guarantees a whole-vendor grant absorbed that vendor's
+    indexed ones, so each vendor is one shape or the other.
+    """
+    grouped: dict[GpuVendor, tuple[int, ...] | None] = {}
+    for vendor, index in grants:
+        if index is None:
+            grouped[vendor] = None
+        else:
+            grouped[vendor] = (*(grouped.get(vendor) or ()), index)
+    return grouped
 
 
 def detect_gpu_vendors() -> frozenset[GpuVendor]:
@@ -200,38 +242,46 @@ def check_gpu_error(exc: subprocess.CalledProcessError) -> None:
 # ── Per-vendor arg recipes ─────────────────────────────────────────────────
 
 
-_NVIDIA_ENV_ARGS = (
-    "-e",
-    "NVIDIA_VISIBLE_DEVICES=all",
-    "-e",
-    "NVIDIA_DRIVER_CAPABILITIES=all",
-)
-"""Toolkit visibility env — read by the CDI spec's hooks *and* by the
-legacy OCI hook, so every NVIDIA tier emits it."""
+def _nvidia_env_args(devices: tuple[int, ...] | None) -> tuple[str, ...]:
+    """Toolkit visibility env — read by the CDI spec's hooks *and* by the
+    legacy OCI hook, so every NVIDIA tier emits it."""
+    visible = "all" if devices is None else ",".join(str(i) for i in devices)
+    return ("-e", f"NVIDIA_VISIBLE_DEVICES={visible}", "-e", "NVIDIA_DRIVER_CAPABILITIES=all")
 
 
-def _nvidia_args(cdi_kinds: frozenset[str]) -> list[str]:
+def _nvidia_args(cdi_kinds: frozenset[str], devices: tuple[int, ...] | None = None) -> list[str]:
     """NVIDIA passthrough — CDI, the legacy OCI hook, or raw device nodes.
 
     Tiered by how the host integrates the driver:
 
     1. **CDI** (podman ≥ 4.1 + ``nvidia-ctk cdi generate``) — the
-       ``nvidia.com/gpu=all`` device reference.
+       ``nvidia.com/gpu=all`` device reference, or one per selected
+       device index.
     2. **Legacy OCI hook** (pre-CDI Container Toolkit installs) — the
        hook triggers on ``NVIDIA_VISIBLE_DEVICES`` and injects devices
-       and driver userland itself, so the env args alone suffice.
+       and driver userland itself, so the env args alone suffice —
+       including for device selection, which the hook honours.
     3. **Raw device nodes** (driver loaded, no toolkit) — every
-       ``/dev/nvidia*`` node.  The image must then carry a driver
-       userland (``libcuda``) matching the host kernel module.
+       ``/dev/nvidia*`` node, or the shared nodes plus the selected
+       GPUs' nodes (best effort, PCI-bus-address order).  The image
+       must then carry a driver userland (``libcuda``) matching the
+       host kernel module.
     """
+    env_args = _nvidia_env_args(devices)
     if _NVIDIA_GPU_KIND in cdi_kinds:
-        return ["--device", f"{_NVIDIA_GPU_KIND}=all", *_NVIDIA_ENV_ARGS]
+        refs: tuple[str, ...] = ("all",) if devices is None else tuple(str(i) for i in devices)
+        device_args = [arg for ref in refs for arg in ("--device", f"{_NVIDIA_GPU_KIND}={ref}")]
+        return [*device_args, *env_args]
     if _has_nvidia_legacy_hook():
-        return list(_NVIDIA_ENV_ARGS)
+        return list(env_args)
     if _NVIDIA_CTL_DEVICE.exists():
-        nodes = sorted(_NVIDIA_DEV_DIR.glob(_NVIDIA_DEV_GLOB))
+        if devices is None:
+            nodes = sorted(_NVIDIA_DEV_DIR.glob(_NVIDIA_DEV_GLOB))
+        else:
+            nodes = _nvidia_raw_nodes(devices)
+            _warn_best_effort("nvidia")
         device_args = [arg for node in nodes for arg in ("--device", str(node))]
-        return [*device_args, *_NVIDIA_ENV_ARGS]
+        return [*device_args, *env_args]
     raise GpuConfigError(
         "run.gpus requests 'nvidia' but this host has no CDI spec declaring "
         f"'{_NVIDIA_GPU_KIND}', no legacy '{_NVIDIA_LEGACY_HOOK_NAME}' OCI hook, "
@@ -241,19 +291,31 @@ def _nvidia_args(cdi_kinds: frozenset[str]) -> list[str]:
     )
 
 
-def _amd_args(cdi_kinds: frozenset[str]) -> list[str]:
-    """AMD passthrough — CDI when generated, the ROCm device pair otherwise."""
+def _amd_args(cdi_kinds: frozenset[str], devices: tuple[int, ...] | None = None) -> list[str]:
+    """AMD passthrough — CDI when generated, the ROCm device pair otherwise.
+
+    Indexed grants without CDI mount ``/dev/kfd`` plus only the selected
+    render nodes; KFD's topology still lists every GPU, but a card whose
+    render node is absent cannot be driven.
+    """
     if _AMD_GPU_KIND in cdi_kinds:
-        return ["--device", f"{_AMD_GPU_KIND}=all", *_KEEP_GROUPS_ARGS]
+        refs: tuple[str, ...] = ("all",) if devices is None else tuple(str(i) for i in devices)
+        device_args = [arg for ref in refs for arg in ("--device", f"{_AMD_GPU_KIND}={ref}")]
+        return [*device_args, *_KEEP_GROUPS_ARGS]
     if _KFD_DEVICE.exists():
-        return [
-            "--device",
-            str(_KFD_DEVICE),
-            "--device",
-            str(_DRI_DIR),
-            *_dri_by_path_mount_args(),
-            *_KEEP_GROUPS_ARGS,
-        ]
+        if devices is None:
+            return [
+                "--device",
+                str(_KFD_DEVICE),
+                "--device",
+                str(_DRI_DIR),
+                *_dri_by_path_mount_args(),
+                *_KEEP_GROUPS_ARGS,
+            ]
+        nodes = _selected_render_nodes("amd", _AMD_PCI_VENDOR, devices)
+        _warn_best_effort("amd")
+        node_args = [arg for node in nodes for arg in ("--device", str(node))]
+        return ["--device", str(_KFD_DEVICE), *node_args, *_KEEP_GROUPS_ARGS]
     raise GpuConfigError(
         f"run.gpus requests 'amd' but this host has neither an '{_AMD_GPU_KIND}' "
         f"CDI spec nor {_KFD_DEVICE} — is the amdgpu kernel driver loaded?  "
@@ -261,12 +323,18 @@ def _amd_args(cdi_kinds: frozenset[str]) -> list[str]:
     )
 
 
-def _intel_args(cdi_kinds: frozenset[str]) -> list[str]:
+def _intel_args(cdi_kinds: frozenset[str], devices: tuple[int, ...] | None = None) -> list[str]:
     """Intel passthrough — CDI when generated, plain ``/dev/dri`` otherwise."""
     if _INTEL_GPU_KIND in cdi_kinds:
-        return ["--device", f"{_INTEL_GPU_KIND}=all", *_KEEP_GROUPS_ARGS]
+        refs: tuple[str, ...] = ("all",) if devices is None else tuple(str(i) for i in devices)
+        device_args = [arg for ref in refs for arg in ("--device", f"{_INTEL_GPU_KIND}={ref}")]
+        return [*device_args, *_KEEP_GROUPS_ARGS]
     if _has_intel_render_node():
-        return ["--device", str(_DRI_DIR), *_dri_by_path_mount_args(), *_KEEP_GROUPS_ARGS]
+        if devices is None:
+            return ["--device", str(_DRI_DIR), *_dri_by_path_mount_args(), *_KEEP_GROUPS_ARGS]
+        nodes = _selected_render_nodes("intel", _INTEL_PCI_VENDOR, devices)
+        _warn_best_effort("intel")
+        return [*(arg for node in nodes for arg in ("--device", str(node))), *_KEEP_GROUPS_ARGS]
     raise GpuConfigError(
         f"run.gpus requests 'intel' but this host has neither an '{_INTEL_GPU_KIND}' "
         f"CDI spec nor an Intel render node under {_DRM_SYSFS} — is the i915/xe "
@@ -303,6 +371,121 @@ def _has_intel_render_node() -> bool:
     return any(
         _safe_read(node / "device" / "vendor").strip() == _INTEL_PCI_VENDOR
         for node in _DRM_SYSFS.glob("renderD*")
+    )
+
+
+# ── Best-effort device indexing (raw tiers) ────────────────────────────────
+
+
+def gpu_device_addresses() -> dict[GpuVendor, tuple[str, ...]]:
+    """PCI bus addresses of each vendor's GPUs, in terok index order.
+
+    The authoritative answer to "which card does ``amd:1`` grant" on the
+    raw (non-CDI) tiers: position ``N`` in a vendor's tuple is the
+    device that ``vendor:N`` selects.  On CDI hosts the vendor's spec
+    owns the numbering instead and this map is informational only.
+    """
+    try:
+        nvidia = tuple(sorted(d.name for d in _NVIDIA_PROC_GPUS.iterdir()))
+    except OSError:
+        nvidia = ()
+    return {
+        "nvidia": nvidia,
+        "amd": tuple(addr for addr, _ in _vendor_render_nodes(_AMD_PCI_VENDOR)),
+        "intel": tuple(addr for addr, _ in _vendor_render_nodes(_INTEL_PCI_VENDOR)),
+    }
+
+
+def _vendor_render_nodes(pci_vendor: str) -> list[tuple[str, Path]]:
+    """The vendor's ``(pci_address, /dev node)`` pairs, PCI-address ordered."""
+    found = []
+    for sysfs in _DRM_SYSFS.glob("renderD*"):
+        if _safe_read(sysfs / "device" / "vendor").strip() != pci_vendor:
+            continue
+        found.append((_pci_address(sysfs), _DRI_DIR / sysfs.name))
+    return sorted(found)
+
+
+def _pci_address(sysfs_node: Path) -> str:
+    """PCI bus address of a DRM sysfs node (its ``device`` symlink target)."""
+    try:
+        return (sysfs_node / "device").resolve().name
+    except OSError:
+        return sysfs_node.name
+
+
+def _selected_render_nodes(
+    vendor: GpuVendor, pci_vendor: str, devices: tuple[int, ...]
+) -> list[Path]:
+    """Resolve device indices to render nodes, failing loudly out of range."""
+    nodes = _vendor_render_nodes(pci_vendor)
+    if bad := [i for i in devices if i >= len(nodes)]:
+        available = ", ".join(f"{vendor}:{i}={addr}" for i, (addr, _) in enumerate(nodes))
+        raise GpuConfigError(
+            f"run.gpus selects {vendor} device(s) {bad} but this host has "
+            f"{len(nodes)} {vendor} device(s)" + (f": {available}" if available else ".")
+        )
+    return [nodes[i][1] for i in devices]
+
+
+def _nvidia_raw_nodes(devices: tuple[int, ...]) -> list[Path]:
+    """Shared NVIDIA nodes plus the selected GPUs' nodes (raw tier).
+
+    Per-GPU nodes are ``/dev/nvidia<minor>``; everything else matching
+    the glob (``nvidiactl``, ``nvidia-uvm``, …) is shared and always
+    granted.
+    """
+    minors = _nvidia_minors_by_pci_order()
+    if bad := [i for i in devices if i >= len(minors)]:
+        raise GpuConfigError(
+            f"run.gpus selects nvidia device(s) {bad} but this host has "
+            f"{len(minors)} NVIDIA device(s) (see /proc/driver/nvidia/gpus)."
+        )
+    shared = [
+        node
+        for node in sorted(_NVIDIA_DEV_DIR.glob(_NVIDIA_DEV_GLOB))
+        if not node.name.removeprefix("nvidia").isdigit()
+    ]
+    return shared + [_NVIDIA_DEV_DIR / f"nvidia{minors[i]}" for i in devices]
+
+
+def _nvidia_minors_by_pci_order() -> list[int]:
+    """Device minors of the host's NVIDIA GPUs, PCI-bus-address ordered.
+
+    Parsed from ``/proc/driver/nvidia/gpus/<pci>/information`` — present
+    whenever the kernel driver is loaded, so the raw tier needs no
+    vendor tools for the mapping.
+    """
+    minors: list[int] = []
+    try:
+        gpu_dirs = sorted(_NVIDIA_PROC_GPUS.iterdir())
+    except OSError:
+        gpu_dirs = []
+    for gpu_dir in gpu_dirs:
+        for line in _safe_read(gpu_dir / "information").splitlines():
+            key, _, value = line.partition(":")
+            if key.strip() == "Device Minor" and value.strip().isdigit():
+                minors.append(int(value.strip()))
+                break
+    if not minors:
+        raise GpuConfigError(
+            "run.gpus selects an nvidia device by index, but the device-minor "
+            f"map under {_NVIDIA_PROC_GPUS} is unavailable — cannot identify "
+            "the device nodes.  Grant the whole vendor ('nvidia') instead, or "
+            "install the NVIDIA Container Toolkit and generate a CDI spec."
+        )
+    return minors
+
+
+def _warn_best_effort(vendor: GpuVendor) -> None:
+    """One stderr notice per raw indexed grant — degraded, not denied."""
+    carrot = " (which also lifts the baked-driver requirement)" if vendor == "nvidia" else ""
+    print(
+        f"WARNING: '{vendor}' GPU device selection without CDI is best-effort: "
+        "terok orders devices by PCI bus address, which may differ from the "
+        "vendor tools' numbering.  Install the vendor's CDI spec for "
+        f"authoritative device mapping{carrot}.",
+        file=sys.stderr,
     )
 
 

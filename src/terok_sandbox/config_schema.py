@@ -57,8 +57,17 @@ type GpuVendor = Literal["nvidia", "amd", "intel"]
 GPU_VENDORS: tuple[GpuVendor, ...] = ("nvidia", "amd", "intel")
 """Recognised ``run.gpus`` vendor tokens, in canonical (emission) order."""
 
-type GpuSelector = tuple[GpuVendor, ...] | Literal["all"] | None
-"""Normalized ``run.gpus`` value: explicit vendors, auto-detect, or off.
+type GpuGrant = tuple[GpuVendor, int | None]
+"""One normalized selector token: a vendor and an optional device index.
+
+``("amd", None)`` grants every AMD device; ``("amd", 1)`` grants the
+host's second AMD device (PCI-bus-address order — see
+[`terok_sandbox.runtime.gpu`][terok_sandbox.runtime.gpu] for the
+ordering contract per passthrough tier).
+"""
+
+type GpuSelector = tuple[GpuGrant, ...] | Literal["all"] | None
+"""Normalized ``run.gpus`` value: explicit grants, auto-detect, or off.
 
 The vocabulary lives here, next to the field it types; the host-probing
 and podman-arg side of the story is [`terok_sandbox.runtime.gpu`][terok_sandbox.runtime.gpu].
@@ -69,10 +78,13 @@ def normalize_gpus(value: bool | str | Sequence[str] | None) -> GpuSelector:
     """Normalize a raw ``run.gpus`` value into a [`GpuSelector`][terok_sandbox.config_schema.GpuSelector].
 
     Accepts the shapes a YAML config or CLI flag produces: booleans,
-    a single token (``"all"``, ``"nvidia"``, …), a comma-separated
-    token string, or a list of tokens.  Raises ``ValueError`` on an
-    unknown vendor token so misconfiguration surfaces at parse time,
-    not at launch.
+    a single token (``"all"``, ``"nvidia"``, ``"nvidia:0"``, …), a
+    comma-separated token string, or a list of tokens.  A ``:N`` suffix
+    grants one device of that vendor instead of all of them; repeat the
+    vendor to grant several (``"nvidia:0,nvidia:1"``).  A whole-vendor
+    token absorbs that vendor's indexed ones.  Raises ``ValueError`` on
+    an unknown vendor or malformed index so misconfiguration surfaces
+    at parse time, not at launch.
     """
     if value is None or value is False:
         return None
@@ -82,14 +94,35 @@ def normalize_gpus(value: bool | str | Sequence[str] | None) -> GpuSelector:
     tokens = [tok for part in parts for raw in part.split(",") if (tok := raw.strip().lower())]
     if not tokens:
         return None
-    if unknown := [tok for tok in tokens if tok != "all" and tok not in GPU_VENDORS]:
-        raise ValueError(
-            f"run.gpus: unknown GPU vendor(s) {unknown!r}; "
-            f"expected 'all', true, or any of {list(GPU_VENDORS)}"
-        )
+    grants = dict.fromkeys(_parse_gpu_token(tok) for tok in tokens if tok != "all")
     if "all" in tokens:
         return "all"
-    return tuple(vendor for vendor in GPU_VENDORS if vendor in tokens)
+    whole_vendors = {vendor for vendor, index in grants if index is None}
+    return tuple(
+        (vendor, index)
+        for vendor, index in sorted(
+            grants, key=lambda g: (GPU_VENDORS.index(g[0]), g[1] if g[1] is not None else -1)
+        )
+        if index is None or vendor not in whole_vendors
+    )
+
+
+def _parse_gpu_token(token: str) -> GpuGrant:
+    """Parse one ``vendor`` or ``vendor:index`` selector token."""
+    vendor, sep, index_part = token.partition(":")
+    if vendor not in GPU_VENDORS:
+        raise ValueError(
+            f"run.gpus: unknown GPU vendor {vendor!r}; "
+            f"expected 'all', true, or any of {list(GPU_VENDORS)}"
+        )
+    if not sep:
+        return vendor, None
+    if not index_part.isdigit():
+        raise ValueError(
+            f"run.gpus: bad device index in {token!r}; "
+            f"expected '{vendor}' or '{vendor}:<non-negative integer>'"
+        )
+    return vendor, int(index_part)
 
 
 ServicesMode = Literal["tcp", "socket"]

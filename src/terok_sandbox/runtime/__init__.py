@@ -12,10 +12,12 @@ from __future__ import annotations
 from .gpu import (
     GPU_VENDORS,
     GpuConfigError,
+    GpuGrant,
     GpuSelector,
     GpuVendor,
     check_gpu_available,
     detect_gpu_vendors,
+    gpu_device_addresses,
     normalize_gpus,
 )
 from .krun import FakeKrunTransport, KrunContainer, KrunRuntime, KrunTransport
@@ -74,9 +76,11 @@ __all__ = [
     "GpuConfigError",
     # GPU passthrough — selector types, probes, normalization
     "GPU_VENDORS",
+    "GpuGrant",
     "GpuSelector",
     "GpuVendor",
     "check_gpu_available",
     "detect_gpu_vendors",
+    "gpu_device_addresses",
     "normalize_gpus",
 ]
