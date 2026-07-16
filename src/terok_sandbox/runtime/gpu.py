@@ -410,9 +410,15 @@ def _vendor_render_nodes(pci_vendor: str) -> list[tuple[str, Path]]:
 
 
 def _pci_address(sysfs_node: Path) -> str:
-    """PCI bus address of a DRM sysfs node (its ``device`` symlink target)."""
+    """PCI bus address of a DRM sysfs node — its ``device`` link's basename.
+
+    Read via ``readlink`` (sysfs points render nodes at their PCI
+    device directly) rather than a full ``resolve()`` walk; a node
+    whose ``device`` is unreadable or not a symlink degrades to the
+    node name, keeping ordering deterministic instead of failing.
+    """
     try:
-        return (sysfs_node / "device").resolve().name
+        return (sysfs_node / "device").readlink().name
     except OSError:
         return sysfs_node.name
 

@@ -404,6 +404,31 @@ class TestDeviceGrants:
             gpu_run_args((("amd", 0),))
         assert capsys.readouterr().err == ""
 
+    def test_nvidia_raw_indexed_out_of_range(self, tmp_path: Path) -> None:
+        """An index past the NVIDIA device count names the count and procfs."""
+        with _host(
+            nvidia_dev=True,
+            nvidia_proc={"0000:01:00.0": 0},
+            tmp_path=tmp_path,
+        ):
+            with pytest.raises(GpuConfigError, match=r"\[2\].*1 NVIDIA device"):
+                gpu_run_args((("nvidia", 2),))
+
+    def test_gpu_device_addresses_without_nvidia_procfs(self, tmp_path: Path) -> None:
+        """A missing /proc/driver/nvidia/gpus yields an empty nvidia tuple."""
+        with _host(drm_nodes={"renderD128": ("0x1002", "0000:03:00.0")}, tmp_path=tmp_path):
+            table = gpu_device_addresses()
+        assert table["nvidia"] == ()
+        assert table["amd"] == ("0000:03:00.0",)
+
+    def test_pci_address_falls_back_to_node_name(self, tmp_path: Path) -> None:
+        """A ``device`` entry that is not a symlink degrades to the node name."""
+        from terok_sandbox.runtime.gpu import _pci_address
+
+        node = tmp_path / "renderD128"
+        (node / "device").mkdir(parents=True)
+        assert _pci_address(node) == "renderD128"
+
     def test_gpu_device_addresses_map(self, tmp_path: Path) -> None:
         """The index→PCI-address table matches the raw grant ordering."""
         with _host(
