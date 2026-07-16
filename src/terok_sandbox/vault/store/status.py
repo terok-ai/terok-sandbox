@@ -460,7 +460,8 @@ def _classify_db_access(
     # ``Exception`` only: with ``prompt_on_tty=False`` no prompt path can
     # raise ``SystemExit`` here, and catching it would stringify an
     # explicit exit from a lower layer into a status line.
-    except Exception as exc:  # noqa: BLE001 — non-passphrase failure, surfaced verbatim
+    # Non-passphrase failure — surfaced verbatim.
+    except Exception as exc:  # noqa: BLE001
         return _DbAccess(db_error=str(exc))
     try:
         types: dict[str, str] = {}
@@ -469,7 +470,8 @@ def _classify_db_access(
                 row = db.load_credential(credential_set, provider)
                 types.setdefault(provider, str(row.get("type", "unknown")) if row else "unknown")
         ssh_keys = db.count_ssh_keys()
-    except Exception as exc:  # noqa: BLE001 — a mid-read failure is a DB fault, not a lock
+    # A mid-read failure is a DB fault, not a lock.
+    except Exception as exc:  # noqa: BLE001
         return _DbAccess(db_error=str(exc))
     finally:
         db.close()
