@@ -435,6 +435,7 @@ class NullRuntime:
         self._force_remove_calls.append(names)
         for name in names:
             self._container_states.pop(name, None)
+            self._container_started_at.pop(name, None)
             self._container_images.pop(name, None)
             self._container_rw_sizes.pop(name, None)
             self._container_ids.pop(name, None)

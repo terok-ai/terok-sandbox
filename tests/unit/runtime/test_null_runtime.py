@@ -239,3 +239,12 @@ class TestNullRuntimeOperations:
         """``reserve_port`` returns an actually-free port."""
         with NullRuntime().reserve_port() as reservation:
             assert 1024 <= reservation.port <= 65535
+
+
+def test_force_remove_clears_started_at_fixture() -> None:
+    """A removed container must not keep answering ``started_at``."""
+    runtime = NullRuntime()
+    runtime.set_container_state("c1", "running")
+    runtime.set_container_started_at("c1", 123.0)
+    runtime.force_remove([runtime.container("c1")])
+    assert runtime.container("c1").started_at is None
