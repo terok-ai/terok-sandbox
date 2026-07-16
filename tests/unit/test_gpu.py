@@ -93,7 +93,7 @@ def _host(
     drm_nodes: dict[str, tuple[str, str]] | None = None,
     nvidia_hook: bool = False,
     nvidia_dev: bool = False,
-    nvidia_proc: dict[str, int] | None = None,
+    nvidia_proc: dict[str, int | None] | None = None,
     by_path: bool = False,
     tmp_path: Path,
 ) -> Iterator[None]:
@@ -121,7 +121,8 @@ def _host(
     for pci_addr, minor in (nvidia_proc or {}).items():
         gpu_dir = proc_gpus / pci_addr
         gpu_dir.mkdir(parents=True)
-        (gpu_dir / "information").write_text(f"Model: \t Fake GPU\nDevice Minor: \t {minor}\n")
+        minor_line = f"Device Minor: \t {minor}\n" if minor is not None else ""
+        (gpu_dir / "information").write_text(f"Model: \t Fake GPU\n{minor_line}")
     hooks_dir = tmp_path / "hooks.d"
     if nvidia_hook:
         hooks_dir.mkdir()
@@ -355,6 +356,17 @@ class TestDeviceGrants:
         assert str(tmp_path / "dev" / "nvidia-uvm") in devices
         assert ("-e", "NVIDIA_VISIBLE_DEVICES=0") in _pairs(args)
         assert "best-effort" in capsys.readouterr().err
+
+    def test_nvidia_raw_indexed_rejects_gappy_minor_map(self, tmp_path: Path) -> None:
+        """One GPU without a readable minor rejects the whole map — a
+        silent skip would shift later indices onto the wrong device."""
+        with _host(
+            nvidia_dev=True,
+            nvidia_proc={"0000:01:00.0": 1, "0000:02:00.0": None},
+            tmp_path=tmp_path,
+        ):
+            with pytest.raises(GpuConfigError, match="0000:02:00.0.*Device Minor"):
+                gpu_run_args((("nvidia", 0),))
 
     def test_nvidia_raw_indexed_without_minor_map_fails(self, tmp_path: Path) -> None:
         """No procfs minor map → loud failure, not a guessed node."""

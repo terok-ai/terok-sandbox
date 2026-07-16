@@ -215,6 +215,25 @@ def check_gpu_available() -> bool:
     return _NVIDIA_GPU_KIND in _declared_cdi_kinds()
 
 
+def gpu_device_addresses() -> dict[GpuVendor, tuple[str, ...]]:
+    """PCI bus addresses of each vendor's GPUs, in terok index order.
+
+    The authoritative answer to "which card does ``amd:1`` grant" on the
+    raw (non-CDI) tiers: position ``N`` in a vendor's tuple is the
+    device that ``vendor:N`` selects.  On CDI hosts the vendor's spec
+    owns the numbering instead and this map is informational only.
+    """
+    try:
+        nvidia = tuple(sorted(d.name for d in _NVIDIA_PROC_GPUS.iterdir()))
+    except OSError:
+        nvidia = ()
+    return {
+        "nvidia": nvidia,
+        "amd": tuple(addr for addr, _ in _vendor_render_nodes(_AMD_PCI_VENDOR)),
+        "intel": tuple(addr for addr, _ in _vendor_render_nodes(_INTEL_PCI_VENDOR)),
+    }
+
+
 def check_gpu_error(exc: subprocess.CalledProcessError) -> None:
     """Raise [`GpuConfigError`][terok_sandbox.runtime.gpu.GpuConfigError] if *exc* looks like a GPU launch issue.
 
@@ -380,25 +399,6 @@ def _has_render_node(pci_vendor: str) -> bool:
 # ── Best-effort device indexing (raw tiers) ────────────────────────────────
 
 
-def gpu_device_addresses() -> dict[GpuVendor, tuple[str, ...]]:
-    """PCI bus addresses of each vendor's GPUs, in terok index order.
-
-    The authoritative answer to "which card does ``amd:1`` grant" on the
-    raw (non-CDI) tiers: position ``N`` in a vendor's tuple is the
-    device that ``vendor:N`` selects.  On CDI hosts the vendor's spec
-    owns the numbering instead and this map is informational only.
-    """
-    try:
-        nvidia = tuple(sorted(d.name for d in _NVIDIA_PROC_GPUS.iterdir()))
-    except OSError:
-        nvidia = ()
-    return {
-        "nvidia": nvidia,
-        "amd": tuple(addr for addr, _ in _vendor_render_nodes(_AMD_PCI_VENDOR)),
-        "intel": tuple(addr for addr, _ in _vendor_render_nodes(_INTEL_PCI_VENDOR)),
-    }
-
-
 def _vendor_render_nodes(pci_vendor: str) -> list[tuple[str, Path]]:
     """The vendor's ``(pci_address, /dev node)`` pairs, PCI-address ordered."""
     found = []
@@ -480,11 +480,27 @@ def _nvidia_minors_by_pci_order() -> list[int]:
     except OSError:
         gpu_dirs = []
     for gpu_dir in gpu_dirs:
-        for line in _safe_read(gpu_dir / "information").splitlines():
-            key, _, value = line.partition(":")
-            if key.strip() == "Device Minor" and value.strip().isdigit():
-                minors.append(int(value.strip()))
-                break
+        minor = next(
+            (
+                int(value.strip())
+                for line in _safe_read(gpu_dir / "information").splitlines()
+                for key, _, value in (line.partition(":"),)
+                if key.strip() == "Device Minor" and value.strip().isdigit()
+            ),
+            None,
+        )
+        if minor is None:
+            # A gap must reject the whole map — skipping would shift
+            # every later index onto the wrong physical device.
+            raise GpuConfigError(
+                f"run.gpus selects an nvidia device by index, but "
+                f"{gpu_dir.name} under {_NVIDIA_PROC_GPUS} exposes no "
+                "readable 'Device Minor' — refusing a device map that "
+                "could grant the wrong GPU.  Grant the whole vendor "
+                "('nvidia') instead, or install the NVIDIA Container "
+                "Toolkit and generate a CDI spec."
+            )
+        minors.append(minor)
     if not minors:
         raise GpuConfigError(
             "run.gpus selects an nvidia device by index, but the device-minor "
