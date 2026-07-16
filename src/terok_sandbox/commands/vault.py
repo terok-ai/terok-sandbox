@@ -650,17 +650,23 @@ def change_passphrase(
 
     The ordering is the safety argument:
 
-    1. Verify + rekey the DB first ([`rekey_in_place`][terok_sandbox.vault.store.encryption.rekey_in_place]).
+    1. Escrow the new value first
+       ([`vault_pending_passphrase_file`][terok_sandbox.SandboxConfig.vault_pending_passphrase_file],
+       owner-only, RAM-backed): from this point a crash can never leave
+       the DB encrypted under a key that exists nowhere on the host.
+    2. Verify + rekey the DB ([`rekey_in_place`][terok_sandbox.vault.store.encryption.rekey_in_place]).
        Every failure here — wrong old passphrase, a live supervisor
        holding the WAL ("database is locked") — aborts with **nothing
-       changed anywhere**.
-    2. Only then fan the new value out to every tier that currently
+       changed anywhere** (the escrow is removed on the way out).
+    3. Only then fan the new value out to every tier that currently
        holds material, in resolution order, collecting per-tier
        outcomes instead of raising: a tier that can't take the new
        value (keyring denied, systemd-creds host regressed) is purged
        where possible so no tier keeps resolving the *old* passphrase,
-       and reported either way.
-    3. Drop the recovery-acknowledged marker — the saved copy the
+       and reported either way.  Once at least one tier holds the new
+       value the escrow is deleted; if every rewrite failed it stays,
+       so the key remains recoverable.
+    4. Drop the recovery-acknowledged marker — the saved copy the
        operator confirmed is now the wrong passphrase.
 
     Refuses up front (``RuntimeError``) while ``passphrase_command`` is
@@ -720,8 +726,20 @@ def change_passphrase(
     if new == current:
         raise ValueError("the new passphrase is identical to the current one")
 
+    from .._yaml import write_secret_text
+
     if db_exists:
-        rekey_in_place(cfg.db_path, current, new)
+        # Crash-recovery escrow: the rekeyed DB's key must exist on disk
+        # *before* the DB is rekeyed — a crash between the rekey and the
+        # tier fan-out would otherwise strand the vault under a key
+        # nobody has seen (fatal for a freshly minted value).
+        write_secret_text(cfg.vault_pending_passphrase_file, new + "\n")
+        try:
+            rekey_in_place(cfg.db_path, current, new)
+        except BaseException:
+            # Nothing was modified — don't leave escrow debris behind.
+            cfg.vault_pending_passphrase_file.unlink(missing_ok=True)
+            raise
 
     present = [
         row.source
@@ -745,10 +763,14 @@ def change_passphrase(
     # see vault.store.recovery), so the change flow must drop it.
     forget_recovery_marker(cfg.vault_recovery_marker_file)
 
+    if any(rewrite.ok for rewrite in rewrites):
+        # At least one tier now holds the new value — the escrow has
+        # done its job.  When every rewrite failed it stays behind as
+        # the only on-host copy of the key the DB is now encrypted with.
+        cfg.vault_pending_passphrase_file.unlink(missing_ok=True)
+
     # Stamp the rekey so health surfaces can flag supervisors spawned
     # before it — they keep the passphrase they resolved at spawn.
-    from .._yaml import write_secret_text
-
     write_secret_text(cfg.vault_rekey_stamp_file, "")
 
     return PassphraseChangeResult(
@@ -878,21 +900,23 @@ def _change_or_exit(cfg: SandboxConfig, *, old: str, new: str | None) -> Passphr
         raise SystemExit(
             f"that passphrase does not open {cfg.db_path} — nothing was changed."
         ) from None
-    except (ValueError, RuntimeError) as exc:
-        raise SystemExit(f"nothing was changed: {exc}") from None
     except Exception as exc:
-        if "database is locked" not in str(exc).lower():
-            raise
-        import shlex
+        # Lock contention first — the rekey guards raise it as RuntimeError,
+        # SQLite as OperationalError, and both deserve the fuser hint.
+        if "database is locked" in str(exc).lower():
+            import shlex
 
-        raise SystemExit(
-            "cannot re-encrypt the credentials DB while it is in use — nothing was"
-            " changed.\n"
-            "  A running task's supervisor still holds it open.  Find it with:\n"
-            f"    fuser -v {shlex.quote(str(cfg.db_path))}\n"
-            "  stop it (delete or stop the matching task), then re-run"
-            " `vault passphrase change`."
-        ) from exc
+            raise SystemExit(
+                "cannot re-encrypt the credentials DB while it is in use — nothing was"
+                " changed.\n"
+                "  A running task's supervisor still holds it open.  Find it with:\n"
+                f"    fuser -v {shlex.quote(str(cfg.db_path))}\n"
+                "  stop it (delete or stop the matching task), then re-run"
+                " `vault passphrase change`."
+            ) from exc
+        if isinstance(exc, (ValueError, RuntimeError)):
+            raise SystemExit(f"nothing was changed: {exc}") from None
+        raise
 
 
 def _handle_vault_passphrase_change(*, cfg: SandboxConfig | None = None) -> None:
@@ -990,6 +1014,11 @@ def _handle_vault_status(*, cfg: SandboxConfig | None = None, as_json: bool = Fa
                         for warning in status.warnings
                     ],
                     "credentials": list(status.providers) if status.providers is not None else None,
+                    "credential_types": (
+                        dict(status.credential_types)
+                        if status.credential_types is not None
+                        else None
+                    ),
                     "ssh_keys": status.ssh_keys,
                     "db_path": str(status.db_path),
                 },
@@ -1024,14 +1053,21 @@ def _chain_row_marker(row: ChainRow) -> str:
 
 
 def _print_stored_secrets(status: VaultStatus) -> None:
-    """Render the credentials / SSH-key inventory lines."""
+    """Render the credentials / SSH-key inventory lines.
+
+    Each provider is labelled with its credential type — the snapshot
+    collected both in one DB pass, so the renderer never reopens the DB.
+    """
     if status.providers is None:
         detail = "DB unreadable — see the error above" if status.db_error else "vault locked"
         print(f"  Credentials: {detail}")
         return
-    listing = (
-        f" ({', '.join(sanitize_tty(p) for p in status.providers)})" if status.providers else ""
+    types = status.credential_types or {}
+    labelled = ", ".join(
+        sanitize_tty(f"{provider} ({types.get(provider, 'unknown')})")
+        for provider in status.providers
     )
+    listing = f" ({labelled})" if labelled else ""
     print(f"  Credentials: {len(status.providers)} stored{listing}")
     print(f"  SSH keys:    {status.ssh_keys} stored")
 

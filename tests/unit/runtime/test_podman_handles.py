@@ -127,6 +127,34 @@ class TestContainerId:
         assert PodmanRuntime().container("ctr").id is None
 
 
+# ── Container.started_at ─────────────────────────────────────────────────
+
+
+class TestContainerStartedAt:
+    """``Container.started_at`` reads ``{{.State.StartedAt.Unix}}`` via ``podman inspect``."""
+
+    @patch("terok_sandbox.runtime.podman.subprocess.check_output", return_value="1234567890\n")
+    def test_resolved_timestamp(self, _co) -> None:
+        """A numeric epoch string comes back as a float."""
+        assert PodmanRuntime().container("ctr").started_at == 1234567890.0
+
+    @patch(
+        "terok_sandbox.runtime.podman.subprocess.check_output",
+        side_effect=subprocess.CalledProcessError(125, "podman"),
+    )
+    def test_missing_container_is_none(self, _co) -> None:
+        """Podman error (container gone) → ``None``."""
+        assert PodmanRuntime().container("gone").started_at is None
+
+    @patch(
+        "terok_sandbox.runtime.podman.subprocess.check_output",
+        return_value="<no value>\n",
+    )
+    def test_non_numeric_output_is_none(self, _co) -> None:
+        """A template miss (older podman) yields non-numeric text → ``None``."""
+        assert PodmanRuntime().container("ctr").started_at is None
+
+
 # ── Container.mounts ─────────────────────────────────────────────────────
 
 

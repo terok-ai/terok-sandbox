@@ -38,6 +38,10 @@ class TestNullContainerDefaults:
         """Unknown container yields ``running == False``."""
         assert NullRuntime().container("nobody").running is False
 
+    def test_started_at_is_none_without_fixture(self) -> None:
+        """Unknown container yields ``started_at == None``."""
+        assert NullRuntime().container("nobody").started_at is None
+
     def test_image_is_none_without_fixture(self) -> None:
         """Unknown container yields ``image == None``."""
         assert NullRuntime().container("nobody").image is None
@@ -73,6 +77,12 @@ class TestNullContainerFixtures:
         rt.set_container_state("c", "running")
         assert rt.container("c").state == "running"
         assert rt.container("c").running is True
+
+    def test_started_at_fixture(self) -> None:
+        """``set_container_started_at`` is reflected by ``Container.started_at``."""
+        rt = NullRuntime()
+        rt.set_container_started_at("c", 1234567890.0)
+        assert rt.container("c").started_at == 1234567890.0
 
     def test_image_fixture(self) -> None:
         """``set_container_image`` connects container to image handle."""

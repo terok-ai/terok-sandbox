@@ -65,8 +65,8 @@ def _handle_sandbox_setup(
             terminal and a no-TTY run drops it silently.  Off by
             default so a routine ``setup > install.log`` can't leak it.
         passphrase_tier: Force the credentials-DB passphrase storage
-            tier.  One of ``systemd-creds``, ``keyring``, ``session-file``,
-            ``config``.  Default ``None`` runs the auto-detect / chooser
+            tier.  One of ``systemd-creds``, ``keyring``,
+            ``session-file``.  Default ``None`` runs the auto-detect / chooser
             chain — on a non-TTY without systemd-creds that now fails
             closed, so headless bootstraps must pass this explicitly.
         cfg: Optional [`SandboxConfig`][terok_sandbox.config.SandboxConfig]
@@ -269,7 +269,7 @@ SETUP_COMMANDS: tuple[CommandDef, ...] = (
                 default=None,
                 help=(
                     "Force credentials-DB passphrase storage to a specific tier"
-                    " (systemd-creds | keyring | session-file | config) instead of"
+                    " (systemd-creds | keyring | session-file) instead of"
                     " the auto-detect / chooser chain.  Required on a non-TTY host"
                     " without systemd-creds — the silent session-file fallback was"
                     " removed in v0.0.100 because it minted a passphrase the"

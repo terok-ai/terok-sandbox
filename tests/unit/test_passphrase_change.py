@@ -12,15 +12,23 @@ orchestration (verify → rekey → tier fan-out → marker drop), and the
 from __future__ import annotations
 
 import io
+import sqlite3
 import sys
 from pathlib import Path
 
 import pytest
 
 from terok_sandbox import PassphraseTier, SandboxConfig, change_passphrase
+from terok_sandbox.commands import vault as vault_cmd
 from terok_sandbox.commands.credentials import plan_provisioning
-from terok_sandbox.commands.vault import _handle_vault_passphrase_change
-from terok_sandbox.vault.store import encryption
+from terok_sandbox.commands.vault import (
+    _change_or_exit,
+    _collect_current_passphrase,
+    _collect_new_passphrase,
+    _handle_vault_passphrase_change,
+    _rewrite_tier,
+)
+from terok_sandbox.vault.store import encryption, systemd_creds
 from terok_sandbox.vault.store.db import CredentialDB
 from terok_sandbox.vault.store.encryption import (
     NoPassphraseError,
@@ -159,6 +167,25 @@ class TestRekeyInPlace:
         with pytest.raises(ValueError, match="empty passphrase"):
             rekey_in_place(cfg.db_path, OLD, "")
 
+    def test_refuses_while_another_connection_holds_the_db(self, tmp_path: Path) -> None:
+        """A live reader (a supervisor stand-in) must abort the rekey before any change."""
+        from terok_sandbox.vault.store.encryption import open_sqlcipher
+
+        cfg = _cfg(tmp_path)
+        _seed_db(cfg, OLD)
+        holder = open_sqlcipher(cfg.db_path, OLD)
+        holder.execute("BEGIN")
+        holder.execute("SELECT count(*) FROM sqlite_master")
+        try:
+            # Contention surfaces either as SQLite's own raise or as the
+            # verified-result-row guard — both say "database is locked",
+            # which is what the CLI/TUI handlers key their hint on.
+            with pytest.raises(Exception, match="database is locked"):
+                rekey_in_place(cfg.db_path, OLD, NEW)
+        finally:
+            holder.close()
+        assert _opens_with(cfg, OLD)
+
     def test_no_old_key_sidecars_survive(self, tmp_path: Path) -> None:
         """Leftover WAL/journal frames under the old key would poison the next open."""
         cfg = _cfg(tmp_path)
@@ -168,6 +195,100 @@ class TestRekeyInPlace:
 
         for suffix in ("-wal", "-shm", "-journal"):
             assert not Path(str(cfg.db_path) + suffix).exists()
+
+
+class _FakeRow:
+    """A one-row cursor stand-in serving a crafted ``fetchone()`` result."""
+
+    def __init__(self, row: tuple[object, ...]) -> None:
+        self._row = row
+
+    def fetchone(self) -> tuple[object, ...]:
+        """Return the scripted row."""
+        return self._row
+
+
+class _FakeConn:
+    """A sqlcipher connection double with scriptable result rows per statement.
+
+    ``wal_checkpoint`` and ``journal_mode`` report contention through
+    their *result rows* rather than by raising, so a real second
+    connection can't deterministically steer both guards — a scripted
+    double can.
+    """
+
+    def __init__(
+        self,
+        *,
+        select_error: Exception | None = None,
+        checkpoint_busy: int = 0,
+        journal_mode: str = "delete",
+    ) -> None:
+        self._select_error = select_error
+        self._checkpoint_busy = checkpoint_busy
+        self._journal_mode = journal_mode
+        self.closed = False
+        self.rekeyed = False
+
+    def execute(self, sql: str) -> _FakeRow:
+        """Dispatch on the statement the way the real connection would."""
+        if sql.startswith("SELECT"):
+            if self._select_error is not None:
+                raise self._select_error
+            return _FakeRow((0,))
+        if "wal_checkpoint" in sql:
+            return _FakeRow((self._checkpoint_busy, 0, 0))
+        if "journal_mode=DELETE" in sql:
+            return _FakeRow((self._journal_mode,))
+        if sql.startswith("PRAGMA rekey"):
+            self.rekeyed = True
+        return _FakeRow((None,))
+
+    def close(self) -> None:
+        """Record the mandatory cleanup."""
+        self.closed = True
+
+
+class TestRekeyInPlaceContentionGuards:
+    """The result-row contention guards ``rekey_in_place`` verifies explicitly."""
+
+    def _rekey_with(self, monkeypatch: pytest.MonkeyPatch, conn: _FakeConn) -> None:
+        """Run ``rekey_in_place`` over the scripted connection double."""
+        monkeypatch.setattr(encryption, "open_sqlcipher", lambda *_a, **_kw: conn)
+        rekey_in_place(Path("unused.db"), OLD, NEW)
+
+    def test_non_key_database_error_propagates_untranslated(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A real fault on the probe read must not be mislabelled a key mismatch."""
+        import sqlcipher3
+
+        conn = _FakeConn(select_error=sqlcipher3.DatabaseError("database is locked"))
+        with pytest.raises(sqlcipher3.DatabaseError, match="database is locked") as excinfo:
+            self._rekey_with(monkeypatch, conn)
+        assert not isinstance(excinfo.value, WrongPassphraseError)
+        assert not conn.rekeyed
+        assert conn.closed
+
+    def test_busy_wal_checkpoint_refuses_before_rekey(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A busy checkpoint means old-key WAL frames would survive — abort."""
+        conn = _FakeConn(checkpoint_busy=1)
+        with pytest.raises(RuntimeError, match="database is locked.*drain the WAL"):
+            self._rekey_with(monkeypatch, conn)
+        assert not conn.rekeyed
+        assert conn.closed
+
+    def test_refused_journal_mode_switch_refuses_before_rekey(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``journal_mode`` echoing the old mode means no exclusive hold — abort."""
+        conn = _FakeConn(journal_mode="wal")
+        with pytest.raises(RuntimeError, match="database is locked.*exclusive hold"):
+            self._rekey_with(monkeypatch, conn)
+        assert not conn.rekeyed
+        assert conn.closed
 
 
 class TestChangePassphrase:
@@ -189,6 +310,8 @@ class TestChangePassphrase:
         assert not acknowledged(cfg.vault_recovery_marker_file)
         # The rekey stamp lets health surfaces flag pre-rekey supervisors.
         assert cfg.vault_rekey_stamp_file.exists()
+        # A tier holds the new value, so the crash-recovery escrow is gone.
+        assert not cfg.vault_pending_passphrase_file.exists()
 
     def test_minted_when_new_is_omitted(self, tmp_path: Path) -> None:
         cfg = _cfg(tmp_path)
@@ -284,6 +407,23 @@ class TestChangePassphrase:
         with pytest.raises(NoPassphraseError, match="locked"):
             change_passphrase(cfg, new=NEW)
 
+    def test_escrow_survives_when_every_tier_rewrite_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If no tier took the new value, the pending file is its only on-host copy."""
+        cfg = _cfg(tmp_path, use_keyring=True)
+        _seed_db(cfg, OLD)
+        monkeypatch.setattr(encryption, "load_passphrase_from_keyring", lambda: OLD)
+        monkeypatch.setattr(encryption, "store_passphrase_in_keyring", lambda _v: False)
+        monkeypatch.setattr(encryption, "forget_passphrase_in_keyring", lambda: False)
+
+        result = change_passphrase(cfg, new=NEW)
+
+        assert result.problems and not any(r.ok for r in result.rewrites)
+        assert _opens_with(cfg, NEW)
+        escrowed = cfg.vault_pending_passphrase_file.read_text(encoding="utf-8").strip()
+        assert escrowed == NEW
+
     def test_unprovisioned_vault_raises(self, tmp_path: Path) -> None:
         cfg = _cfg(tmp_path)
 
@@ -300,6 +440,225 @@ class TestChangePassphrase:
             change_passphrase(cfg, old="not-the-key", new=NEW)
         assert _opens_with(cfg, OLD)
         assert acknowledged(cfg.vault_recovery_marker_file)
+        # Nothing changed, so no escrow debris may remain either.
+        assert not cfg.vault_pending_passphrase_file.exists()
+
+    def test_refuses_a_legacy_plaintext_db(self, tmp_path: Path) -> None:
+        """A plaintext DB has no key to rotate — route to the encrypt-db migration."""
+        cfg = _cfg(tmp_path)
+        cfg.db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(cfg.db_path)
+        conn.execute("CREATE TABLE legacy (x)")
+        conn.commit()
+        conn.close()
+
+        with pytest.raises(RuntimeError, match="legacy plaintext.*encrypt-db"):
+            change_passphrase(cfg, new=NEW)
+
+
+class TestRewriteTier:
+    """Per-tier fan-out after the rekey — always reports, never raises."""
+
+    def test_systemd_creds_reseals_when_available(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A capable host re-seals the credential file under the new value."""
+        cfg = _cfg(tmp_path)
+        sealed: list[tuple[str, Path, str]] = []
+        monkeypatch.setattr(systemd_creds, "is_available", lambda: True)
+        monkeypatch.setattr(
+            systemd_creds,
+            "seal",
+            lambda pw, path, key_mode: sealed.append((pw, path, key_mode)),
+        )
+
+        rewrite = _rewrite_tier(cfg, PassphraseTier.SYSTEMD_CREDS, NEW)
+
+        assert rewrite.ok and "re-sealed" in rewrite.detail
+        assert sealed == [(NEW, cfg.vault_systemd_creds_file, "auto")]
+
+    def test_systemd_creds_unavailable_purges_the_stale_seal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unsealable host must not keep a credential sealed under the OLD key."""
+        cfg = _cfg(tmp_path)
+        cfg.vault_systemd_creds_file.parent.mkdir(parents=True, exist_ok=True)
+        cfg.vault_systemd_creds_file.write_bytes(b"sealed-under-old")
+        monkeypatch.setattr(systemd_creds, "is_available", lambda: False)
+        monkeypatch.setattr(systemd_creds, "unavailable_reason", lambda: "systemd too old")
+
+        rewrite = _rewrite_tier(cfg, PassphraseTier.SYSTEMD_CREDS, NEW)
+
+        assert not rewrite.ok
+        assert "systemd too old" in rewrite.detail
+        assert "vault passphrase seal" in rewrite.detail
+        assert not cfg.vault_systemd_creds_file.exists()
+
+    def test_keyring_rewrite_success(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A keyring backend that takes the write reports a plain success."""
+        cfg = _cfg(tmp_path, use_keyring=True)
+        stored: list[str] = []
+        monkeypatch.setattr(
+            encryption, "store_passphrase_in_keyring", lambda pw: stored.append(pw) or True
+        )
+
+        rewrite = _rewrite_tier(cfg, PassphraseTier.KEYRING, NEW)
+
+        assert rewrite.ok and rewrite.detail == "keyring entry rewritten"
+        assert stored == [NEW]
+
+    def test_unwritable_tier_is_reported(self, tmp_path: Path) -> None:
+        """passphrase_command points at an external store terok cannot write."""
+        cfg = _cfg(tmp_path)
+
+        rewrite = _rewrite_tier(cfg, PassphraseTier.PASSPHRASE_COMMAND, NEW)
+
+        assert not rewrite.ok
+        assert "cannot be rewritten programmatically" in rewrite.detail
+
+    def test_tier_exception_becomes_a_report(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The DB is already rekeyed at this point — a raising tier must not abort."""
+        cfg = _cfg(tmp_path)
+        monkeypatch.setattr(systemd_creds, "is_available", lambda: True)
+
+        def _boom(*_a: object, **_kw: object) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr(systemd_creds, "seal", _boom)
+
+        rewrite = _rewrite_tier(cfg, PassphraseTier.SYSTEMD_CREDS, NEW)
+
+        assert not rewrite.ok and rewrite.detail == "disk full"
+
+
+class TestCollectCurrentPassphrase:
+    """The current-passphrase seam: chain first, prompt only when locked."""
+
+    def test_broken_durable_tier_exits_with_direction(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A present-but-unsealable tier fails closed and names the fix."""
+        cfg = _cfg(tmp_path)
+        cfg.vault_systemd_creds_file.parent.mkdir(parents=True, exist_ok=True)
+        cfg.vault_systemd_creds_file.write_bytes(b"sealed-elsewhere")
+        monkeypatch.setattr(systemd_creds, "unseal", lambda _path: None)
+
+        with pytest.raises(SystemExit, match="Fix or remove the broken tier"):
+            _collect_current_passphrase(cfg)
+
+    def test_unprovisioned_vault_exits_towards_setup(self, tmp_path: Path) -> None:
+        """No DB and no tier: there is nothing to change — setup is the answer."""
+        cfg = _cfg(tmp_path)
+
+        with pytest.raises(SystemExit, match="run setup to provision"):
+            _collect_current_passphrase(cfg)
+
+    def test_locked_vault_prompts_for_the_current_value(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A DB with an empty chain is locked — the prompt fills in the value."""
+        cfg = _cfg(tmp_path)
+        cfg.db_path.parent.mkdir(parents=True, exist_ok=True)
+        cfg.db_path.write_bytes(b"stand-in")
+        monkeypatch.setattr(encryption, "prompt_passphrase", lambda: OLD)
+
+        assert _collect_current_passphrase(cfg) == OLD
+        assert "vault is locked" in capsys.readouterr().out
+
+    def test_cancelled_prompt_exits_cleanly(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An empty prompt entry maps to a nothing-was-changed exit, not a traceback."""
+        cfg = _cfg(tmp_path)
+        cfg.db_path.parent.mkdir(parents=True, exist_ok=True)
+        cfg.db_path.write_bytes(b"stand-in")
+
+        def _empty() -> str:
+            raise ValueError("empty passphrase")
+
+        monkeypatch.setattr(encryption, "prompt_passphrase", _empty)
+
+        with pytest.raises(SystemExit, match="nothing was changed: empty passphrase"):
+            _collect_current_passphrase(cfg)
+
+
+class TestCollectNewPassphraseTTY:
+    """The new-passphrase seam's interactive (TTY) half."""
+
+    def test_typed_and_confirmed_value_is_returned(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A typed entry rides the masked-echo prompt straight through."""
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        monkeypatch.setattr(encryption, "prompt_new_passphrase", lambda: NEW)
+
+        assert _collect_new_passphrase() == NEW
+        assert "NEW passphrase" in capsys.readouterr().out
+
+    def test_mismatched_confirmation_exits_cleanly(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A confirmation mismatch maps to a nothing-was-changed exit."""
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+        def _mismatch() -> str:
+            raise ValueError("passphrases do not match")
+
+        monkeypatch.setattr(encryption, "prompt_new_passphrase", _mismatch)
+
+        with pytest.raises(SystemExit, match="nothing was changed: passphrases do not match"):
+            _collect_new_passphrase()
+
+
+class TestChangeOrExit:
+    """The refusal→exit mapping the CLI handler relies on."""
+
+    def test_wrong_passphrase_names_the_db(self, tmp_path: Path) -> None:
+        """The WrongPassphraseError map points at the DB that refused the key."""
+        cfg = _cfg(tmp_path)
+        _seed_db(cfg, OLD)
+
+        with pytest.raises(SystemExit, match="does not open .*credentials.db"):
+            _change_or_exit(cfg, old="not-the-key", new=NEW)
+        assert _opens_with(cfg, OLD)
+
+    def test_refusals_map_to_nothing_was_changed(self, tmp_path: Path) -> None:
+        """ValueError refusals (here: identical new) exit with the refusal text."""
+        cfg = _cfg(tmp_path)
+        _seed_db(cfg, OLD)
+        _write_session(cfg, OLD)
+
+        with pytest.raises(SystemExit, match="nothing was changed: .*identical"):
+            _change_or_exit(cfg, old=OLD, new=OLD)
+
+    def test_locked_db_exit_carries_the_fuser_hint(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The in-use case tells the operator how to find the holding supervisor."""
+        cfg = _cfg(tmp_path)
+
+        def _locked(*_a: object, **_kw: object) -> None:
+            raise Exception("database is locked")  # noqa: TRY002 — sqlite's own shape
+
+        monkeypatch.setattr(vault_cmd, "change_passphrase", _locked)
+
+        with pytest.raises(SystemExit, match="fuser -v") as excinfo:
+            _change_or_exit(cfg, old=OLD, new=NEW)
+        assert str(cfg.db_path) in str(excinfo.value)
+
+    def test_unrelated_exception_propagates(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Anything that isn't a refusal or lock is a real bug — never swallowed."""
+        cfg = _cfg(tmp_path)
+
+        def _boom(*_a: object, **_kw: object) -> None:
+            raise OSError("disk on fire")
+
+        monkeypatch.setattr(vault_cmd, "change_passphrase", _boom)
+
+        with pytest.raises(OSError, match="disk on fire"):
+            _change_or_exit(cfg, old=OLD, new=NEW)
 
 
 class TestChangeHandlerPiped:
@@ -334,6 +693,37 @@ class TestChangeHandlerPiped:
             _handle_vault_passphrase_change(cfg=cfg)
         assert _opens_with(cfg, OLD)
         assert acknowledged(cfg.vault_recovery_marker_file)
+
+
+class TestChangeHandlerTTY:
+    """The CLI handler's interactive (TTY) contract."""
+
+    def test_minted_passphrase_is_announced_after_the_rekey(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Empty entry mints a value and announces it only once the vault holds it."""
+        from terok_sandbox.commands import credentials as credentials_cmd
+
+        cfg = _cfg(tmp_path)
+        _seed_db(cfg, OLD)
+        _write_session(cfg, OLD)
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        monkeypatch.setattr(encryption, "prompt_new_passphrase", lambda: None)
+        announced: list[str] = []
+        monkeypatch.setattr(
+            credentials_cmd,
+            "_announce_generated_passphrase",
+            lambda pw, **_kw: announced.append(pw),
+        )
+        monkeypatch.setattr(
+            credentials_cmd, "_maybe_acknowledge_recovery", lambda _cfg, **_kw: None
+        )
+
+        _handle_vault_passphrase_change(cfg=cfg)
+
+        (minted,) = announced
+        assert _opens_with(cfg, minted) and not _opens_with(cfg, OLD)
+        assert "re-encrypted" in capsys.readouterr().out
 
 
 class TestPlanProvisioning:
@@ -374,3 +764,14 @@ class TestPlanProvisioning:
 
         assert plan.provisioned
         assert plan.choices == ()
+
+    def test_default_config_is_built_lazily(self) -> None:
+        """``cfg=None`` builds a default config — isolated HOME, stubbed keyring tier."""
+        plan = plan_provisioning()
+
+        # The conftest keyring stub resolves "test", so the default
+        # config counts as provisioned; the point here is that the
+        # cfg=None path built a real SandboxConfig and ran the probe.
+        assert plan.provisioned
+        assert plan.choices == ()
+        assert isinstance(plan.keyring_available, bool)

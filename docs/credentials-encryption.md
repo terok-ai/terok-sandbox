@@ -151,21 +151,27 @@ now the wrong passphrase.
 
 Ground rules the verb enforces:
 
-- **Nothing changes on failure.**  A wrong current passphrase or a
-  busy DB aborts before anything is touched.
+- **Failures before the re-encryption change nothing.**  A wrong
+  current passphrase or a busy DB aborts with every tier and the DB
+  exactly as they were.
+- **Failures after the re-encryption can't lose the key.**  The new
+  value is escrowed to a RAM-backed, owner-only pending file *before*
+  the DB is rekeyed and deleted once at least one tier holds it — so
+  even a crash mid-change leaves the new key recoverable on the host.
+  A tier that can't take the new value (keyring denied, systemd-creds
+  host regressed) is **purged and reported** rather than left holding
+  the old passphrase, and the verb exits non-zero so the failure can't
+  scroll past.
 - **Running tasks hold the vault open.**  Re-encryption needs
   exclusive access; with a live task the verb refuses with a
   `database is locked` hint (`fuser -v` the DB, stop the task, re-run).
   Tasks that resolved the old passphrase keep using it until
-  restarted; new tasks pick up the new one automatically.
+  restarted; new tasks pick up the new one automatically — `terok
+  sickbay` flags the stale ones.
 - **`passphrase_command` blocks the change.**  The helper's secret
   lives in a store you own (`pass`, 1Password, a cloud vault) that
   terok cannot write to — update the secret there first, or remove
   the `passphrase_command` wiring, then re-run.
-- A tier that can't take the new value (keyring denied, systemd-creds
-  host regressed) is **purged and reported** rather than left holding
-  the old passphrase, and the verb exits non-zero so the failure can't
-  scroll past.
 
 ## Changing tiers (move the passphrase to a different backend)
 

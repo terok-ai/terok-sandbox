@@ -418,6 +418,21 @@ class SandboxConfig:
         return self.runtime_dir / "vault.passphrase"
 
     @property
+    def vault_pending_passphrase_file(self) -> Path:
+        """Return the crash-recovery escrow for a passphrase change in flight.
+
+        [`change_passphrase`][terok_sandbox.commands.vault.change_passphrase]
+        writes the *new* value here before re-encrypting the DB and
+        removes it once at least one tier holds it — so a crash between
+        the rekey and the tier fan-out can never leave the DB encrypted
+        under a key that exists nowhere.  Same exposure class as the
+        session-unlock file (RAM-backed, owner-only, cleared on
+        reboot); a distinct filename so the resolver chain never reads
+        it as a live tier.
+        """
+        return self.runtime_dir / "vault.passphrase.pending"
+
+    @property
     def vault_rekey_stamp_file(self) -> Path:
         """Return the marker whose mtime records the last passphrase change.
 

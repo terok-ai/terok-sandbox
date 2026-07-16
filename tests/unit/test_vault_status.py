@@ -285,12 +285,12 @@ def _status_cfg(
     refuses to open a DB that doesn't exist.
     """
     cfg = MagicMock()
-    cfg.vault_passphrase_file = session or Path("/nonexistent/session")
-    cfg.vault_systemd_creds_file = sealed or Path("/nonexistent/sealed")
+    cfg.vault_passphrase_file = session or MOCK_BASE / "absent" / "session"
+    cfg.vault_systemd_creds_file = sealed or MOCK_BASE / "absent" / "sealed"
     cfg.credentials_use_keyring = use_keyring
     cfg.credentials_passphrase_command = passphrase_command
     cfg.db_path = db_path or MOCK_DB_PATH
-    cfg.vault_recovery_marker_file = marker or Path("/nonexistent/marker")
+    cfg.vault_recovery_marker_file = marker or MOCK_BASE / "absent" / "marker"
     if db_error is not None:
         cfg.open_credential_db.side_effect = db_error
     else:
@@ -515,10 +515,13 @@ class TestHandleVaultStatusText:
         db = MagicMock()
         db.list_credential_sets.return_value = ["default"]
         db.list_credentials.return_value = ["github", "openai"]
+        db.load_credential.side_effect = lambda _cs, provider: {"type": f"{provider}-type"}
+        db.count_ssh_keys.return_value = 3
         cfg = _status_cfg(db=db, db_path=_existing_db(tmp_path))
         _run_status(cfg, source="keyring", acknowledged=True)
         out = capsys.readouterr().out
-        assert "Credentials: 2 stored (github, openai)" in out
+        assert "Credentials: 2 stored (github (github-type), openai (openai-type))" in out
+        assert "SSH keys:    3 stored" in out
 
 
 class TestHandleVaultStatusJson:
@@ -688,3 +691,45 @@ class TestSessionShadowState:
         cfg = _status_cfg(session=session, use_keyring=True)
         assert clear_redundant_session_file(cfg) is None
         assert session.exists()  # a deliberate override is never auto-removed
+
+    def test_unreadable_durable_tier_is_an_unverifiable_shadow(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A present-but-unsealable durable tier can't be compared → ``redundant=None``.
+
+        The session file may be doing real work in that state, so the
+        shadow is reported without a verdict and never auto-removed.
+        """
+        from terok_sandbox.vault.store import systemd_creds
+        from terok_sandbox.vault.store.status import session_shadow_state
+
+        session = tmp_path / "session"
+        session.write_text("session-key\n")
+        sealed = tmp_path / "sealed.cred"
+        sealed.write_bytes(b"sealed-on-another-boot")
+        monkeypatch.setattr(systemd_creds, "unseal", lambda _path: None)
+        cfg = _status_cfg(session=session, sealed=sealed)
+
+        shadow = session_shadow_state(cfg)
+
+        assert shadow is not None
+        assert shadow.durable_source is PassphraseTier.SYSTEMD_CREDS
+        assert shadow.redundant is None
+
+
+class TestResolveCfg:
+    """The lazy default-config seam every status entry point shares."""
+
+    def test_none_builds_a_default_config(self) -> None:
+        """``cfg=None`` constructs a real default config (isolated HOME in tests)."""
+        from terok_sandbox import SandboxConfig
+        from terok_sandbox.vault.store.status import _resolve_cfg
+
+        assert isinstance(_resolve_cfg(None), SandboxConfig)
+
+    def test_explicit_cfg_passes_through_unchanged(self) -> None:
+        """A caller-supplied config is returned as-is, never rebuilt."""
+        from terok_sandbox.vault.store.status import _resolve_cfg
+
+        cfg = _status_cfg()
+        assert _resolve_cfg(cfg) is cfg

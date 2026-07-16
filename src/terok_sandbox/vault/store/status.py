@@ -203,17 +203,16 @@ class VaultWarning:
     """One vault warning, authored here and only here.
 
     ``brief`` is the compact form for pills / one-line summaries;
-    ``message`` the full sentence for notifications and status pages;
-    ``verb`` the CLI verb path (without a program name — the renderer
-    knows whether it's ``terok`` or ``terok-sandbox``) that remedies
-    or explains the situation, when one exists.
+    ``message`` the full sentence for notifications and status pages.
+    ``kind`` is the semantic identifier — a renderer that wants to
+    attach a remedy (a CLI verb, a TUI button) maps it per frontend
+    rather than reading command strings out of the library layer.
     """
 
     kind: VaultWarningKind
     severity: Literal["info", "warning", "error"]
     brief: str
     message: str
-    verb: str | None = None
 
 
 def _build_warnings(
@@ -228,7 +227,6 @@ def _build_warnings(
                 "error",
                 "broken passphrase tier",
                 f"a configured passphrase tier is unreadable — {recovery.resolve_error}",
-                verb="vault status",
             )
         )
     if recovery.urgent:
@@ -240,7 +238,6 @@ def _build_warnings(
                 "the only copy of the vault passphrase is the session file, which is"
                 " cleared on reboot — save it off-host now or the vault becomes"
                 " unrecoverable the next time this machine restarts",
-                verb="vault passphrase reveal",
             )
         )
     elif not recovery.acknowledged and recovery.source is not None:
@@ -252,7 +249,6 @@ def _build_warnings(
                 "the vault passphrase is not confirmed saved off-host — every"
                 " storage tier is bound to this machine, account, or boot, so a"
                 " hardware failure strands the vault without a written copy",
-                verb="vault passphrase reveal",
             )
         )
     if shadow is not None:
@@ -287,7 +283,6 @@ def _build_warnings(
                     f"cannot compare session file with {src}",
                     f"the session-file tier shadows {src}, but {src} could not be read"
                     " to compare — fix or remove the durable tier",
-                    verb="vault status",
                 )
             )
     return tuple(warnings)

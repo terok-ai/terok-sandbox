@@ -21,6 +21,7 @@ import pytest
 from pydantic import ValidationError
 
 from terok_sandbox.config_schema import (
+    RawCredentialsSection,
     RawHooksSection,
     RawNetworkSection,
     RawPathsSection,
@@ -54,6 +55,18 @@ def test_network_section_rejects_inverted_port_range() -> None:
     """The model-level validator catches ``start > end`` instead of letting it through."""
     with pytest.raises(ValidationError, match="port_range_start must be <= port_range_end"):
         RawNetworkSection.model_validate({"port_range_start": 32700, "port_range_end": 18700})
+
+
+def test_credentials_section_rejects_removed_plaintext_passphrase() -> None:
+    """The removed plaintext tier fails with migration directions, not pydantic noise."""
+    with pytest.raises(ValidationError, match="passphrase_command: cat /path/to/that/file"):
+        RawCredentialsSection.model_validate({"passphrase": "hunter2"})
+
+
+def test_credentials_section_accepts_explicit_null_passphrase() -> None:
+    """``passphrase: null`` (a commented-out-then-nulled config) stays valid."""
+    section = RawCredentialsSection.model_validate({"passphrase": None})
+    assert section.passphrase is None
 
 
 def test_vault_section_rejects_out_of_range_port() -> None:

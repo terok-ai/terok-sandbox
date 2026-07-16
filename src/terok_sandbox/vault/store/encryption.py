@@ -580,10 +580,13 @@ def rekey_in_place(db_path: Path, old_passphrase: str, new_passphrase: str) -> N
 
     The WAL is drained and journaling switched to ``DELETE`` first: WAL
     frames are encrypted with the *old* key, so rekeying around a
-    populated WAL would leave frames the new key cannot read.  The mode
-    switch doubles as the concurrency guard — it needs exclusive access,
-    so a live per-container supervisor still holding the DB surfaces as
-    ``database is locked`` *before* anything is modified.
+    populated WAL would leave frames the new key cannot read.  Both
+    steps report contention through their *result rows* rather than by
+    raising — ``wal_checkpoint`` returns a busy flag and
+    ``journal_mode`` echoes the old mode when it couldn't switch — so
+    each is verified explicitly, and a live per-container supervisor
+    still holding the DB surfaces as ``database is locked`` *before*
+    anything is modified.
 
     Raises [`WrongPassphraseError`][terok_sandbox.vault.store.encryption.WrongPassphraseError]
     when *old_passphrase* doesn't open the DB and [`ValueError`][ValueError]
@@ -603,18 +606,28 @@ def rekey_in_place(db_path: Path, old_passphrase: str, new_passphrase: str) -> N
             if "file is not a database" not in str(exc):
                 raise  # a real fault ("database is locked", I/O) — not a key mismatch
             raise WrongPassphraseError(f"the current passphrase does not open {db_path}") from exc
-        conn.execute("PRAGMA wal_checkpoint(FULL)")
-        conn.execute("PRAGMA journal_mode=DELETE")
+        busy, _log_pages, _moved_pages = conn.execute("PRAGMA wal_checkpoint(FULL)").fetchone()
+        if busy:
+            raise RuntimeError(
+                f"database is locked — cannot drain the WAL of {db_path};"
+                " another connection is still holding it"
+            )
+        (mode,) = conn.execute("PRAGMA journal_mode=DELETE").fetchone()
+        if str(mode).lower() != "delete":
+            raise RuntimeError(
+                f"database is locked — cannot take exclusive hold of {db_path};"
+                " another connection is still open"
+            )
         # PRAGMA statements cannot take bound parameters; single-quote
         # doubling is SQL's exact string-literal escape, valid for any
         # passphrase content.
         conn.execute("PRAGMA rekey = '{}'".format(new_passphrase.replace("'", "''")))
         conn.execute("PRAGMA journal_mode=WAL")
+        # No sidecar cleanup after this point: the DELETE-mode switch
+        # already removed the old-key WAL, and an unlink after close
+        # would race a fresh supervisor's brand-new (new-key) sidecars.
     finally:
         conn.close()
-    # No connection is left open here, so the sidecars are pure debris;
-    # a leftover -wal written under the old key would poison the next open.
-    _unlink_sidecars(db_path)
 
 
 # ── Setup-time migration ────────────────────────────────────────────

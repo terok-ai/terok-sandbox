@@ -271,9 +271,10 @@ class TestResolvePassphrase:
             return "from-keyring"
 
         monkeypatch.setattr(enc, "load_passphrase_from_keyring", _boobytrap)
+        monkeypatch.setattr(enc, "load_passphrase_from_command", lambda _cmd: "from-command")
         # The chain must keep walking past the skipped tier and hit the
         # helper command below it.
-        result = resolve_passphrase(use_keyring=False, passphrase_command="/bin/echo from-command")
+        result = resolve_passphrase(use_keyring=False, passphrase_command="helper")
         assert result == "from-command"
         assert called["keyring"] == 0
 
@@ -414,7 +415,8 @@ class TestResolvePassphraseWithSource:
         from terok_sandbox.vault.store import encryption as enc
 
         monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda: None)
-        result = resolve_passphrase_with_source(passphrase_command="/bin/echo helper-pw")
+        monkeypatch.setattr(enc, "load_passphrase_from_command", lambda _cmd: "helper-pw")
+        result = resolve_passphrase_with_source(passphrase_command="helper")
         assert result == ("helper-pw", "passphrase-command")
 
     def test_keyring_pre_empts_passphrase_command(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -428,7 +430,7 @@ class TestResolvePassphraseWithSource:
         monkeypatch.setattr(enc, "load_passphrase_from_command", spy)
         result = resolve_passphrase_with_source(
             use_keyring=True,
-            passphrase_command="/bin/echo never-runs",
+            passphrase_command="helper-that-must-not-run",
         )
         assert result == ("ring-pw", "keyring")
         spy.assert_not_called()
@@ -438,8 +440,9 @@ class TestResolvePassphraseWithSource:
         from terok_sandbox.vault.store import encryption as enc
 
         monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda: None)
+        monkeypatch.setattr(enc, "load_passphrase_from_command", lambda _cmd: None)
         with pytest.raises(WrongPassphraseError, match="passphrase_command produced no passphrase"):
-            resolve_passphrase_with_source(passphrase_command="/bin/false")
+            resolve_passphrase_with_source(passphrase_command="broken-helper")
 
     def test_empty_passphrase_command_falls_through(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """An unset / empty-string command is "tier not configured" — fall through cleanly."""
@@ -899,6 +902,21 @@ class TestPromptPassphraseNonTTY:
             prompt_passphrase()
 
 
+class TestPromptNewPassphraseCancelled:
+    """``prompt_new_passphrase`` — the change flow's typed-entry half."""
+
+    def test_ctrl_c_translates_to_systemexit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``Ctrl+C`` mid-entry surfaces as a clean ``SystemExit``, not a traceback."""
+        from terok_sandbox.vault.store.encryption import prompt_new_passphrase
+
+        def _interrupt(*_a: object, **_kw: object) -> str:
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr("prompt_toolkit.prompt", _interrupt)
+        with pytest.raises(SystemExit, match="cancelled"):
+            prompt_new_passphrase()
+
+
 class TestEncryptInPlaceErrors:
     """Edge cases on the migration's error path — keep tmp DB from leaking through."""
 
@@ -964,7 +982,8 @@ class TestEmptyPassphraseGuards:
         from terok_sandbox.vault.store import encryption as enc
 
         monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda: "")
-        result = resolve_passphrase(use_keyring=True, passphrase_command="/bin/echo from-command")
+        monkeypatch.setattr(enc, "load_passphrase_from_command", lambda _cmd: "from-command")
+        result = resolve_passphrase(use_keyring=True, passphrase_command="helper")
         assert result == "from-command"
 
 
