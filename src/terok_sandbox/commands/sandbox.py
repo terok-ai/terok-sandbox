@@ -65,8 +65,8 @@ def _handle_sandbox_setup(
             terminal and a no-TTY run drops it silently.  Off by
             default so a routine ``setup > install.log`` can't leak it.
         passphrase_tier: Force the credentials-DB passphrase storage
-            tier.  One of ``systemd-creds``, ``keyring``, ``session-file``,
-            ``config``.  Default ``None`` runs the auto-detect / chooser
+            tier.  One of ``systemd-creds``, ``keyring``,
+            ``session-file``.  Default ``None`` runs the auto-detect / chooser
             chain — on a non-TTY without systemd-creds that now fails
             closed, so headless bootstraps must pass this explicitly.
         cfg: Optional [`SandboxConfig`][terok_sandbox.config.SandboxConfig]
@@ -82,7 +82,7 @@ def _handle_sandbox_setup(
         run_shield_install_phase,
         run_supervisor_install_phase,
     )
-    from ..config import SandboxConfig, credentials_passphrase, credentials_use_keyring
+    from ..config import SandboxConfig, credentials_use_keyring
     from ..setup_stamp import write_stamp
     from .credentials import _run_credentials_setup_phase
 
@@ -122,7 +122,6 @@ def _handle_sandbox_setup(
         )
         cfg = dataclasses.replace(
             cfg,
-            credentials_passphrase=credentials_passphrase(),
             credentials_use_keyring=credentials_use_keyring(),
         )
     # The git gate lives in each container's supervisor — no host-side
@@ -175,16 +174,17 @@ def _validate_passphrase_tier(tier: str) -> None:
     Mirrors the validation the credentials phase does internally, but
     runs *before* any host-mutating phase so a typo can't leave shield
     hooks installed against a sandbox that will fail at the credentials
-    step.  Imports the validator out of ``commands.credentials`` rather
-    than re-declaring the tier set so the two paths stay in lockstep.
+    step.  Validates against the tier registry's
+    [`PROVISIONABLE_TIERS`][terok_sandbox.vault.store.tiers.PROVISIONABLE_TIERS]
+    so the two paths stay in lockstep by construction.
     """
     from ..vault.store import systemd_creds as _systemd_creds
-    from .credentials import _EXPLICIT_TIERS
+    from ..vault.store.tiers import PROVISIONABLE_TIERS
 
-    if tier not in _EXPLICIT_TIERS:
+    if tier not in PROVISIONABLE_TIERS:
         raise SystemExit(
             f"unknown --passphrase-tier {tier!r};"
-            f" expected one of: {', '.join(sorted(_EXPLICIT_TIERS))}"
+            f" expected one of: {', '.join(sorted(PROVISIONABLE_TIERS))}"
         )
     if tier == "systemd-creds" and not _systemd_creds.is_available():
         raise SystemExit(
@@ -269,7 +269,7 @@ SETUP_COMMANDS: tuple[CommandDef, ...] = (
                 default=None,
                 help=(
                     "Force credentials-DB passphrase storage to a specific tier"
-                    " (systemd-creds | keyring | session-file | config) instead of"
+                    " (systemd-creds | keyring | session-file) instead of"
                     " the auto-detect / chooser chain.  Required on a non-TTY host"
                     " without systemd-creds — the silent session-file fallback was"
                     " removed in v0.0.100 because it minted a passphrase the"

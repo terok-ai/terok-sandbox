@@ -114,16 +114,19 @@ class RawCredentialsSection(BaseModel):
     passphrase: str | None = Field(
         default=None,
         description=(
-            "Unsafe headless fallback for the SQLCipher passphrase; only set"
-            " when no OS keyring or systemd-creds is available."
+            "REMOVED — the plaintext config tier no longer exists.  The"
+            " validator below rejects any set value with migration"
+            " directions; the field itself stays so the error names the"
+            " replacement instead of pydantic's generic extra-key refusal."
         ),
     )
     use_keyring: bool = Field(
-        default=False,
+        default=True,
         description=(
-            "Opt-in switch for the OS keyring tier of the passphrase"
-            " resolution chain.  Off by default because Linux Secret"
-            " Service has per-collection (not per-item) ACLs."
+            "The OS keyring tier of the passphrase resolution chain."
+            "  On by default — an empty keyring simply doesn't resolve;"
+            " set ``false`` to keep the chain away from Secret Service"
+            " entirely (its ACLs are per-collection, not per-item)."
         ),
     )
     passphrase_command: str | None = Field(
@@ -131,13 +134,31 @@ class RawCredentialsSection(BaseModel):
         description=(
             "Operator-supplied shell command (e.g. ``pass show terok-sandbox/vault-passphrase``)"
             " that prints the SQLCipher passphrase on stdout.  Tokenised with"
-            " ``shlex.split``; resolver tier slots between OS keyring and the"
-            " plaintext config-file fallback.  Canonical headless option for"
-            " hosts without systemd ≥ 257 — covers ``pass``, ``bw``, ``op``,"
-            " HashiCorp ``vault``, and the cloud secret-manager CLIs (AWS,"
-            " GCP, Azure)."
+            " ``shlex.split``; resolver tier slots below the OS keyring."
+            "  Canonical headless option for hosts without systemd ≥ 257 —"
+            " covers a plain secret file (``cat /path/to/file``), ``pass``,"
+            " ``bw``, ``op``, HashiCorp ``vault``, and the cloud"
+            " secret-manager CLIs (AWS, GCP, Azure)."
         ),
     )
+
+    @field_validator("passphrase")
+    @classmethod
+    def _reject_removed_plaintext_tier(cls, value: str | None) -> str | None:
+        """Refuse the removed plaintext tier with directions instead of silence.
+
+        The value used to be a supported chain tier (plaintext-on-disk
+        by explicit operator acceptance); dropping the field outright
+        would surface as pydantic's opaque "extra inputs are not
+        permitted".  Rejecting it here keeps the error actionable.
+        """
+        if value is None:
+            return None
+        raise ValueError(
+            "credentials.passphrase (the plaintext config tier) was removed —"
+            " move the value into its own file (mode 600) and set"
+            " `passphrase_command: cat /path/to/that/file` instead"
+        )
 
 
 class RawPathsSection(BaseModel):

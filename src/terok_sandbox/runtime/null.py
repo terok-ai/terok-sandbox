@@ -116,6 +116,11 @@ class NullContainer:
         return self.state == "running"
 
     @property
+    def started_at(self) -> float | None:
+        """Return the fixture start timestamp, or ``None`` when unset."""
+        return self._runtime._container_started_at.get(self.name)
+
+    @property
     def image(self) -> Image | None:
         """Return the fixture image, or ``None`` when unset."""
         ref = self._runtime._container_images.get(self.name)
@@ -244,6 +249,7 @@ class NullRuntime:
 
     def __init__(self) -> None:
         self._container_states: dict[str, str] = {}
+        self._container_started_at: dict[str, float] = {}
         self._container_images: dict[str, str] = {}
         self._container_rw_sizes: dict[str, int] = {}
         self._container_ids: dict[str, str] = {}
@@ -266,6 +272,10 @@ class NullRuntime:
     def set_container_state(self, name: str, state: str) -> None:
         """Record *state* (``"running"``, ``"exited"``, ...) for container *name*."""
         self._container_states[name] = state
+
+    def set_container_started_at(self, name: str, timestamp: float) -> None:
+        """Record the start timestamp of container *name*."""
+        self._container_started_at[name] = timestamp
 
     def set_container_image(self, name: str, image_ref: str) -> None:
         """Record the image ref behind container *name*."""
@@ -425,6 +435,7 @@ class NullRuntime:
         self._force_remove_calls.append(names)
         for name in names:
             self._container_states.pop(name, None)
+            self._container_started_at.pop(name, None)
             self._container_images.pop(name, None)
             self._container_rw_sizes.pop(name, None)
             self._container_ids.pop(name, None)

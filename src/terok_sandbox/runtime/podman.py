@@ -256,6 +256,27 @@ class PodmanContainer:
         return out.lower() == "true"
 
     @property
+    def started_at(self) -> float | None:
+        """Unix timestamp of the container's last start, or ``None``.
+
+        ``{{.State.StartedAt.Unix}}`` sidesteps parsing podman's
+        RFC 3339 output (whose sub-second precision varies by version).
+        """
+        try:
+            out = subprocess.check_output(  # nosec B603 B607 — argv built from fixed verbs + caller-controlled scope/container names — binary PATH lookup is the cross-distro contract
+                ["podman", "inspect", "-f", "{{.State.StartedAt.Unix}}", self.name],
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=_PROBE_TIMEOUT,
+            ).strip()
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+            return None
+        try:
+            return float(out)
+        except ValueError:
+            return None
+
+    @property
     def image(self) -> Image | None:
         """Handle to the image this container was created from, or ``None``."""
         try:

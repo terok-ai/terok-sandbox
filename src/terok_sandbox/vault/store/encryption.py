@@ -3,10 +3,11 @@
 
 """Passphrase plumbing and SQLCipher helpers for at-rest credential encryption.
 
-Walks the six-tier resolution chain — session-unlock file →
+Walks the five-tier resolution chain — session-unlock file →
 systemd-creds → OS keyring → ``passphrase_command`` helper →
-plaintext config fallback → interactive prompt — and exposes the
-SQLCipher open / migrate primitives the rest of the package builds on.
+interactive prompt — and exposes the SQLCipher open / rekey / migrate
+primitives the rest of the package builds on.  The tier vocabulary
+lives in [`tiers`][terok_sandbox.vault.store.tiers];
 ``resolve_passphrase`` documents the chain order; ``open_sqlcipher``
 is the only entry point that ever calls ``sqlcipher3.connect``.
 
@@ -26,9 +27,10 @@ import subprocess  # nosec B404 — operator-supplied passphrase_command helper 
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from . import systemd_creds as _systemd_creds
+from .tiers import PassphraseTier
 
 KEYRING_SERVICE = "terok-sandbox"
 KEYRING_USERNAME = "credentials-db"
@@ -45,18 +47,6 @@ _GENERATED_PASSPHRASE_BYTES = 32
 _PASSPHRASE_COMMAND_TIMEOUT_S = 30.0
 
 _logger = logging.getLogger(__name__)
-
-#: Closed set of tier labels — feeds the vault status display's
-#: passphrase-source label and the setup-chooser's
-#: [`SetupTier`][terok_sandbox.commands.credentials.SetupTier] subset.
-PassphraseSource = Literal[
-    "session-file",
-    "systemd-creds",
-    "keyring",
-    "passphrase-command",
-    "config",
-    "prompt",
-]
 
 
 class NoPassphraseError(RuntimeError):
@@ -77,7 +67,6 @@ def open_sqlcipher_via_chain(
     systemd_creds_file: Path | None = None,
     use_keyring: bool = False,
     passphrase_command: str | None = None,
-    config_fallback: str | None = None,
     prompt_on_tty: bool = False,
     **connect_kwargs: Any,
 ) -> Any:
@@ -92,7 +81,6 @@ def open_sqlcipher_via_chain(
         systemd_creds_file=systemd_creds_file,
         use_keyring=use_keyring,
         passphrase_command=passphrase_command,
-        config_fallback=config_fallback,
         prompt_on_tty=prompt_on_tty,
     )
     if passphrase is None:
@@ -106,9 +94,8 @@ def resolve_passphrase_with_source(
     systemd_creds_file: Path | None = None,
     use_keyring: bool = False,
     passphrase_command: str | None = None,
-    config_fallback: str | None = None,
     prompt_on_tty: bool = False,
-) -> tuple[str | None, PassphraseSource | None]:
+) -> tuple[str | None, PassphraseTier | None]:
     """Walk the runtime resolution chain; return ``(passphrase, source)``.
 
     Single source of truth for the resolution order — see
@@ -125,11 +112,11 @@ def resolve_passphrase_with_source(
     if passphrase_file is not None:
         file_pw = load_passphrase_from_file(passphrase_file)
         if file_pw:
-            return file_pw, "session-file"
+            return file_pw, PassphraseTier.SESSION_FILE
     if systemd_creds_file is not None and systemd_creds_file.is_file():
         sealed_pw = _systemd_creds.unseal(systemd_creds_file)
         if sealed_pw:
-            return sealed_pw, "systemd-creds"
+            return sealed_pw, PassphraseTier.SYSTEMD_CREDS
         # Fail closed: silently falling through would demote a
         # machine-bound tier to keyring / plaintext-on-disk without
         # the operator's knowledge.
@@ -140,11 +127,11 @@ def resolve_passphrase_with_source(
     if use_keyring:
         keyring_pw = load_passphrase_from_keyring()
         if keyring_pw:
-            return keyring_pw, "keyring"
+            return keyring_pw, PassphraseTier.KEYRING
     if passphrase_command:
         cmd_pw = load_passphrase_from_command(passphrase_command)
         if cmd_pw:
-            return cmd_pw, "passphrase-command"
+            return cmd_pw, PassphraseTier.PASSPHRASE_COMMAND
         # Fail closed for the same reason as systemd-creds above; the
         # command string itself is omitted because operators sometimes
         # inline AWS ARNs / vault paths there and this exception reaches
@@ -153,10 +140,8 @@ def resolve_passphrase_with_source(
             "passphrase_command produced no passphrase; run it manually to diagnose"
             " (see WARNING in the vault journal)"
         )
-    if config_fallback:
-        return config_fallback, "config"
     if prompt_on_tty and sys.stdin.isatty():
-        return prompt_passphrase(), "prompt"
+        return prompt_passphrase(), PassphraseTier.PROMPT
     return None, None
 
 
@@ -166,7 +151,6 @@ def resolve_passphrase(
     systemd_creds_file: Path | None = None,
     use_keyring: bool = False,
     passphrase_command: str | None = None,
-    config_fallback: str | None = None,
     prompt_on_tty: bool = False,
 ) -> str | None:
     """Walk the runtime resolution chain; return ``None`` if nothing has it.
@@ -185,27 +169,19 @@ def resolve_passphrase(
        CLIs).  Delegates retrieval without per-backend integration code,
        same shape as ``git config credential.helper`` or
        ``BORG_PASSCOMMAND``.  Configured-but-broken fails closed so a
-       misbehaving helper can't silently demote security to plaintext.
-    5. *config_fallback* — ``credentials.passphrase`` from ``config.yml``.
-       Plaintext-on-disk trust boundary: the operator accepts that
-       filesystem-level protection (LUKS / signed image / permissions)
-       is their security perimeter.  Sandbox#282 surfaces a permanent
-       WARNING in ``vault status`` and sickbay whenever this tier is
-       set, regardless of which tier actually unlocked the call.
-    6. Interactive prompt — only when *prompt_on_tty* and ``sys.stdin.isatty()``.
+       misbehaving helper can't silently demote security to a weaker tier.
+    5. Interactive prompt — only when *prompt_on_tty* and ``sys.stdin.isatty()``.
 
-    *config_fallback* and *passphrase_command* are threaded through as
-    parameters rather than read here so this module stays free of any
-    dependency on the sandbox config layer — the config module already
-    imports from credentials.db, and the back-edge would close a tach
-    cycle.
+    *passphrase_command* is threaded through as a parameter rather than
+    read here so this module stays free of any dependency on the
+    sandbox config layer — the config module already imports from
+    credentials.db, and the back-edge would close a tach cycle.
     """
     passphrase, _source = resolve_passphrase_with_source(
         passphrase_file=passphrase_file,
         systemd_creds_file=systemd_creds_file,
         use_keyring=use_keyring,
         passphrase_command=passphrase_command,
-        config_fallback=config_fallback,
         prompt_on_tty=prompt_on_tty,
     )
     return passphrase
@@ -224,7 +200,7 @@ class TierPresence:
     TPM2 box reading a RAM-backed file?" question.
     """
 
-    source: PassphraseSource
+    source: PassphraseTier
     present: bool
     detail: str
 
@@ -235,7 +211,6 @@ def probe_passphrase_chain(
     systemd_creds_file: Path | None = None,
     use_keyring: bool = False,
     passphrase_command: str | None = None,
-    config_fallback: str | None = None,
 ) -> tuple[TierPresence, ...]:
     """Report per-tier presence across the resolution chain without short-circuiting.
 
@@ -258,31 +233,26 @@ def probe_passphrase_chain(
         session_detail = f"{passphrase_file} (exists but unreadable or empty)"
     return (
         TierPresence(
-            "session-file",
+            PassphraseTier.SESSION_FILE,
             bool(session_value),
             session_detail,
         ),
         TierPresence(
-            "systemd-creds",
+            PassphraseTier.SYSTEMD_CREDS,
             bool(systemd_creds_file and systemd_creds_file.is_file()),
             _systemd_creds_detail(systemd_creds_file),
         ),
         TierPresence(
-            "keyring",
+            PassphraseTier.KEYRING,
             # Truthy, not ``is not None``: an empty string is the resolver's
             # "no passphrase" sentinel, so status must treat it as absent too.
             use_keyring and bool(load_passphrase_from_keyring()),
             "OS keyring" if use_keyring else "use_keyring off",
         ),
         TierPresence(
-            "passphrase-command",
+            PassphraseTier.PASSPHRASE_COMMAND,
             bool(passphrase_command),
             "configured (not executed)" if passphrase_command else "not configured",
-        ),
-        TierPresence(
-            "config",
-            bool(config_fallback),
-            "plaintext in config.yml" if config_fallback else "not set",
         ),
     )
 
@@ -516,28 +486,27 @@ def prompt_passphrase(*, confirm: bool = False) -> str:
     here would produce a wrong key that fails to decrypt the DB.
     """
     if sys.stdin.isatty():
+        if confirm:
+            typed = prompt_new_passphrase()
+            if typed is not None:
+                return typed
+            # Empty + confirm = "mint one for me".  Write to
+            # ``/dev/tty`` (not stdout) so a redirected install
+            # — ``terok-sandbox setup > install.log`` or CI —
+            # can't capture the recovery key.  ``commands._announce_generated_passphrase``
+            # does the same thing for non-``prompt_passphrase``
+            # paths; this is the foundation-layer mirror (we
+            # can't import from the surface layer per tach).
+            passphrase = generate_passphrase()
+            _write_to_controlling_tty(
+                f"\nVault passphrase: {passphrase}\n"
+                "  Write this down — it's your recovery key for rebuilds and other hosts.\n"
+            )
+            return passphrase
         from prompt_toolkit import prompt as ptk_prompt  # noqa: PLC0415
 
         try:
             passphrase = ptk_prompt("credentials.db passphrase: ", is_password=True).strip()
-            if not passphrase and confirm:
-                # Empty + confirm = "mint one for me".  Write to
-                # ``/dev/tty`` (not stdout) so a redirected install
-                # — ``terok-sandbox setup > install.log`` or CI —
-                # can't capture the recovery key.  ``commands._announce_generated_passphrase``
-                # does the same thing for non-``prompt_passphrase``
-                # paths; this is the foundation-layer mirror (we
-                # can't import from the surface layer per tach).
-                passphrase = generate_passphrase()
-                _write_to_controlling_tty(
-                    f"\nVault passphrase: {passphrase}\n"
-                    "  Write this down — it's your recovery key for rebuilds and other hosts.\n"
-                )
-                return passphrase
-            if confirm:
-                again = ptk_prompt("confirm passphrase:        ", is_password=True).strip()
-                if passphrase != again:
-                    raise ValueError("passphrases do not match")
         except (KeyboardInterrupt, EOFError):
             raise SystemExit("passphrase entry cancelled.") from None
     else:
@@ -545,6 +514,31 @@ def prompt_passphrase(*, confirm: bool = False) -> str:
     if not passphrase:
         raise ValueError("empty passphrase")
     return passphrase
+
+
+def prompt_new_passphrase() -> str | None:
+    """Read a typed-and-confirmed *new* passphrase from the TTY, or ``None`` on empty entry.
+
+    The entry half of [`prompt_passphrase`][terok_sandbox.vault.store.encryption.prompt_passphrase]'s
+    ``confirm`` mode, split out so flows that mint-and-announce on
+    their own schedule (``vault passphrase change`` reveals only after
+    the rekey succeeded) can reuse the exact same typed-entry
+    experience: masked echo, a confirmation read, a mismatch error.
+    ``None`` means the operator hit ``Enter`` on the first prompt —
+    the established "generate one for me" gesture.
+    """
+    from prompt_toolkit import prompt as ptk_prompt  # noqa: PLC0415
+
+    try:
+        passphrase = ptk_prompt("credentials.db passphrase: ", is_password=True).strip()
+        if not passphrase:
+            return None
+        again = ptk_prompt("confirm passphrase:        ", is_password=True).strip()
+        if passphrase != again:
+            raise ValueError("passphrases do not match")
+        return passphrase
+    except (KeyboardInterrupt, EOFError):
+        raise SystemExit("passphrase entry cancelled.") from None
 
 
 # ── SQLCipher primitives ────────────────────────────────────────────
@@ -571,6 +565,69 @@ def open_sqlcipher(db_path: str | Path, passphrase: str, **connect_kwargs: Any) 
 def generate_passphrase() -> str:
     """Return a freshly-randomised url-safe passphrase."""
     return secrets.token_urlsafe(_GENERATED_PASSPHRASE_BYTES)
+
+
+def rekey_in_place(db_path: Path, old_passphrase: str, new_passphrase: str) -> None:
+    """Re-encrypt *db_path* under *new_passphrase* via SQLCipher ``PRAGMA rekey``.
+
+    The change-passphrase counterpart of
+    [`encrypt_in_place`][terok_sandbox.vault.store.encryption.encrypt_in_place]
+    — same journal discipline, different starting point: an
+    already-encrypted DB instead of a legacy plaintext one, re-encrypted
+    page by page inside SQLCipher's own journaled transaction (no temp
+    copy, no backup — the operator's off-host passphrase copy is the
+    recovery story).
+
+    The WAL is drained and journaling switched to ``DELETE`` first: WAL
+    frames are encrypted with the *old* key, so rekeying around a
+    populated WAL would leave frames the new key cannot read.  Both
+    steps report contention through their *result rows* rather than by
+    raising — ``wal_checkpoint`` returns a busy flag and
+    ``journal_mode`` echoes the old mode when it couldn't switch — so
+    each is verified explicitly, and a live per-container supervisor
+    still holding the DB surfaces as ``database is locked`` *before*
+    anything is modified.
+
+    Raises [`WrongPassphraseError`][terok_sandbox.vault.store.encryption.WrongPassphraseError]
+    when *old_passphrase* doesn't open the DB and [`ValueError`][ValueError]
+    on an empty new passphrase (SQLCipher's no-encryption sentinel).
+    """
+    if not new_passphrase:
+        raise ValueError("empty passphrase would disable SQLCipher encryption")
+    import sqlcipher3  # noqa: PLC0415
+
+    conn = open_sqlcipher(db_path, old_passphrase)
+    try:
+        try:
+            # A wrong key only surfaces on the first page read — force
+            # one before touching anything.
+            conn.execute("SELECT count(*) FROM sqlite_master")
+        except sqlcipher3.DatabaseError as exc:
+            if "file is not a database" not in str(exc):
+                raise  # a real fault ("database is locked", I/O) — not a key mismatch
+            raise WrongPassphraseError(f"the current passphrase does not open {db_path}") from exc
+        busy, _log_pages, _moved_pages = conn.execute("PRAGMA wal_checkpoint(FULL)").fetchone()
+        if busy:
+            raise RuntimeError(
+                f"database is locked — cannot drain the WAL of {db_path};"
+                " another connection is still holding it"
+            )
+        (mode,) = conn.execute("PRAGMA journal_mode=DELETE").fetchone()
+        if str(mode).lower() != "delete":
+            raise RuntimeError(
+                f"database is locked — cannot take exclusive hold of {db_path};"
+                " another connection is still open"
+            )
+        # PRAGMA statements cannot take bound parameters; single-quote
+        # doubling is SQL's exact string-literal escape, valid for any
+        # passphrase content.
+        conn.execute("PRAGMA rekey = '{}'".format(new_passphrase.replace("'", "''")))
+        conn.execute("PRAGMA journal_mode=WAL")
+        # No sidecar cleanup after this point: the DELETE-mode switch
+        # already removed the old-key WAL, and an unlink after close
+        # would race a fresh supervisor's brand-new (new-key) sidecars.
+    finally:
+        conn.close()
 
 
 # ── Setup-time migration ────────────────────────────────────────────
@@ -701,7 +758,7 @@ __all__ = [
     "KEYRING_SERVICE",
     "KEYRING_USERNAME",
     "NoPassphraseError",
-    "PassphraseSource",
+    "PassphraseTier",
     "WrongPassphraseError",
     "encrypt_in_place",
     "forget_passphrase_in_keyring",
@@ -713,7 +770,9 @@ __all__ = [
     "load_passphrase_from_keyring",
     "open_sqlcipher",
     "open_sqlcipher_via_chain",
+    "prompt_new_passphrase",
     "prompt_passphrase",
+    "rekey_in_place",
     "resolve_passphrase",
     "resolve_passphrase_with_source",
     "store_passphrase_in_keyring",

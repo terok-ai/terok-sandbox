@@ -7,8 +7,7 @@ Generic namespace resolvers (``namespace_state_dir`` and friends) and
 the layered-config readers (``read_config_section``,
 ``read_config_top_level``) are exercised in ``terok-util``'s own test
 suite — they live there now.  This file only covers what stays in
-sandbox: the thin wrappers (``config_root``, ``state_root``, …) and
-the ``plaintext_passphrase_config_path`` walker.
+sandbox: the thin wrappers (``config_root``, ``state_root``, …).
 """
 
 from __future__ import annotations
@@ -238,66 +237,3 @@ class TestNamespaceConfigRoot:
             unittest.mock.patch("terok_util.paths._is_root", return_value=True),
         ):
             assert namespace_config_root() == Path("/etc/terok")
-
-
-class TestPlaintextPassphraseConfigPath:
-    """sandbox#282 helper that locates ``credentials.passphrase`` in the layered config."""
-
-    def test_returns_none_when_field_absent(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """No ``credentials.passphrase`` anywhere → ``None``."""
-        from terok_sandbox.paths import plaintext_passphrase_config_path
-
-        cfg = tmp_path / "config.yml"
-        cfg.write_text("credentials:\n  use_keyring: true\n", encoding="utf-8")
-        monkeypatch.setattr(
-            "terok_sandbox.paths.config_file_paths",
-            lambda: [("user", cfg)],
-        )
-        assert plaintext_passphrase_config_path() is None
-
-    def test_finds_field_in_user_config(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Field set in user config → that path."""
-        from terok_sandbox.paths import plaintext_passphrase_config_path
-
-        cfg = tmp_path / "user" / "config.yml"
-        cfg.parent.mkdir(parents=True)
-        cfg.write_text("credentials:\n  passphrase: hunter2\n", encoding="utf-8")
-        monkeypatch.setattr(
-            "terok_sandbox.paths.config_file_paths",
-            lambda: [("user", cfg)],
-        )
-        assert plaintext_passphrase_config_path() == cfg
-
-    def test_user_wins_over_system(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Both layers set the field → the higher-priority (last-walked) one wins."""
-        from terok_sandbox.paths import plaintext_passphrase_config_path
-
-        system = tmp_path / "system.yml"
-        user = tmp_path / "user.yml"
-        system.write_text("credentials:\n  passphrase: sys-value\n", encoding="utf-8")
-        user.write_text("credentials:\n  passphrase: user-value\n", encoding="utf-8")
-        monkeypatch.setattr(
-            "terok_sandbox.paths.config_file_paths",
-            lambda: [("system", system), ("user", user)],
-        )
-        assert plaintext_passphrase_config_path() == user
-
-    def test_bad_layer_is_swallowed(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """A malformed YAML layer doesn't kill the walk — visibility surfaces must not crash."""
-        from terok_sandbox.paths import plaintext_passphrase_config_path
-
-        broken = tmp_path / "broken.yml"
-        good = tmp_path / "good.yml"
-        # ``: : :`` is unambiguously not valid YAML; the parse error must
-        # NOT propagate out of the helper.
-        broken.write_text(": : :\n", encoding="utf-8")
-        good.write_text("credentials:\n  passphrase: visible\n", encoding="utf-8")
-        monkeypatch.setattr(
-            "terok_sandbox.paths.config_file_paths",
-            lambda: [("system", broken), ("user", good)],
-        )
-        assert plaintext_passphrase_config_path() == good

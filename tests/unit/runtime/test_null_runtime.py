@@ -38,6 +38,10 @@ class TestNullContainerDefaults:
         """Unknown container yields ``running == False``."""
         assert NullRuntime().container("nobody").running is False
 
+    def test_started_at_is_none_without_fixture(self) -> None:
+        """Unknown container yields ``started_at == None``."""
+        assert NullRuntime().container("nobody").started_at is None
+
     def test_image_is_none_without_fixture(self) -> None:
         """Unknown container yields ``image == None``."""
         assert NullRuntime().container("nobody").image is None
@@ -73,6 +77,12 @@ class TestNullContainerFixtures:
         rt.set_container_state("c", "running")
         assert rt.container("c").state == "running"
         assert rt.container("c").running is True
+
+    def test_started_at_fixture(self) -> None:
+        """``set_container_started_at`` is reflected by ``Container.started_at``."""
+        rt = NullRuntime()
+        rt.set_container_started_at("c", 1234567890.0)
+        assert rt.container("c").started_at == 1234567890.0
 
     def test_image_fixture(self) -> None:
         """``set_container_image`` connects container to image handle."""
@@ -229,3 +239,12 @@ class TestNullRuntimeOperations:
         """``reserve_port`` returns an actually-free port."""
         with NullRuntime().reserve_port() as reservation:
             assert 1024 <= reservation.port <= 65535
+
+
+def test_force_remove_clears_started_at_fixture() -> None:
+    """A removed container must not keep answering ``started_at``."""
+    runtime = NullRuntime()
+    runtime.set_container_state("c1", "running")
+    runtime.set_container_started_at("c1", 123.0)
+    runtime.force_remove([runtime.container("c1")])
+    assert runtime.container("c1").started_at is None

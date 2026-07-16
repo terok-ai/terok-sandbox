@@ -33,16 +33,32 @@ from terok_sandbox.vault.store.recovery import (
 _PASSPHRASE = "correct-horse-battery-staple"
 
 
-def _cfg(tmp_path: Path, *, passphrase: str | None = _PASSPHRASE) -> SandboxConfig:
-    """Sandbox config with the config-tier passphrase wired in (no keyring)."""
+@pytest.fixture(autouse=True)
+def _keyring_holds_passphrase(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Land ``_PASSPHRASE`` on the keyring tier for every test in this module.
+
+    Layers on top of the conftest chain stub (which pins the keyring
+    read to a generic ``"test"``) so the reveal assertions can check
+    for a distinctive cleartext in each output channel.
+    """
+    import terok_sandbox.vault.store.encryption as _enc
+
+    monkeypatch.setattr(_enc, "load_passphrase_from_keyring", lambda: _PASSPHRASE)
+
+
+def _cfg(tmp_path: Path, *, unlocked: bool = True) -> SandboxConfig:
+    """Sandbox config with the keyring-tier passphrase wired in.
+
+    *unlocked* switches the keyring tier on or off; with it off no tier
+    resolves, which is the locked-vault shape the exit-path tests need.
+    """
     return SandboxConfig(
         state_dir=tmp_path / "state",
         runtime_dir=tmp_path / "rt",
         config_dir=tmp_path / "cfg",
         vault_dir=tmp_path / "vault",
         services_mode="socket",
-        credentials_passphrase=passphrase,
-        credentials_use_keyring=False,
+        credentials_use_keyring=unlocked,
     )
 
 
@@ -121,7 +137,7 @@ class TestRevealDefault:
         """No resolvable passphrase → SystemExit with `vault unlock` hint."""
         _patch_tty(monkeypatch)
         with pytest.raises(SystemExit, match="vault unlock"):
-            _handle_vault_passphrase_reveal(cfg=_cfg(tmp_path, passphrase=None))
+            _handle_vault_passphrase_reveal(cfg=_cfg(tmp_path, unlocked=False))
 
 
 class TestRevealAllowRedirect:
@@ -242,7 +258,7 @@ class TestAcknowledge:
 
     def test_locked_vault_still_acks(self, tmp_path: Path) -> None:
         """Marker is passphrase-independent — ack works even on a locked vault."""
-        cfg = _cfg(tmp_path, passphrase=None)
+        cfg = _cfg(tmp_path, unlocked=False)
         _handle_vault_passphrase_acknowledge(cfg=cfg)
         assert acknowledged(cfg.vault_recovery_marker_file)
 

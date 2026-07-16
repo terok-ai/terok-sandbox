@@ -37,7 +37,7 @@ if TYPE_CHECKING:
         ServicesMode,
     )
     from .vault.store.db import CredentialDB
-    from .vault.store.encryption import PassphraseSource
+    from .vault.store.tiers import PassphraseTier
 
 CONTAINER_RUNTIME_DIR = "/run/terok"
 """Container-side mount point for the host runtime directory (socket mode)."""
@@ -96,11 +96,6 @@ def _credentials_section() -> RawCredentialsSection:
     return _validate_section(RawCredentialsSection, "credentials")
 
 
-def credentials_passphrase() -> str | None:
-    """Resolve the ``credentials.passphrase`` headless fallback through the schema."""
-    return _credentials_section().passphrase
-
-
 def credentials_use_keyring() -> bool:
     """Resolve the ``credentials.use_keyring`` opt-in flag through the schema."""
     return _credentials_section().use_keyring
@@ -109,11 +104,6 @@ def credentials_use_keyring() -> bool:
 def credentials_passphrase_command() -> str | None:
     """Resolve the ``credentials.passphrase_command`` shell-helper recipe through the schema."""
     return _credentials_section().passphrase_command
-
-
-def _default_credentials_passphrase() -> str | None:
-    """Default-factory indirection so tests can patch ``credentials_passphrase``."""
-    return credentials_passphrase()
 
 
 def _default_credentials_use_keyring() -> bool:
@@ -291,21 +281,15 @@ class SandboxConfig:
     their own trusted source.
     """
 
-    credentials_passphrase: str | None = field(default_factory=_default_credentials_passphrase)
-    """Headless-no-keyring fallback for the SQLCipher passphrase.
-
-    Read from ``credentials.passphrase`` in ``config.yml`` at construct
-    time.  ``None`` (the default) means "no config-file fallback set"
-    — callers fall through to the next tier in the resolution chain.
-    """
-
     credentials_use_keyring: bool = field(default_factory=_default_credentials_use_keyring)
-    """Opt-in switch for the OS keyring tier in the passphrase resolution chain.
+    """Switch for the OS keyring tier in the passphrase resolution chain.
 
-    Off by default.  Linux Secret Service has per-collection (not
-    per-item) ACLs, so authorising terok against the default collection
-    grants read access to every other secret stored there.  Operators
-    opt in via ``terok setup`` after weighing that trade-off.
+    On by default — an empty keyring simply doesn't resolve, so the
+    tier costs nothing until something lands a value there.  Operators
+    who want the chain to stay away from Secret Service entirely (its
+    ACLs are per-collection, not per-item, so authorising terok against
+    the default collection grants read access to every other secret
+    stored there) set ``credentials.use_keyring: false``.
     """
 
     credentials_passphrase_command: str | None = field(
@@ -433,6 +417,35 @@ class SandboxConfig:
         """
         return self.runtime_dir / "vault.passphrase"
 
+    @property
+    def vault_pending_passphrase_file(self) -> Path:
+        """Return the crash-recovery escrow for a passphrase change in flight.
+
+        [`change_passphrase`][terok_sandbox.commands.vault.change_passphrase]
+        writes the *new* value here before re-encrypting the DB and
+        removes it once at least one tier holds it — so a crash between
+        the rekey and the tier fan-out can never leave the DB encrypted
+        under a key that exists nowhere.  Same exposure class as the
+        session-unlock file (RAM-backed, owner-only, cleared on
+        reboot); a distinct filename so the resolver chain never reads
+        it as a live tier.
+        """
+        return self.runtime_dir / "vault.passphrase.pending"
+
+    @property
+    def vault_rekey_stamp_file(self) -> Path:
+        """Return the marker whose mtime records the last passphrase change.
+
+        Touched by [`change_passphrase`][terok_sandbox.commands.vault.change_passphrase]
+        so health surfaces can flag supervisors that were spawned *before*
+        the rekey — they keep the passphrase they resolved at spawn and
+        need a restart to pick up the new one.  Lives under
+        ``runtime_dir`` deliberately: it vanishes on reboot together
+        with every process it could possibly indict, so a stale stamp
+        can never outlive the problem it describes.
+        """
+        return self.runtime_dir / "vault.rekeyed_at"
+
     def container_runtime_dir(self, container_name: str) -> Path:
         """Host-side per-container runtime dir, bind-mounted at ``/run/terok``.
 
@@ -503,10 +516,12 @@ class SandboxConfig:
         """Return the sidecar marker path for "operator saved the recovery passphrase".
 
         Lives next to the sealed-credential file (persistent state,
-        ``0o600``).  Contents are the SHA-256 fingerprint of the
-        acknowledged passphrase, so a re-key invalidates the marker
-        and re-prompts on the next surface that reads it
-        ([`terok_sandbox.vault.store.recovery`][terok_sandbox.vault.store.recovery]).
+        ``0o600``).  A **zero-byte** file — deliberately no passphrase
+        fingerprint (that would be an offline-guessing oracle, see
+        [`terok_sandbox.vault.store.recovery`][terok_sandbox.vault.store.recovery]),
+        so a re-key does not auto-invalidate it;
+        [`change_passphrase`][terok_sandbox.commands.vault.change_passphrase]
+        and ``vault lock`` drop the marker themselves.
         """
         return self.vault_dir / "vault.recovery_acknowledged"
 
@@ -536,7 +551,7 @@ class SandboxConfig:
 
     def open_credential_db_with_source(
         self, db_path: Path | None = None, *, prompt_on_tty: bool = False
-    ) -> tuple[CredentialDB, PassphraseSource]:
+    ) -> tuple[CredentialDB, PassphraseTier]:
         """Same as [`open_credential_db`][terok_sandbox.SandboxConfig.open_credential_db]
         but also returns which tier of the chain hit.
 
@@ -578,7 +593,7 @@ class SandboxConfig:
 
     def resolve_passphrase_with_source(
         self, *, prompt_on_tty: bool = False
-    ) -> tuple[str | None, PassphraseSource | None]:
+    ) -> tuple[str | None, PassphraseTier | None]:
         """Walk the resolution chain with this config's knobs; return ``(passphrase, source)``.
 
         Diagnostic counterpart to
@@ -602,7 +617,6 @@ class SandboxConfig:
             "systemd_creds_file": self.vault_systemd_creds_file,
             "use_keyring": self.credentials_use_keyring,
             "passphrase_command": self.credentials_passphrase_command,
-            "config_fallback": self.credentials_passphrase,
             "prompt_on_tty": prompt_on_tty,
         }
 

@@ -12,15 +12,19 @@ under ``vault passphrase``:
   machine-bound ``systemd-creds`` credential.
 - ``vault passphrase to-keyring`` moves it from whichever tier holds it
   now into the OS keyring (the recommended upgrade path off the
-  session-file / plaintext-config tiers).
+  session-file tier).
 - ``vault passphrase reveal`` resolves and prints the current
   passphrase (to ``/dev/tty`` by default, or stdout with
   ``--allow-redirect``) and offers to mark the recovery key as saved.
 - ``vault passphrase acknowledge`` marks the current passphrase as
   saved without displaying it — the silent ack a TUI / CI captures.
+- ``vault passphrase change`` re-encrypts the DB under a new
+  passphrase and rewrites every tier that stores the old one —
+  [`change_passphrase`][terok_sandbox.commands.vault.change_passphrase]
+  is the prompt-free core the TUI shares.
 ``vault lock`` clears every stored copy of the passphrase — session
-file, keyring, sealed systemd-creds credential, and plaintext config —
-so the vault becomes irrecoverable without an off-host copy.  The
+file, keyring, and the sealed systemd-creds credential — so the vault
+becomes irrecoverable without an off-host copy.  The
 machine-bound tiers are an automatic-unlock convenience on top of a
 passphrase the operator is expected to have saved; locking peels them
 away.  ``purge_passphrase_tiers`` is the prompt-free core ``lock`` and
@@ -43,15 +47,12 @@ from typing import TYPE_CHECKING
 
 from terok_util import LazyHandler, sanitize_tty
 
+from ..vault.store.tiers import PassphraseTier
 from ._types import ArgDef, CommandDef
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
-    from pathlib import Path
-
     from ..config import SandboxConfig
-    from ..vault.store.encryption import TierPresence
-    from ..vault.store.recovery import RecoveryStatus
+    from ..vault.store.status import ChainRow, VaultStatus
     from ..vault.store.systemd_creds import KeyMode
 
 
@@ -66,13 +67,6 @@ def _resolve_cfg(cfg: SandboxConfig | None) -> SandboxConfig:
     from ..config import SandboxConfig
 
     return SandboxConfig()
-
-
-#: Tiers that survive a reboot.  A higher-priority *volatile* tier (the
-#: session file) sitting on top of one of these is "shadowing" it: the
-#: vault auto-resolves from the session copy and silently ignores the
-#: durable one — how a TPM2-sealed box ends up reading a RAM-backed file.
-_DURABLE_TIERS = frozenset({"systemd-creds", "keyring", "passphrase-command", "config"})
 
 
 @dataclass(frozen=True)
@@ -90,29 +84,7 @@ class SessionProvisionResult:
 
     written: bool
     validated: bool = False
-    shadowed_durable: str | None = None
-
-
-def _active_durable_source(cfg: SandboxConfig) -> str | None:
-    """Name the durable tier that already resolves the vault, or ``None``.
-
-    Probes the chain *minus* the session file (file presence only — no
-    unseal, no command exec): if a reboot-surviving tier is present, a
-    session write would merely shadow it.  The single source of truth
-    for the no-shadow guard, shared by the writer and the CLI's
-    skip-the-prompt early-out.
-    """
-    from ..vault.store.encryption import probe_passphrase_chain
-
-    for tier in probe_passphrase_chain(
-        systemd_creds_file=cfg.vault_systemd_creds_file,
-        use_keyring=cfg.credentials_use_keyring,
-        passphrase_command=cfg.credentials_passphrase_command,
-        config_fallback=cfg.credentials_passphrase,
-    ):
-        if tier.present and tier.source in _DURABLE_TIERS:
-            return tier.source
-    return None
+    shadowed_durable: PassphraseTier | None = None
 
 
 def provision_session_passphrase(
@@ -129,8 +101,8 @@ def provision_session_passphrase(
     Two guards, in order:
 
     1. **No-shadow.** The session tier is the highest-priority slot, so
-       writing it masks any durable tier (systemd-creds / keyring /
-       config) underneath — a reboot then wipes the session copy and the
+       writing it masks any durable tier (systemd-creds / keyring)
+       underneath — a reboot then wipes the session copy and the
        operator only *thought* the sealed key was in use.  When a durable
        tier already resolves and *force* is false, nothing is written and
        the result reports ``written=False`` + the shadowed tier.  *force*
@@ -145,9 +117,10 @@ def provision_session_passphrase(
     from .._yaml import write_secret_text
     from ..vault.store.db import CredentialDB
     from ..vault.store.encryption import is_plaintext_sqlite
+    from ..vault.store.status import active_durable_source
 
     if not force:
-        shadowed = _active_durable_source(cfg)
+        shadowed = active_durable_source(cfg)
         if shadowed is not None:
             return SessionProvisionResult(written=False, shadowed_durable=shadowed)
 
@@ -173,13 +146,14 @@ def _handle_vault_unlock(*, cfg: SandboxConfig | None = None, force: bool = Fals
     """
     from ..vault.store.db import PlaintextDBFoundError
     from ..vault.store.encryption import WrongPassphraseError, prompt_passphrase
+    from ..vault.store.status import active_durable_source
 
     cfg = _resolve_cfg(cfg)
 
     # Skip the prompt entirely when the writer would refuse anyway — same
     # guard the writer applies, run early purely so we don't ask for a
     # value we'd discard.
-    if not force and (durable := _active_durable_source(cfg)) is not None:
+    if not force and (durable := active_durable_source(cfg)) is not None:
         print(
             f"vault already auto-unlocks via {durable}; not writing a session file"
             " (it would shadow the durable tier and be lost on the next reboot)."
@@ -206,92 +180,14 @@ def _handle_vault_unlock(*, cfg: SandboxConfig | None = None, force: bool = Fals
         print(f"  no DB at {cfg.db_path} yet — this value becomes its key on first use")
 
 
-@dataclass(frozen=True)
-class SessionShadow:
-    """A session-file tier sitting on top of a durable tier.
-
-    ``redundant`` is the actionable bit:
-
-    - ``True`` — the session copy is byte-identical to what the durable
-      tier resolves to, so it's pure residue (a past ``unlock`` on a
-      box that already auto-unlocks).  Safe to delete; nothing is lost.
-    - ``False`` — the two differ.  Either a deliberate re-key in
-      progress or a stale unlock masking the durable value; never
-      auto-removed.
-    - ``None`` — the durable tier is present but couldn't be read to
-      compare (broken seal, dead helper), so the session file may be
-      doing real work.  Left alone.
-    """
-
-    durable_source: str
-    redundant: bool | None
-
-
-def session_shadow_state(cfg: SandboxConfig) -> SessionShadow | None:
-    """Describe a session-file-over-durable-tier shadow, or ``None`` if there is none.
-
-    Returns ``None`` in the common cases — no session file, or no durable
-    tier beneath it — without resolving anything.  Only when both are
-    present does it resolve the *durable* chain (omitting the session
-    file) to compare values; that one comparison is the only place
-    status / remediation pay an unseal.  The session secret never leaves
-    the process — this reads two tiers and compares, exactly what the
-    resolver already does internally.
-    """
-    from ..vault.store.encryption import (
-        NoPassphraseError,
-        WrongPassphraseError,
-        load_passphrase_from_file,
-        resolve_passphrase_with_source,
-    )
-
-    session_value = load_passphrase_from_file(cfg.vault_passphrase_file)
-    if not session_value:
-        return None
-    durable_source = _active_durable_source(cfg)
-    if durable_source is None:
-        return None
-    try:
-        durable_value, _ = resolve_passphrase_with_source(
-            systemd_creds_file=cfg.vault_systemd_creds_file,
-            use_keyring=cfg.credentials_use_keyring,
-            passphrase_command=cfg.credentials_passphrase_command,
-            config_fallback=cfg.credentials_passphrase,
-            # ``passphrase_file`` omitted on purpose — resolve the durable
-            # chain *under* the session file so we can compare against it.
-        )
-    except (WrongPassphraseError, NoPassphraseError):
-        durable_value = None
-    if not durable_value:
-        return SessionShadow(durable_source, redundant=None)
-    return SessionShadow(durable_source, redundant=(durable_value == session_value))
-
-
-def clear_redundant_session_file(cfg: SandboxConfig) -> str | None:
-    """Remove the session-unlock file iff it merely duplicates a durable tier.
-
-    Same-key residue only: a session file whose passphrase differs from
-    the durable tier is a deliberate override (or a re-key mid-flight)
-    and is kept.  Re-verifies state at call time rather than trusting a
-    caller's stale read.  Returns the durable tier it deduplicated
-    against, or ``None`` when there was nothing safe to remove.
-    """
-    shadow = session_shadow_state(cfg)
-    if shadow is None or shadow.redundant is not True:
-        return None
-    cfg.vault_passphrase_file.unlink(missing_ok=True)
-    return shadow.durable_source
-
-
 def _forget_config_tier_updates(cfg: SandboxConfig) -> dict[str, object | None]:
     """Return the config-section patch ``purge_passphrase_tiers`` should apply.
 
-    Both fields are auto-resolution wirings — leaving either would let
-    a future supervisor re-unlock from disk and defeat the lock.
+    The ``passphrase_command`` wiring is an auto-resolution hook —
+    leaving it would let a future supervisor re-unlock from disk and
+    defeat the lock.
     """
     updates: dict[str, object | None] = {}
-    if cfg.credentials_passphrase:
-        updates["passphrase"] = None
     if cfg.credentials_passphrase_command:
         updates["passphrase_command"] = None
     return updates
@@ -301,10 +197,10 @@ def purge_passphrase_tiers(cfg: SandboxConfig) -> None:
     """Remove every stored copy of the credentials-DB passphrase.
 
     Clears the session-unlock tmpfs file, the OS keyring entry, the
-    sealed systemd-creds credential, and the plaintext
-    ``credentials.passphrase`` / ``credentials.passphrase_command``
-    wiring in ``config.yml`` — then drops the recovery-acknowledged
-    marker, since it's meaningless once no tier remains.  After this the
+    sealed systemd-creds credential, and the
+    ``credentials.passphrase_command`` wiring in ``config.yml`` — then
+    drops the recovery-acknowledged marker, since it's meaningless once
+    no tier remains.  After this the
     vault can only be reopened by re-supplying the passphrase
     (``vault unlock``); it is **unrecoverable** without an off-host copy.
 
@@ -686,183 +582,497 @@ def _handle_vault_passphrase_acknowledge(*, cfg: SandboxConfig | None = None) ->
     print("recovery key marked as saved.")
 
 
-def _classify_vault_access(
-    cfg: SandboxConfig, recovery: RecoveryStatus
-) -> tuple[str | None, list[str] | None, str | None]:
-    """One best-effort DB open, three answers: ``(lock_reason, providers, db_error)``.
+@dataclass(frozen=True)
+class TierRewrite:
+    """What happened to one passphrase-holding tier during a change.
 
-    "Locked" hides three different operator problems, each with a
-    different remedy — collapsing them is how a wrong passphrase, a
-    broken sealed credential, and a genuinely empty chain all read as
-    the same word on every surface:
-
-    - ``lock_reason`` set — the vault can't be opened *because of the
-      passphrase*: ``no passphrase in any tier`` (provision one), the
-      resolved value doesn't open the DB (typo / foreign DB — re-enter
-      the right one), or a configured tier is unreadable (broken seal /
-      dead helper — fail-closed from the resolver, carried in from
-      [`RecoveryStatus.resolve_error`][terok_sandbox.RecoveryStatus]).
-    - ``providers`` set — the DB opened; sorted provider slugs.
-    - ``db_error`` set — the DB failed for a non-passphrase reason
-      (schema drift, permissions); surfaced verbatim.
-
-    Never prompts: a status read must not block on stdin.
+    ``ok`` means the tier now holds the *new* passphrase.  A failed
+    rewrite (``ok=False``) is reported, never raised — by the time the
+    fan-out runs the DB is already rekeyed, so aborting would only
+    hide which tiers still need the operator's attention.
     """
-    from ..vault.store.encryption import NoPassphraseError, WrongPassphraseError
 
-    # Plain prose, not a credential — named so credential-heuristic
-    # scanners (Sonar S2068) don't misread the assignment.
-    no_tier_reason = "no passphrase in any tier"
-    if recovery.resolve_error is not None:
-        return f"a configured tier is unreadable — {recovery.resolve_error}", None, None
-    if recovery.source is None:
-        return no_tier_reason, None, None
+    tier: PassphraseTier
+    ok: bool
+    detail: str
+
+
+@dataclass(frozen=True)
+class PassphraseChangeResult:
+    """Outcome of [`change_passphrase`][terok_sandbox.commands.vault.change_passphrase].
+
+    ``generated`` carries the same follow-up duty as
+    [`TierProvisionResult`][terok_sandbox.commands.credentials.TierProvisionResult]:
+    a minted value must be revealed to the operator.  The recovery
+    marker has been dropped either way — whoever renders this result
+    owns re-running the acknowledgement flow.
+    """
+
+    passphrase: str
+    """The new passphrase — mint or caller-supplied."""
+
+    generated: bool
+    """``True`` iff this call minted the value (caller passed ``None``)."""
+
+    rekeyed: bool
+    """``True`` iff an existing DB was re-encrypted (``False`` on a
+    fresh install where the new value simply becomes the key on first
+    use)."""
+
+    rewrites: tuple[TierRewrite, ...]
+    """Per-tier outcomes, in resolution-chain order."""
+
+    @property
+    def problems(self) -> tuple[TierRewrite, ...]:
+        """The rewrites that failed — non-empty means the operator has cleanup to do."""
+        return tuple(rewrite for rewrite in self.rewrites if not rewrite.ok)
+
+
+def change_passphrase(
+    cfg: SandboxConfig | None = None,
+    *,
+    old: str | None = None,
+    new: str | None = None,
+) -> PassphraseChangeResult:
+    """Re-encrypt the vault under a new passphrase and rewrite every tier holding the old one.
+
+    The prompt-free core shared by the ``vault passphrase change`` CLI
+    verb and the TUI — same contract shape as
+    [`provision_passphrase_tier`][terok_sandbox.commands.credentials.provision_passphrase_tier]:
+    no ``/dev/tty``, no ack prompt; the caller owns the conversation.
+
+    *old* is only consulted when the resolution chain can't produce the
+    current passphrase (locked vault) — when a caller supplies it
+    explicitly it wins over the chain, so a stale tier value can't
+    override an operator who knows better.  *new* ``None`` mints a
+    fresh [`generate_passphrase`][terok_sandbox.vault.store.encryption.generate_passphrase]
+    value (``generated=True`` in the result — reveal it!).
+
+    The ordering is the safety argument:
+
+    1. Escrow the new value first
+       ([`vault_pending_passphrase_file`][terok_sandbox.SandboxConfig.vault_pending_passphrase_file],
+       owner-only, RAM-backed): from this point a crash can never leave
+       the DB encrypted under a key that exists nowhere on the host.
+    2. Verify + rekey the DB ([`rekey_in_place`][terok_sandbox.vault.store.encryption.rekey_in_place]).
+       Every failure here — wrong old passphrase, a live supervisor
+       holding the WAL ("database is locked") — aborts with **nothing
+       changed anywhere** (the escrow is removed on the way out).
+    3. Only then fan the new value out to every tier that currently
+       holds material, in resolution order, collecting per-tier
+       outcomes instead of raising: a tier that can't take the new
+       value (keyring denied, systemd-creds host regressed) is purged
+       where possible so no tier keeps resolving the *old* passphrase,
+       and reported either way.  Once at least one tier holds the new
+       value the escrow is deleted; if every rewrite failed it stays,
+       so the key remains recoverable.
+    4. Drop the recovery-acknowledged marker — the saved copy the
+       operator confirmed is now the wrong passphrase.
+
+    Refuses up front (``RuntimeError``) while ``passphrase_command`` is
+    configured: that tier's secret lives in a store the operator owns,
+    so the sandbox rewriting everything else would leave the helper
+    resolving a stale value that fails closed on the next boot.  Update
+    the external store first, or remove the wiring.
+
+    Raises [`NoPassphraseError`][terok_sandbox.NoPassphraseError] when
+    neither the chain nor *old* yields the current passphrase,
+    [`WrongPassphraseError`][terok_sandbox.WrongPassphraseError] when
+    that value doesn't open the DB, and [`ValueError`][ValueError] for
+    an empty or unchanged *new*.
+    """
+    from ..vault.store.encryption import (
+        NoPassphraseError,
+        generate_passphrase,
+        is_plaintext_sqlite,
+        probe_passphrase_chain,
+        rekey_in_place,
+    )
+    from ..vault.store.recovery import forget as forget_recovery_marker
+
+    cfg = _resolve_cfg(cfg)
+
+    if cfg.credentials_passphrase_command:
+        raise RuntimeError(
+            "credentials.passphrase_command is configured — the passphrase lives in"
+            " an external secret store terok cannot write to.  Update the secret"
+            " there first (or remove passphrase_command from config.yml), then"
+            " re-run the change."
+        )
+    if new == "":  # nosec: B105 — rejecting the empty sentinel, not comparing a secret
+        raise ValueError("refusing an empty passphrase (SQLCipher reads it as no encryption)")
+    if cfg.db_path.exists() and is_plaintext_sqlite(cfg.db_path):
+        raise RuntimeError(
+            f"{cfg.db_path} is still the legacy plaintext format — run the"
+            " encrypt-db migration before changing the passphrase"
+        )
+
+    # Explicit *old* wins; the chain fills in for the common unlocked case.
+    current = old or cfg.resolve_passphrase()  # raises WrongPassphraseError on a broken tier
+    db_exists = cfg.db_path.exists()
+    if current is None:
+        if db_exists:
+            raise NoPassphraseError(
+                "the vault is locked — supply the current passphrase to change it"
+            )
+        raise NoPassphraseError(
+            "no credentials DB and no stored passphrase — provision the vault"
+            " (setup) instead of changing it"
+        )
+
+    generated = new is None
+    if new is None:
+        new = generate_passphrase()
+    if new == current:
+        raise ValueError("the new passphrase is identical to the current one")
+
+    from .._yaml import write_secret_text
+
+    if db_exists:
+        # Crash-recovery escrow: the rekeyed DB's key must exist on disk
+        # *before* the DB is rekeyed — a crash between the rekey and the
+        # tier fan-out would otherwise strand the vault under a key
+        # nobody has seen (fatal for a freshly minted value).
+        write_secret_text(cfg.vault_pending_passphrase_file, new + "\n")
+        try:
+            rekey_in_place(cfg.db_path, current, new)
+        except BaseException:
+            # Nothing was modified — don't leave escrow debris behind.
+            cfg.vault_pending_passphrase_file.unlink(missing_ok=True)
+            raise
+
+    present = [
+        row.source
+        for row in probe_passphrase_chain(
+            passphrase_file=cfg.vault_passphrase_file,
+            systemd_creds_file=cfg.vault_systemd_creds_file,
+            use_keyring=cfg.credentials_use_keyring,
+            passphrase_command=cfg.credentials_passphrase_command,
+        )
+        if row.present
+    ]
+    if not present:
+        # Locked vault changed via an explicitly-supplied *old*: nothing
+        # holds material yet, so land the new value where `vault unlock`
+        # would — otherwise the change succeeds and nobody can open the DB.
+        present = [PassphraseTier.SESSION_FILE]
+    rewrites = tuple(_rewrite_tier(cfg, tier, new) for tier in present)
+
+    # The confirmed-saved copy (if any) is now the wrong passphrase —
+    # the marker doesn't auto-invalidate (deliberately fingerprint-free,
+    # see vault.store.recovery), so the change flow must drop it.
+    forget_recovery_marker(cfg.vault_recovery_marker_file)
+
+    if any(rewrite.ok for rewrite in rewrites):
+        # At least one tier now holds the new value — the escrow has
+        # done its job.  When every rewrite failed it stays behind as
+        # the only on-host copy of the key the DB is now encrypted with.
+        cfg.vault_pending_passphrase_file.unlink(missing_ok=True)
+
+    # Stamp the rekey so health surfaces can flag supervisors spawned
+    # before it — they keep the passphrase they resolved at spawn.
+    write_secret_text(cfg.vault_rekey_stamp_file, "")
+
+    return PassphraseChangeResult(
+        passphrase=new, generated=generated, rekeyed=db_exists, rewrites=rewrites
+    )
+
+
+def _rewrite_tier(cfg: SandboxConfig, tier: PassphraseTier, passphrase: str) -> TierRewrite:
+    """Land *passphrase* on one tier that currently holds material; report, never raise.
+
+    Failure handling is tier-shaped: a tier that can't take the new
+    value is *purged* where possible, because a tier left holding the
+    old passphrase would either shadow the new one or fail closed on
+    every future resolve — a stale copy is strictly worse than a
+    missing one.
+    """
+    from .._yaml import write_secret_text
+    from ..vault.store import systemd_creds as _systemd_creds
+    from ..vault.store.encryption import (
+        forget_passphrase_in_keyring,
+        store_passphrase_in_keyring,
+    )
+
     try:
-        db = cfg.open_credential_db(prompt_on_tty=False)
+        if tier is PassphraseTier.SESSION_FILE:
+            write_secret_text(cfg.vault_passphrase_file, passphrase + "\n")
+            return TierRewrite(tier, ok=True, detail="session file rewritten")
+        if tier is PassphraseTier.SYSTEMD_CREDS:
+            if not _systemd_creds.is_available():
+                reason = _systemd_creds.unavailable_reason() or "unavailable"
+                cfg.vault_systemd_creds_file.unlink(missing_ok=True)
+                return TierRewrite(
+                    tier,
+                    ok=False,
+                    detail=(
+                        f"cannot re-seal ({reason}) — stale sealed credential removed;"
+                        " re-run `vault passphrase seal` on a capable host"
+                    ),
+                )
+            _systemd_creds.seal(passphrase, cfg.vault_systemd_creds_file, key_mode="auto")
+            return TierRewrite(
+                tier, ok=True, detail="credential re-sealed under the new passphrase"
+            )
+        if tier is PassphraseTier.KEYRING:
+            if store_passphrase_in_keyring(passphrase):
+                return TierRewrite(tier, ok=True, detail="keyring entry rewritten")
+            if forget_passphrase_in_keyring():
+                return TierRewrite(
+                    tier, ok=False, detail="keyring write failed — stale entry removed"
+                )
+            return TierRewrite(
+                tier,
+                ok=False,
+                detail=(
+                    "keyring write failed and the stale entry could not be removed —"
+                    " it still holds the OLD passphrase and will fail to open the vault"
+                ),
+            )
+        return TierRewrite(tier, ok=False, detail="tier cannot be rewritten programmatically")
+    except Exception as exc:  # noqa: BLE001 — the DB is already rekeyed; report every tier
+        return TierRewrite(tier, ok=False, detail=str(exc))
+
+
+def _collect_current_passphrase(cfg: SandboxConfig) -> str:
+    """Resolve the current passphrase, prompting only when the vault is locked.
+
+    When a tier resolves it, retyping a value the same shell can print
+    with ``vault passphrase reveal`` would be security theatre — so the
+    prompt appears exactly when the chain comes up empty.
+    """
+    from ..vault.store.encryption import WrongPassphraseError, prompt_passphrase
+
+    try:
+        current = cfg.resolve_passphrase()
+    except WrongPassphraseError as exc:
+        raise SystemExit(
+            f"cannot change the passphrase: {exc}\n"
+            "  Fix or remove the broken tier first — `terok-sandbox vault status`"
+            " names it."
+        ) from exc
+    if current is not None:
+        return current
+    if not cfg.db_path.exists():
+        raise SystemExit(
+            "nothing to change: no credentials DB and no stored passphrase —"
+            " run setup to provision the vault instead"
+        )
+    print("The vault is locked — enter the CURRENT passphrase first.")
+    try:
+        return prompt_passphrase()
+    except ValueError as exc:
+        raise SystemExit(f"nothing was changed: {exc}") from None
+
+
+def _collect_new_passphrase() -> str | None:
+    """Read the new passphrase: typed-and-confirmed on a TTY, one stdin line piped.
+
+    ``None`` means "mint one" — allowed only on a TTY, because the
+    minted value must be displayed on ``/dev/tty`` and the fail-closed
+    announce would only fire *after* the rekey; a piped run must refuse
+    before anything changes instead.
+    """
+    from ..vault.store.encryption import prompt_new_passphrase
+
+    if sys.stdin.isatty():
+        print("Enter the NEW passphrase (leave empty to generate one):")
+        try:
+            return prompt_new_passphrase()
+        except ValueError as exc:
+            raise SystemExit(f"nothing was changed: {exc}") from None
+    new = sys.stdin.readline().rstrip("\n") or None
+    if new is None:
+        raise SystemExit(
+            "a generated passphrase needs a terminal to be displayed on —"
+            " supply the new passphrase on stdin, or run interactively."
+        )
+    return new
+
+
+def _change_or_exit(cfg: SandboxConfig, *, old: str, new: str | None) -> PassphraseChangeResult:
+    """Run [`change_passphrase`][terok_sandbox.commands.vault.change_passphrase]; map every refusal to a friendly exit."""
+    from ..vault.store.encryption import WrongPassphraseError
+
+    try:
+        return change_passphrase(cfg, old=old, new=new)
     except WrongPassphraseError:
-        return (
-            f"the passphrase via {recovery.source} does not open the DB"
-            " — wrong key, or a DB from another install",
-            None,
-            None,
+        raise SystemExit(
+            f"that passphrase does not open {cfg.db_path} — nothing was changed."
+        ) from None
+    except Exception as exc:
+        # Lock contention first — the rekey guards raise it as RuntimeError,
+        # SQLite as OperationalError, and both deserve the fuser hint.
+        if "database is locked" in str(exc).lower():
+            import shlex
+
+            raise SystemExit(
+                "cannot re-encrypt the credentials DB while it is in use — nothing was"
+                " changed.\n"
+                "  A running task's supervisor still holds it open.  Find it with:\n"
+                f"    fuser -v {shlex.quote(str(cfg.db_path))}\n"
+                "  stop it (delete or stop the matching task), then re-run"
+                " `vault passphrase change`."
+            ) from exc
+        if isinstance(exc, (ValueError, RuntimeError)):
+            raise SystemExit(f"nothing was changed: {exc}") from None
+        raise
+
+
+def _handle_vault_passphrase_change(*, cfg: SandboxConfig | None = None) -> None:
+    """Interactively change the vault passphrase.
+
+    CLI ergonomics over [`change_passphrase`][terok_sandbox.commands.vault.change_passphrase]:
+    the current passphrase is prompted only when no tier resolves it,
+    the new one is typed-and-confirmed (or minted on empty entry and
+    announced to ``/dev/tty`` *after* the rekey succeeded), and the
+    flow ends with the standard recovery acknowledgement — the old
+    confirmation died with the old passphrase.
+
+    Piped usage reads one line per needed value from stdin: the current
+    passphrase first (only when the vault is locked), then the new one.
+    """
+    from .credentials import _announce_generated_passphrase, _maybe_acknowledge_recovery
+
+    cfg = _resolve_cfg(cfg)
+    current = _collect_current_passphrase(cfg)
+    new = _collect_new_passphrase()
+    result = _change_or_exit(cfg, old=current, new=new)
+
+    if result.rekeyed:
+        print(f"→ re-encrypted {cfg.db_path} under the new passphrase")
+    for rewrite in result.rewrites:
+        marker = "→" if rewrite.ok else "✗"
+        print(f"{marker} {rewrite.tier}: {sanitize_tty(rewrite.detail)}")
+    print(
+        "  already-running tasks may still hold the old passphrase — restart them"
+        " to pick up the new one; new tasks use it automatically"
+    )
+
+    if result.generated:
+        _announce_generated_passphrase(result.passphrase)
+    _maybe_acknowledge_recovery(cfg, echo_to_stdout=False)
+
+    if result.problems:
+        raise SystemExit(
+            "the vault now uses the new passphrase, but the tiers marked ✗ above"
+            " could not be rewritten — fix them before the next reboot."
         )
-    except NoPassphraseError:
-        # Tier vanished between the resolve and the open — plain lock.
-        return no_tier_reason, None, None
-    # ``Exception`` only: with ``prompt_on_tty=False`` no prompt path can
-    # raise ``SystemExit`` here, and catching it would stringify an
-    # explicit exit from a lower layer into a status line.
-    except Exception as exc:  # noqa: BLE001 - non-passphrase failure, surfaced verbatim
-        return None, None, str(exc)
-    try:
-        providers = sorted(
-            {provider for cs in db.list_credential_sets() for provider in db.list_credentials(cs)}
-        )
-    except Exception as exc:  # noqa: BLE001 - a mid-read failure is a DB fault, not a lock
-        return None, None, str(exc)
-    finally:
-        db.close()
-    return None, providers, None
 
 
 def _handle_vault_status(*, cfg: SandboxConfig | None = None, as_json: bool = False) -> None:
     """Show the vault's lock state, passphrase resolution chain, and stored secrets.
 
-    Read-only host-side diagnostic: it never opens a write transaction
-    and never resolves the live passphrase beyond a best-effort DB open
-    for the credential count.  Unlike the daemon-startup log, it reports
-    the *whole* chain rather than only the winning tier, so a session
-    file shadowing a durable systemd-creds / keyring tier is visible —
-    and it re-states the plaintext-on-disk and unconfirmed-recovery
-    warnings the TUI and sickbay share.
+    Read-only host-side diagnostic — all the facts come from
+    [`VaultStatus.load`][terok_sandbox.vault.store.status.VaultStatus.load]
+    (the same snapshot the TUI and sickbay render), so this handler is
+    pure presentation.  Unlike the daemon-startup log it reports the
+    *whole* chain rather than only the winning tier, so a session file
+    shadowing a durable systemd-creds / keyring tier is visible.
     """
     import json
 
-    from ..paths import plaintext_passphrase_config_path
-    from ..vault.store.encryption import probe_passphrase_chain
-    from ..vault.store.recovery import RecoveryStatus
+    from ..vault.store.status import VaultState, VaultStatus
 
-    cfg = _resolve_cfg(cfg)
-
-    chain = probe_passphrase_chain(
-        passphrase_file=cfg.vault_passphrase_file,
-        systemd_creds_file=cfg.vault_systemd_creds_file,
-        use_keyring=cfg.credentials_use_keyring,
-        passphrase_command=cfg.credentials_passphrase_command,
-        config_fallback=cfg.credentials_passphrase,
-    )
-    active_index = next((i for i, tier in enumerate(chain) if tier.present), None)
-    active_source = chain[active_index].source if active_index is not None else None
-    # Shadowing only matters when a *volatile* tier (the session file) sits on
-    # top of a durable one.  A durable active tier legitimately outranks the
-    # tiers below it — that's not a shadow, just the resolution order.
-    active_is_durable = active_source in _DURABLE_TIERS
-    rows = [
-        (
-            tier,
-            i == active_index,
-            tier.present
-            and active_index is not None
-            and i > active_index
-            and tier.source in _DURABLE_TIERS
-            and not active_is_durable,
-        )
-        for i, tier in enumerate(chain)
-    ]
-    shadowed = [tier.source for tier, _active, is_shadowed in rows if is_shadowed]
-
-    recovery = RecoveryStatus.load(cfg)
-    plaintext = plaintext_passphrase_config_path()
-    # When the chain table shows a session-over-durable shadow, resolve it
-    # once more to learn whether the session copy is redundant (same key)
-    # or a real override (different key) — turns the bare "shadowing"
-    # warning into an actionable one.  Cheap no-op unless a shadow exists.
-    shadow = session_shadow_state(cfg) if shadowed else None
-    # Lock state comes from *access* (can the DB actually be opened?),
-    # not from chain presence — a sealed credential that exists but
-    # won't unseal is "present" in the table yet locked in the header,
-    # and that contradiction is exactly the diagnostic.
-    lock_reason, providers, db_error = _classify_vault_access(cfg, recovery)
+    status = VaultStatus.load(_resolve_cfg(cfg))
 
     if as_json:
         print(
             json.dumps(
                 {
-                    "locked": lock_reason is not None,
-                    "lock_reason": lock_reason,
-                    "db_error": db_error,
-                    "passphrase_source": recovery.source,
+                    "state": status.state,
+                    "locked": status.state is not VaultState.UNLOCKED,
+                    "lock_reason": status.lock_reason,
+                    "db_error": status.db_error,
+                    "passphrase_source": status.source,
                     "chain": [
                         {
-                            "source": tier.source,
-                            "present": tier.present,
-                            "active": is_active,
-                            "shadowed": is_shadowed,
-                            "detail": tier.detail,
+                            "source": row.tier,
+                            "present": row.present,
+                            "active": row.active,
+                            "shadowed": row.shadowed,
+                            "detail": row.detail,
                         }
-                        for tier, is_active, is_shadowed in rows
+                        for row in status.chain
                     ],
-                    "shadowed_tiers": shadowed,
+                    "shadowed_tiers": [row.tier for row in status.chain if row.shadowed],
                     "session_shadow": (
-                        {"durable_source": shadow.durable_source, "redundant": shadow.redundant}
-                        if shadow
+                        {
+                            "durable_source": status.shadow.durable_source,
+                            "redundant": status.shadow.redundant,
+                        }
+                        if status.shadow
                         else None
                     ),
-                    "recovery_acknowledged": recovery.acknowledged,
-                    "plaintext_passphrase_path": str(plaintext) if plaintext else None,
-                    "credentials": providers,
-                    "db_path": str(cfg.db_path),
+                    "recovery_acknowledged": status.recovery.acknowledged,
+                    "warnings": [
+                        {
+                            "kind": warning.kind,
+                            "severity": warning.severity,
+                            "message": warning.message,
+                        }
+                        for warning in status.warnings
+                    ],
+                    "credentials": list(status.providers) if status.providers is not None else None,
+                    "credential_types": (
+                        dict(status.credential_types)
+                        if status.credential_types is not None
+                        else None
+                    ),
+                    "ssh_keys": status.ssh_keys,
+                    "db_path": str(status.db_path),
                 },
                 indent=2,
             )
         )
         return
 
-    _print_vault_status(
-        rows=rows,
-        active_source=recovery.source,
-        lock_reason=lock_reason,
-        db_error=db_error,
-        shadow=shadow,
-        recovery_acknowledged=recovery.acknowledged,
-        plaintext=plaintext,
-        providers=providers,
-        db_path=cfg.db_path,
+    _print_vault_status(status)
+
+
+def _status_header(status: VaultStatus) -> str:
+    """One-line state summary for the ``Vault:`` header."""
+    from ..vault.store.status import VaultState
+
+    if status.db_error is not None:
+        return f"ERROR — {sanitize_tty(status.db_error)}"
+    if status.state is VaultState.UNPROVISIONED:
+        return "UNPROVISIONED — no credentials DB and no stored passphrase yet"
+    if status.lock_reason is not None:
+        return f"LOCKED — {sanitize_tty(status.lock_reason)}"
+    return f"unlocked — passphrase via {status.source}"
+
+
+def _chain_row_marker(row: ChainRow) -> str:
+    """The one-word annotation for a chain-table row."""
+    if row.active:
+        return "active"
+    if row.shadowed:
+        return "shadowed"
+    return "–"
+
+
+def _print_stored_secrets(status: VaultStatus) -> None:
+    """Render the credentials / SSH-key inventory lines.
+
+    Each provider is labelled with its credential type — the snapshot
+    collected both in one DB pass, so the renderer never reopens the DB.
+    """
+    if status.providers is None:
+        detail = "DB unreadable — see the error above" if status.db_error else "vault locked"
+        print(f"  Credentials: {detail}")
+        return
+    types = status.credential_types or {}
+    labelled = ", ".join(
+        sanitize_tty(f"{provider} ({types.get(provider, 'unknown')})")
+        for provider in status.providers
     )
+    listing = f" ({labelled})" if labelled else ""
+    print(f"  Credentials: {len(status.providers)} stored{listing}")
+    print(f"  SSH keys:    {status.ssh_keys} stored")
 
 
-def _print_vault_status(
-    *,
-    rows: Sequence[tuple[TierPresence, bool, bool]],
-    active_source: str | None,
-    lock_reason: str | None,
-    db_error: str | None,
-    shadow: SessionShadow | None,
-    recovery_acknowledged: bool,
-    plaintext: Path | None,
-    providers: list[str] | None,
-    db_path: Path,
-) -> None:
+def _print_vault_status(status: VaultStatus) -> None:
     """Render the human-readable ``vault status`` report to stdout.
 
     The JSON branch carries the same facts; this is purely presentation.
@@ -870,53 +1080,28 @@ def _print_vault_status(
     flows through [`sanitize_tty`][terok_util.sanitize_tty] — they trace
     back to on-disk config / DB content.
     """
-    locked = lock_reason is not None
-    if db_error is not None:
-        header = f"ERROR — {sanitize_tty(db_error)}"
-    elif lock_reason is not None:
-        header = f"LOCKED — {sanitize_tty(lock_reason)}"
-    else:
-        header = f"unlocked — passphrase via {active_source}"
-    print(f"Vault: {header}")
-    print(f"  DB:  {sanitize_tty(str(db_path))}")
+    from ..vault.store.status import VaultState
+
+    print(f"Vault: {_status_header(status)}")
+    db_note = "" if status.db_exists else " (created encrypted on first use)"
+    print(f"  DB:  {sanitize_tty(str(status.db_path))}{db_note}")
     print("  Passphrase resolution chain:")
-    for tier, is_active, is_shadowed in rows:
-        marker = "active" if is_active else "shadowed" if is_shadowed else "–"
-        print(f"    {tier.source:<19} {marker:<9} {sanitize_tty(tier.detail)}")
-    if locked:
+    for row in status.chain:
+        print(f"    {row.tier:<19} {_chain_row_marker(row):<9} {sanitize_tty(row.detail)}")
+    if status.state is VaultState.UNPROVISIONED:
+        print("  run setup (or the TUI) to provision a vault passphrase")
+    elif status.state is VaultState.LOCKED:
         print("  the vault is locked — run `terok-sandbox vault unlock` to provision a passphrase")
-    if shadow is not None:
-        src = sanitize_tty(shadow.durable_source)
-        if shadow.redundant is True:
-            print(
-                f"  note: the session-file tier duplicates the durable {src} tier"
-                " (same passphrase) — redundant residue; it clears on the next reboot"
-            )
-        elif shadow.redundant is False:
-            print(
-                f"  warning: the session-file tier shadows the durable {src} tier with a"
-                " DIFFERENT passphrase — a deliberate override, or a stale unlock masking"
-                " the durable value; the durable tier resumes once the session file is gone"
-            )
-        else:
-            print(
-                f"  warning: the session-file tier shadows {src}, but {src} could not be"
-                " read to compare — fix or remove the durable tier"
-            )
     recovery_line = (
         "acknowledged"
-        if recovery_acknowledged
+        if status.recovery.acknowledged
         else "NOT acknowledged — save the passphrase off-host before you rely on a machine-bound tier"
     )
     print(f"  Recovery key: {recovery_line}")
-    if plaintext is not None:
-        print(f"  warning: vault passphrase stored in plaintext at {sanitize_tty(str(plaintext))}")
-    if providers is None:
-        detail = "DB unreadable — see the error above" if db_error else "vault locked"
-        print(f"  Credentials: {detail}")
-    else:
-        listing = f" ({', '.join(sanitize_tty(p) for p in providers)})" if providers else ""
-        print(f"  Credentials: {len(providers)} stored{listing}")
+    for warning in status.warnings:
+        label = "note" if warning.severity == "info" else warning.severity
+        print(f"  {label}: {sanitize_tty(warning.message)}")
+    _print_stored_secrets(status)
 
 
 def _handle_vault_list(
@@ -1105,6 +1290,14 @@ _PASSPHRASE_GROUP = CommandDef(
             handler=LazyHandler(
                 "terok_sandbox.commands.vault:_handle_vault_passphrase_acknowledge"
             ),
+        ),
+        CommandDef(
+            name="change",
+            help=(
+                "Change the vault passphrase: re-encrypt the DB and rewrite"
+                " every tier that stores it"
+            ),
+            handler=LazyHandler("terok_sandbox.commands.vault:_handle_vault_passphrase_change"),
         ),
     ),
 )

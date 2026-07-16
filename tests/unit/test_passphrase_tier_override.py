@@ -34,7 +34,7 @@ def _real_load_from_file(path: Path) -> str | None:
         return None
 
 
-def _cfg(tmp_path: Path, *, passphrase: str | None = None) -> SandboxConfig:
+def _cfg(tmp_path: Path) -> SandboxConfig:
     """Sandbox config with the keyring tier turned off (avoid host keyring leakage)."""
     return SandboxConfig(
         state_dir=tmp_path / "state",
@@ -42,7 +42,6 @@ def _cfg(tmp_path: Path, *, passphrase: str | None = None) -> SandboxConfig:
         config_dir=tmp_path / "cfg",
         vault_dir=tmp_path / "vault",
         services_mode="socket",
-        credentials_passphrase=passphrase,
         credentials_use_keyring=False,
     )
 
@@ -142,29 +141,3 @@ class TestExplicitSystemdCredsTier:
         assert len(sealed) == 1
         assert sealed[0][1] == cfg.vault_systemd_creds_file
         assert sealed[0][2] == "auto"
-
-
-class TestExplicitConfigTier:
-    """``--passphrase-tier=config`` still gates on the plaintext-on-disk confirmation."""
-
-    def test_config_tier_requires_yes_confirmation(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Operator who says ``no`` at the plaintext gate is told to pick another tier."""
-        monkeypatch.setattr("terok_sandbox.vault.store.systemd_creds.is_available", lambda: False)
-        # Operator declines the plaintext warning — pipe ``no`` into stdin.
-        monkeypatch.setattr("sys.stdin.readline", lambda: "no\n")
-        with pytest.raises(SystemExit, match="config tier not confirmed"):
-            _handle_credentials_encrypt_db(
-                cfg=_cfg(tmp_path, passphrase="hunter2"), passphrase_tier="config"
-            )
-
-    def test_config_tier_accepts_yes(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """``yes`` lands the config tier; pre-existing passphrase is reused."""
-        monkeypatch.setattr("terok_sandbox.vault.store.systemd_creds.is_available", lambda: False)
-        monkeypatch.setattr("sys.stdin.readline", lambda: "yes\n")
-        cfg = _cfg(tmp_path, passphrase="hunter2")
-        # No DB → handler short-circuits after provisioning.  No ack
-        # required because the config value pre-existed.
-        _handle_credentials_encrypt_db(cfg=cfg, passphrase_tier="config")
-        assert not cfg.vault_recovery_marker_file.exists()

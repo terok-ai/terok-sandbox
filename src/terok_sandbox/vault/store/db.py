@@ -46,8 +46,9 @@ from typing import Any
 
 import sqlcipher3.dbapi2 as _sqlcipher_dbapi
 
-from .encryption import NoPassphraseError, PassphraseSource, WrongPassphraseError
+from .encryption import NoPassphraseError, WrongPassphraseError
 from .migrations import ensure_credentials_schema, migrate_credential_db_schema
+from .tiers import PassphraseTier
 
 # sqlcipher3 has its own DatabaseError class disjoint from stdlib sqlite3's;
 # bad-passphrase failures raise the sqlcipher3 flavour.
@@ -773,9 +774,8 @@ def open_credential_db_with_source(
     systemd_creds_file: Path | None = None,
     use_keyring: bool = False,
     passphrase_command: str | None = None,
-    config_fallback: str | None = None,
     prompt_on_tty: bool = False,
-) -> tuple[CredentialDB, PassphraseSource]:
+) -> tuple[CredentialDB, PassphraseTier]:
     """Same as [`open_credential_db`][terok_sandbox.vault.store.db.open_credential_db]
     but also returns which tier the passphrase came from.
 
@@ -789,7 +789,6 @@ def open_credential_db_with_source(
         systemd_creds_file=systemd_creds_file,
         use_keyring=use_keyring,
         passphrase_command=passphrase_command,
-        config_fallback=config_fallback,
         prompt_on_tty=prompt_on_tty,
     )
     if passphrase is None or source is None:
@@ -804,7 +803,6 @@ def open_credential_db(
     systemd_creds_file: Path | None = None,
     use_keyring: bool = False,
     passphrase_command: str | None = None,
-    config_fallback: str | None = None,
     prompt_on_tty: bool = False,
 ) -> CredentialDB:
     """Open the credential DB, resolving the passphrase via the runtime chain.
@@ -812,8 +810,8 @@ def open_credential_db(
     Walks: *passphrase_file* (tmpfs session-unlock) → *systemd_creds_file*
     (sealed credential decrypted via ``systemd-creds(1)``) → OS keyring
     (when *use_keyring*) → *passphrase_command* (operator-supplied
-    helper, e.g. ``pass show …`` / ``op read …``) → *config_fallback*
-    → (when *prompt_on_tty* and a TTY is attached) interactive prompt.
+    helper, e.g. ``pass show …`` / ``op read …``) → (when
+    *prompt_on_tty* and a TTY is attached) interactive prompt.
     CLI consumers pass ``prompt_on_tty=True``; daemons leave it
     ``False`` so they fail fast instead of blocking on stdin.
     """
@@ -823,7 +821,6 @@ def open_credential_db(
         systemd_creds_file=systemd_creds_file,
         use_keyring=use_keyring,
         passphrase_command=passphrase_command,
-        config_fallback=config_fallback,
         prompt_on_tty=prompt_on_tty,
     )
     return db
