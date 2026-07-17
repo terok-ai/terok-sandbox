@@ -330,6 +330,16 @@ def test_child_sweep_ignores_foreign_processes(
     assert killed == []
 
 
+def test_child_sweep_labels_truncated_argv_with_placeholder(
+    install_env: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A child argv cut short of its container-ID element still gets a row."""
+    _add_process(install_env["proc"], 51, [*_CHILD_ARGV])
+    monkeypatch.setattr("terok_sandbox.supervisor.install.os.kill", lambda pid, sig: None)
+
+    assert kill_all_supervisors() == [("?", None)]
+
+
 def test_child_sweep_tolerates_vanished_and_reports_eperm(
     install_env: dict[str, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
