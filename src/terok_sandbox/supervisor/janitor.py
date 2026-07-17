@@ -4,9 +4,9 @@
 """Reconcile stray supervisor process trees against live containers.
 
 The per-container supervisor is meant to die with its container — the
-[`poststop`][terok_sandbox.resources.hooks.supervisor_hook] hook group-kills
-the tree, the supervisor self-terminates when its container's init PID
-dies, and ``PR_SET_PDEATHSIG`` takes the service children down with it.
+``poststop`` hook group-kills the tree, the supervisor self-terminates
+when its container's init PID dies, and ``PR_SET_PDEATHSIG`` takes the
+service children down with it.
 Those are the *prevention* layers.  This module is the *reconciliation*
 backstop: a periodic sweep that finds supervisor trees whose container is
 no longer running and kills them, no matter how they were stranded (a

@@ -193,6 +193,60 @@ class TestLiveContainerIds:
         monkeypatch.setattr(janitor.shutil, "which", lambda _n: None)
         assert janitor._live_container_ids() is None
 
+    def test_subprocess_error_is_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A podman invocation that errors/times out → ``None`` (unknown)."""
+        monkeypatch.setattr(janitor.shutil, "which", lambda _n: "/usr/bin/podman")
+
+        def _boom(*_a: object, **_k: object) -> None:
+            raise janitor.subprocess.TimeoutExpired(cmd="podman", timeout=10)
+
+        monkeypatch.setattr(janitor.subprocess, "run", _boom)
+        assert janitor._live_container_ids() is None
+
+    def test_unparsable_json_is_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Non-JSON stdout → ``None`` rather than a bogus empty set."""
+        monkeypatch.setattr(janitor.shutil, "which", lambda _n: "/usr/bin/podman")
+
+        class _Res:
+            stdout = "not json"
+
+        monkeypatch.setattr(janitor.subprocess, "run", lambda *a, **k: _Res())
+        assert janitor._live_container_ids() is None
+
+
+class TestProcessHelpers:
+    """The /proc-derived age and group-liveness helpers degrade gracefully."""
+
+    def test_process_age_none_when_stat_missing(self, fake_proc: Path) -> None:
+        """A pid with no ``stat`` file yields ``None`` age (never crashes the scan)."""
+        assert janitor._process_age_s(424242) is None
+
+    def test_process_age_none_when_starttime_malformed(self, fake_proc: Path) -> None:
+        """A stat line with a non-numeric starttime field yields ``None``, not a crash."""
+        pid_dir = fake_proc / "999"
+        pid_dir.mkdir()
+        (pid_dir / "stat").write_text("999 (py) S 1 not-a-number\n")
+        assert janitor._process_age_s(999) is None
+
+    def test_group_alive_reflects_signal0(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``_group_alive`` is True when killpg(0) succeeds, False on OSError."""
+        monkeypatch.setattr(janitor.os, "killpg", lambda pgid, sig: None)
+        assert janitor._group_alive(1) is True
+        monkeypatch.setattr(
+            janitor.os, "killpg", lambda pgid, sig: (_ for _ in ()).throw(ProcessLookupError)
+        )
+        assert janitor._group_alive(1) is False
+
+    def test_scan_skips_process_that_vanished(
+        self, fake_proc: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A pid whose group can't be read (raced exit) is skipped, not fatal."""
+        _add(fake_proc, 4321, _child(_STOPPED, "vault"))
+        monkeypatch.setattr(
+            janitor.os, "getpgid", lambda pid: (_ for _ in ()).throw(ProcessLookupError)
+        )
+        assert janitor._scan_supervisor_groups() == {}
+
 
 class TestDoctorCheck:
     """The doctor-check wrapper renders the sweep result."""

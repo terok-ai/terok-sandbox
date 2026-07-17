@@ -214,10 +214,47 @@ class TestHookSpawn:
         assert argv[1] == str(wrapper)
         assert argv[2] == container_id
         assert argv[3] == str(sidecar_path)
+        assert len(argv) == 4  # no OCI pid in this state → no 5th positional
 
         # PID file under <root>/pids
         pid_file = hook_root / "pids" / f"supervisor-{container_id}.pid"
         assert pid_file.read_text().strip() == "12345"
+
+    def test_createRuntime_forwards_container_init_pid(
+        self, hook_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A ``pid`` in the OCI state is appended to the wrapper argv for the PID watch."""
+        mod = _load_hook_module()
+        container_id = "abc123def456"
+        sidecar_path = _write_sidecar(
+            hook_root,
+            "demo",
+            {"container_name": "demo", "db_path": str(hook_root / "v.db"), "ipc_mode": "socket"},
+        )
+        fake_hooks_dir = hook_root / "hooks"
+        fake_hooks_dir.mkdir()
+        fake_hook_file = fake_hooks_dir / "supervisor_hook.py"
+        fake_hook_file.write_text("# fake")
+        wrapper = hook_root / "supervisor_wrapper.py"
+        _install_wrapper_alongside_hook(mod, wrapper)
+        monkeypatch.setattr(mod, "__file__", str(fake_hook_file))
+        _feed_stdin(
+            monkeypatch,
+            {
+                "id": container_id,
+                "pid": 1504136,
+                "annotations": {"terok.sandbox.sidecar": str(sidecar_path)},
+            },
+        )
+        monkeypatch.setattr(mod.sys, "argv", ["supervisor_hook", "createRuntime"])
+        monkeypatch.setattr(mod._supervisor_state, "outer_host_uid", lambda: os.getuid())
+
+        with patch.object(mod.subprocess, "Popen", return_value=MagicMock(pid=12345)) as popen:
+            mod.main()
+
+        (argv,), _kwargs = popen.call_args
+        assert argv[3] == str(sidecar_path)
+        assert argv[4] == "1504136"  # container init host-PID, for the direct watch
 
     def test_ownership_check_uses_in_namespace_uid_not_outer(
         self, hook_root: Path, monkeypatch: pytest.MonkeyPatch

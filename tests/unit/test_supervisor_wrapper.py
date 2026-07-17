@@ -59,6 +59,34 @@ class TestRestartLoop:
             ["/bin/terok-sandbox", "supervisor", "abc123", "/sidecar.json"]
         )
 
+    def test_container_pid_is_forwarded_when_present(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A numeric 3rd positional (the container init PID) reaches the supervisor verb."""
+        mod = _render_wrapper(tmp_path, ["/bin/terok-sandbox"])
+        with patch.object(mod.subprocess, "call", return_value=0) as call_mock:
+            monkeypatch.setattr(
+                mod.sys, "argv", ["supervisor_wrapper.py", "abc123", "/sidecar.json", "4242"]
+            )
+            assert mod.main() == 0
+        call_mock.assert_called_once_with(
+            ["/bin/terok-sandbox", "supervisor", "abc123", "/sidecar.json", "4242"]
+        )
+
+    def test_non_numeric_container_pid_is_dropped(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A garbage 3rd positional is ignored — never forwarded as an option."""
+        mod = _render_wrapper(tmp_path, ["/bin/terok-sandbox"])
+        with patch.object(mod.subprocess, "call", return_value=0) as call_mock:
+            monkeypatch.setattr(
+                mod.sys, "argv", ["supervisor_wrapper.py", "abc123", "/sidecar.json", "--evil"]
+            )
+            assert mod.main() == 0
+        call_mock.assert_called_once_with(
+            ["/bin/terok-sandbox", "supervisor", "abc123", "/sidecar.json"]
+        )
+
     def test_retries_then_gives_up(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """Five non-zero exits return the last rc and stop retrying."""
         mod = _render_wrapper(tmp_path, ["/bin/terok-sandbox"])
