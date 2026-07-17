@@ -37,7 +37,10 @@ runs when the sidecar wired it.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import ctypes
 import logging
+import os
 import signal
 from typing import TYPE_CHECKING
 
@@ -63,6 +66,9 @@ _logger = logging.getLogger("terok-supervisor.child")
 _EXIT_OK = 0
 _EXIT_BAD_SIDECAR = 2
 _EXIT_START_FAILED = 4
+
+#: ``prctl`` option arming the parent-death signal (Linux).
+_PR_SET_PDEATHSIG = 1
 
 
 async def _run_verdict(cfg: SidecarConfig, paths: SupervisorPaths, stop: asyncio.Event) -> None:
@@ -236,17 +242,46 @@ _RUNNERS: dict[str, _Runner] = {
 SERVICE_NAMES: tuple[str, ...] = tuple(_RUNNERS)
 
 
+def _arm_parent_death_signal() -> bool:
+    """Arm the kernel dead-man's switch: SIGTERM this child when its parent dies.
+
+    A supervisor killed without teardown (crash, OOM, SIGKILL past the
+    poststop grace) would otherwise strand its service children — the
+    vault-daemon child then pins the credentials DB open and blocks any
+    later re-encryption.  ``PR_SET_PDEATHSIG`` makes the *kernel*
+    deliver the same SIGTERM the graceful teardown would have sent, so
+    the child closes down cleanly with no reaper involved at all.
+
+    Best-effort on the prctl itself (Linux-specific; the group-level
+    poststop reap remains the backstop), but the return value is
+    binding: ``False`` means the parent is *already* gone — the arm
+    raced the supervisor's death — and the caller must exit rather
+    than run as a stray the switch will never fire for.
+    """
+    with contextlib.suppress(OSError, AttributeError):
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.prctl(_PR_SET_PDEATHSIG, signal.SIGTERM, 0, 0, 0)
+    return os.getppid() != 1
+
+
 def run_child(service: str, container_id: str, sidecar_path: Path) -> int:
     """Harden, build the one *service*, run it until SIGTERM; return an exit code.
 
     The synchronous entry the ``supervise-child`` CLI verb calls via
-    ``asyncio.run``.  Loads the sidecar the parent pinned (config, not
-    secrets), hardens the process *before* the runner opens the credential
-    store or binds a socket — honouring the sidecar's debug-mode opt-out —
-    then drives the single service's lifecycle.  A start failure returns
+    ``asyncio.run``.  Arms the parent-death signal first (a supervisor
+    that dies without teardown must never strand a running child), then
+    loads the sidecar the parent pinned (config, not secrets), hardens
+    the process *before* the runner opens the credential store or binds
+    a socket — honouring the sidecar's debug-mode opt-out — then drives
+    the single service's lifecycle.  A start failure returns
     ``_EXIT_START_FAILED`` (4) so the parent can log it and carry on,
     degrading one service without taking the rest down.
     """
+    if not _arm_parent_death_signal():
+        _logger.error(
+            "%s child: supervisor died before startup — refusing to run as a stray", service
+        )
+        return _EXIT_START_FAILED
     runner = _RUNNERS.get(service)
     if runner is None:
         _logger.error("unknown supervisor child service %r", service)
