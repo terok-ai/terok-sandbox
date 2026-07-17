@@ -256,7 +256,9 @@ class TestGpuRunArgs:
         with _host(kfd=True, drm_nodes=drm, by_path=True, tmp_path=tmp_path):
             args = gpu_run_args((("amd", None),))
         link = tmp_path / "by-path" / "pci-0000:03:00.0-render"
-        assert ("-v", f"{link}:{link}:ro") in _pairs(args)
+        # --mount long form: the PCI address's colons would break -v parsing.
+        assert ("--mount", f"type=bind,source={link},destination={link},ro=true") in _pairs(args)
+        assert "-v" not in args
 
     def test_no_by_path_links_no_mount(self, tmp_path: Path) -> None:
         """Hosts without /dev/dri/by-path entries get no dangling binds."""
@@ -264,6 +266,7 @@ class TestGpuRunArgs:
         with _host(kfd=True, drm_nodes=drm, tmp_path=tmp_path):
             args = gpu_run_args((("amd", None),))
         assert "-v" not in args
+        assert "--mount" not in args
 
     def test_amd_plus_intel_dedups_shared_args(self, tmp_path: Path) -> None:
         """Each vendor grants its own nodes; shared keep-groups emits once."""
@@ -385,7 +388,7 @@ class TestDeviceGrants:
         assert ("--device", "/dev/dri/renderD129") in pairs
         assert ("--device", "/dev/dri/renderD128") not in pairs
         assert ("--device", "/dev/dri") not in pairs
-        binds = [v for f, v in pairs if f == "-v"]
+        binds = [v for f, v in pairs if f == "--mount"]
         assert any("pci-0000:03:00.0-render" in b for b in binds)
         assert not any("pci-0000:0b:00.0-render" in b for b in binds)
         assert ("--group-add", "keep-groups") in pairs

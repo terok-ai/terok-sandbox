@@ -539,7 +539,14 @@ def _by_path_link_args(pairs: list[tuple[str, Path]]) -> list[str]:
     and skipped for nodes without one.
     """
     links = (_DRI_BY_PATH_DIR / f"pci-{addr}-render" for addr, _ in pairs)
-    return [arg for link in links if link.exists() for arg in ("-v", f"{link}:{link}:ro")]
+    # --mount, not -v: PCI addresses contain colons, which -v's
+    # host:ctr:option splitting cannot parse.
+    return [
+        arg
+        for link in links
+        if link.exists()
+        for arg in ("--mount", f"type=bind,source={link},destination={link},ro=true")
+    ]
 
 
 def _dedup_pairs(args: list[str]) -> list[str]:
