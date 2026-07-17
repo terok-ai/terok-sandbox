@@ -16,6 +16,7 @@ in ``test_supervisor_children.py``; the spawn mechanics in
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -282,6 +283,133 @@ class TestSupervise:
             AsyncMock(side_effect=ValueError("boom")),
         ):
             await _supervise("cid", [handle], stop)  # must return, not raise
+
+
+class TestContainerPidWatch:
+    """The direct container-init-PID watch — the podman-free death signal."""
+
+    @pytest.mark.asyncio
+    async def test_pid_watch_returns_when_the_process_exits(self) -> None:
+        """A real short-lived process: the watch resolves once it's killed.
+
+        Exercises the true ``pidfd_open`` path (or the poll fallback on an
+        old kernel) against an actual PID, not a mock.
+        """
+        import sys
+
+        from terok_sandbox.supervisor.main import _wait_for_container_pid
+
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-c", "import time; time.sleep(30)"
+        )
+        watch = asyncio.create_task(_wait_for_container_pid(proc.pid))
+        await asyncio.sleep(0.1)
+        assert not watch.done()  # still alive → still watching
+        proc.terminate()
+        await asyncio.wait_for(watch, timeout=5)  # exit unblocks the watch
+        await proc.wait()
+
+    @pytest.mark.asyncio
+    async def test_pid_watch_returns_immediately_for_a_dead_pid(self) -> None:
+        """A PID already gone at open time resolves at once (tear down now)."""
+        from terok_sandbox.supervisor.main import _wait_for_container_pid
+
+        with patch(
+            "terok_sandbox.supervisor.main.os.pidfd_open",
+            side_effect=ProcessLookupError,
+        ):
+            await asyncio.wait_for(_wait_for_container_pid(999999), timeout=2)
+
+    @pytest.mark.asyncio
+    async def test_poll_stays_pending_on_permission_error(self) -> None:
+        """EPERM means the process exists but is momentarily unsignalable — keep watching.
+
+        The watch must NOT resolve (which would falsely tear the container
+        down); only an actual exit (ProcessLookupError) ends it.
+        """
+        from terok_sandbox.supervisor.main import _poll_pid_exit
+
+        with (
+            patch(
+                "terok_sandbox.supervisor.main.os.kill",
+                side_effect=PermissionError("operation not permitted"),
+            ),
+            patch("terok_sandbox.supervisor.main._PID_POLL_INTERVAL_S", 0.01),
+        ):
+            watch = asyncio.create_task(_poll_pid_exit(4242))
+            await asyncio.sleep(0.1)  # several poll cycles
+            assert not watch.done()  # EPERM never resolves the watch
+            watch.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await watch
+
+    @pytest.mark.asyncio
+    async def test_poll_fallback_used_when_pidfd_unavailable(self) -> None:
+        """Without ``pidfd_open`` the watch degrades to a ``kill(pid, 0)`` poll."""
+        import sys
+
+        from terok_sandbox.supervisor.main import _wait_for_container_pid
+
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-c", "import time; time.sleep(30)"
+        )
+        with (
+            patch(
+                "terok_sandbox.supervisor.main.os.pidfd_open",
+                side_effect=OSError("no pidfd"),
+            ),
+            patch("terok_sandbox.supervisor.main._PID_POLL_INTERVAL_S", 0.05),
+        ):
+            watch = asyncio.create_task(_wait_for_container_pid(proc.pid))
+            await asyncio.sleep(0.1)
+            assert not watch.done()
+            proc.terminate()
+            await asyncio.wait_for(watch, timeout=5)
+        await proc.wait()
+
+    @pytest.mark.asyncio
+    async def test_supervise_tears_down_on_container_pid_exit(self) -> None:
+        """The PID arm unblocks ``_supervise`` even when podman-wait never fires."""
+        from terok_sandbox.supervisor.main import _supervise
+
+        handle = ChildHandle(service="s", process=_FakeProc())  # never exits
+        stop = asyncio.Event()
+        hang = asyncio.Event()  # podman-wait + children arms both hang on this
+
+        async def _hang(*_a: object) -> int:
+            await hang.wait()
+            return 0
+
+        with (
+            patch("terok_sandbox.supervisor.main._wait_for_container", _hang),
+            patch("terok_sandbox.supervisor.main._await_all_children", _hang),
+            patch(
+                "terok_sandbox.supervisor.main._wait_for_container_pid",
+                AsyncMock(return_value=None),
+            ) as pid_watch,
+        ):
+            await asyncio.wait_for(_supervise("cid", [handle], stop, 4242), timeout=5)
+        pid_watch.assert_awaited_once_with(4242)
+
+    @pytest.mark.asyncio
+    async def test_supervise_skips_pid_arm_when_absent(self) -> None:
+        """No container_pid → no PID-watch task is created."""
+        from terok_sandbox.supervisor.main import _supervise
+
+        handle = ChildHandle(service="s", process=_FakeProc())
+        stop = asyncio.Event()
+        with (
+            patch(
+                "terok_sandbox.supervisor.main._wait_for_container",
+                AsyncMock(return_value=0),
+            ),
+            patch(
+                "terok_sandbox.supervisor.main._wait_for_container_pid",
+                AsyncMock(return_value=None),
+            ) as pid_watch,
+        ):
+            await _supervise("cid", [handle], stop, None)
+        pid_watch.assert_not_awaited()
 
 
 class TestKillChildren:

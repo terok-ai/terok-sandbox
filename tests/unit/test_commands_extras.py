@@ -90,11 +90,22 @@ def _doctor_patches(
     benign_recovery_check = _make_check(
         label="Recovery key acknowledged", severity="ok", host_side=True
     )
+    benign_orphan_check = _make_check(
+        label="Orphaned supervisor sweep", severity="ok", host_side=True
+    )
     with (
         patch("terok_sandbox.doctor.sandbox_doctor_checks", return_value=checks),
         patch(
             "terok_sandbox.doctor.make_recovery_acknowledged_check",
             return_value=benign_recovery_check,
+        ),
+        # Neutralise the orphan-supervisor sweep the same way: its real
+        # evaluate shells out to ``podman ps``, which would trip the
+        # "host-side checks don't touch subprocess" assertions on a runner
+        # that has podman on PATH.
+        patch(
+            "terok_sandbox.supervisor.janitor.make_orphan_supervisor_check",
+            return_value=benign_orphan_check,
         ),
         patch("subprocess.run") as run,
     ):

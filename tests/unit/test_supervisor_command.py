@@ -34,20 +34,24 @@ class TestHandleSupervisor:
         """``container_id`` passes through; ``sidecar_path`` becomes a ``Path``; rc propagates."""
         captured: dict[str, object] = {}
 
-        async def _fake_run(container_id: str, sidecar_path: Path) -> int:
+        async def _fake_run(
+            container_id: str, sidecar_path: Path, container_pid: int | None = None
+        ) -> int:
             captured["container_id"] = container_id
             captured["sidecar_path"] = sidecar_path
+            captured["container_pid"] = container_pid
             return 7
 
         with (
             patch("terok_sandbox.supervisor.run_supervisor", side_effect=_fake_run),
             patch("logging.basicConfig") as basic_config,
         ):
-            rc = _handle_supervisor("abc123", "/run/terok/sidecar/demo.json")
+            rc = _handle_supervisor("abc123", "/run/terok/sidecar/demo.json", 4242)
 
         assert rc == 7
         assert captured["container_id"] == "abc123"
         assert captured["sidecar_path"] == Path("/run/terok/sidecar/demo.json")
+        assert captured["container_pid"] == 4242
         assert isinstance(captured["sidecar_path"], Path)
         # Root logging is configured so module loggers reach the wrapper's
         # per-container stderr log file.
@@ -69,7 +73,7 @@ class TestHandleSupervisor:
             rc = _handle_supervisor("cid", "/sidecar.json")
 
         assert rc == 0
-        run.assert_called_once_with("cid", Path("/sidecar.json"))
+        run.assert_called_once_with("cid", Path("/sidecar.json"), None)
         # The object asyncio.run drove is exactly what run_supervisor returned.
         asyncio_run.assert_called_once_with(sentinel.return_value)
 
@@ -104,7 +108,11 @@ class TestRegistration:
         assert SUPERVISOR.handler == LazyHandler(
             "terok_sandbox.commands.supervisor:_handle_supervisor"
         )
-        assert tuple(a.name for a in SUPERVISOR.args) == ("container_id", "sidecar_path")
+        assert tuple(a.name for a in SUPERVISOR.args) == (
+            "container_id",
+            "sidecar_path",
+            "container_pid",
+        )
 
     def test_supervise_child_verb_shape(self) -> None:
         assert SUPERVISE_CHILD.name == "supervise-child"

@@ -95,8 +95,15 @@ def main() -> None:
     if sidecar_path is None:
         return
 
+    # The OCI state carries the container init's host-PID at createRuntime;
+    # it's the supervisor's authoritative container-death signal.  Absent
+    # or malformed → the supervisor falls back to the podman-wait watch.
+    container_pid = oci.get("pid")
+    if not isinstance(container_pid, int) or container_pid <= 0:
+        container_pid = None
+
     try:
-        _dispatch(stage, container_id, sidecar_path, host_uid)
+        _dispatch(stage, container_id, sidecar_path, host_uid, container_pid)
     except Exception as exc:  # noqa: BLE001 — soft-fail every path
         _supervisor_state.log(f"terok-sandbox supervisor hook: {exc}")
 
@@ -156,7 +163,13 @@ def _validate_sidecar_path(raw: str) -> Path | None:
     return resolved
 
 
-def _dispatch(stage: str, container_id: str, sidecar_path: Path, host_uid: int) -> None:
+def _dispatch(
+    stage: str,
+    container_id: str,
+    sidecar_path: Path,
+    host_uid: int,
+    container_pid: int | None = None,
+) -> None:
     """Dispatch by stage — spawn at createRuntime, reap at poststop."""
     root = sidecar_path.parent.parent  # <root>/sidecar/<name>.json → <root>
     if stage == "poststop":
@@ -171,7 +184,7 @@ def _dispatch(stage: str, container_id: str, sidecar_path: Path, host_uid: int) 
     # threaded further.
     if _load_sidecar(sidecar_path) is None:
         return
-    _spawn_supervisor(container_id, sidecar_path, root, host_uid)
+    _spawn_supervisor(container_id, sidecar_path, root, host_uid, container_pid)
 
 
 def _spawn_supervisor(
@@ -179,8 +192,14 @@ def _spawn_supervisor(
     sidecar_path: Path,
     root: Path,
     host_uid: int,
+    container_pid: int | None = None,
 ) -> None:
-    """Start the supervisor wrapper for *container_id* as a detached child."""
+    """Start the supervisor wrapper for *container_id* as a detached child.
+
+    *container_pid* (the container init host-PID from the OCI state) is
+    passed to the wrapper as an optional 3rd positional so the supervisor
+    can watch it directly; ``None`` simply omits it.
+    """
     wrapper_path = Path(__file__).resolve().parent.parent / "supervisor_wrapper.py"
     if not wrapper_path.is_file():
         _supervisor_state.log(
@@ -208,9 +227,12 @@ def _spawn_supervisor(
         _supervisor_state.log(f"terok-sandbox supervisor hook: cannot open log file: {exc}")
         return
 
+    wrapper_argv = ["/usr/bin/python3", str(wrapper_path), container_id, str(sidecar_path)]
+    if container_pid is not None:
+        wrapper_argv.append(str(container_pid))
     try:
         proc = subprocess.Popen(  # noqa: S603  # nosec B603
-            ["/usr/bin/python3", str(wrapper_path), container_id, str(sidecar_path)],
+            wrapper_argv,
             env=env,
             stdin=subprocess.DEVNULL,
             stdout=log_fh,

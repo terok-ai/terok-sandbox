@@ -46,7 +46,7 @@ def main() -> int:
     """Drive the restart loop; return the supervisor's last exit code."""
     if len(sys.argv) < 3:
         print(
-            "usage: supervisor_wrapper.py <container_id> <sidecar_path>",
+            "usage: supervisor_wrapper.py <container_id> <sidecar_path> [container_pid]",
             file=sys.stderr,
         )
         return 2
@@ -57,6 +57,11 @@ def main() -> int:
         )
         return 2
     container_id, sidecar_path = sys.argv[1], sys.argv[2]
+    # Optional 3rd positional: the container init host-PID from the
+    # createRuntime hook.  Forwarded to the supervisor as its direct
+    # container-death signal; a non-numeric or missing value is simply
+    # dropped (the supervisor falls back to the podman-wait watch).
+    container_pid = sys.argv[3] if len(sys.argv) > 3 and sys.argv[3].isdigit() else None
 
     # Validate both positionals before they reach the CLI.  The OCI hook
     # only ever passes podman's hex id and an absolute, pre-validated
@@ -79,6 +84,8 @@ def main() -> int:
         return 2
 
     argv = [*_SANDBOX_BIN_ARGV, "supervisor", container_id, sidecar_path]
+    if container_pid is not None:
+        argv.append(container_pid)
     attempts = 0
     rc = 1
     while attempts < _MAX_ATTEMPTS:

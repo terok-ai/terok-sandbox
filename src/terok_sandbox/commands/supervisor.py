@@ -42,12 +42,21 @@ def _configure_supervisor_logging() -> None:
     )
 
 
-def _handle_supervisor(container_id: str, sidecar_path: str) -> int:
-    """Bridge from the CLI parser to [`run_supervisor`][terok_sandbox.supervisor.main.run_supervisor]."""
+def _handle_supervisor(
+    container_id: str, sidecar_path: str, container_pid: int | None = None
+) -> int:
+    """Bridge from the CLI parser to [`run_supervisor`][terok_sandbox.supervisor.main.run_supervisor].
+
+    *container_pid* — the container's init host-PID, passed by the
+    ``createRuntime`` hook via the wrapper — is the authoritative
+    container-death signal (see
+    [`run_supervisor`][terok_sandbox.supervisor.main.run_supervisor]).
+    Optional so an older wrapper (positional-count 2) still dispatches.
+    """
     from ..supervisor import run_supervisor
 
     _configure_supervisor_logging()
-    return asyncio.run(run_supervisor(container_id, Path(sidecar_path)))
+    return asyncio.run(run_supervisor(container_id, Path(sidecar_path), container_pid))
 
 
 def _handle_supervise_child(service: str, container_id: str, sidecar_path: str) -> int:
@@ -72,6 +81,13 @@ SUPERVISOR: CommandDef = CommandDef(
     args=(
         ArgDef(name="container_id", help="Container ID the supervisor manages"),
         ArgDef(name="sidecar_path", help="Absolute path to the per-container sidecar JSON"),
+        ArgDef(
+            name="container_pid",
+            help="Container init host-PID (from the createRuntime hook); enables the direct PID watch",
+            type=int,
+            nargs="?",
+            default=None,
+        ),
     ),
 )
 

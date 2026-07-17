@@ -34,6 +34,7 @@ def _handle_doctor(*, cfg: SandboxConfig | None = None) -> None:
     from ..config import SandboxConfig
     from ..doctor import make_recovery_acknowledged_check, sandbox_doctor_checks
     from ..launch import make_stray_sidecar_check
+    from ..supervisor.janitor import make_orphan_supervisor_check
 
     if cfg is None:
         cfg = SandboxConfig()
@@ -50,6 +51,7 @@ def _handle_doctor(*, cfg: SandboxConfig | None = None) -> None:
         ),
         make_recovery_acknowledged_check(),
         make_stray_sidecar_check(cfg),
+        make_orphan_supervisor_check(),
     ]
     worst = "ok"
     markers = {"ok": "ok", "warn": "WARN", "error": "ERROR"}

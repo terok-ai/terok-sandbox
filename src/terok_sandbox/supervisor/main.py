@@ -36,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -63,15 +64,32 @@ _CHILD_TERM_GRACE_S = 5.0
 #: Delay between retries when the ``podman wait`` *invocation* itself keeps
 #: failing (a broken nested podman under an old OCI runtime's hook env,
 #: storage-lock contention).  Watching is degraded, not fatal — teardown
-#: still arrives via the stop signal or the poststop hook.
+#: still arrives via the container-PID watch, the stop signal, or the
+#: poststop hook.
 _PODMAN_WAIT_RETRY_S = 30.0
+
+#: Poll interval for the container-init-PID fallback watch, used only when
+#: ``pidfd_open`` is unavailable (kernel < 5.3) or refused.  Short enough
+#: that a supervisor never lingers long after its container, cheap enough
+#: to be invisible.
+_PID_POLL_INTERVAL_S = 2.0
 
 
 # ── Entry point ─────────────────────────────────────────────────────────
 
 
-async def run_supervisor(container_id: str, sidecar_path: Path) -> int:
+async def run_supervisor(
+    container_id: str, sidecar_path: Path, container_pid: int | None = None
+) -> int:
     """Launch, monitor, and tear down the per-container child processes.
+
+    *container_pid* is the container's init host-PID, handed down from the
+    ``createRuntime`` OCI hook.  When present it is the **authoritative**
+    container-death signal: the supervisor watches it directly (via
+    ``pidfd``), so it tears down the instant the container exits even where
+    nested ``podman wait`` is blind (crun handing the hook the container's
+    env).  ``None`` (older hook, or a runtime that didn't supply it) falls
+    back to the ``podman wait`` watch alone.
 
     Lifecycle:
 
@@ -118,7 +136,7 @@ async def run_supervisor(container_id: str, sidecar_path: Path) -> int:
                 container_id,
             )
             return 3
-        await _supervise(container_id, handles, stop_event)
+        await _supervise(container_id, handles, stop_event, container_pid)
         return 0
     finally:
         await _terminate_children(handles)
@@ -155,21 +173,28 @@ async def _launch_children(
 
 
 async def _supervise(
-    container_id: str, handles: list[ChildHandle], stop_event: asyncio.Event
+    container_id: str,
+    handles: list[ChildHandle],
+    stop_event: asyncio.Event,
+    container_pid: int | None = None,
 ) -> None:
     """Block until the container exits, every child dies, or a stop signal.
 
-    Races three tasks; whichever fires first unblocks teardown.  The
+    Races the watch tasks; whichever fires first unblocks teardown.  The
     ``all children exited`` arm covers the case where every service died
     on its own (a stolen port on all of them), so the parent stops
     holding a dead bundle instead of waiting forever on ``podman wait``.
+    When *container_pid* is known, a direct PID watch is added — the one
+    arm that still fires when nested ``podman wait`` is blind.
     """
-    wait_task = asyncio.create_task(_wait_for_container(container_id))
-    stop_task = asyncio.create_task(stop_event.wait())
-    children_task = asyncio.create_task(_await_all_children(handles))
-    done, pending = await asyncio.wait(
-        {wait_task, stop_task, children_task}, return_when=asyncio.FIRST_COMPLETED
-    )
+    tasks = {
+        asyncio.create_task(_wait_for_container(container_id)),
+        asyncio.create_task(stop_event.wait()),
+        asyncio.create_task(_await_all_children(handles)),
+    }
+    if container_pid and container_pid > 0:
+        tasks.add(asyncio.create_task(_wait_for_container_pid(container_pid)))
+    done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
     for task in pending:
         task.cancel()
     # Await every task — cancelled included — so the ``podman wait``
@@ -281,10 +306,65 @@ async def _wait_for_container(container_id: str) -> int:
         log = _logger.error if failures == 1 else _logger.debug
         log(
             "podman wait %s failed (exit %s): %s — container-exit watching degraded, "
-            "retrying in %.0fs (teardown still arrives via stop signal / poststop hook)",
+            "retrying in %.0fs (teardown still arrives via the PID watch / stop signal / "
+            "poststop hook)",
             container_id,
             proc.returncode,
             stderr.decode(errors="replace").strip(),
             _PODMAN_WAIT_RETRY_S,
         )
         await asyncio.sleep(_PODMAN_WAIT_RETRY_S)
+
+
+async def _wait_for_container_pid(pid: int) -> None:
+    """Return once the container's init process *pid* has exited.
+
+    The podman-free container-death signal: the supervisor watches the
+    container init host-PID the ``createRuntime`` hook handed it, so it
+    tears down the instant the container dies even where nested
+    ``podman wait`` is blind (an OCI runtime that gives the hook the
+    container's environment).
+
+    Prefers ``pidfd_open`` — an edge-triggered readable event on process
+    exit, registered with the loop, so the watch costs nothing while the
+    container runs.  Falls back to a cheap ``kill(pid, 0)`` poll on a
+    kernel without pidfd (< 5.3) or when the open is refused.  A pid that
+    is already gone resolves immediately, which is the correct outcome.
+    """
+    try:
+        pidfd = os.pidfd_open(pid)
+    except ProcessLookupError:
+        return  # already gone → tear down now
+    except (OSError, AttributeError):
+        await _poll_pid_exit(pid)
+        return
+    try:
+        loop = asyncio.get_running_loop()
+        exited = asyncio.Event()
+        loop.add_reader(pidfd, exited.set)
+        try:
+            await exited.wait()
+        finally:
+            loop.remove_reader(pidfd)
+    finally:
+        os.close(pidfd)
+
+
+async def _poll_pid_exit(pid: int) -> None:
+    """Signal-0 poll until *pid* is gone — the no-pidfd fallback.
+
+    Only ``ProcessLookupError`` (ESRCH) means the process exited.  A
+    ``PermissionError`` (EPERM) — or any other ``OSError`` — means the
+    process is *still there* but momentarily unsignalable, so the watch
+    keeps polling rather than falsely reporting the container dead; a
+    genuine exit still resolves it, and the other teardown arms cover the
+    unlikely persistent-error case.
+    """
+    while True:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        except OSError:
+            pass  # exists but unsignalable — not gone; keep watching
+        await asyncio.sleep(_PID_POLL_INTERVAL_S)
