@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import signal
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -22,6 +23,7 @@ import pytest
 
 from terok_sandbox.supervisor.children import (
     SERVICE_NAMES,
+    _arm_parent_death_signal,
     _ensure_socket_dirs,
     _install_signal_handlers,
     _run_clearance,
@@ -32,6 +34,17 @@ from terok_sandbox.supervisor.children import (
     run_child,
 )
 from terok_sandbox.supervisor.main import SidecarConfig, SupervisorPaths
+
+
+@pytest.fixture(autouse=True)
+def _no_pdeathsig(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep ``run_child`` tests from arming PDEATHSIG on the test process.
+
+    The real prctl would tie the *pytest* process's life to its parent —
+    a side effect that outlives the test.  The dedicated
+    ``TestArmParentDeathSignal`` cases bypass this stub explicitly.
+    """
+    monkeypatch.setattr("terok_sandbox.supervisor.children._arm_parent_death_signal", lambda: True)
 
 
 @pytest.fixture
@@ -244,6 +257,42 @@ class TestEnsureSocketDirs:
         parent = paths.vault_socket.parent
         assert parent.is_dir()
         assert (parent.stat().st_mode & 0o777) == 0o700
+
+
+class TestArmParentDeathSignal:
+    """The kernel dead-man's switch — armed best-effort, orphan check binding."""
+
+    def test_arms_pdeathsig_and_reports_live_parent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """prctl is invoked with PR_SET_PDEATHSIG/SIGTERM; a live parent → True."""
+        calls: list[tuple] = []
+        libc = MagicMock()
+        libc.prctl = MagicMock(side_effect=lambda *a: calls.append(a) or 0)
+        monkeypatch.setattr("terok_sandbox.supervisor.children.ctypes.CDLL", lambda *a, **k: libc)
+        assert _arm_parent_death_signal() is True
+        assert calls and calls[0][:2] == (1, signal.SIGTERM)
+
+    def test_orphaned_at_startup_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """ppid == 1 means the supervisor died before the switch was armed."""
+        monkeypatch.setattr("terok_sandbox.supervisor.children.ctypes.CDLL", MagicMock())
+        monkeypatch.setattr("terok_sandbox.supervisor.children.os.getppid", lambda: 1)
+        assert _arm_parent_death_signal() is False
+
+    def test_missing_prctl_is_best_effort(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A libc without prctl (non-Linux) degrades silently — reaps still cover."""
+        monkeypatch.setattr(
+            "terok_sandbox.supervisor.children.ctypes.CDLL",
+            MagicMock(side_effect=OSError("no libc")),
+        )
+        assert _arm_parent_death_signal() is True
+
+    def test_run_child_exits_when_orphaned(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An already-orphaned child never starts its service."""
+        monkeypatch.setattr(
+            "terok_sandbox.supervisor.children._arm_parent_death_signal", lambda: False
+        )
+        assert run_child("vault", "cid", tmp_path / "missing.json") == 4
 
 
 class TestRunChildGuards:

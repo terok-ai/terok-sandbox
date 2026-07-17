@@ -147,28 +147,28 @@ def uninstall_supervisor_hooks(*, hooks_dir: Path | None = None) -> None:
 
 
 def kill_all_supervisors() -> list[tuple[str, str | None]]:
-    """SIGKILL every live host-side supervisor process — wrappers and children.
+    """SIGKILL every live host-side supervisor process group, then sweep strays.
 
-    Two passes.  First the wrappers, one per
-    ``<state_root>/pids/supervisor-*.pid``: read the PID, ``SIGKILL``
-    if alive, then unlink the stale file.  Then the
-    process-per-service children (``_kill_all_service_children``)
-    — a SIGKILLed wrapper never got to tear them down, and a wrapper
-    that crashed earlier left them orphaned with no PID file, so they
-    are swept by argv rather than by parentage.  Each returned row is
-    ``(container_id, error_or_None)`` — ``None`` means the process is
-    no longer there, whether we killed it or it had already exited.
+    The OCI hook spawns each wrapper with ``start_new_session=True``,
+    so the PID it records is also the **process-group ID** of that
+    container's entire supervisor tree — restart-loop wrapper,
+    supervisor, service children, watcher subprocesses.  One
+    ``killpg`` per ``<state_root>/pids/supervisor-*.pid`` therefore
+    takes the whole tree down atomically, and it still works after the
+    wrapper itself died: a process group persists while any member
+    lives, and its ID cannot be recycled meanwhile.  A second pass
+    (``_kill_all_service_children``) sweeps ``supervise-child``
+    processes that no PID file reaches any more — an earlier reap
+    unlinked the file while the kill half failed.  Each returned row
+    is ``(container_id, error_or_None)`` — ``None`` means the
+    processes are no longer there, whether we killed them or they had
+    already exited.
 
     Designed for the panic path: the OCI ``poststop`` reap does a
     graceful ``SIGTERM`` → poll → ``SIGKILL`` dance for a normal
     container stop; panic skips straight to ``SIGKILL`` because the
     whole point is to deny the supervisor any more cycles to answer
     socket calls from a misbehaving container.
-
-    PID-recycle check is intentional but tight: the file name carries
-    the container ID, so a stale PID that's been recycled into an
-    unrelated process can still be matched by reading
-    ``/proc/<pid>/cmdline`` for the wrapper path before signalling.
     """
     results: list[tuple[str, str | None]] = []
     pids_dir = state_root() / _PIDS_DIR_NAME
@@ -186,14 +186,14 @@ def kill_all_supervisors() -> list[tuple[str, str | None]]:
 def _kill_all_service_children() -> list[tuple[str, str | None]]:
     """SIGKILL every ``supervise-child`` service process left on the host.
 
-    The wrapper pass above gives its targets no chance to tear their
-    service children down, and a wrapper that died earlier without a
-    teardown left its children orphaned — the vault-daemon child then
-    keeps the credentials DB open indefinitely.  Neither case is
-    reachable through PID files, so the children are found by what
-    they *are* rather than who spawned them: a ``/proc`` argv sweep
-    for the ``supervise-child`` invocation.  One row per child, keyed
-    by its container-ID argv element.
+    The group pass above reaches everything a PID file names — but a
+    child whose PID file is already gone (an earlier reap unlinked it
+    while the kill half failed) has no group handle left, and the
+    vault-daemon child then keeps the credentials DB open
+    indefinitely.  So the last-resort net finds children by what they
+    *are* rather than who spawned them: a ``/proc`` argv sweep for the
+    ``supervise-child`` invocation.  Normally it finds nothing.  One
+    row per child, keyed by its container-ID argv element.
     """
     results: list[tuple[str, str | None]] = []
     for pid, args in _iter_process_argvs():
@@ -232,16 +232,16 @@ def _child_container_id(args: list[bytes]) -> str:
 
 
 def _kill_one_supervisor(pid_file: Path, wrapper_path: str, container_id: str) -> str | None:
-    """SIGKILL one supervisor wrapper; unlink the PID file regardless."""
+    """SIGKILL one supervisor's whole process group; unlink the PID file regardless."""
     try:
-        pid = int(pid_file.read_text().strip())
+        pgid = int(pid_file.read_text().strip())
     except (OSError, ValueError) as exc:
         pid_file.unlink(missing_ok=True)
         return f"unreadable pid file: {exc}"
     error: str | None = None
-    if _is_our_wrapper(pid, wrapper_path, container_id):
+    if _is_group_ours(pgid, wrapper_path, container_id):
         try:
-            os.kill(pid, signal.SIGKILL)
+            os.killpg(pgid, signal.SIGKILL)
         except ProcessLookupError:
             pass
         except OSError as exc:
@@ -250,24 +250,31 @@ def _kill_one_supervisor(pid_file: Path, wrapper_path: str, container_id: str) -
     return error
 
 
-def _is_our_wrapper(pid: int, wrapper_path: str, container_id: str) -> bool:
-    """Defend against PID recycling by checking ``/proc/<pid>/cmdline``.
+def _is_group_ours(pgid: int, wrapper_path: str, container_id: str) -> bool:
+    """PID-recycle guard for a whole supervisor process group.
 
-    Both the wrapper path and the container_id must appear in the
-    process's argv — wrapper_path alone matches every live wrapper, so
-    a PID recycled into an unrelated container's wrapper would slip
-    through.
+    Leader alive → its argv must be our wrapper *for this container*
+    (wrapper_path alone matches every live wrapper, so a PID recycled
+    into another container's wrapper would slip through).  Leader gone
+    or a zombie (no ``/proc`` entry, or the empty cmdline zombies get)
+    → ``True``: a group ID stays pinned while any member lives, so a
+    surviving group under this number can only be the remnant of our
+    own session — and if nothing survives either, the ``killpg``
+    lands on ``ProcessLookupError`` harmlessly.
 
     Reads bytes (not text) — ``/proc/*/cmdline`` is null-separated and
     is allowed to contain arbitrary byte sequences for the recycled
     process; a ``UnicodeDecodeError`` here would otherwise abort
     ``kill_all_supervisors`` mid-sweep.
     """
-    cmdline_path = Path("/proc") / str(pid) / "cmdline"
-    with contextlib.suppress(OSError):
-        cmdline = cmdline_path.read_bytes()
-        return wrapper_path.encode() in cmdline and container_id.encode() in cmdline
-    return False
+    try:
+        cmdline = (_PROC_DIR / str(pgid) / "cmdline").read_bytes()
+    except OSError:
+        return True
+    if not cmdline:
+        return True
+    args = cmdline.rstrip(b"\x00").split(b"\x00")
+    return wrapper_path.encode() in args and container_id.encode() in args
 
 
 def _copy_executable(src: Path, dst: Path) -> None:

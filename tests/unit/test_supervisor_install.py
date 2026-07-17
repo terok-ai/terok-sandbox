@@ -20,7 +20,7 @@ from unittest.mock import patch
 import pytest
 
 from terok_sandbox.supervisor.install import (
-    _is_our_wrapper,
+    _is_group_ours,
     _resolve_sandbox_argv,
     install_supervisor_hooks,
     kill_all_supervisors,
@@ -51,10 +51,14 @@ def install_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Pa
 
 
 def _add_process(proc: Path, pid: int, argv: list[str]) -> None:
-    """Materialise one fake ``/proc/<pid>`` with a null-separated cmdline."""
+    """Materialise one fake ``/proc/<pid>`` with a null-separated cmdline.
+
+    An empty *argv* yields the empty cmdline real zombies expose.
+    """
     pid_dir = proc / str(pid)
     pid_dir.mkdir()
-    (pid_dir / "cmdline").write_bytes(b"\x00".join(a.encode() for a in argv) + b"\x00")
+    cmdline = b"\x00".join(a.encode() for a in argv) + b"\x00" if argv else b""
+    (pid_dir / "cmdline").write_bytes(cmdline)
 
 
 def test_install_lays_down_full_artefact_set(install_env: dict[str, Path]) -> None:
@@ -149,7 +153,7 @@ def test_kill_all_supervisors_skips_stale_pids(
 
     PID-recycle guard: the file name carries the container ID, but the
     PID inside may have been recycled into an unrelated process — the
-    ``/proc/<pid>/cmdline`` check rejects it.  Stubbing ``_is_our_wrapper``
+    ``/proc/<pid>/cmdline`` check rejects it.  Stubbing ``_is_group_ours``
     keeps the test off the host's real ``/proc`` state.
     """
     root = install_env["state"]
@@ -157,7 +161,7 @@ def test_kill_all_supervisors_skips_stale_pids(
     pids_dir.mkdir(parents=True)
     stale = pids_dir / "supervisor-deadbeef.pid"
     stale.write_text("424242\n")
-    monkeypatch.setattr("terok_sandbox.supervisor.install._is_our_wrapper", lambda *_a: False)
+    monkeypatch.setattr("terok_sandbox.supervisor.install._is_group_ours", lambda *_a: False)
 
     result = kill_all_supervisors()
 
@@ -185,21 +189,22 @@ def test_kill_all_supervisors_reports_unreadable_pid_file(install_env: dict[str,
 def test_kill_all_supervisors_sigkills_matching_wrapper(
     install_env: dict[str, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A PID file whose process IS our wrapper gets ``SIGKILL``ed then unlinked.
+    """A PID file whose group is ours gets a group ``SIGKILL``, then unlinked.
 
-    Stubs ``_is_our_wrapper`` True and captures ``os.kill`` so the sweep
-    never signals a real process; the PID file is always removed after.
+    Stubs ``_is_group_ours`` True and captures ``os.killpg`` so the sweep
+    never signals a real process group; the PID file is always removed
+    after.
     """
     root = install_env["state"]
     pids_dir = root / "pids"
     pids_dir.mkdir(parents=True)
     live = pids_dir / "supervisor-beef.pid"
     live.write_text("99999\n")
-    monkeypatch.setattr("terok_sandbox.supervisor.install._is_our_wrapper", lambda *_a: True)
+    monkeypatch.setattr("terok_sandbox.supervisor.install._is_group_ours", lambda *_a: True)
     killed: list[tuple[int, int]] = []
     monkeypatch.setattr(
-        "terok_sandbox.supervisor.install.os.kill",
-        lambda pid, sig: killed.append((pid, sig)),
+        "terok_sandbox.supervisor.install.os.killpg",
+        lambda pgid, sig: killed.append((pgid, sig)),
     )
 
     result = kill_all_supervisors()
@@ -212,18 +217,18 @@ def test_kill_all_supervisors_sigkills_matching_wrapper(
 def test_kill_all_supervisors_tolerates_already_exited(
     install_env: dict[str, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A wrapper that has already exited (``ProcessLookupError``) is no error."""
+    """A group that has already fully exited (``ProcessLookupError``) is no error."""
     root = install_env["state"]
     pids_dir = root / "pids"
     pids_dir.mkdir(parents=True)
     gone = pids_dir / "supervisor-d00d.pid"
     gone.write_text("99998\n")
-    monkeypatch.setattr("terok_sandbox.supervisor.install._is_our_wrapper", lambda *_a: True)
+    monkeypatch.setattr("terok_sandbox.supervisor.install._is_group_ours", lambda *_a: True)
 
-    def _raise_lookup(_pid: int, _sig: int) -> None:
+    def _raise_lookup(_pgid: int, _sig: int) -> None:
         raise ProcessLookupError
 
-    monkeypatch.setattr("terok_sandbox.supervisor.install.os.kill", _raise_lookup)
+    monkeypatch.setattr("terok_sandbox.supervisor.install.os.killpg", _raise_lookup)
 
     result = kill_all_supervisors()
 
@@ -240,12 +245,12 @@ def test_kill_all_supervisors_surfaces_oserror(
     pids_dir.mkdir(parents=True)
     locked = pids_dir / "supervisor-face.pid"
     locked.write_text("99997\n")
-    monkeypatch.setattr("terok_sandbox.supervisor.install._is_our_wrapper", lambda *_a: True)
+    monkeypatch.setattr("terok_sandbox.supervisor.install._is_group_ours", lambda *_a: True)
 
-    def _raise_eperm(_pid: int, _sig: int) -> None:
+    def _raise_eperm(_pgid: int, _sig: int) -> None:
         raise OSError("operation not permitted")
 
-    monkeypatch.setattr("terok_sandbox.supervisor.install.os.kill", _raise_eperm)
+    monkeypatch.setattr("terok_sandbox.supervisor.install.os.killpg", _raise_eperm)
 
     result = kill_all_supervisors()
 
@@ -292,8 +297,12 @@ def test_kill_all_supervisors_takes_wrapper_and_children(
     pids_dir.mkdir(parents=True)
     (pids_dir / "supervisor-beefcafe.pid").write_text("11111\n")
     _add_process(install_env["proc"], 22222, [*_CHILD_ARGV, "vault", "beefcafe", "/x/sidecar.json"])
-    monkeypatch.setattr("terok_sandbox.supervisor.install._is_our_wrapper", lambda *_a: True)
+    monkeypatch.setattr("terok_sandbox.supervisor.install._is_group_ours", lambda *_a: True)
     killed: list[int] = []
+    monkeypatch.setattr(
+        "terok_sandbox.supervisor.install.os.killpg",
+        lambda pgid, sig: killed.append(pgid),
+    )
     monkeypatch.setattr(
         "terok_sandbox.supervisor.install.os.kill",
         lambda pid, sig: killed.append(pid),
@@ -341,37 +350,45 @@ def test_child_sweep_tolerates_vanished_and_reports_eperm(
     assert result["bbbb"] is not None and "SIGKILL failed" in result["bbbb"]
 
 
-# ── _is_our_wrapper ─────────────────────────────────────────────────────
+# ── _is_group_ours ──────────────────────────────────────────────────────
 
 
-class TestIsOurWrapper:
-    """The PID-recycle guard requires BOTH the wrapper path and container ID."""
+class TestIsGroupOurs:
+    """The recycle guard for a whole group — strict on a live leader, permissive on a dead one."""
 
-    def test_returns_true_when_both_present_in_cmdline(self, tmp_path: Path) -> None:
-        """A cmdline carrying the wrapper path and the container ID matches.
+    _WRAPPER = "/state/supervisor_wrapper.py"
 
-        Writes a fake null-separated ``/proc/<pid>/cmdline`` and points the
-        check at it via a patched ``Path("/proc")/...`` read — no real
-        process is involved.
-        """
-        wrapper = "/state/supervisor_wrapper.py"
-        container_id = "abc123"
-        cmdline = b"\x00".join([b"python3", wrapper.encode(), container_id.encode()]) + b"\x00"
-        with patch("terok_sandbox.supervisor.install.Path.read_bytes", return_value=cmdline):
-            assert _is_our_wrapper(4242, wrapper, container_id) is True
+    def test_live_leader_matching_both_marks_is_ours(self, install_env: dict[str, Path]) -> None:
+        """A leader argv carrying the wrapper path and the container ID matches."""
+        _add_process(install_env["proc"], 4242, ["python3", self._WRAPPER, "abc123", "/s.json"])
+        assert _is_group_ours(4242, self._WRAPPER, "abc123") is True
 
-    def test_returns_false_when_container_id_absent(self) -> None:
+    def test_live_leader_for_another_container_is_rejected(
+        self, install_env: dict[str, Path]
+    ) -> None:
         """The wrapper path alone is not enough — a recycled PID running an
         unrelated container's wrapper must be rejected."""
-        wrapper = "/state/supervisor_wrapper.py"
-        cmdline = b"\x00".join([b"python3", wrapper.encode(), b"other-id"]) + b"\x00"
-        with patch("terok_sandbox.supervisor.install.Path.read_bytes", return_value=cmdline):
-            assert _is_our_wrapper(4242, wrapper, "abc123") is False
+        _add_process(install_env["proc"], 4242, ["python3", self._WRAPPER, "other-id", "/s.json"])
+        assert _is_group_ours(4242, self._WRAPPER, "abc123") is False
 
-    def test_returns_false_when_cmdline_unreadable(self) -> None:
-        """A missing/unreadable ``/proc/<pid>/cmdline`` (OSError) → False."""
-        with patch("terok_sandbox.supervisor.install.Path.read_bytes", side_effect=OSError("gone")):
-            assert _is_our_wrapper(4242, "/w.py", "abc123") is False
+    def test_live_foreign_process_is_rejected(self, install_env: dict[str, Path]) -> None:
+        """A PID recycled into an arbitrary process must never be group-killed."""
+        _add_process(install_env["proc"], 4242, ["/usr/bin/some-daemon", "--flag"])
+        assert _is_group_ours(4242, self._WRAPPER, "abc123") is False
+
+    def test_dead_leader_is_ours(self, install_env: dict[str, Path]) -> None:
+        """No ``/proc`` entry → any surviving group under this ID is our remnant.
+
+        A process-group ID stays pinned while any member lives, so the
+        number cannot have been recycled — this is exactly the orphaned-
+        children case the group kill must still reach.
+        """
+        assert _is_group_ours(4242, self._WRAPPER, "abc123") is True
+
+    def test_zombie_leader_is_ours(self, install_env: dict[str, Path]) -> None:
+        """Zombies expose an empty cmdline — same remnant reasoning as a dead leader."""
+        _add_process(install_env["proc"], 4242, [])
+        assert _is_group_ours(4242, self._WRAPPER, "abc123") is True
 
 
 # ── uninstall with explicit hooks_dir ───────────────────────────────────
