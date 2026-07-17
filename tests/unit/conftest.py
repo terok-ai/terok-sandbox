@@ -72,6 +72,23 @@ def _isolate_user_paths(
     monkeypatch.setattr("terok_util.paths._is_root", lambda: False)
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _prime_podman_version_probe() -> None:
+    """Populate terok-util's cached podman-version probe once, up front.
+
+    The probe shells out on first use; a test that patches
+    ``subprocess.run`` globally and happens to run first would both feed
+    the probe a mock and absorb the probe call into its own
+    call-counting assertions — an order-dependent failure.  One real
+    probe per session (the fallback answer is fine on podman-less CI)
+    makes every later lookup a cache hit.
+    """
+    from terok_util.podman import _podman_version
+
+    _podman_version.cache_clear()
+    _podman_version()
+
+
 @pytest.fixture(autouse=True)
 def _pin_systemctl_path(monkeypatch: pytest.MonkeyPatch) -> None:
     """Pin ``_SYSTEMCTL_PATH`` to a known absolute path for every unit test.
