@@ -351,10 +351,20 @@ async def _wait_for_container_pid(pid: int) -> None:
 
 
 async def _poll_pid_exit(pid: int) -> None:
-    """Signal-0 poll until *pid* is gone — the no-pidfd fallback."""
+    """Signal-0 poll until *pid* is gone — the no-pidfd fallback.
+
+    Only ``ProcessLookupError`` (ESRCH) means the process exited.  A
+    ``PermissionError`` (EPERM) — or any other ``OSError`` — means the
+    process is *still there* but momentarily unsignalable, so the watch
+    keeps polling rather than falsely reporting the container dead; a
+    genuine exit still resolves it, and the other teardown arms cover the
+    unlikely persistent-error case.
+    """
     while True:
         try:
             os.kill(pid, 0)
-        except OSError:
+        except ProcessLookupError:
             return
+        except OSError:
+            pass  # exists but unsignalable — not gone; keep watching
         await asyncio.sleep(_PID_POLL_INTERVAL_S)

@@ -16,6 +16,7 @@ in ``test_supervisor_children.py``; the spawn mechanics in
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -318,6 +319,29 @@ class TestContainerPidWatch:
             side_effect=ProcessLookupError,
         ):
             await asyncio.wait_for(_wait_for_container_pid(999999), timeout=2)
+
+    @pytest.mark.asyncio
+    async def test_poll_stays_pending_on_permission_error(self) -> None:
+        """EPERM means the process exists but is momentarily unsignalable — keep watching.
+
+        The watch must NOT resolve (which would falsely tear the container
+        down); only an actual exit (ProcessLookupError) ends it.
+        """
+        from terok_sandbox.supervisor.main import _poll_pid_exit
+
+        with (
+            patch(
+                "terok_sandbox.supervisor.main.os.kill",
+                side_effect=PermissionError("operation not permitted"),
+            ),
+            patch("terok_sandbox.supervisor.main._PID_POLL_INTERVAL_S", 0.01),
+        ):
+            watch = asyncio.create_task(_poll_pid_exit(4242))
+            await asyncio.sleep(0.1)  # several poll cycles
+            assert not watch.done()  # EPERM never resolves the watch
+            watch.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await watch
 
     @pytest.mark.asyncio
     async def test_poll_fallback_used_when_pidfd_unavailable(self) -> None:
