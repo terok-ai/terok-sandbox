@@ -30,19 +30,31 @@ from terok_sandbox.supervisor.install import (
 
 @pytest.fixture
 def install_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
-    """Redirect ``state_root()`` to ``tmp_path``.
+    """Redirect ``state_root()`` (and the child sweep's ``/proc``) to ``tmp_path``.
 
     Single layout: descriptors land next to scripts under
     ``state_root() / "hooks"``.  Overriding ``state_root`` keeps the
-    test hermetic — install lands entirely under ``tmp_path``.
+    test hermetic — install lands entirely under ``tmp_path``.  The
+    fake ``/proc`` starts empty so ``kill_all_supervisors``'s child
+    sweep never scans (or signals!) the host's real processes.
     """
     state = tmp_path / "state"
+    proc = tmp_path / "proc"
+    proc.mkdir()
     monkeypatch.setattr("terok_sandbox.supervisor.install.state_root", lambda: state)
+    monkeypatch.setattr("terok_sandbox.supervisor.install._PROC_DIR", proc)
     monkeypatch.setattr(
         "terok_sandbox.supervisor.install.ensure_user_hooks_dir_configured",
         lambda _dir: None,
     )
-    return {"state": state, "hooks_dir": state / "hooks"}
+    return {"state": state, "hooks_dir": state / "hooks", "proc": proc}
+
+
+def _add_process(proc: Path, pid: int, argv: list[str]) -> None:
+    """Materialise one fake ``/proc/<pid>`` with a null-separated cmdline."""
+    pid_dir = proc / str(pid)
+    pid_dir.mkdir()
+    (pid_dir / "cmdline").write_bytes(b"\x00".join(a.encode() for a in argv) + b"\x00")
 
 
 def test_install_lays_down_full_artefact_set(install_env: dict[str, Path]) -> None:
@@ -241,6 +253,92 @@ def test_kill_all_supervisors_surfaces_oserror(
     assert container_id == "face"
     assert err is not None and "SIGKILL failed" in err
     assert not locked.exists()
+
+
+# ── service-children sweep ──────────────────────────────────────────────
+
+
+_CHILD_ARGV = ["/usr/bin/python3", "-P", "-m", "terok_sandbox", "supervise-child"]
+
+
+def test_kill_all_supervisors_sweeps_orphaned_children(
+    install_env: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``supervise-child`` with no PID file anywhere still gets SIGKILLed.
+
+    This is the post-split regression: SIGKILLing only the wrapper (or a
+    wrapper that crashed on its own) orphans the service children, and
+    the vault-daemon child then pins the credentials DB open forever.
+    """
+    _add_process(install_env["proc"], 4242, [*_CHILD_ARGV, "vault", "beefcafe", "/x/sidecar.json"])
+    killed: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        "terok_sandbox.supervisor.install.os.kill",
+        lambda pid, sig: killed.append((pid, sig)),
+    )
+
+    result = kill_all_supervisors()
+
+    assert result == [("beefcafe", None)]
+    assert killed == [(4242, 9)]
+
+
+def test_kill_all_supervisors_takes_wrapper_and_children(
+    install_env: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One row per process: the wrapper from its PID file, the child from the sweep."""
+    root = install_env["state"]
+    pids_dir = root / "pids"
+    pids_dir.mkdir(parents=True)
+    (pids_dir / "supervisor-beefcafe.pid").write_text("11111\n")
+    _add_process(install_env["proc"], 22222, [*_CHILD_ARGV, "vault", "beefcafe", "/x/sidecar.json"])
+    monkeypatch.setattr("terok_sandbox.supervisor.install._is_our_wrapper", lambda *_a: True)
+    killed: list[int] = []
+    monkeypatch.setattr(
+        "terok_sandbox.supervisor.install.os.kill",
+        lambda pid, sig: killed.append(pid),
+    )
+
+    result = kill_all_supervisors()
+
+    assert result == [("beefcafe", None), ("beefcafe", None)]
+    assert killed == [11111, 22222]
+
+
+def test_child_sweep_ignores_foreign_processes(
+    install_env: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Neither mark alone qualifies — a lookalike argv is never signalled."""
+    _add_process(install_env["proc"], 31, ["/usr/bin/python3", "-m", "terok_sandbox", "doctor"])
+    _add_process(install_env["proc"], 32, ["/usr/bin/nano", "supervise-child-notes.txt"])
+    killed: list[int] = []
+    monkeypatch.setattr(
+        "terok_sandbox.supervisor.install.os.kill",
+        lambda pid, sig: killed.append(pid),
+    )
+
+    assert kill_all_supervisors() == []
+    assert killed == []
+
+
+def test_child_sweep_tolerates_vanished_and_reports_eperm(
+    install_env: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A raced exit is no error; a refused SIGKILL is surfaced in the row."""
+    _add_process(install_env["proc"], 41, [*_CHILD_ARGV, "vault", "aaaa", "/x/a.json"])
+    _add_process(install_env["proc"], 42, [*_CHILD_ARGV, "signer", "bbbb", "/x/b.json"])
+
+    def _kill(pid: int, _sig: int) -> None:
+        if pid == 41:
+            raise ProcessLookupError
+        raise OSError("operation not permitted")
+
+    monkeypatch.setattr("terok_sandbox.supervisor.install.os.kill", _kill)
+
+    result = dict(kill_all_supervisors())
+
+    assert result["aaaa"] is None
+    assert result["bbbb"] is not None and "SIGKILL failed" in result["bbbb"]
 
 
 # ── _is_our_wrapper ─────────────────────────────────────────────────────

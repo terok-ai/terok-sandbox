@@ -76,6 +76,26 @@ def _feed_stdin(monkeypatch: pytest.MonkeyPatch, payload: dict[str, object]) -> 
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
 
 
+def _fake_proc(hook_module: object, root: Path) -> Path:
+    """Point the module's stray-children sweep at an empty fake ``/proc``.
+
+    Mandatory for every poststop-path test: against the real ``/proc``
+    the sweep could find — and signal — actual processes on the host
+    running the suite.
+    """
+    proc = root / "proc"
+    proc.mkdir(exist_ok=True)
+    hook_module._PROC_DIR = proc
+    return proc
+
+
+def _add_process(proc: Path, pid: int, argv: list[str]) -> None:
+    """Materialise one fake ``/proc/<pid>`` with a null-separated cmdline."""
+    pid_dir = proc / str(pid)
+    pid_dir.mkdir()
+    (pid_dir / "cmdline").write_bytes(b"\x00".join(a.encode() for a in argv) + b"\x00")
+
+
 class TestHookSoftFail:
     """Every error path must return ``None`` (rc 0) — container start never blocked."""
 
@@ -267,6 +287,7 @@ class TestHookSpawn:
         pid_file.parent.mkdir(parents=True)
         pid_file.write_text("12345\n")
 
+        _fake_proc(mod, hook_root)
         _feed_stdin(
             monkeypatch,
             {"id": container_id, "annotations": {"terok.sandbox.sidecar": str(sidecar_path)}},
@@ -309,6 +330,7 @@ class TestHookSpawn:
             "demo",
             {"container_name": "demo", "db_path": str(hook_root / "v.db"), "ipc_mode": "socket"},
         )
+        _fake_proc(mod, hook_root)
         _feed_stdin(
             monkeypatch,
             {"id": container_id, "annotations": {"terok.sandbox.sidecar": str(sidecar_path)}},
@@ -319,6 +341,45 @@ class TestHookSpawn:
         mod.main()
 
         assert sidecar_path.exists()
+
+    def test_poststop_reaps_stray_children(
+        self, hook_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Service children the wrapper's teardown missed are swept — this container's only.
+
+        The post-split regression guard: a wrapper SIGKILLed past the
+        grace window (or dead before poststop, as observed on the
+        podman 3.4 host) leaves its ``supervise-child`` processes
+        orphaned, and the vault-daemon child keeps the credentials DB
+        open forever.  No PID file exists here at all — the sweep must
+        find the children by argv.
+        """
+        mod = _load_hook_module()
+        container_id = "abc123def456"
+        sidecar_path = _write_sidecar(
+            hook_root,
+            "demo",
+            {"container_name": "demo", "db_path": str(hook_root / "v.db"), "ipc_mode": "socket"},
+        )
+        proc = _fake_proc(mod, hook_root)
+        child_argv = ["/usr/bin/python3", "-P", "-m", "terok_sandbox", "supervise-child"]
+        _add_process(proc, 5551, [*child_argv, "vault", container_id, "/x/sidecar.json"])
+        _add_process(proc, 5552, [*child_argv, "vault", "othercontainer", "/y/sidecar.json"])
+        _feed_stdin(
+            monkeypatch,
+            {"id": container_id, "annotations": {"terok.sandbox.sidecar": str(sidecar_path)}},
+        )
+        monkeypatch.setattr(mod.sys, "argv", ["supervisor_hook", "poststop"])
+        monkeypatch.setattr(mod._supervisor_state, "outer_host_uid", lambda: os.getuid())
+
+        killed: list[tuple[int, int]] = []
+        with (
+            patch.object(mod._supervisor_state, "pid_exists", return_value=False),
+            patch.object(os, "kill", lambda pid, sig: killed.append((pid, sig))),
+        ):
+            mod.main()
+
+        assert killed == [(5551, mod.signal.SIGTERM)]
 
 
 class TestSpawnEnv:

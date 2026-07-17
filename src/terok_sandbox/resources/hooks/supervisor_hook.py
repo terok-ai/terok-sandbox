@@ -60,6 +60,14 @@ _SIDECAR_ANNOTATION = "terok.sandbox.sidecar"
 _REAP_POLL_INTERVAL_S = 0.2
 _REAP_POLL_TICKS = 10
 
+#: argv element marking a process-per-service child (the launcher spawns
+#: every service as ``<python> -P -m terok_sandbox supervise-child
+#: <service> <container_id> <sidecar_path>``).
+_CHILD_VERB_MARK = b"supervise-child"
+
+#: Where the stray-children sweep reads process argvs from (patchable in tests).
+_PROC_DIR = Path("/proc")
+
 
 def main() -> None:
     """OCI hook entry point — soft-fail on every error path."""
@@ -279,17 +287,33 @@ def _supervisor_alive(pid_file: Path, wrapper_path: Path, container_id: str) -> 
 def _reap_supervisor(container_id: str, root: Path) -> None:
     """SIGTERM the wrapper at poststop, SIGKILL if it lingers past 2 s.
 
-    Reaps only the process tree and its PID file.  The sidecar JSON
-    deliberately survives the stop: the container's env (TCP ports,
-    gate token, phantom credential tokens) is immutable after ``podman
-    run``, so the preserved sidecar is the only wiring the supervisor
-    may come back with when createRuntime re-fires on the next
-    ``podman start``.  Sidecar removal belongs to real teardown —
+    Reaps the whole process tree and its PID file: the wrapper first
+    (a SIGTERMed wrapper tears its service children down itself), then
+    whatever ``supervise-child`` processes are left for this container
+    (``_reap_stray_children``) — the SIGKILL escalation gives the
+    wrapper no chance at teardown, and a wrapper that died earlier
+    without one leaves children no PID file can reach.  The sidecar
+    JSON deliberately survives the stop: the container's env (TCP
+    ports, gate token, phantom credential tokens) is immutable after
+    ``podman run``, so the preserved sidecar is the only wiring the
+    supervisor may come back with when createRuntime re-fires on the
+    next ``podman start``.  Sidecar removal belongs to real teardown —
     [`remove_container_state`][terok_sandbox.launch.remove_container_state]
     at cleanup / task delete, or the doctor's stray sweep.
     """
     pid_file = root / "pids" / f"supervisor-{container_id}.pid"
     wrapper_path = Path(__file__).resolve().parent.parent / "supervisor_wrapper.py"
+    try:
+        _reap_wrapper(pid_file, wrapper_path, container_id)
+    finally:
+        # Every wrapper outcome — reaped, already gone, unreachable —
+        # can leave service children behind; the vault-daemon child
+        # would keep the credentials DB open indefinitely.
+        _reap_stray_children(container_id)
+
+
+def _reap_wrapper(pid_file: Path, wrapper_path: Path, container_id: str) -> None:
+    """The wrapper half of the reap: SIGTERM → poll → SIGKILL, PID file unlinked."""
     try:
         pid = int(pid_file.read_text().strip())
     except (OSError, ValueError):
@@ -318,6 +342,55 @@ def _reap_supervisor(container_id: str, root: Path) -> None:
         with contextlib.suppress(ProcessLookupError, OSError):
             os.kill(pid, signal.SIGKILL)
     pid_file.unlink(missing_ok=True)
+
+
+def _reap_stray_children(container_id: str) -> None:
+    """SIGTERM → poll → SIGKILL the service children a teardown left behind.
+
+    Normally a no-op: the wrapper's own SIGTERM handler brings its
+    children down before it exits.  Children survive when the wrapper
+    was SIGKILLed past the grace window, or crashed without a teardown.
+    They are found by argv (``… -m terok_sandbox supervise-child
+    <service> <container_id> …``), scoped to *this* container so a
+    busy host never loses another container's live bundle.
+    """
+    strays = _find_stray_children(container_id)
+    if not strays:
+        return
+    _supervisor_state.log(
+        f"terok-sandbox supervisor hook: reaping {len(strays)} stray service"
+        f" child(ren) of {container_id}: {strays}"
+    )
+    for pid in strays:
+        with contextlib.suppress(ProcessLookupError, OSError):
+            os.kill(pid, signal.SIGTERM)
+    for _ in range(_REAP_POLL_TICKS):
+        time.sleep(_REAP_POLL_INTERVAL_S)
+        strays = [pid for pid in strays if _supervisor_state.pid_exists(pid)]
+        if not strays:
+            return
+    for pid in strays:
+        with contextlib.suppress(ProcessLookupError, OSError):
+            os.kill(pid, signal.SIGKILL)
+
+
+def _find_stray_children(container_id: str) -> list[int]:
+    """PIDs of live ``supervise-child`` processes belonging to *container_id*.
+
+    Bytes comparison against exact argv elements — same PID-recycle
+    discipline as ``_is_our_wrapper``, and immune to arbitrary byte
+    sequences in foreign processes' cmdlines.
+    """
+    strays: list[int] = []
+    for proc_dir in _PROC_DIR.glob("[0-9]*"):
+        try:
+            raw = (proc_dir / "cmdline").read_bytes()
+        except OSError:
+            continue
+        args = raw.rstrip(b"\x00").split(b"\x00")
+        if _CHILD_VERB_MARK in args and container_id.encode() in args:
+            strays.append(int(proc_dir.name))
+    return strays
 
 
 def _is_our_wrapper(pid: int, wrapper_path: str, container_id: str) -> bool:

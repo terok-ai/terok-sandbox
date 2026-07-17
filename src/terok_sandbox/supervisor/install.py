@@ -38,6 +38,10 @@ import shutil
 import signal
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 from ..integrations.shield import ensure_user_hooks_dir_configured
 from ..paths import state_root
@@ -57,6 +61,15 @@ def _descriptor_name(stage: str) -> str:
 #: pattern is ``supervisor-<container_id>.pid``.
 _PIDS_DIR_NAME = "pids"
 _PID_GLOB = "supervisor-*.pid"
+
+#: argv fingerprints of a process-per-service child — the launcher spawns
+#: every service as ``<python> -P -m terok_sandbox supervise-child
+#: <service> <container_id> <sidecar_path>``.
+_CHILD_MODULE_MARK = b"terok_sandbox"
+_CHILD_VERB_MARK = b"supervise-child"
+
+#: Where the child sweep reads process argvs from (patchable in tests).
+_PROC_DIR = Path("/proc")
 
 #: Placeholder in the wrapper template ``install`` rewrites with the
 #: resolved ``terok-sandbox`` argv (JSON-encoded list).
@@ -134,13 +147,17 @@ def uninstall_supervisor_hooks(*, hooks_dir: Path | None = None) -> None:
 
 
 def kill_all_supervisors() -> list[tuple[str, str | None]]:
-    """SIGKILL every live host-side supervisor process; return one row per PID file.
+    """SIGKILL every live host-side supervisor process — wrappers and children.
 
-    Iterates ``<state_root>/pids/supervisor-*.pid``.  For each file:
-    read the PID, ``SIGKILL`` if alive, then unlink the stale file.
-    Each returned row is ``(container_id, error_or_None)`` — ``None``
-    means the process is no longer there, whether we killed it or it
-    had already exited.
+    Two passes.  First the wrappers, one per
+    ``<state_root>/pids/supervisor-*.pid``: read the PID, ``SIGKILL``
+    if alive, then unlink the stale file.  Then the
+    process-per-service children (``_kill_all_service_children``)
+    — a SIGKILLed wrapper never got to tear them down, and a wrapper
+    that crashed earlier left them orphaned with no PID file, so they
+    are swept by argv rather than by parentage.  Each returned row is
+    ``(container_id, error_or_None)`` — ``None`` means the process is
+    no longer there, whether we killed it or it had already exited.
 
     Designed for the panic path: the OCI ``poststop`` reap does a
     graceful ``SIGTERM`` → poll → ``SIGKILL`` dance for a normal
@@ -155,13 +172,63 @@ def kill_all_supervisors() -> list[tuple[str, str | None]]:
     """
     results: list[tuple[str, str | None]] = []
     pids_dir = state_root() / _PIDS_DIR_NAME
-    if not pids_dir.is_dir():
-        return results
-    wrapper_path = str(state_root() / _WRAPPER_NAME)
-    for pid_file in sorted(pids_dir.glob(_PID_GLOB)):
-        container_id = pid_file.stem.removeprefix("supervisor-")
-        results.append((container_id, _kill_one_supervisor(pid_file, wrapper_path, container_id)))
+    if pids_dir.is_dir():
+        wrapper_path = str(state_root() / _WRAPPER_NAME)
+        for pid_file in sorted(pids_dir.glob(_PID_GLOB)):
+            container_id = pid_file.stem.removeprefix("supervisor-")
+            results.append(
+                (container_id, _kill_one_supervisor(pid_file, wrapper_path, container_id))
+            )
+    results.extend(_kill_all_service_children())
     return results
+
+
+def _kill_all_service_children() -> list[tuple[str, str | None]]:
+    """SIGKILL every ``supervise-child`` service process left on the host.
+
+    The wrapper pass above gives its targets no chance to tear their
+    service children down, and a wrapper that died earlier without a
+    teardown left its children orphaned — the vault-daemon child then
+    keeps the credentials DB open indefinitely.  Neither case is
+    reachable through PID files, so the children are found by what
+    they *are* rather than who spawned them: a ``/proc`` argv sweep
+    for the ``supervise-child`` invocation.  One row per child, keyed
+    by its container-ID argv element.
+    """
+    results: list[tuple[str, str | None]] = []
+    for pid, args in _iter_process_argvs():
+        if _CHILD_MODULE_MARK not in args or _CHILD_VERB_MARK not in args:
+            continue
+        error: str | None = None
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError as exc:
+            error = f"SIGKILL failed: {exc}"
+        results.append((_child_container_id(args), error))
+    return results
+
+
+def _iter_process_argvs() -> Iterator[tuple[int, list[bytes]]]:
+    """Yield ``(pid, argv_elements)`` for every process whose cmdline is readable.
+
+    Bytes, not text — ``/proc/*/cmdline`` may contain arbitrary byte
+    sequences for foreign processes, and a decode error would abort
+    the sweep mid-flight.
+    """
+    for proc_dir in _PROC_DIR.glob("[0-9]*"):
+        with contextlib.suppress(OSError):
+            raw = (proc_dir / "cmdline").read_bytes()
+            yield int(proc_dir.name), raw.rstrip(b"\x00").split(b"\x00")
+
+
+def _child_container_id(args: list[bytes]) -> str:
+    """The container-ID argv element (``… supervise-child <service> <id> <sidecar>``)."""
+    idx = args.index(_CHILD_VERB_MARK)
+    if idx + 2 < len(args):
+        return args[idx + 2].decode(errors="replace")
+    return "?"
 
 
 def _kill_one_supervisor(pid_file: Path, wrapper_path: str, container_id: str) -> str | None:
