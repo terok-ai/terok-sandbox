@@ -8,3 +8,7 @@ _ = NftNotFoundError  # type: ignore[name-defined]  # noqa: F821
 _ = EnvironmentCheck  # type: ignore[name-defined]  # noqa: F821
 _ = ShieldNeedsSetup  # type: ignore[name-defined]  # noqa: F821
 _ = ShieldState  # type: ignore[name-defined]  # noqa: F821
+
+# cli._VersionAction.__call__ — parameter names fixed by the argparse.Action interface
+_ = namespace  # type: ignore[name-defined]  # noqa: F821
+_ = option_string  # type: ignore[name-defined]  # noqa: F821

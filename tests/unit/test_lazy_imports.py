@@ -27,7 +27,10 @@ import terok_sandbox
 
 #: Heavy leaves that must stay off the import path of a bare
 #: ``import terok_sandbox`` and of building the command registry.
-HEAVY_LEAVES = ("pydantic", "sqlcipher3", "cryptography", "terok_shield")
+#: ``importlib.metadata`` earns its place: the ``__version__`` lookup
+#: pulls ``inspect``/``email``/``zipfile`` (~3–4 MiB RSS), which every
+#: supervisor child would pay if it crept back to import time.
+HEAVY_LEAVES = ("pydantic", "sqlcipher3", "cryptography", "terok_shield", "importlib.metadata")
 
 #: The ``src`` root holding the importable package, so the fresh
 #: subprocess resolves ``terok_sandbox`` the same way this session did
@@ -140,6 +143,31 @@ def test_supervisor_spawn_loads_only_supervisor() -> None:
 def test_top_level_help_imports_no_command_module() -> None:
     """``terok-sandbox --help`` lists every verb without importing any subsystem module."""
     assert _command_modules_after(["--help"]) == []
+
+
+def test_version_still_resolves_lazily() -> None:
+    """``terok_sandbox.__version__`` and ``--version`` still work, just paid on demand."""
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join([_SRC_ROOT, os.environ.get("PYTHONPATH", "")]),
+    }
+    code = (
+        "import terok_sandbox\n"
+        "assert isinstance(terok_sandbox.__version__, str) and terok_sandbox.__version__\n"
+        "from terok_sandbox.cli import main\n"
+        "try:\n"
+        "    main(['--version'])\n"
+        "except SystemExit:\n"
+        "    pass"
+    )
+    result = subprocess.run(  # noqa: S603 — fixed interpreter + inline code, no shell
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    )
+    assert result.stdout.startswith("terok-sandbox ")
 
 
 def test_supervisor_verb_skips_shield_wiring() -> None:

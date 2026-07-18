@@ -15,14 +15,45 @@ module is just a wrapper around
 from __future__ import annotations
 
 import argparse
-from importlib.metadata import PackageNotFoundError, version as _meta_version
 
 from .commands import COMMANDS, CommandTree
 
-try:
-    __version__ = _meta_version("terok-sandbox")
-except PackageNotFoundError:
-    __version__ = "0.0.0"
+
+class _VersionAction(argparse.Action):
+    """``--version`` that resolves the version string only when invoked.
+
+    The stock ``action="version"`` wants the string at parser build
+    time, which would put the ``importlib.metadata`` lookup (and the
+    stdlib it drags in) back on **every** invocation — including the
+    per-container supervisor and child spawns this CLI keeps slim.
+    Deferring into ``__call__`` charges it only to the one run that
+    actually asked.  The lookup is spelled out here rather than read
+    off the package barrel because ``cli`` sits below the barrel in
+    the tach layering (the barrel's lazy exports point back at
+    ``commands``); [`terok_sandbox.__getattr__`][terok_sandbox.__getattr__]
+    performs the same resolution for library consumers.
+    """
+
+    def __init__(self, option_strings: list[str], dest: str, **kwargs: object) -> None:
+        """Fix ``nargs=0`` so the flag consumes no argument."""
+        super().__init__(option_strings, dest, nargs=0, **kwargs)  # type: ignore[arg-type]
+
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: object,
+        option_string: str | None = None,
+    ) -> None:
+        """Print ``terok-sandbox <version>`` to stdout and exit, mirroring ``action="version"``."""
+        from importlib.metadata import PackageNotFoundError, version
+
+        try:
+            resolved = version("terok-sandbox")
+        except PackageNotFoundError:
+            resolved = "0.0.0"  # running from source without installed metadata
+        print(f"{parser.prog} {resolved}")
+        parser.exit()
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -47,7 +78,9 @@ def main(argv: list[str] | None = None) -> None:
         prog="terok-sandbox",
         description="Hardened Podman container runtime with shield firewall and git gate",
     )
-    parser.add_argument("--version", action="version", version=f"terok-sandbox {__version__}")
+    parser.add_argument(
+        "--version", action=_VersionAction, help="show program's version number and exit"
+    )
     # Lazy dispatch: passing ``argv`` wires only the invoked verb's module
     # in full (others stay name/help placeholders for the ``--help``
     # listing).  `terok-sandbox supervisor <id> <sidecar>` — spawned on
