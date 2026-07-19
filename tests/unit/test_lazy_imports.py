@@ -17,11 +17,14 @@ test session already imported.
 
 from __future__ import annotations
 
+import importlib.metadata
 import json
 import os
 import subprocess  # nosec B404 — fixed argv, no shell, running our own interpreter
 import sys
 from pathlib import Path
+
+import pytest
 
 import terok_sandbox
 
@@ -168,6 +171,56 @@ def test_version_still_resolves_lazily() -> None:
         check=True,
     )
     assert result.stdout.startswith("terok-sandbox ")
+
+
+def _raise_not_found(name: str) -> None:
+    """Stand in for [`importlib.metadata.version`][importlib.metadata.version] on a source tree."""
+    raise importlib.metadata.PackageNotFoundError(name)
+
+
+def test_barrel_version_resolves_through_getattr() -> None:
+    """First touch of ``terok_sandbox.__version__`` resolves via ``__getattr__`` and caches it."""
+    terok_sandbox.__dict__.pop("__version__", None)  # force the lazy path, not a cached global
+    resolved = terok_sandbox.__version__
+    assert isinstance(resolved, str) and resolved
+    assert terok_sandbox.__dict__["__version__"] == resolved  # cached for subsequent reads
+
+
+def test_barrel_version_falls_back_without_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Running from a source tree (no installed metadata) yields the ``0.0.0`` sentinel."""
+    monkeypatch.setattr(importlib.metadata, "version", _raise_not_found)
+    terok_sandbox.__dict__.pop("__version__", None)
+    try:
+        assert terok_sandbox.__version__ == "0.0.0"
+    finally:
+        terok_sandbox.__dict__.pop("__version__", None)  # don't leak the sentinel to other tests
+
+
+def test_barrel_dir_advertises_version() -> None:
+    """``dir(terok_sandbox)`` lists ``__version__`` so it stays tab-completable despite the lazy hook."""
+    assert "__version__" in dir(terok_sandbox)
+
+
+def test_cli_version_flag_prints_and_exits(capsys: pytest.CaptureFixture[str]) -> None:
+    """``--version`` resolves on demand, prints ``terok-sandbox <version>`` to stdout, exits 0."""
+    from terok_sandbox.cli import main
+
+    with pytest.raises(SystemExit) as exit_info:
+        main(["--version"])
+    assert exit_info.value.code == 0
+    assert capsys.readouterr().out.startswith("terok-sandbox ")
+
+
+def test_cli_version_flag_falls_back_without_metadata(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The ``--version`` action reports the ``0.0.0`` sentinel when metadata is absent."""
+    monkeypatch.setattr(importlib.metadata, "version", _raise_not_found)
+    from terok_sandbox.cli import main
+
+    with pytest.raises(SystemExit):
+        main(["--version"])
+    assert capsys.readouterr().out.strip() == "terok-sandbox 0.0.0"
 
 
 def test_supervisor_verb_skips_shield_wiring() -> None:
