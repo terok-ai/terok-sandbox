@@ -33,19 +33,10 @@ subsystem is paid for only when its symbol is first touched.
 
 from __future__ import annotations
 
-__version__: str = "0.0.0"  # placeholder; replaced at build time
-
 from importlib import import_module
-from importlib.metadata import PackageNotFoundError, version as _meta_version
 from typing import TYPE_CHECKING, Any
 
 from terok_util.config_stack import ConfigScope
-
-try:
-    __version__ = _meta_version("terok-sandbox")
-except PackageNotFoundError:
-    pass  # editable install or running from source without metadata
-
 
 #: Public name → ``"submodule:attr"`` source.  ``submodule`` is relative
 #: to this package; ``attr`` is the name inside that submodule (it
@@ -199,7 +190,22 @@ def __getattr__(name: str) -> Any:
     cached on the module so subsequent accesses are plain attribute
     reads.  Unknown names raise [`AttributeError`][AttributeError] the
     same way a missing module global would.
+
+    ``__version__`` resolves here too: the
+    [`importlib.metadata.version`][importlib.metadata.version] lookup
+    drags in several MiB of stdlib (``inspect``, ``email``, ``zipfile``),
+    so it is charged only to callers that actually ask — never to the
+    bare import the per-container supervisor spawn starts from.
     """
+    if name == "__version__":
+        from importlib.metadata import PackageNotFoundError, version as meta_version
+
+        try:
+            value = meta_version("terok-sandbox")
+        except PackageNotFoundError:
+            value = "0.0.0"  # running from source without installed metadata
+        globals()[name] = value
+        return value
     target = _LAZY.get(name)
     if target is None:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
@@ -211,7 +217,7 @@ def __getattr__(name: str) -> Any:
 
 def __dir__() -> list[str]:
     """List eager globals plus every lazily-exported name for tab-completion."""
-    return sorted({*globals(), *_LAZY})
+    return sorted({*globals(), *_LAZY, "__version__"})
 
 
 if TYPE_CHECKING:
@@ -220,6 +226,8 @@ if TYPE_CHECKING:
     # terok_sandbox``.  Demoted names stay resolvable via ``_LAZY`` but
     # are intentionally omitted here; reach into their submodule for a
     # statically-typed handle.
+    __version__: str
+
     from ._stage import bold, red, stage_line, yellow
     from ._util._selinux import (
         SelinuxCheckResult,
