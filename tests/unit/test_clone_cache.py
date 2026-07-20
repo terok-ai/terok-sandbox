@@ -387,11 +387,21 @@ class TestGateHeadSelfHeal:
 
     def test_healthy_head_survives_unreachable_upstream(self, tmp_path: Path) -> None:
         """When upstream's default cannot be determined, a valid HEAD stays put."""
+        import subprocess
+
         _, gate_dir = _make_upstream_and_gate(tmp_path)
         gate = GitGate(scope="proj", gate_path=gate_dir, upstream_url=str(gate_dir))
 
         with patch("terok_sandbox.gate.mirror._query_upstream_head_ref", return_value=None):
             assert gate._align_gate_head(env={}) is None
+
+        head = subprocess.run(
+            ["git", "-C", str(gate_dir), "symbolic-ref", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        assert head == "refs/heads/master"
 
     def test_dangling_head_healed_from_upstream(self, tmp_path: Path) -> None:
         """A dangling HEAD is re-pointed at upstream's advertised default branch.
@@ -552,6 +562,7 @@ class TestForceReinitClearsCache:
             patch.object(gate, "_validate_gate"),
             patch.object(gate, "_ssh_env", return_value={}),
             patch("terok_sandbox.gate.mirror._clone_gate_mirror"),
+            patch("terok_sandbox.gate.mirror._normalise_fresh_gate"),
             patch.object(gate, "_sync_from_upstream", return_value=(False, [], [], [], [], [])),
             patch.object(gate, "_align_gate_head", return_value=None),
             patch.object(gate, "_refresh_clone_cache", return_value=None),
