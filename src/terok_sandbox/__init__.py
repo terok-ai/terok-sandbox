@@ -100,9 +100,14 @@ _LAZY: dict[str, str] = {
     "DoctorCheck": "doctor:DoctorCheck",
     "sandbox_doctor_checks": "doctor:sandbox_doctor_checks",
     # Git gate
+    "AppliedOp": "gate.mirror:AppliedOp",
+    "ApplyPendingResult": "gate.mirror:ApplyPendingResult",
+    "BackupRef": "gate.mirror:BackupRef",
     "GateAuthNotConfigured": "gate.mirror:GateAuthNotConfigured",
     "GateStalenessInfo": "gate.mirror:GateStalenessInfo",
+    "GateSyncResult": "gate.mirror:GateSyncResult",
     "GitGate": "gate.mirror:GitGate",
+    "PendingOp": "gate.mirror:PendingOp",
     "is_ssh_url": "gate.mirror:is_ssh_url",
     "GateServer": "gate.server:GateServer",
     "mint_gate_token": "gate.tokens:mint_gate_token",
@@ -262,7 +267,17 @@ if TYPE_CHECKING:
     )
     from .diagnostics import ContainerDiagnostics, container_diagnostics
     from .doctor import CheckVerdict, DoctorCheck, sandbox_doctor_checks
-    from .gate.mirror import GateAuthNotConfigured, GateStalenessInfo, GitGate, is_ssh_url
+    from .gate.mirror import (
+        AppliedOp,
+        ApplyPendingResult,
+        BackupRef,
+        GateAuthNotConfigured,
+        GateStalenessInfo,
+        GateSyncResult,
+        GitGate,
+        PendingOp,
+        is_ssh_url,
+    )
     from .gate.tokens import mint_gate_token
     from .integrations.shield import (
         EnvironmentCheck,
@@ -386,9 +401,14 @@ __all__ = [
     "check_environment",
     "resolve_container_state_dir",
     # Git gate
+    "AppliedOp",
+    "ApplyPendingResult",
+    "BackupRef",
     "GateAuthNotConfigured",
     "GateStalenessInfo",
+    "GateSyncResult",
     "GitGate",
+    "PendingOp",
     "is_ssh_url",
     # Credentials + vault
     "CODEX_SHARED_OAUTH_MARKER",

@@ -50,11 +50,13 @@ class TestGitGateSyncGuards:
         # subsequent sync logic doesn't matter for this test.
         with (
             patch("terok_sandbox.gate.mirror._clone_gate_mirror"),
+            patch("terok_sandbox.gate.mirror._normalise_fresh_gate"),
             patch.object(
                 gate,
-                "sync_branches",
-                return_value={"success": True, "updated_branches": [], "errors": []},
+                "_sync_from_upstream",
+                return_value=(False, [], [], [], [], []),
             ),
+            patch.object(gate, "_align_gate_head", return_value=None),
         ):
             gate.sync()
         assert called == ["proj"]
@@ -80,7 +82,7 @@ class TestGitGateSyncRemoteless:
         assert result["upstream_url"] is None
         assert result["created"] is True
         assert result["success"] is True
-        assert result["updated_branches"] == []
+        assert result["applied"] == [] and result["pending"] == []
         assert result["errors"] == []
         assert result["cache_refreshed"] is False
 
@@ -100,7 +102,7 @@ class TestGitGateSyncRemoteless:
         mock_init.assert_not_called()
         assert second["created"] is False
         assert second["success"] is True
-        assert second["updated_branches"] == []
+        assert second["applied"] == [] and second["pending"] == []
 
     def test_force_reinit_reruns_init_bare(self, tmp_path: Path) -> None:
         """``force_reinit=True`` wipes and re-initialises a remoteless gate."""
@@ -154,53 +156,52 @@ class TestInitRemotelessGate:
 
 
 # ---------------------------------------------------------------------------
-# GitGate.sync_branches — error paths
+# GitGate.sync — upstream-fetch error paths
 # ---------------------------------------------------------------------------
 
 
-class TestSyncBranchesErrorPaths:
-    """sync_branches should not crash on remote-update failures."""
+def _existing_gate(tmp_path: Path) -> GitGate:
+    """A gate whose directory exists so sync() goes straight to fetching."""
+    gate_dir = tmp_path / "g.git"
+    gate_dir.mkdir()
+    return GitGate(
+        scope="p",
+        gate_path=gate_dir,
+        upstream_url="https://example.com/x/y.git",
+    )
 
-    def test_missing_gate_dir_returns_error(self, tmp_path: Path) -> None:
-        gate = GitGate(scope="p", gate_path=tmp_path / "missing.git")
-        result = gate.sync_branches()
-        assert result["success"] is False
-        assert "Gate not initialized" in result["errors"][0]
 
-    def test_remote_update_nonzero_recorded_in_errors(self, tmp_path: Path) -> None:
-        gate_dir = tmp_path / "g.git"
-        gate_dir.mkdir()
-        gate = GitGate(scope="p", gate_path=gate_dir)
+class TestSyncErrorPaths:
+    """sync() degrades fetch failures into reportable errors, never crashes."""
+
+    def test_fetch_nonzero_recorded_in_errors(self, tmp_path: Path) -> None:
+        gate = _existing_gate(tmp_path)
         with patch(
             "terok_sandbox.gate.mirror.subprocess.run",
             return_value=_proc(rc=1, stderr="auth failed"),
         ):
-            result = gate.sync_branches()
+            result = gate.sync()
         assert result["success"] is False
-        assert "remote update failed" in result["errors"][0]
+        assert "fetch failed" in result["errors"][0]
         assert "auth failed" in result["errors"][0]
 
     def test_timeout_recorded(self, tmp_path: Path) -> None:
-        gate_dir = tmp_path / "g.git"
-        gate_dir.mkdir()
-        gate = GitGate(scope="p", gate_path=gate_dir)
+        gate = _existing_gate(tmp_path)
         with patch(
             "terok_sandbox.gate.mirror.subprocess.run",
             side_effect=subprocess.TimeoutExpired("git", 1),
         ):
-            result = gate.sync_branches()
+            result = gate.sync()
         assert result["success"] is False
         assert "timed out" in result["errors"][0].lower()
 
     def test_unexpected_exception_recorded(self, tmp_path: Path) -> None:
-        gate_dir = tmp_path / "g.git"
-        gate_dir.mkdir()
-        gate = GitGate(scope="p", gate_path=gate_dir)
+        gate = _existing_gate(tmp_path)
         with patch(
             "terok_sandbox.gate.mirror.subprocess.run",
             side_effect=OSError("disk full"),
         ):
-            result = gate.sync_branches()
+            result = gate.sync()
         assert result["success"] is False
         assert "disk full" in result["errors"][0]
 

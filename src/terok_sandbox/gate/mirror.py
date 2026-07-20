@@ -21,11 +21,48 @@ syncing, comparing, and querying the gate.
 All constructor parameters are plain values (strings, paths) — no
 terok-specific types like ``ProjectConfig``.
 
+Ref model
+---------
+
+The gate keeps three ref namespaces, and the split is what makes sync safe:
+
+- ``refs/heads/*`` — the container-facing view.  Sync on its own only ever
+  *creates* branches or *fast-forwards* them; every other change (delete,
+  non-fast-forward move) is returned as a pending op and applied only via
+  [`apply_pending_ops`][terok_sandbox.gate.mirror.GitGate.apply_pending_ops]
+  after the operator confirmed it.  Agent work pushed to the gate but not
+  yet upstream therefore survives any number of syncs.
+- ``refs/terok/upstream/*`` — a private snapshot of upstream's heads,
+  force-updated and pruned freely on every fetch.  It is the "what did
+  upstream have last time" memory that classifies each branch: a gate head
+  equal to its snapshot entry has no gate-local work (a destructive op on
+  it is *lossless*), anything else diverged locally (*lossy*).
+- ``refs/terok/backup/<branch>/<stamp>-<sha12>`` — the old tip of every
+  destructively changed branch, written before the change so nothing ever
+  becomes unreachable.  Expired per the retention policy by
+  [`prune_backups`][terok_sandbox.gate.mirror.GitGate.prune_backups].
+- ``refs/terok/attic/<branch>`` — the last upstream tip a branch had
+  before it went pending (deleted upstream, or rewritten while the gate
+  head stayed behind).  The pruning, force-updating snapshot forgets that
+  tip immediately, but it is exactly what proves a pending op lossless —
+  so the attic keeps it until the branch is resolved (op applied, or gate
+  and upstream agree again).  First writer wins: across repeated upstream
+  rewrites the attic still names the last tip the gate was actually in
+  sync with.
+
+The whole ``refs/terok`` namespace is hidden (``transfer.hideRefs``), so
+containers can neither see nor overwrite the snapshot, attic, or backups —
+a container that could push the snapshot could forge "lossless".
+
 Value types returned by ``GitGate`` methods:
 
-- [`GateSyncResult`][terok_sandbox.gate.mirror.GateSyncResult] — full sync outcome (created, updated branches,
-  errors; ``upstream_url`` is ``None`` for remoteless gates)
-- [`BranchSyncResult`][terok_sandbox.gate.mirror.BranchSyncResult] — selective branch sync outcome
+- [`GateSyncResult`][terok_sandbox.gate.mirror.GateSyncResult] — full sync outcome: applied ops, pending
+  destructive ops, kept gate-only branches (``upstream_url`` is ``None``
+  for remoteless gates)
+- [`AppliedOp`][terok_sandbox.gate.mirror.AppliedOp] / [`PendingOp`][terok_sandbox.gate.mirror.PendingOp] — one branch-level ref change,
+  performed or awaiting confirmation
+- [`ApplyPendingResult`][terok_sandbox.gate.mirror.ApplyPendingResult] — outcome of applying confirmed pending ops
+- [`BackupRef`][terok_sandbox.gate.mirror.BackupRef] — one parsed backup ref
 - [`CommitInfo`][terok_sandbox.gate.mirror.CommitInfo] — single commit metadata (hash, date, author, message)
 - [`GateStalenessInfo`][terok_sandbox.gate.mirror.GateStalenessInfo] — frozen comparison of gate HEAD vs upstream HEAD
 """
@@ -44,9 +81,9 @@ import tempfile
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, Literal, TypedDict, cast
 
 if TYPE_CHECKING:
     from ..config import SandboxConfig
@@ -78,12 +115,60 @@ logger = logging.getLogger(__name__)
 # ---------- Vocabulary ----------
 
 
+OpKind = Literal["create", "fast_forward", "force_update", "delete"]
+"""Branch-level ref change kinds.  ``create``/``fast_forward`` are the only
+kinds sync applies on its own; ``force_update``/``delete`` only ever appear
+as pending ops."""
+
+PendingReason = Literal["upstream_rewrite", "upstream_delete", "unknown_provenance"]
+"""Why a destructive op is proposed.  ``unknown_provenance`` marks branches
+found during migration from a pre-snapshot mirror gate — upstream doesn't
+have them *now*, but whether it ever did is unknowable, so they are
+surfaced once and otherwise left alone."""
+
+
+class AppliedOp(TypedDict):
+    """One branch-level ref change sync (or an approved apply) performed."""
+
+    branch: str
+    kind: OpKind
+    old_sha: str | None  # None for create
+    new_sha: str | None  # None for delete
+
+
+class PendingOp(TypedDict):
+    """A destructive branch change awaiting operator confirmation.
+
+    ``lossless`` is the heart of the safety story: ``True`` means the gate
+    tip equals what upstream last advertised for this branch — no agent
+    commits would be discarded.  ``gate_only_commits`` quantifies the lossy
+    case (``None`` when provenance is unknown and the count would be
+    meaningless).  ``gate_sha`` doubles as the compare-and-swap guard in
+    [`apply_pending_ops`][terok_sandbox.gate.mirror.GitGate.apply_pending_ops]:
+    an op is refused if the branch moved since it was proposed.
+    """
+
+    branch: str
+    kind: Literal["force_update", "delete"]
+    reason: PendingReason
+    gate_sha: str
+    upstream_sha: str | None  # None for delete
+    old_snapshot_sha: str | None  # None when provenance is unknown
+    lossless: bool
+    gate_only_commits: int | None
+
+
 class GateSyncResult(TypedDict):
-    """Result of a full gate sync operation.
+    """Result of a gate sync operation.
 
     ``upstream_url`` is ``None`` when the gate is initialised without a
     remote — a local-only mirror that the container can push to but that
     never fetches external commits.
+
+    ``pending`` ops are *proposals*, not failures — a sync that fetched
+    cleanly and applied its safe ops reports ``success: True`` regardless
+    of how much destructive work awaits confirmation.  ``notes`` carries
+    non-fatal observations (moved tags, expired backups, foreign refs).
 
     The clone-cache refresh is best-effort: ``cache_error`` carries the
     failure description when the refresh was attempted and failed, so
@@ -95,19 +180,40 @@ class GateSyncResult(TypedDict):
     path: str
     upstream_url: str | None
     created: bool
+    migrated: bool
     success: bool
-    updated_branches: list[str]
     errors: list[str]
+    notes: list[str]
+    applied: list[AppliedOp]
+    pending: list[PendingOp]
+    gate_only_branches: list[str]
     cache_refreshed: bool
     cache_error: str | None
 
 
-class BranchSyncResult(TypedDict):
-    """Result of a branch sync operation."""
+class ApplyPendingResult(TypedDict):
+    """Result of applying operator-confirmed pending ops.
+
+    Ops whose branch moved between proposal and apply land in ``errors``
+    and leave the branch untouched — the rest are still applied, so a
+    single race never voids a whole confirmation.  ``backups`` maps each
+    changed branch to the backup ref holding its previous tip (empty when
+    backups are disabled).
+    """
 
     success: bool
-    updated_branches: list[str]
+    applied: list[AppliedOp]
+    backups: dict[str, str]
     errors: list[str]
+
+
+class BackupRef(TypedDict):
+    """One parsed ``refs/terok/backup/…`` entry."""
+
+    ref: str
+    branch: str
+    saved_at: str  # ISO timestamp parsed from the ref name
+    sha: str  # the backed-up tip (full sha the ref points at)
 
 
 class CommitInfo(TypedDict):
@@ -133,6 +239,43 @@ class GateStalenessInfo:
     error: str | None
 
 
+# ---------- Ref-model constants ----------
+
+#: Hidden namespace root — everything terok-private lives under it, and
+#: ``transfer.hideRefs`` keeps containers away from all of it at once.
+_TEROK_NAMESPACE = "refs/terok"
+_SNAPSHOT_PREFIX = "refs/terok/upstream/"
+_BACKUP_PREFIX = "refs/terok/backup/"
+_ATTIC_PREFIX = "refs/terok/attic/"
+_HEADS_PREFIX = "refs/heads/"
+_FETCH_REFSPEC = f"+{_HEADS_PREFIX}*:{_SNAPSHOT_PREFIX}*"
+#: git's "ref must not exist yet" / "delete unconditionally" CAS sentinel.
+_ZERO_SHA = "0" * 40
+#: Timestamp format baked into backup ref names — sortable, filesystem- and
+#: refname-safe, and the retention clock (commit dates would lie about when
+#: the *backup* was taken).
+_BACKUP_STAMP_FORMAT = "%Y%m%dT%H%M%SZ"
+_BACKUP_STAMP_RE = re.compile(r"^(\d{8}T\d{6}Z)-([0-9a-f]{12})$")
+
+
+def _git(
+    gate_dir: Path | str,
+    *args: str,
+    env: dict | None = None,
+    timeout: float = 30,
+    check: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    """Run a git subcommand inside *gate_dir* with captured text output."""
+    return subprocess.run(  # nosec B603 B607 — argv built from fixed verbs + repo-relative paths — binary PATH lookup is the cross-distro contract
+        ["git", "-C", str(gate_dir), *args],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=timeout,
+        check=check,
+    )
+
+
 # ---------- GitGate class (Repository + Gateway pattern) ----------
 
 
@@ -156,6 +299,8 @@ class GitGate:
         use_personal_ssh: bool = False,
         validate_gate_fn: Callable[[str], None] | None = None,
         clone_cache_base: Path | str | None = None,
+        backups_enabled: bool = True,
+        backup_retention_days: int = 30,
     ) -> None:
         """Initialise with plain parameters.
 
@@ -186,6 +331,16 @@ class GitGate:
             ``clone_cache_base / scope`` after updating the bare mirror.
             The cache accelerates task startup by enabling a host-side
             file copy instead of a full ``git clone``.
+        backups_enabled:
+            When ``True`` (default), every destructive branch change applied
+            via [`apply_pending_ops`][terok_sandbox.gate.mirror.GitGate.apply_pending_ops]
+            first saves the old tip under ``refs/terok/backup/``.  Opt out
+            per project when the reflog alone is protection enough.
+        backup_retention_days:
+            Backups older than this are expired by
+            [`prune_backups`][terok_sandbox.gate.mirror.GitGate.prune_backups]
+            (which a successful sync runs automatically).  ``0`` keeps
+            backups forever.
         """
         self._scope = scope
         self._gate_path = Path(gate_path)
@@ -194,6 +349,8 @@ class GitGate:
         self._use_personal_ssh = use_personal_ssh
         self._validate_gate_fn = validate_gate_fn
         self._clone_cache_base = Path(clone_cache_base) if clone_cache_base else None
+        self._backups_enabled = backups_enabled
+        self._backup_retention_days = backup_retention_days
         self._signer: _EphemeralSigner | None = None
 
     @property
@@ -281,7 +438,7 @@ class GitGate:
         branches: list[str] | None = None,
         force_reinit: bool = False,
     ) -> GateSyncResult:
-        """Sync the host-side git mirror gate from upstream.
+        """Sync the host-side git gate from upstream, destroying nothing.
 
         With an upstream configured, clones (or fetches) from it using the
         project's SSH setup.  Without one, initialises a bare repo in place
@@ -290,13 +447,25 @@ class GitGate:
         to stage commits even when there is nothing external to mirror.
 
         A remoteless gate that already exists is a proper no-op: nothing
-        re-initialises, and the returned branch list is empty.
+        re-initialises, and the returned op lists are empty.
+
+        Only safe branch changes are applied here — creates and
+        fast-forwards.  Deletes and non-fast-forward moves come back as
+        ``pending`` proposals for
+        [`apply_pending_ops`][terok_sandbox.gate.mirror.GitGate.apply_pending_ops];
+        branches that exist only on the gate (agent work not yet upstream)
+        are listed in ``gate_only_branches`` and never touched.
+
+        *branches* restricts the sync to the named branches (the auto-sync
+        allowlist); the default full sync covers everything upstream has.
 
         ``force_reinit`` recreates the whole local footprint — the bare
         mirror *and* the clone cache — so a hopeless state can always be
         recovered with one flag.  Deletion failures propagate: rebuilding
         over stale or partial data would silently defeat the point of a
-        from-scratch recovery.
+        from-scratch recovery.  This is the one path that still discards
+        gate-local work, which is exactly why it hides behind an explicit
+        operator flag and never runs implicitly.
         """
         self._validate_gate()
 
@@ -316,34 +485,30 @@ class GitGate:
         if not gate_exists:
             if self._upstream_url:
                 _clone_gate_mirror(self._upstream_url, gate_dir, env)
+                _normalise_fresh_gate(gate_dir)
             else:
                 _init_remoteless_gate(gate_dir)
             created = True
 
-        # A remoteless gate has nothing to fetch — skip ``git remote update``
+        # A remoteless gate has nothing to fetch — skip the upstream fetch
         # (which would fail on a repo with no origin) and the clone-cache
-        # refresh (there is no bare mirror to track).
+        # refresh (there is no upstream state to track).
         if not self._upstream_url:
-            return {
-                "path": str(gate_dir),
-                "upstream_url": None,
-                "created": created,
-                "success": True,
-                "updated_branches": [],
-                "errors": [],
-                "cache_refreshed": False,
-                "cache_error": None,
-            }
+            return _empty_sync_result(str(gate_dir), created=created)
 
-        sync_result = self.sync_branches(branches)
-        success = sync_result["success"]
-        errors = sync_result["errors"]
+        migrated, errors, notes, applied, pending, gate_only = self._sync_from_upstream(
+            env, branches, freshly_created=created
+        )
+        success = not errors
 
         # A dangling gate HEAD breaks every fresh clone of the gate, so a
         # failed heal is a sync failure, not a footnote.
-        if success and (head_error := self._heal_gate_head(env)):
+        if success and (head_error := self._align_gate_head(env)):
             errors.append(head_error)
             success = False
+
+        if success and (expired := self.prune_backups()):
+            notes.append(f"expired {len(expired)} backup ref(s) past retention")
 
         # Refresh the non-bare clone cache from the bare mirror (best-effort).
         cache_error: str | None = None
@@ -356,48 +521,480 @@ class GitGate:
             "path": str(gate_dir),
             "upstream_url": self._upstream_url,
             "created": created,
+            "migrated": migrated,
             "success": success,
-            "updated_branches": sync_result["updated_branches"],
             "errors": errors,
+            "notes": notes,
+            "applied": applied,
+            "pending": pending,
+            "gate_only_branches": gate_only,
             "cache_refreshed": cache_refreshed,
             "cache_error": cache_error,
         }
 
-    def sync_branches(self, branches: list[str] | None = None) -> BranchSyncResult:
-        """Sync specific branches in the gate from upstream.
+    def _sync_from_upstream(
+        self, env: dict, branches: list[str] | None, *, freshly_created: bool
+    ) -> tuple[bool, list[str], list[str], list[AppliedOp], list[PendingOp], list[str]]:
+        """Normalise config, fetch, classify, apply safe ops — the sync core.
 
-        Args:
-            branches: List of branches to sync (default: all via remote update)
-
-        Returns:
-            Dict with keys: success, updated_branches, errors
+        Returns ``(migrated, errors, notes, applied, pending,
+        gate_only_branches)``.  A pre-existing gate may still carry the
+        destructive mirror configuration (``+refs/*:refs/*`` + prune);
+        that is normalised exactly once here, and the migration sync
+        classifies differently (no snapshot memory exists yet).  Any
+        exception collapses into ``errors``: sync is a boundary the TUI
+        poller and CLI call in loops, and a transient git hiccup must
+        degrade into a reportable failed sync, not a crash.
         """
-        gate_dir = self._gate_path
-
-        if not gate_dir.exists():
-            return {"success": False, "updated_branches": [], "errors": ["Gate not initialized"]}
-
-        self._validate_gate()
-
-        env = self._ssh_env()
+        migrated = False
         errors: list[str] = []
-        updated: list[str] = []
-
+        notes: list[str] = []
+        applied: list[AppliedOp] = []
+        pending: list[PendingOp] = []
+        gate_only: list[str] = []
         try:
-            cmd = ["git", "-C", str(gate_dir), "remote", "update", "--prune"]
-            result = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=120)  # nosec B603 — argv is a fixed list controlled by this module
-
-            if result.returncode != 0:
-                errors.append(f"remote update failed: {result.stderr}")
+            migrated = False if freshly_created else _ensure_gate_config(self._gate_path)
+            old_snapshot = _read_refs(self._gate_path, _SNAPSHOT_PREFIX)
+            fetch_error = self._fetch_upstream(env, branches, notes)
+            if fetch_error is not None:
+                errors.append(fetch_error)
             else:
-                updated = branches if branches else ["all"]
-
+                applied, pending, gate_only = self._plan_and_apply_safe_ops(
+                    old_snapshot, branches, first_sync=migrated, notes=notes
+                )
         except subprocess.TimeoutExpired:
             errors.append("Sync timed out")
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — boundary: report, don't crash callers
             errors.append(str(e))
+        return migrated, errors, notes, applied, pending, gate_only
 
-        return {"success": len(errors) == 0, "updated_branches": updated, "errors": errors}
+    def _fetch_upstream(
+        self, env: dict, branches: list[str] | None, notes: list[str]
+    ) -> str | None:
+        """Fetch upstream state into the snapshot namespace.
+
+        Full mode fetches with the configured snapshot refspec plus
+        ``--prune`` (scoped to that refspec's target, so it never touches
+        ``refs/heads``) and ``--tags`` (without ``--prune-tags`` — tags an
+        agent created on the gate are not sync's to delete).
+
+        Selective mode fetches one explicit refspec per requested branch
+        and prunes nothing; a branch upstream no longer advertises is
+        detected via ``ls-remote`` and its snapshot entry dropped by hand —
+        that *is* the deletion signal in this mode.
+
+        Returns an error description, or ``None`` on success.  A fetch
+        whose only complaint is force-moved upstream tags is a success
+        with a note: git rejects clobbering existing tags (rc 1) on every
+        subsequent fetch, and one moved tag must not wedge sync forever.
+        """
+        gate_dir = self._gate_path
+        if branches:
+            missing = self._drop_snapshots_of_deleted(env, branches)
+            to_fetch = [b for b in branches if b not in missing]
+            if not to_fetch:
+                return None
+            refspecs = [f"+{_HEADS_PREFIX}{b}:{_SNAPSHOT_PREFIX}{b}" for b in to_fetch]
+            result = _git(gate_dir, "fetch", "origin", *refspecs, env=env, timeout=120)
+        else:
+            result = _git(gate_dir, "fetch", "--prune", "--tags", "origin", env=env, timeout=120)
+
+        if result.returncode == 0:
+            return None
+        if _only_tag_clobbers(result.stderr):
+            moved = ", ".join(sorted(_rejected_tags(result.stderr))) or "unknown"
+            notes.append(f"upstream moved existing tag(s) not updated: {moved}")
+            return None
+        return f"fetch failed: {result.stderr.strip()}"
+
+    def _drop_snapshots_of_deleted(self, env: dict, branches: list[str]) -> set[str]:
+        """Return requested *branches* gone from upstream; drop their snapshots.
+
+        One batched ``ls-remote --heads`` roundtrip answers "which of these
+        still exist" — fetching a deleted ref would otherwise fail the whole
+        selective fetch.  The snapshot entry of a deleted branch is removed
+        here so the classifier sees the deletion the same way a pruning
+        full fetch would show it.
+        """
+        listed = _git(
+            self._gate_path,
+            "ls-remote",
+            "--heads",
+            "origin",
+            *(f"{_HEADS_PREFIX}{b}" for b in branches),
+            env=env,
+            timeout=60,
+            check=True,
+        ).stdout
+        alive = {line.split("\t")[1].removeprefix(_HEADS_PREFIX) for line in listed.splitlines()}
+        missing = set(branches) - alive
+        for branch in missing:
+            _git(self._gate_path, "update-ref", "-d", f"{_SNAPSHOT_PREFIX}{branch}")
+        return missing
+
+    def _plan_and_apply_safe_ops(
+        self,
+        old_snapshot: dict[str, str],
+        branches: list[str] | None,
+        *,
+        first_sync: bool,
+        notes: list[str],
+    ) -> tuple[list[AppliedOp], list[PendingOp], list[str]]:
+        """Classify every branch and apply the safe subset of the plan.
+
+        The three-way comparison — snapshot before the fetch, snapshot
+        after it, current gate heads — decides each branch's fate exactly
+        as documented in the module docstring.  Creates and fast-forwards
+        are applied immediately through compare-and-swap ``update-ref``
+        (a concurrent container push makes the op fail into a note rather
+        than clobbering the push).  Everything destructive is returned as
+        pending.
+
+        *first_sync* marks the one sync right after migrating a mirror
+        gate: with no snapshot memory, heads absent upstream are surfaced
+        once as ``unknown_provenance`` pending deletes so stale
+        squash-merge residue gets a cleanup offer; declining leaves them
+        as ordinary gate-only branches from the next sync on.
+        """
+        gate_dir = self._gate_path
+        new_snapshot = _read_refs(gate_dir, _SNAPSHOT_PREFIX)
+        heads = _read_refs(gate_dir, _HEADS_PREFIX)
+        attic = _read_refs(gate_dir, _ATTIC_PREFIX)
+        restrict = set(branches) if branches else None
+
+        applied: list[AppliedOp] = []
+        pending: list[PendingOp] = []
+        gate_only: list[str] = []
+
+        for branch in sorted(heads | new_snapshot | attic):
+            if restrict is not None and branch not in restrict:
+                continue
+            # Attic first: it names the last tip the gate was in sync with,
+            # which survives repeated upstream rewrites; the pre-fetch
+            # snapshot only covers the most recent one.
+            op = self._classify_branch(
+                branch,
+                gate_sha=heads.get(branch),
+                upstream_sha=new_snapshot.get(branch),
+                old_sha=attic.get(branch) or old_snapshot.get(branch),
+                first_sync=first_sync,
+            )
+            if op is None:
+                continue
+            if op == "gate-only":
+                gate_only.append(branch)
+            elif op["kind"] in ("create", "fast_forward"):
+                if error := self._apply_ref_cas(op):
+                    notes.append(error)
+                else:
+                    applied.append(op)
+            else:
+                pending.append(cast("PendingOp", op))
+
+        self._update_attic(old_snapshot, new_snapshot, heads)
+        return applied, pending, gate_only
+
+    def _classify_branch(
+        self,
+        branch: str,
+        *,
+        gate_sha: str | None,
+        upstream_sha: str | None,
+        old_sha: str | None,
+        first_sync: bool,
+    ) -> AppliedOp | PendingOp | Literal["gate-only"] | None:
+        """Decide one branch's fate from the three-way ref comparison.
+
+        Returns a safe [`AppliedOp`][terok_sandbox.gate.mirror.AppliedOp]
+        (not yet performed), a destructive
+        [`PendingOp`][terok_sandbox.gate.mirror.PendingOp] proposal,
+        ``"gate-only"`` for agent branches upstream never had, or ``None``
+        for a branch already up to date.
+        """
+        if gate_sha is None:
+            if upstream_sha is None:
+                return None  # attic residue only — handled by _update_attic
+            return {"branch": branch, "kind": "create", "old_sha": None, "new_sha": upstream_sha}
+
+        if upstream_sha is not None:
+            if gate_sha == upstream_sha:
+                return None
+            if self._is_ancestor(gate_sha, upstream_sha):
+                return {
+                    "branch": branch,
+                    "kind": "fast_forward",
+                    "old_sha": gate_sha,
+                    "new_sha": upstream_sha,
+                }
+            return self._pending(
+                branch,
+                "force_update",
+                "upstream_rewrite",
+                gate_sha=gate_sha,
+                upstream_sha=upstream_sha,
+                old_sha=old_sha,
+            )
+
+        # Upstream doesn't have the branch.  With provenance (snapshot or
+        # attic memory) that's an upstream deletion; without it, it is an
+        # agent branch — except on the first post-migration sync, where
+        # history is unknowable and we offer the cleanup exactly once.
+        if old_sha is not None:
+            return self._pending(
+                branch,
+                "delete",
+                "upstream_delete",
+                gate_sha=gate_sha,
+                upstream_sha=None,
+                old_sha=old_sha,
+            )
+        if first_sync:
+            return self._pending(
+                branch,
+                "delete",
+                "unknown_provenance",
+                gate_sha=gate_sha,
+                upstream_sha=None,
+                old_sha=None,
+            )
+        return "gate-only"
+
+    def _pending(
+        self,
+        branch: str,
+        kind: Literal["force_update", "delete"],
+        reason: PendingReason,
+        *,
+        gate_sha: str,
+        upstream_sha: str | None,
+        old_sha: str | None,
+    ) -> PendingOp:
+        """Build a pending op with its lossless/lossy classification."""
+        lossless = old_sha is not None and gate_sha == old_sha
+        base = old_sha or upstream_sha
+        gate_only_commits: int | None = None
+        if lossless:
+            gate_only_commits = 0
+        elif base is not None:
+            gate_only_commits = _count_commits_range(self._gate_path, base, gate_sha, None)
+        return {
+            "branch": branch,
+            "kind": kind,
+            "reason": reason,
+            "gate_sha": gate_sha,
+            "upstream_sha": upstream_sha,
+            "old_snapshot_sha": old_sha,
+            "lossless": lossless,
+            "gate_only_commits": gate_only_commits,
+        }
+
+    def _apply_ref_cas(self, op: AppliedOp) -> str | None:
+        """Apply a safe op via compare-and-swap; return an error note on race.
+
+        ``git update-ref <ref> <new> <old>`` refuses to move a ref that
+        isn't exactly at ``<old>`` — the all-zeros form means "must not
+        exist yet".  A concurrent container push therefore fails the op
+        cleanly instead of being clobbered; the next sync re-plans against
+        the pushed state.
+        """
+        ref = f"{_HEADS_PREFIX}{op['branch']}"
+        new_sha = op["new_sha"] or _ZERO_SHA
+        old_sha = op["old_sha"] or _ZERO_SHA
+        result = _git(self._gate_path, "update-ref", ref, new_sha, old_sha)
+        if result.returncode != 0:
+            return f"skipped {op['kind']} of {op['branch']}: ref moved during sync"
+        return None
+
+    def _update_attic(
+        self, old_snapshot: dict[str, str], new_snapshot: dict[str, str], heads: dict[str, str]
+    ) -> None:
+        """Maintain the attic — provenance memory for branches gone pending.
+
+        A pruning, force-updating fetch erases the snapshot entry that
+        proved a pending op lossless (and, for deletes, that the branch
+        ever came from upstream at all), so the *next* sync — and any
+        offline [`pending_ops`][terok_sandbox.gate.mirror.GitGate.pending_ops]
+        call — would be unable to classify it.  The attic records the
+        pre-fetch tip the first time a branch goes pending (first writer
+        wins) and drops it once the branch is resolved: gate and upstream
+        agree again (equal or fast-forwardable), or the gate head is gone.
+        """
+        attic = _read_refs(self._gate_path, _ATTIC_PREFIX)
+        for branch, gate_sha in heads.items():
+            upstream_sha = new_snapshot.get(branch)
+            resolved = upstream_sha is not None and (
+                gate_sha == upstream_sha or self._is_ancestor(gate_sha, upstream_sha)
+            )
+            if resolved:
+                if branch in attic:
+                    _git(self._gate_path, "update-ref", "-d", f"{_ATTIC_PREFIX}{branch}")
+            elif branch not in attic and (old_sha := old_snapshot.get(branch)) is not None:
+                _git(self._gate_path, "update-ref", f"{_ATTIC_PREFIX}{branch}", old_sha)
+        for branch in attic.keys() - heads.keys():
+            _git(self._gate_path, "update-ref", "-d", f"{_ATTIC_PREFIX}{branch}")
+
+    def pending_ops(self) -> list[PendingOp]:
+        """Recompute the pending destructive ops without touching the network.
+
+        Compares the current gate heads against the snapshot and attic —
+        state the last sync left behind — so TUI badges and confirmation
+        dialogs can refresh cheaply (no fetch, no SSH signer).  The one
+        thing this cannot see is the one-shot ``unknown_provenance`` batch
+        a migration sync reports.
+        """
+        if not self._gate_path.exists():
+            return []
+        snapshot = _read_refs(self._gate_path, _SNAPSHOT_PREFIX)
+        attic = _read_refs(self._gate_path, _ATTIC_PREFIX)
+        heads = _read_refs(self._gate_path, _HEADS_PREFIX)
+
+        pending: list[PendingOp] = []
+        for branch, gate_sha in sorted(heads.items()):
+            if (upstream_sha := snapshot.get(branch)) is not None:
+                if gate_sha != upstream_sha and not self._is_ancestor(gate_sha, upstream_sha):
+                    pending.append(
+                        self._pending(
+                            branch,
+                            "force_update",
+                            "upstream_rewrite",
+                            gate_sha=gate_sha,
+                            upstream_sha=upstream_sha,
+                            old_sha=attic.get(branch),
+                        )
+                    )
+            elif (attic_sha := attic.get(branch)) is not None:
+                pending.append(
+                    self._pending(
+                        branch,
+                        "delete",
+                        "upstream_delete",
+                        gate_sha=gate_sha,
+                        upstream_sha=None,
+                        old_sha=attic_sha,
+                    )
+                )
+        return pending
+
+    def apply_pending_ops(self, ops: list[PendingOp]) -> ApplyPendingResult:
+        """Apply operator-confirmed destructive ops, backing up every old tip.
+
+        Each op is guarded by compare-and-swap on the ``gate_sha`` it was
+        proposed against: a branch that moved since (an agent pushed) fails
+        *that op only* and stays untouched — confirmations never apply to
+        state the operator didn't see.  Unless backups are disabled, the
+        old tip is first saved under ``refs/terok/backup/`` so even an
+        approved mistake is one ``update-ref`` away from recovery.
+
+        Finishes with the same HEAD-alignment and clone-cache refresh a
+        sync performs — deleting the branch HEAD points at is precisely
+        when healing matters.
+        """
+        applied: list[AppliedOp] = []
+        backups: dict[str, str] = {}
+        errors: list[str] = []
+
+        for op in ops:
+            ref = f"{_HEADS_PREFIX}{op['branch']}"
+            new_sha = op["upstream_sha"]
+            if op["kind"] != "delete" and new_sha is None:
+                errors.append(f"{op['branch']}: force_update op carries no upstream sha")
+                continue
+            # Backup before the change: between a delete and a later backup
+            # there would be a window where the old tip is unreferenced.
+            backup_ref = (
+                self._write_backup(op["branch"], op["gate_sha"]) if self._backups_enabled else None
+            )
+            if op["kind"] == "delete":
+                result = _git(self._gate_path, "update-ref", "-d", ref, op["gate_sha"])
+            else:
+                result = _git(
+                    self._gate_path, "update-ref", ref, cast("str", new_sha), op["gate_sha"]
+                )
+            if result.returncode != 0:
+                if backup_ref is not None:
+                    _git(self._gate_path, "update-ref", "-d", backup_ref)
+                errors.append(
+                    f"{op['branch']}: branch moved since the op was proposed — not applied"
+                )
+                continue
+            if backup_ref is not None:
+                backups[op["branch"]] = backup_ref
+            # The op resolved the branch either way — the attic memory is moot.
+            _git(self._gate_path, "update-ref", "-d", f"{_ATTIC_PREFIX}{op['branch']}")
+            applied.append(
+                {
+                    "branch": op["branch"],
+                    "kind": op["kind"],
+                    "old_sha": op["gate_sha"],
+                    "new_sha": op["upstream_sha"],
+                }
+            )
+
+        if applied:
+            env = self._ssh_env()
+            if head_error := self._align_gate_head(env):
+                errors.append(head_error)
+            elif self._clone_cache_base and (cache_error := self._refresh_clone_cache()):
+                errors.append(f"clone cache refresh failed: {cache_error}")
+
+        return {"success": not errors, "applied": applied, "backups": backups, "errors": errors}
+
+    def _write_backup(self, branch: str, sha: str) -> str | None:
+        """Save *sha* as a timestamped backup ref for *branch*; return its name.
+
+        The ref name carries the wall-clock stamp retention runs on and the
+        abbreviated tip for human eyes; the ref itself pins the full sha.
+        Failure to back up is deliberately non-fatal — ``None`` tells the
+        caller no backup exists, and the ``logAllRefUpdates=always`` reflog
+        remains the last-resort trail.
+        """
+        stamp = datetime.now(UTC).strftime(_BACKUP_STAMP_FORMAT)
+        ref = f"{_BACKUP_PREFIX}{branch}/{stamp}-{sha[:12]}"
+        result = _git(self._gate_path, "update-ref", ref, sha)
+        return ref if result.returncode == 0 else None
+
+    def list_backups(self) -> list[BackupRef]:
+        """Return all backup refs, newest first, parsed from their names."""
+        entries: list[BackupRef] = []
+        for path, sha in _read_refs(self._gate_path, _BACKUP_PREFIX).items():
+            branch, _, leaf = path.rpartition("/")
+            if not branch or not (m := _BACKUP_STAMP_RE.match(leaf)):
+                continue
+            saved_at = datetime.strptime(m.group(1), _BACKUP_STAMP_FORMAT).replace(tzinfo=UTC)
+            entries.append(
+                {
+                    "ref": f"{_BACKUP_PREFIX}{path}",
+                    "branch": branch,
+                    "saved_at": saved_at.isoformat(),
+                    "sha": sha,
+                }
+            )
+        return sorted(entries, key=lambda e: e["saved_at"], reverse=True)
+
+    def prune_backups(self, older_than_days: int | None = None) -> list[str]:
+        """Delete backup refs older than the retention window; return them.
+
+        Age is the ref-name timestamp — when the backup was *taken*, the
+        only clock that matters for "have I had a chance to notice".  With
+        retention ``0`` (or a nonexistent gate) nothing is ever expired.
+        """
+        days = self._backup_retention_days if older_than_days is None else older_than_days
+        if days <= 0 or not self._gate_path.exists():
+            return []
+        cutoff = datetime.now(UTC) - timedelta(days=days)
+        expired = [
+            entry["ref"]
+            for entry in self.list_backups()
+            if datetime.fromisoformat(entry["saved_at"]) < cutoff
+        ]
+        for ref in expired:
+            _git(self._gate_path, "update-ref", "-d", ref)
+        return expired
+
+    def _is_ancestor(self, ancestor: str, descendant: str) -> bool:
+        """Return ``True`` iff *ancestor* is reachable from *descendant*."""
+        result = _git(self._gate_path, "merge-base", "--is-ancestor", ancestor, descendant)
+        return result.returncode == 0
 
     def compare_vs_upstream(self, branch: str | None = None) -> GateStalenessInfo:
         """Compare gate HEAD vs upstream HEAD for a branch.
@@ -530,79 +1127,73 @@ class GitGate:
         except Exception:
             return None
 
-    def _heal_gate_head(self, env: dict) -> str | None:
-        """Re-point the gate's ``HEAD`` after an upstream default-branch rename.
+    def _align_gate_head(self, env: dict) -> str | None:
+        """Keep the gate's ``HEAD`` symref pointing at upstream's default branch.
 
-        ``git remote update --prune`` moves the mirror's branch refs but
-        never touches its ``HEAD`` symref, so a rename upstream leaves it
-        dangling — and everything that asks the gate for its HEAD (clone
-        cache ``set-head``, fresh task clones) then fails or silently
-        checks out nothing.  The happy path costs one local ref lookup;
-        the upstream roundtrip runs only when HEAD is actually dangling.
+        Sync moves branch refs but never the ``HEAD`` symref, so an
+        upstream default-branch change leaves the gate advertising the old
+        default — and once the old branch's (always-gated) deletion is
+        approved, a dangling HEAD that breaks every fresh clone.  Aligning
+        eagerly, not just when dangling, keeps fresh clones and the clone
+        cache's ``remote set-head --auto`` on the branch upstream actually
+        develops on; the old branch itself is untouched (its deletion
+        remains a pending op like any other).
 
-        A detached HEAD lands on the heal path deliberately: a mirror
-        gate's HEAD must be a *symref* — ``git clone`` and ``remote
-        set-head --auto`` only work off the advertised symref — so
-        re-pointing a detached HEAD at upstream's default branch is the
-        required normalisation, not collateral damage.
+        Re-pointing HEAD is deliberately conservative: only at a branch
+        that exists in the gate.  A detached or dangling HEAD is
+        normalised the same way — a bare gate's HEAD must be a valid
+        symref for ``git clone`` to work at all.
 
-        Returns ``None`` when HEAD is healthy or was healed, or a failure
-        description otherwise — a gate whose HEAD stays dangling breaks
+        Returns ``None`` when HEAD is healthy (or was aligned), or a
+        failure description — a gate whose HEAD stays dangling breaks
         every fresh clone, so ``sync()`` reports it as a sync failure
-        rather than pressing on quietly.
+        rather than pressing on quietly.  One exception: an empty gate
+        with an empty (or unreachable) upstream keeps its unborn HEAD and
+        is healthy — there is simply nothing to point at yet.
         """
-        gate_dir = str(self._gate_path)
+        gate_dir = self._gate_path
         try:
-            target = subprocess.run(  # nosec B603 B607 — argv built from fixed verbs + repo-relative paths — binary PATH lookup is the cross-distro contract
-                ["git", "-C", gate_dir, "symbolic-ref", "--quiet", "HEAD"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            ).stdout.strip()
-            dangling = not target or (
-                subprocess.run(  # nosec B603 B607 — argv built from fixed verbs + repo-relative paths — binary PATH lookup is the cross-distro contract
-                    ["git", "-C", gate_dir, "show-ref", "--verify", "--quiet", target],
-                    capture_output=True,
-                    timeout=10,
-                ).returncode
-                != 0
+            target = _git(gate_dir, "symbolic-ref", "--quiet", "HEAD", timeout=10).stdout.strip()
+            healthy = bool(target) and (
+                _git(gate_dir, "show-ref", "--verify", "--quiet", target, timeout=10).returncode
+                == 0
             )
-            if not dangling:
-                return None
 
-            upstream_head = _query_upstream_head_ref(gate_dir, env)
+            upstream_head = _query_upstream_head_ref(str(gate_dir), env)
             if upstream_head is None:
+                if healthy or not _read_refs(gate_dir, _HEADS_PREFIX):
+                    return None  # aligned enough, or healthy-empty (unborn HEAD)
                 return (
                     f"gate HEAD {target or '(unset)'!r} is dangling and upstream's "
                     "default branch could not be determined"
                 )
-            # The advertised default must exist in the gate before HEAD is
-            # re-pointed at it — otherwise the "heal" would just swap one
-            # dangling symref for another and report success (possible when
-            # upstream's HEAD moved between our fetch and the ls-remote).
-            missing = (
-                subprocess.run(  # nosec B603 B607 — argv built from fixed verbs + repo-relative paths — binary PATH lookup is the cross-distro contract
-                    ["git", "-C", gate_dir, "show-ref", "--verify", "--quiet", upstream_head],
-                    capture_output=True,
-                    timeout=10,
+            if upstream_head == target and healthy:
+                return None
+            # The target must exist in the gate before HEAD is re-pointed —
+            # otherwise this would swap one dangling symref for another and
+            # report success (possible when upstream's HEAD moved between
+            # our fetch and the ls-remote, or the new default's creation is
+            # itself still pending).
+            exists = (
+                _git(
+                    gate_dir, "show-ref", "--verify", "--quiet", upstream_head, timeout=10
                 ).returncode
-                != 0
+                == 0
             )
-            if missing:
+            if not exists:
+                if healthy:
+                    return None  # keep the old, valid default until the new one lands
+                if not _read_refs(gate_dir, _HEADS_PREFIX):
+                    return None  # empty gate, empty upstream — unborn HEAD is correct
                 return (
                     f"gate HEAD {target or '(unset)'!r} is dangling and upstream's "
                     f"default branch {upstream_head!r} is not present in the gate"
                 )
-            subprocess.run(  # nosec B603 B607 — argv built from fixed verbs + repo-relative paths — binary PATH lookup is the cross-distro contract
-                ["git", "-C", gate_dir, "symbolic-ref", "HEAD", upstream_head],
-                check=True,
-                capture_output=True,
-                timeout=10,
-            )
-            logger.info("Gate HEAD healed: %s -> %s", target or "(unset)", upstream_head)
+            _git(gate_dir, "symbolic-ref", "HEAD", upstream_head, timeout=10, check=True)
+            logger.info("Gate HEAD aligned: %s -> %s", target or "(unset)", upstream_head)
             return None
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
-            return f"gate HEAD heal failed: {_describe_git_failure(exc)}"
+            return f"gate HEAD alignment failed: {_describe_git_failure(exc)}"
 
     def _refresh_clone_cache(self) -> str | None:
         """Refresh the non-bare clone cache from the local bare mirror.
@@ -958,6 +1549,117 @@ def _resolve_origin_default_branch(cache_dir: Path) -> str:
     return head_ref.removeprefix("refs/remotes/origin/")
 
 
+def _read_refs(gate_dir: Path | str, prefix: str) -> dict[str, str]:
+    """Return ``{name-under-prefix: sha}`` for every ref below *prefix*."""
+    result = _git(gate_dir, "for-each-ref", "--format=%(objectname) %(refname)", prefix.rstrip("/"))
+    refs: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        sha, _, refname = line.partition(" ")
+        refs[refname.removeprefix(prefix)] = sha
+    return refs
+
+
+def _ensure_gate_config(gate_dir: Path | str) -> bool:
+    """Normalise the gate's git config; return whether this was a migration.
+
+    Idempotently establishes the three config facts the ref model rests
+    on: the snapshot fetch refspec (replacing the mirror-clone
+    ``+refs/*:refs/*`` that force-overwrote and pruned agent branches),
+    the hidden ``refs/terok`` namespace (containers must not see or forge
+    the snapshot/attic/backups), and always-on reflogs as the last-resort
+    recovery trail.  ``True`` means the destructive mirror configuration
+    was actually present — the caller reports that one-time migration and
+    classifies the sync accordingly (no snapshot memory exists yet).
+    """
+    had_mirror = _git(gate_dir, "config", "--get", "remote.origin.mirror").stdout.strip() == "true"
+    refspecs = _git(gate_dir, "config", "--get-all", "remote.origin.fetch").stdout.split()
+    migrating = had_mirror or _FETCH_REFSPEC not in refspecs
+
+    if migrating:
+        _git(gate_dir, "config", "--unset-all", "remote.origin.mirror")
+        _git(gate_dir, "config", "--replace-all", "remote.origin.fetch", _FETCH_REFSPEC)
+    hidden = _git(gate_dir, "config", "--get-all", "transfer.hideRefs").stdout.split()
+    if _TEROK_NAMESPACE not in hidden:
+        _git(gate_dir, "config", "--add", "transfer.hideRefs", _TEROK_NAMESPACE)
+    _git(gate_dir, "config", "core.logAllRefUpdates", "always")
+    return migrating
+
+
+def _normalise_fresh_gate(gate_dir: Path | str) -> None:
+    """Turn a just-cloned mirror into a snapshot-model gate.
+
+    ``git clone --mirror`` is kept for the initial copy (one efficient,
+    atomic transfer), but its configuration and ref layout are destructive
+    to keep: the config is rewritten, the snapshot namespace is seeded
+    from the heads that just arrived (trivially identical to upstream —
+    nothing local can exist yet), and foreign namespaces a mirror drags
+    along (``refs/pull/*``, ``refs/notes/*``, …) are dropped while they
+    are provably nothing but upstream residue.
+    """
+    _ensure_gate_config(gate_dir)
+    commands = [
+        f"create {_SNAPSHOT_PREFIX}{branch} {sha}"
+        for branch, sha in _read_refs(gate_dir, _HEADS_PREFIX).items()
+    ]
+    keep = (_HEADS_PREFIX, "refs/tags/", _TEROK_NAMESPACE + "/")
+    commands += [
+        f"delete refs/{ref}"
+        for ref in _read_refs(gate_dir, "refs/")
+        if not f"refs/{ref}".startswith(keep)
+    ]
+    if commands:
+        subprocess.run(  # nosec B603 B607 — argv built from fixed verbs + repo-relative paths — binary PATH lookup is the cross-distro contract
+            ["git", "-C", str(gate_dir), "update-ref", "--stdin"],
+            input="\n".join(commands) + "\n",
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=True,
+        )
+
+
+def _empty_sync_result(path: str, *, created: bool) -> GateSyncResult:
+    """The all-quiet sync result a remoteless gate reports."""
+    return {
+        "path": path,
+        "upstream_url": None,
+        "created": created,
+        "migrated": False,
+        "success": True,
+        "errors": [],
+        "notes": [],
+        "applied": [],
+        "pending": [],
+        "gate_only_branches": [],
+        "cache_refreshed": False,
+        "cache_error": None,
+    }
+
+
+_TAG_CLOBBER_MARKER = "would clobber existing tag"
+_REJECTED_TAG_RE = re.compile(r"!\s+\[rejected\]\s+(\S+)\s+->\s+\S+\s+\(would clobber")
+
+
+def _only_tag_clobbers(stderr: str) -> bool:
+    """True when a failed fetch complained about nothing but moved tags.
+
+    git refuses to move an existing tag without ``--force`` and exits
+    non-zero — on *every* fetch, forever, until the tag is resolved by
+    hand.  That refusal is correct (a gate tag is not sync's to rewrite)
+    but must not read as a sync failure, or one moved upstream tag wedges
+    the gate permanently.
+    """
+    if _TAG_CLOBBER_MARKER not in stderr:
+        return False
+    rejects = [line for line in stderr.splitlines() if "[rejected]" in line]
+    return bool(rejects) and all(_TAG_CLOBBER_MARKER in line for line in rejects)
+
+
+def _rejected_tags(stderr: str) -> set[str]:
+    """Extract the tag names a fetch refused to clobber."""
+    return set(_REJECTED_TAG_RE.findall(stderr))
+
+
 def _clone_gate_mirror(upstream_url: str, gate_dir: Path, env: dict) -> None:
     """Clone the upstream repository as a bare mirror into *gate_dir*."""
     cmd = ["git", "clone", "--mirror", upstream_url, str(gate_dir)]
@@ -1053,7 +1755,9 @@ def _get_gate_branch_head(gate_dir: Path, branch: str, env: dict) -> str | None:
         return None
 
 
-def _count_commits_range(gate_dir: Path, from_ref: str, to_ref: str, env: dict) -> int | None:
+def _count_commits_range(
+    gate_dir: Path, from_ref: str, to_ref: str, env: dict | None
+) -> int | None:
     """Count commits reachable from *to_ref* but not from *from_ref*.
 
     Uses ``git rev-list --count from..to``.  Returns ``None`` when the
