@@ -358,6 +358,121 @@ class TestApplyPendingOps:
         assert "feature" not in _heads(gate._gate_path)
 
 
+class TestApplyEdgeCases:
+    """Malformed ops and post-apply plumbing failures degrade into errors."""
+
+    def test_force_op_without_upstream_sha_is_refused(self, tmp_path: Path) -> None:
+        upstream = _make_upstream(tmp_path)
+        gate = _make_gate(tmp_path, upstream)
+        gate.sync()
+        bogus: PendingOp = {
+            "branch": "master",
+            "kind": "force_update",
+            "reason": "upstream_rewrite",
+            "gate_sha": _heads(gate._gate_path)["master"],
+            "upstream_sha": None,
+            "old_snapshot_sha": None,
+            "lossless": False,
+            "gate_only_commits": None,
+        }
+
+        result = gate.apply_pending_ops([bogus])
+
+        assert result["success"] is False
+        assert "carries no upstream sha" in result["errors"][0]
+        assert gate.list_backups() == []
+
+    def test_head_alignment_failure_is_reported(self, tmp_path: Path) -> None:
+        from unittest.mock import patch
+
+        upstream = _make_upstream(tmp_path)
+        _git(upstream, "branch", "feature")
+        gate = _make_gate(tmp_path, upstream)
+        gate.sync()
+        _git(upstream, "branch", "-D", "feature")
+        (op,) = gate.sync()["pending"]
+
+        with patch.object(gate, "_align_gate_head", return_value="HEAD broke"):
+            result = gate.apply_pending_ops([op])
+
+        assert result["applied"] and result["errors"] == ["HEAD broke"]
+        assert result["success"] is False
+
+    def test_cache_refresh_failure_after_apply_is_reported(self, tmp_path: Path) -> None:
+        from unittest.mock import patch
+
+        upstream = _make_upstream(tmp_path)
+        _git(upstream, "branch", "feature")
+        gate = _make_gate(tmp_path, upstream, clone_cache_base=tmp_path / "cache")
+        gate.sync()
+        _git(upstream, "branch", "-D", "feature")
+        (op,) = gate.sync()["pending"]
+
+        with patch.object(gate, "_refresh_clone_cache", return_value="disk full"):
+            result = gate.apply_pending_ops([op])
+
+        assert result["applied"]
+        assert result["errors"] == ["clone cache refresh failed: disk full"]
+
+    def test_empty_gate_keeps_unborn_head_for_advertised_default(self, tmp_path: Path) -> None:
+        """An empty gate whose upstream already advertises a default stays unborn."""
+        from unittest.mock import patch
+
+        upstream = tmp_path / "empty-upstream"
+        subprocess.run(
+            ["git", "init", "--bare", "-b", "master", str(upstream)],
+            check=True,
+            capture_output=True,
+        )
+        gate = _make_gate(tmp_path, upstream)
+        gate.sync()
+
+        with patch(
+            "terok_sandbox.gate.mirror._query_upstream_head_ref",
+            return_value="refs/heads/master",
+        ):
+            assert gate._align_gate_head(env={}) is None
+
+    def test_safe_op_cas_race_becomes_a_note(self, tmp_path: Path) -> None:
+        """A stale CAS guard fails a safe op into a note, not a clobber."""
+        upstream = _make_upstream(tmp_path)
+        gate = _make_gate(tmp_path, upstream)
+        gate.sync()
+        real_master = _heads(gate._gate_path)["master"]
+
+        error = gate._apply_ref_cas(
+            {"branch": "master", "kind": "fast_forward", "old_sha": "1" * 40, "new_sha": "2" * 40}
+        )
+
+        assert error is not None and "ref moved during sync" in error
+        assert _heads(gate._gate_path)["master"] == real_master
+
+    def test_hand_deleted_branch_clears_its_attic_entry(self, tmp_path: Path) -> None:
+        """Attic residue for a branch with no head left is swept by the next sync."""
+        upstream = _make_upstream(tmp_path)
+        _git(upstream, "branch", "feature")
+        gate = _make_gate(tmp_path, upstream)
+        gate.sync()
+        _git(upstream, "branch", "-D", "feature")
+        gate.sync()  # pending delete + attic entry
+        _git(gate._gate_path, "update-ref", "-d", "refs/heads/feature")
+
+        result = gate.sync()
+
+        assert result["pending"] == []
+        assert _read_refs(gate._gate_path, _ATTIC_PREFIX) == {}
+
+    def test_malformed_backup_ref_names_are_ignored(self, tmp_path: Path) -> None:
+        upstream = _make_upstream(tmp_path)
+        gate = _make_gate(tmp_path, upstream)
+        gate.sync()
+        sha = _heads(gate._gate_path)["master"]
+        _git(gate._gate_path, "update-ref", "refs/terok/backup/oddball", sha)
+
+        assert gate.list_backups() == []
+        assert gate.prune_backups(older_than_days=1) == []
+
+
 class TestBackupRetention:
     """Backups expire on the ref-name clock, and only there."""
 
@@ -460,6 +575,19 @@ class TestSelectiveSync:
         assert op["branch"] == "feature" and op["kind"] == "delete"
         assert op["lossless"] is True
         assert "feature" in _heads(gate._gate_path)
+
+    def test_selection_of_only_deleted_branches_skips_the_fetch(self, tmp_path: Path) -> None:
+        upstream = _make_upstream(tmp_path)
+        _git(upstream, "branch", "feature")
+        gate = _make_gate(tmp_path, upstream)
+        gate.sync()
+        _git(upstream, "branch", "-D", "feature")
+
+        result = gate.sync(branches=["feature"])
+
+        assert result["success"] is True
+        (op,) = result["pending"]
+        assert op["branch"] == "feature" and op["kind"] == "delete"
 
     def test_deletion_outside_selection_is_invisible(self, tmp_path: Path) -> None:
         upstream = _make_upstream(tmp_path)
@@ -628,6 +756,22 @@ class TestHeadAlignment:
 
         assert _git(gate._gate_path, "symbolic-ref", "HEAD") == "refs/heads/trunk"
         assert "master" not in _heads(gate._gate_path)
+
+    def test_healthy_head_kept_until_new_default_lands(self, tmp_path: Path) -> None:
+        """A valid HEAD is not swapped for a default the gate doesn't have yet."""
+        from unittest.mock import patch
+
+        upstream = _make_upstream(tmp_path)
+        gate = _make_gate(tmp_path, upstream)
+        gate.sync()
+
+        with patch(
+            "terok_sandbox.gate.mirror._query_upstream_head_ref",
+            return_value="refs/heads/ghost",
+        ):
+            assert gate._align_gate_head(env={}) is None
+
+        assert _git(gate._gate_path, "symbolic-ref", "HEAD") == "refs/heads/master"
 
     def test_empty_upstream_syncs_cleanly(self, tmp_path: Path) -> None:
         upstream = tmp_path / "empty-upstream"

@@ -894,33 +894,12 @@ class GitGate:
         errors: list[str] = []
 
         for op in ops:
-            ref = f"{_HEADS_PREFIX}{op['branch']}"
-            new_sha = op["upstream_sha"]
-            if op["kind"] != "delete" and new_sha is None:
-                errors.append(f"{op['branch']}: force_update op carries no upstream sha")
-                continue
-            # Backup before the change: between a delete and a later backup
-            # there would be a window where the old tip is unreferenced.
-            backup_ref = (
-                self._write_backup(op["branch"], op["gate_sha"]) if self._backups_enabled else None
-            )
-            if op["kind"] == "delete":
-                result = _git(self._gate_path, "update-ref", "-d", ref, op["gate_sha"])
-            else:
-                result = _git(
-                    self._gate_path, "update-ref", ref, cast("str", new_sha), op["gate_sha"]
-                )
-            if result.returncode != 0:
-                if backup_ref is not None:
-                    _git(self._gate_path, "update-ref", "-d", backup_ref)
-                errors.append(
-                    f"{op['branch']}: branch moved since the op was proposed — not applied"
-                )
+            backup_ref, error = self._apply_one_pending_op(op)
+            if error is not None:
+                errors.append(error)
                 continue
             if backup_ref is not None:
                 backups[op["branch"]] = backup_ref
-            # The op resolved the branch either way — the attic memory is moot.
-            _git(self._gate_path, "update-ref", "-d", f"{_ATTIC_PREFIX}{op['branch']}")
             applied.append(
                 {
                     "branch": op["branch"],
@@ -938,6 +917,35 @@ class GitGate:
                 errors.append(f"clone cache refresh failed: {cache_error}")
 
         return {"success": not errors, "applied": applied, "backups": backups, "errors": errors}
+
+    def _apply_one_pending_op(self, op: PendingOp) -> tuple[str | None, str | None]:
+        """Perform one confirmed op; return ``(backup_ref, error)``.
+
+        Exactly one of the two is meaningful: an error means the branch was
+        left untouched (malformed op, or the CAS guard found the branch
+        moved since the proposal — in which case the just-written backup is
+        removed again, since nothing was changed that could need it).
+        """
+        ref = f"{_HEADS_PREFIX}{op['branch']}"
+        new_sha = op["upstream_sha"]
+        if op["kind"] != "delete" and new_sha is None:
+            return None, f"{op['branch']}: force_update op carries no upstream sha"
+        # Backup before the change: between a delete and a later backup
+        # there would be a window where the old tip is unreferenced.
+        backup_ref = (
+            self._write_backup(op["branch"], op["gate_sha"]) if self._backups_enabled else None
+        )
+        if op["kind"] == "delete":
+            result = _git(self._gate_path, "update-ref", "-d", ref, op["gate_sha"])
+        else:
+            result = _git(self._gate_path, "update-ref", ref, cast("str", new_sha), op["gate_sha"])
+        if result.returncode != 0:
+            if backup_ref is not None:
+                _git(self._gate_path, "update-ref", "-d", backup_ref)
+            return None, f"{op['branch']}: branch moved since the op was proposed — not applied"
+        # The op resolved the branch either way — the attic memory is moot.
+        _git(self._gate_path, "update-ref", "-d", f"{_ATTIC_PREFIX}{op['branch']}")
+        return backup_ref, None
 
     def _write_backup(self, branch: str, sha: str) -> str | None:
         """Save *sha* as a timestamped backup ref for *branch*; return its name.
