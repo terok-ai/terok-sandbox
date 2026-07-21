@@ -364,15 +364,44 @@ class TestGateHeadSelfHeal:
         ).stdout.strip()
         assert cache_branch == "trunk"
 
-    def test_valid_head_is_left_alone(self, tmp_path: Path) -> None:
-        """The happy path never contacts upstream or rewrites a healthy HEAD."""
+    def test_aligned_head_is_left_alone(self, tmp_path: Path) -> None:
+        """A healthy HEAD already on upstream's default is not rewritten."""
+        import subprocess
+
         _, gate_dir = _make_upstream_and_gate(tmp_path)
         gate = GitGate(scope="proj", gate_path=gate_dir, upstream_url=str(gate_dir))
 
-        with patch("terok_sandbox.gate.mirror._query_upstream_head_ref") as mock_query:
-            assert gate._heal_gate_head(env={}) is None
+        with patch(
+            "terok_sandbox.gate.mirror._query_upstream_head_ref",
+            return_value="refs/heads/master",
+        ):
+            assert gate._align_gate_head(env={}) is None
 
-        mock_query.assert_not_called()
+        head = subprocess.run(
+            ["git", "-C", str(gate_dir), "symbolic-ref", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        assert head == "refs/heads/master"
+
+    def test_healthy_head_survives_unreachable_upstream(self, tmp_path: Path) -> None:
+        """When upstream's default cannot be determined, a valid HEAD stays put."""
+        import subprocess
+
+        _, gate_dir = _make_upstream_and_gate(tmp_path)
+        gate = GitGate(scope="proj", gate_path=gate_dir, upstream_url=str(gate_dir))
+
+        with patch("terok_sandbox.gate.mirror._query_upstream_head_ref", return_value=None):
+            assert gate._align_gate_head(env={}) is None
+
+        head = subprocess.run(
+            ["git", "-C", str(gate_dir), "symbolic-ref", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        assert head == "refs/heads/master"
 
     def test_dangling_head_healed_from_upstream(self, tmp_path: Path) -> None:
         """A dangling HEAD is re-pointed at upstream's advertised default branch.
@@ -391,7 +420,7 @@ class TestGateHeadSelfHeal:
         )
         gate = GitGate(scope="proj", gate_path=gate_dir, upstream_url=str(upstream))
 
-        assert gate._heal_gate_head(env=os.environ.copy()) is None
+        assert gate._align_gate_head(env=os.environ.copy()) is None
 
         head = subprocess.run(
             ["git", "-C", str(gate_dir), "symbolic-ref", "HEAD"],
@@ -422,7 +451,7 @@ class TestGateHeadSelfHeal:
             "terok_sandbox.gate.mirror._query_upstream_head_ref",
             return_value="refs/heads/ghost",
         ):
-            error = gate._heal_gate_head(env=os.environ.copy())
+            error = gate._align_gate_head(env=os.environ.copy())
 
         assert error is not None
         assert "not present in the gate" in error
@@ -452,7 +481,7 @@ class TestGateHeadSelfHeal:
         )
         gate = GitGate(scope="proj", gate_path=gate_dir, upstream_url=str(upstream))
 
-        assert gate._heal_gate_head(env=os.environ.copy()) is None
+        assert gate._align_gate_head(env=os.environ.copy()) is None
 
         head = subprocess.run(
             [*git, "symbolic-ref", "HEAD"], check=True, capture_output=True, text=True
@@ -473,10 +502,10 @@ class TestGateHeadSelfHeal:
             "terok_sandbox.gate.mirror.subprocess.run",
             side_effect=subprocess.TimeoutExpired("git", 10),
         ):
-            error = gate._heal_gate_head(env={})
+            error = gate._align_gate_head(env={})
 
         assert error is not None
-        assert "heal failed" in error
+        assert "alignment failed" in error
 
     def test_query_upstream_head_without_symref_yields_none(self) -> None:
         """Servers that advertise HEAD's hash but no symref resolve to None."""
@@ -506,7 +535,7 @@ class TestGateHeadSelfHeal:
         )
         gate = GitGate(scope="proj", gate_path=gate_dir, upstream_url=str(tmp_path / "gone"))
 
-        error = gate._heal_gate_head(env=os.environ.copy())
+        error = gate._align_gate_head(env=os.environ.copy())
 
         assert error is not None
         assert "could not be determined" in error
@@ -533,12 +562,9 @@ class TestForceReinitClearsCache:
             patch.object(gate, "_validate_gate"),
             patch.object(gate, "_ssh_env", return_value={}),
             patch("terok_sandbox.gate.mirror._clone_gate_mirror"),
-            patch.object(
-                gate,
-                "sync_branches",
-                return_value={"success": True, "updated_branches": ["all"], "errors": []},
-            ),
-            patch.object(gate, "_heal_gate_head", return_value=None),
+            patch("terok_sandbox.gate.mirror._normalise_fresh_gate"),
+            patch.object(gate, "_sync_from_upstream", return_value=(False, [], [], [], [], [])),
+            patch.object(gate, "_align_gate_head", return_value=None),
             patch.object(gate, "_refresh_clone_cache", return_value=None),
         ):
             result = gate.sync(force_reinit=True)
@@ -566,11 +592,9 @@ class TestSyncIntegration:
             patch.object(_gate_with_cache, "_validate_gate"),
             patch.object(_gate_with_cache, "_ssh_env", return_value={}),
             patch.object(
-                _gate_with_cache,
-                "sync_branches",
-                return_value={"success": True, "updated_branches": ["all"], "errors": []},
+                _gate_with_cache, "_sync_from_upstream", return_value=(False, [], [], [], [], [])
             ),
-            patch.object(_gate_with_cache, "_heal_gate_head", return_value=None),
+            patch.object(_gate_with_cache, "_align_gate_head", return_value=None),
             patch.object(_gate_with_cache, "_refresh_clone_cache", return_value=None) as mock_cache,
         ):
             result = _gate_with_cache.sync()
@@ -585,11 +609,9 @@ class TestSyncIntegration:
             patch.object(_gate_with_cache, "_validate_gate"),
             patch.object(_gate_with_cache, "_ssh_env", return_value={}),
             patch.object(
-                _gate_with_cache,
-                "sync_branches",
-                return_value={"success": True, "updated_branches": ["all"], "errors": []},
+                _gate_with_cache, "_sync_from_upstream", return_value=(False, [], [], [], [], [])
             ),
-            patch.object(_gate_with_cache, "_heal_gate_head", return_value="HEAD dangling"),
+            patch.object(_gate_with_cache, "_align_gate_head", return_value="HEAD dangling"),
             patch.object(_gate_with_cache, "_refresh_clone_cache") as mock_cache,
         ):
             result = _gate_with_cache.sync()
@@ -603,11 +625,9 @@ class TestSyncIntegration:
             patch.object(_gate_with_cache, "_validate_gate"),
             patch.object(_gate_with_cache, "_ssh_env", return_value={}),
             patch.object(
-                _gate_with_cache,
-                "sync_branches",
-                return_value={"success": True, "updated_branches": ["all"], "errors": []},
+                _gate_with_cache, "_sync_from_upstream", return_value=(False, [], [], [], [], [])
             ),
-            patch.object(_gate_with_cache, "_heal_gate_head", return_value=None),
+            patch.object(_gate_with_cache, "_align_gate_head", return_value=None),
             patch.object(_gate_with_cache, "_refresh_clone_cache", return_value="boom"),
         ):
             result = _gate_with_cache.sync()
@@ -622,14 +642,10 @@ class TestSyncIntegration:
             patch.object(_gate_with_cache, "_ssh_env", return_value={}),
             patch.object(
                 _gate_with_cache,
-                "sync_branches",
-                return_value={
-                    "success": False,
-                    "updated_branches": [],
-                    "errors": ["timeout"],
-                },
+                "_sync_from_upstream",
+                return_value=(False, ["timeout"], [], [], [], []),
             ),
-            patch.object(_gate_with_cache, "_heal_gate_head") as mock_heal,
+            patch.object(_gate_with_cache, "_align_gate_head") as mock_heal,
             patch.object(_gate_with_cache, "_refresh_clone_cache") as mock_cache,
         ):
             result = _gate_with_cache.sync()
@@ -651,12 +667,8 @@ class TestSyncIntegration:
         with (
             patch.object(gate, "_validate_gate"),
             patch.object(gate, "_ssh_env", return_value={}),
-            patch.object(
-                gate,
-                "sync_branches",
-                return_value={"success": True, "updated_branches": ["all"], "errors": []},
-            ),
-            patch.object(gate, "_heal_gate_head", return_value=None),
+            patch.object(gate, "_sync_from_upstream", return_value=(False, [], [], [], [], [])),
+            patch.object(gate, "_align_gate_head", return_value=None),
         ):
             result = gate.sync()
 
