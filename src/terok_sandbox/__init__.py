@@ -119,7 +119,10 @@ _LAZY: dict[str, str] = {
     "resolve_container_state_dir": "integrations.shield:resolve_container_state_dir",
     # Per-container launch/state
     "PerContainerResources": "launch:PerContainerResources",
+    "SANDBOX_MANAGED_FLAGS": "launch:SANDBOX_MANAGED_FLAGS",
     "allocate_per_container_resources": "launch:allocate_per_container_resources",
+    "reject_managed_flags": "launch:reject_managed_flags",
+    "reject_managed_volumes": "launch:reject_managed_volumes",
     "make_stray_sidecar_check": "launch:make_stray_sidecar_check",
     "remove_container_state": "launch:remove_container_state",
     "write_sidecar": "launch:write_sidecar",
@@ -149,6 +152,7 @@ _LAZY: dict[str, str] = {
     "normalize_gpus": "runtime:normalize_gpus",
     "podman_port_resolver": "runtime:podman_port_resolver",
     # Facade
+    "GRANTABLE_CAPS": "sandbox:GRANTABLE_CAPS",
     "LifecycleHooks": "sandbox:LifecycleHooks",
     "READY_MARKER": "sandbox:READY_MARKER",
     "RunSpec": "sandbox:RunSpec",
@@ -286,7 +290,13 @@ if TYPE_CHECKING:
         check_environment,
         resolve_container_state_dir,
     )
-    from .launch import PerContainerResources, allocate_per_container_resources
+    from .launch import (
+        SANDBOX_MANAGED_FLAGS,
+        PerContainerResources,
+        allocate_per_container_resources,
+        reject_managed_flags,
+        reject_managed_volumes,
+    )
     from .port_registry import claim_port, release_port
     from .runtime import (
         DEFAULT_GUEST_SSHD_PORT,
@@ -311,7 +321,15 @@ if TYPE_CHECKING:
         normalize_gpus,
         podman_port_resolver,
     )
-    from .sandbox import READY_MARKER, LifecycleHooks, RunSpec, Sandbox, Sharing, VolumeSpec
+    from .sandbox import (
+        GRANTABLE_CAPS,
+        READY_MARKER,
+        LifecycleHooks,
+        RunSpec,
+        Sandbox,
+        Sharing,
+        VolumeSpec,
+    )
     from .setup_stamp import (
         SetupVerdict,
         installed_versions,
@@ -365,7 +383,10 @@ __all__ = [
     "stamp_path",
     # Lifecycle managers
     "PerContainerResources",
+    "SANDBOX_MANAGED_FLAGS",
     "allocate_per_container_resources",
+    "reject_managed_flags",
+    "reject_managed_volumes",
     "mint_gate_token",
     # Runtime + facade
     "ContainerRuntime",
@@ -384,6 +405,7 @@ __all__ = [
     "PodmanRuntime",
     "PodmanEventStream",
     "ContainerEvent",
+    "GRANTABLE_CAPS",
     "READY_MARKER",
     "RunSpec",
     "Sharing",
