@@ -40,6 +40,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from .podman_args import validate_passthrough_args
+
 _MEMORY_RE = re.compile(r"\d+(\.\d+)? ?[kKmMgGtTpP]?[iI]?[bB]?")
 """Format check for ``run.memory`` — mirrors ``docker/go-units.sizeRegex``,
 which is what podman's ``--memory`` flag accepts.
@@ -416,6 +418,27 @@ class RawRunSection(BaseModel):
             "containers work under SELinux without disabling labels wholesale."
         ),
     )
+    perf: bool = Field(
+        default=False,
+        description=(
+            "Grant the container the ``perfmon`` capability so ``perf`` can "
+            "sample inside it (flips the default seccomp profile's "
+            "``perf_event_open`` rule to allow).  Rootless scope: the task "
+            "samples its **own** processes, user-space only — and only if the "
+            "host's ``kernel.perf_event_paranoid`` sysctl is ≤ 2 (hardened "
+            "kernels ship 4, which disables unprivileged perf entirely)."
+        ),
+    )
+    podman_args: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Freeform extra ``podman run`` flags, appended verbatim (expert "
+            "escape hatch — you own the pieces).  Sandbox-managed flags "
+            "(``--network``, ``--cap-add``, …), mounts shadowing sandbox "
+            "targets, and isolation-weakening flags (``--privileged``, "
+            "``--security-opt``) are rejected at parse time."
+        ),
+    )
     runtime: Literal["crun", "krun"] | None = Field(
         default=None,
         description=(
@@ -435,6 +458,23 @@ class RawRunSection(BaseModel):
         ),
     )
     hooks: RawHooksSection = Field(default_factory=RawHooksSection)
+
+    @field_validator("podman_args")
+    @classmethod
+    def _validate_podman_args(cls, v: list[str]) -> list[str]:
+        """Reject managed/isolation-weakening flags at parse time.
+
+        Delegates to
+        [`validate_passthrough_args`][terok_sandbox.podman_args.validate_passthrough_args]
+        (the launch-path gate) so config validation and launch behaviour
+        can never disagree; its ``SystemExit`` is surfaced as the
+        [`ValueError`][ValueError] pydantic expects.
+        """
+        try:
+            validate_passthrough_args(v)
+        except SystemExit as exc:
+            raise ValueError(str(exc)) from None
+        return v
 
     @field_validator("gpus", mode="before")
     @classmethod

@@ -119,10 +119,12 @@ _LAZY: dict[str, str] = {
     "resolve_container_state_dir": "integrations.shield:resolve_container_state_dir",
     # Per-container launch/state
     "PerContainerResources": "launch:PerContainerResources",
-    "SANDBOX_MANAGED_FLAGS": "launch:SANDBOX_MANAGED_FLAGS",
+    "PASSTHROUGH_DENIED_FLAGS": "podman_args:PASSTHROUGH_DENIED_FLAGS",
+    "SANDBOX_MANAGED_FLAGS": "podman_args:SANDBOX_MANAGED_FLAGS",
     "allocate_per_container_resources": "launch:allocate_per_container_resources",
-    "reject_managed_flags": "launch:reject_managed_flags",
-    "reject_managed_volumes": "launch:reject_managed_volumes",
+    "reject_managed_flags": "podman_args:reject_managed_flags",
+    "reject_managed_volumes": "podman_args:reject_managed_volumes",
+    "validate_passthrough_args": "podman_args:validate_passthrough_args",
     "make_stray_sidecar_check": "launch:make_stray_sidecar_check",
     "remove_container_state": "launch:remove_container_state",
     "write_sidecar": "launch:write_sidecar",
@@ -290,12 +292,13 @@ if TYPE_CHECKING:
         check_environment,
         resolve_container_state_dir,
     )
-    from .launch import (
+    from .launch import PerContainerResources, allocate_per_container_resources
+    from .podman_args import (
+        PASSTHROUGH_DENIED_FLAGS,
         SANDBOX_MANAGED_FLAGS,
-        PerContainerResources,
-        allocate_per_container_resources,
         reject_managed_flags,
         reject_managed_volumes,
+        validate_passthrough_args,
     )
     from .port_registry import claim_port, release_port
     from .runtime import (
@@ -382,11 +385,13 @@ __all__ = [
     "sandbox_uninstall",
     "stamp_path",
     # Lifecycle managers
+    "PASSTHROUGH_DENIED_FLAGS",
     "PerContainerResources",
     "SANDBOX_MANAGED_FLAGS",
     "allocate_per_container_resources",
     "reject_managed_flags",
     "reject_managed_volumes",
+    "validate_passthrough_args",
     "mint_gate_token",
     # Runtime + facade
     "ContainerRuntime",

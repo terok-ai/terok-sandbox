@@ -39,8 +39,9 @@ if TYPE_CHECKING:
     from .vault.store.db import CredentialDB
     from .vault.store.tiers import PassphraseTier
 
-CONTAINER_RUNTIME_DIR = "/run/terok"
-"""Container-side mount point for the host runtime directory (socket mode)."""
+from .podman_args import (
+    CONTAINER_RUNTIME_DIR as CONTAINER_RUNTIME_DIR,  # noqa: E402 — re-export; definition moved to the argv-policy leaf
+)
 
 
 def _validate_section[T: BaseModel](schema_cls: type[T], section: str) -> T:
