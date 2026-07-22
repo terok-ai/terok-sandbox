@@ -357,3 +357,30 @@ def test_gate_use_personal_ssh_default_swallows_malformed_section(monkeypatch) -
 
     monkeypatch.setattr(_paths, "read_config_section", lambda _section: {"use_persoanl": "true"})
     assert gate_use_personal_ssh_default() is False
+
+
+def test_run_section_perf_defaults_off() -> None:
+    """``run.perf`` is opt-in; the default grants no capability."""
+    assert RawRunSection().perf is False
+    assert RawRunSection(perf=True).perf is True
+
+
+def test_run_section_podman_args_accepts_benign_flags() -> None:
+    args = ["-e", "HTTPS_PROXY=http://host:8118", "--shm-size=2g"]
+    assert RawRunSection(podman_args=args).podman_args == args
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        ["--cap-add", "perfmon"],
+        ["--net=host"],
+        ["--privileged"],
+        ["--security-opt", "label=disable"],
+        ["-v", "/foo:/run/terok/vault.sock"],
+    ],
+)
+def test_run_section_podman_args_rejects_managed_and_weakening(bad: list[str]) -> None:
+    """Parse-time rejection mirrors the launch gate exactly."""
+    with pytest.raises(ValidationError, match="podman_args"):
+        RawRunSection(podman_args=bad)

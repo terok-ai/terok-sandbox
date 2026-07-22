@@ -40,11 +40,14 @@ from terok_sandbox.launch import (
     exec_podman,
     format_args,
     make_stray_sidecar_check,
-    reject_managed_flags,
-    reject_managed_volumes,
     remove_container_state,
     run_state_dir,
     write_sidecar,
+)
+from terok_sandbox.podman_args import (
+    reject_managed_flags,
+    reject_managed_volumes,
+    validate_passthrough_args,
 )
 
 
@@ -624,6 +627,27 @@ class TestRejectManagedFlags:
 
     def test_user_volume_unrelated_target_passes(self) -> None:
         reject_managed_volumes(["-v", "/workspace:/workspace:Z"])
+
+
+class TestValidatePassthroughArgs:
+    """Verify the one gate for config-sourced freeform podman args."""
+
+    def test_benign_args_pass_and_return_tuple(self) -> None:
+        args = ["-e", "HTTPS_PROXY=http://host:8118", "-p", "127.0.0.1:80:80", "--shm-size=2g"]
+        assert validate_passthrough_args(args) == tuple(args)
+
+    def test_rejects_managed_flag(self) -> None:
+        with pytest.raises(SystemExit, match="--cap-add"):
+            validate_passthrough_args(["--cap-add", "perfmon"])
+
+    def test_rejects_managed_volume_target(self) -> None:
+        with pytest.raises(SystemExit, match="vault.sock"):
+            validate_passthrough_args(["-v", "/foo:/run/terok/vault.sock"])
+
+    @pytest.mark.parametrize("flag", ["--privileged", "--security-opt=seccomp=unconfined"])
+    def test_rejects_isolation_weakening_flags(self, flag: str) -> None:
+        with pytest.raises(SystemExit, match="isolation-weakening"):
+            validate_passthrough_args([flag])
 
 
 # ---------------------------------------------------------------------------

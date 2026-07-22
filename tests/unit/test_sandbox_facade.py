@@ -677,6 +677,41 @@ class TestSandbox:
         assert "--memory" not in cmd
         assert "--cpus" not in cmd
 
+    def test_caps_in_podman_cmd(self) -> None:
+        """Each grantable cap appears as a ``--cap-add`` pair."""
+        with (
+            patch("subprocess.run") as mock_run,
+            patch("builtins.print"),
+            patch("terok_sandbox.integrations.shield.ShieldManager.pre_start", return_value=[]),
+        ):
+            Sandbox().run(_make_spec(caps=("perfmon",)))
+
+        cmd = mock_run.call_args[0][0]
+        idx = cmd.index("--cap-add")
+        assert cmd[idx + 1] == "perfmon"
+
+    def test_no_caps_omits_flag(self) -> None:
+        """No ``--cap-add`` appears for the default empty caps."""
+        with (
+            patch("subprocess.run") as mock_run,
+            patch("builtins.print"),
+            patch("terok_sandbox.integrations.shield.ShieldManager.pre_start", return_value=[]),
+        ):
+            Sandbox().run(_make_spec())
+
+        assert "--cap-add" not in mock_run.call_args[0][0]
+
+    def test_unlisted_cap_rejected(self) -> None:
+        """A cap outside GRANTABLE_CAPS raises before podman is invoked."""
+        with (
+            patch("subprocess.run") as mock_run,
+            patch("builtins.print"),
+            patch("terok_sandbox.integrations.shield.ShieldManager.pre_start", return_value=[]),
+        ):
+            with pytest.raises(ValueError, match="sys_admin.*not in allowlist"):
+                Sandbox().run(_make_spec(caps=("sys_admin",)))
+        mock_run.assert_not_called()
+
 
 class TestVolumeSpec:
     """Verify VolumeSpec dataclass."""

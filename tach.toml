@@ -33,6 +33,13 @@ path = "terok_sandbox._util"
 layer = "foundation"
 utility = true
 
+# Podman argv policy — managed-flag sets, container mount-point constants,
+# and the freeform-args validators shared by config parsing and launch.
+[[modules]]
+path = "terok_sandbox.podman_args"
+layer = "foundation"
+depends_on = []
+
 # Platform-aware path resolution — generic resolvers + layered-config
 # readers live in terok-util; this module wraps them with sandbox-specific
 # binders (vault_root, runtime_root, …).
@@ -69,6 +76,7 @@ path = "terok_sandbox.config_schema"
 layer = "foundation"
 depends_on = [
     "terok_sandbox.paths",
+    "terok_sandbox.podman_args",
 ]
 
 # Configuration dataclass — same-layer dep on paths + port_registry,
@@ -80,6 +88,7 @@ path = "terok_sandbox.config"
 layer = "foundation"
 depends_on = [
     "terok_sandbox.paths",
+    "terok_sandbox.podman_args",
     "terok_sandbox.port_registry",
     "terok_sandbox.vault.store.db",
     "terok_sandbox.vault.store.encryption",

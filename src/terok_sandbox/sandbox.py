@@ -61,6 +61,26 @@ arbitrary-code-execution surface.
 """
 
 
+GRANTABLE_CAPS: frozenset[str] = frozenset({"perfmon"})
+"""Linux capabilities the sandbox will grant via ``podman run --cap-add``.
+
+``--cap-add`` is a sandbox-managed flag: each entry here is vetted for
+how it interacts with the pieces the sandbox owns (shield egress rules,
+the user-namespace mapping, supervisor sockets) before it is admitted.
+Freeform caller args must not carry ``--cap-add`` — the typed
+[`RunSpec.caps`][terok_sandbox.sandbox.RunSpec] field is the only way in,
+so this allowlist stays the single statement of capability policy.
+
+- ``perfmon`` — flips the default seccomp profile's ``perf_event_open``
+  rule from EPERM to allow, enabling in-container ``perf`` sampling.
+  Under rootless podman the capability lives in the container's user
+  namespace only, so the kernel's ``perf_event_paranoid`` check still
+  applies: the container can sample **its own processes, user-space
+  only** (host sysctl ≤ 2), never the host.  Invisible to shield and
+  the userns mapping — safe to grant.
+"""
+
+
 SAFE_ANNOTATION_KEYS: frozenset[str] = frozenset(
     {
         # Per-task dossier JSON path; shield hook reads it on every
@@ -231,6 +251,16 @@ class RunSpec:
     cpus: str | None = None
     """Podman ``--cpus`` value (e.g. ``"2.0"``, ``"0.5"``).  ``None`` = unlimited."""
 
+    caps: tuple[str, ...] = ()
+    """Linux capabilities to grant (``podman --cap-add``), lowercase names.
+
+    Every entry must be on
+    [`GRANTABLE_CAPS`][terok_sandbox.sandbox.GRANTABLE_CAPS]; anything
+    else is rejected at command-assembly time.  This typed field is the
+    only sanctioned route to ``--cap-add`` — it must never travel via
+    *extra_args*.
+    """
+
     extra_args: tuple[str, ...] = ()
     """Additional podman run arguments (e.g. port publishing)."""
 
@@ -354,6 +384,24 @@ def _validate_runtime(runtime: str) -> str:
             "extend SAFE_RUNTIMES to enable a new backend"
         )
     return runtime
+
+
+def _validate_caps(caps: tuple[str, ...]) -> tuple[str, ...]:
+    """Return *caps* if every entry is on the grantable allowlist.
+
+    Rejected values become [`ValueError`][ValueError] so a
+    caller-controlled [`RunSpec.caps`][terok_sandbox.sandbox.RunSpec]
+    can never widen the container's capability set beyond
+    [`GRANTABLE_CAPS`][terok_sandbox.sandbox.GRANTABLE_CAPS].
+    """
+    for cap in caps:
+        if cap not in GRANTABLE_CAPS:
+            raise ValueError(
+                f"capability {cap!r}: not in allowlist {sorted(GRANTABLE_CAPS)} — "
+                "extend GRANTABLE_CAPS (with a vetting note) to make a new "
+                "capability grantable"
+            )
+    return caps
 
 
 def _validate_annotations(annotations: Mapping[str, str]) -> Mapping[str, str]:
@@ -563,6 +611,9 @@ class Sandbox:
             cmd += ["--memory", spec.memory]
         if spec.cpus is not None:
             cmd += ["--cpus", spec.cpus]
+
+        for cap in _validate_caps(spec.caps):
+            cmd += ["--cap-add", cap]
 
         if spec.extra_args:
             cmd += list(spec.extra_args)

@@ -119,7 +119,12 @@ _LAZY: dict[str, str] = {
     "resolve_container_state_dir": "integrations.shield:resolve_container_state_dir",
     # Per-container launch/state
     "PerContainerResources": "launch:PerContainerResources",
+    "PASSTHROUGH_DENIED_FLAGS": "podman_args:PASSTHROUGH_DENIED_FLAGS",
+    "SANDBOX_MANAGED_FLAGS": "podman_args:SANDBOX_MANAGED_FLAGS",
     "allocate_per_container_resources": "launch:allocate_per_container_resources",
+    "reject_managed_flags": "podman_args:reject_managed_flags",
+    "reject_managed_volumes": "podman_args:reject_managed_volumes",
+    "validate_passthrough_args": "podman_args:validate_passthrough_args",
     "make_stray_sidecar_check": "launch:make_stray_sidecar_check",
     "remove_container_state": "launch:remove_container_state",
     "write_sidecar": "launch:write_sidecar",
@@ -149,6 +154,7 @@ _LAZY: dict[str, str] = {
     "normalize_gpus": "runtime:normalize_gpus",
     "podman_port_resolver": "runtime:podman_port_resolver",
     # Facade
+    "GRANTABLE_CAPS": "sandbox:GRANTABLE_CAPS",
     "LifecycleHooks": "sandbox:LifecycleHooks",
     "READY_MARKER": "sandbox:READY_MARKER",
     "RunSpec": "sandbox:RunSpec",
@@ -287,6 +293,13 @@ if TYPE_CHECKING:
         resolve_container_state_dir,
     )
     from .launch import PerContainerResources, allocate_per_container_resources
+    from .podman_args import (
+        PASSTHROUGH_DENIED_FLAGS,
+        SANDBOX_MANAGED_FLAGS,
+        reject_managed_flags,
+        reject_managed_volumes,
+        validate_passthrough_args,
+    )
     from .port_registry import claim_port, release_port
     from .runtime import (
         DEFAULT_GUEST_SSHD_PORT,
@@ -311,7 +324,15 @@ if TYPE_CHECKING:
         normalize_gpus,
         podman_port_resolver,
     )
-    from .sandbox import READY_MARKER, LifecycleHooks, RunSpec, Sandbox, Sharing, VolumeSpec
+    from .sandbox import (
+        GRANTABLE_CAPS,
+        READY_MARKER,
+        LifecycleHooks,
+        RunSpec,
+        Sandbox,
+        Sharing,
+        VolumeSpec,
+    )
     from .setup_stamp import (
         SetupVerdict,
         installed_versions,
@@ -364,8 +385,13 @@ __all__ = [
     "sandbox_uninstall",
     "stamp_path",
     # Lifecycle managers
+    "PASSTHROUGH_DENIED_FLAGS",
     "PerContainerResources",
+    "SANDBOX_MANAGED_FLAGS",
     "allocate_per_container_resources",
+    "reject_managed_flags",
+    "reject_managed_volumes",
+    "validate_passthrough_args",
     "mint_gate_token",
     # Runtime + facade
     "ContainerRuntime",
@@ -384,6 +410,7 @@ __all__ = [
     "PodmanRuntime",
     "PodmanEventStream",
     "ContainerEvent",
+    "GRANTABLE_CAPS",
     "READY_MARKER",
     "RunSpec",
     "Sharing",
