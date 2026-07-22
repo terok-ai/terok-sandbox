@@ -97,6 +97,7 @@ _LAZY: dict[str, str] = {
     "container_diagnostics": "diagnostics:container_diagnostics",
     "SupervisorLiveness": "diagnostics:SupervisorLiveness",
     "supervisor_liveness": "diagnostics:supervisor_liveness",
+    "respawn_supervisor": "diagnostics:respawn_supervisor",
     # Post-start supervision check
     "SupervisionStatus": "supervision:SupervisionStatus",
     "verify_supervision": "supervision:verify_supervision",
@@ -283,6 +284,7 @@ if TYPE_CHECKING:
         ContainerDiagnostics,
         SupervisorLiveness,
         container_diagnostics,
+        respawn_supervisor,
         supervisor_liveness,
     )
     from .doctor import CheckVerdict, DoctorCheck, sandbox_doctor_checks
@@ -503,6 +505,7 @@ __all__ = [
     "container_diagnostics",
     "SupervisorLiveness",
     "supervisor_liveness",
+    "respawn_supervisor",
     # Post-start supervision check
     "SupervisionStatus",
     "verify_supervision",

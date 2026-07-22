@@ -22,28 +22,46 @@ shared resolver earns its keep:
 
 Paths are computed, never probed: a file may be absent (the sidecar is
 removed at teardown, the supervisor may never have logged).  Callers
-that care about existence check it themselves.  The one exception is
+that care about existence check it themselves.  The two exceptions are
 [`supervisor_liveness`][terok_sandbox.diagnostics.supervisor_liveness],
-which *does* probe — it answers the root-cause question "is this
-container's supervisor actually running?" that the path bundle only
-points at.
+which *probes* the root-cause question "is this container's supervisor
+actually running?", and
+[`respawn_supervisor`][terok_sandbox.diagnostics.respawn_supervisor],
+its remediation — both act on the supervisor the path bundle only points
+at.
 """
 
 from __future__ import annotations
 
+import contextlib
+import json
 import os
+import subprocess  # nosec B404 — re-invokes our own installed OCI hook
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 from .paths import state_root
-from .supervisor.install import _PIDS_DIR_NAME, _WRAPPER_NAME
+from .supervisor.install import (
+    _HOOK_SCRIPT_NAME,
+    _PIDS_DIR_NAME,
+    _TRIGGER_ANNOTATION,
+    _WRAPPER_NAME,
+)
 
 _LOGS_DIR_NAME = "logs"
 _SIDECAR_DIR_NAME = "sidecar"
 _HOOK_LOG_NAME = "hook.log"
+_HOOKS_DIR_NAME = "hooks"
 
 #: Where the liveness probe reads process argvs from (patchable in tests).
 _PROC_DIR = Path("/proc")
+
+#: How long to wait for the re-fired hook to spawn the wrapper and write
+#: its PID file.  The hook detaches the wrapper and returns promptly; the
+#: only slow path is its own SIGTERM→SIGKILL reap on a pid-file write
+#: failure (~2 s), so this is generous.
+_RESPAWN_TIMEOUT_S = 15.0
 
 
 @dataclass(frozen=True)
@@ -181,9 +199,56 @@ def _wrapper_argv_matches(pid: int, wrapper: Path, container_id: str) -> bool:
     return str(wrapper).encode() in args and container_id.encode() in args
 
 
+def respawn_supervisor(
+    container_id: str,
+    container_name: str,
+    *,
+    state_dir: Path | None = None,
+    container_pid: int | None = None,
+) -> SupervisorLiveness:
+    """Re-fire the OCI hook's supervisor spawn for a running container.
+
+    Idempotent remediation for a container that came up unsupervised: it
+    re-invokes the installed ``createRuntime`` hook with a synthesized OCI
+    state — exactly what crun feeds it at container start.  The hook
+    reconstructs the same env and paths, no-ops when a supervisor is
+    already alive, and writes the PID file, so re-running it is the safe,
+    canonical respawn (the same mechanism the poststop/stray machinery
+    already trusts) rather than a second copy of the spawn logic.
+
+    *container_pid* (the container init's host PID, if the caller has it)
+    lets the respawned supervisor watch the container directly; omitted,
+    the supervisor falls back to its ``podman wait`` watch.
+
+    Returns the liveness *after* the attempt.  A missing hook or sidecar
+    (setup never ran, or the container was torn down) comes back
+    ``alive=False`` without spawning anything.  Never raises.
+    """
+    root = state_dir or state_root()
+    hook = root / _HOOKS_DIR_NAME / _HOOK_SCRIPT_NAME
+    sidecar = root / _SIDECAR_DIR_NAME / f"{container_name}.json"
+    if hook.is_file() and sidecar.is_file():
+        state: dict[str, object] = {
+            "id": container_id,
+            "annotations": {_TRIGGER_ANNOTATION: str(sidecar)},
+        }
+        if container_pid is not None:
+            state["pid"] = container_pid
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            subprocess.run(  # nosec B603 — fixed argv, our own installed hook script
+                [sys.executable, str(hook), "createRuntime"],
+                input=json.dumps(state),
+                text=True,
+                timeout=_RESPAWN_TIMEOUT_S,
+                check=False,
+            )
+    return supervisor_liveness(container_id, state_dir=root)
+
+
 __all__ = [
     "ContainerDiagnostics",
     "SupervisorLiveness",
     "container_diagnostics",
+    "respawn_supervisor",
     "supervisor_liveness",
 ]

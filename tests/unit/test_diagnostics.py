@@ -5,13 +5,16 @@
 
 from __future__ import annotations
 
+import json
 import os
+import sys
 from pathlib import Path
 
 from terok_sandbox import (
     ContainerDiagnostics,
     container_diagnostics,
     diagnostics as diag,
+    respawn_supervisor,
     supervisor_liveness,
 )
 
@@ -120,3 +123,76 @@ class TestSupervisorLiveness:
         r = supervisor_liveness(_CID, state_dir=tmp_path)
         assert r.alive is False
         assert r.pid == pid
+
+
+class TestRespawnSupervisor:
+    """Re-firing the installed OCI hook to respawn a container's supervisor."""
+
+    @staticmethod
+    def _install_hook_and_sidecar(tmp_path: Path) -> None:
+        (tmp_path / "hooks").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "hooks" / "supervisor_hook.py").write_text("# hook")
+        (tmp_path / "sidecar").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "sidecar" / f"{_CNAME}.json").write_text("{}")
+
+    def test_reinvokes_hook_with_synthesized_oci_state(self, tmp_path: Path, monkeypatch) -> None:
+        self._install_hook_and_sidecar(tmp_path)
+        captured: dict[str, object] = {}
+
+        def _fake_run(argv, **kwargs):  # noqa: ANN001, ANN202
+            captured["argv"] = argv
+            captured["input"] = kwargs.get("input")
+            return None
+
+        monkeypatch.setattr(diag.subprocess, "run", _fake_run)
+        result = respawn_supervisor(_CID, _CNAME, state_dir=tmp_path)
+
+        argv = captured["argv"]
+        assert argv[0] == sys.executable
+        assert argv[1] == str(tmp_path / "hooks" / "supervisor_hook.py")
+        assert argv[2] == "createRuntime"
+        state = json.loads(captured["input"])
+        assert state["id"] == _CID
+        assert state["annotations"]["terok.sandbox.sidecar"] == str(
+            tmp_path / "sidecar" / f"{_CNAME}.json"
+        )
+        assert "pid" not in state
+        assert result.alive is False  # no PID file planted → not up afterwards
+
+    def test_container_pid_is_forwarded_when_given(self, tmp_path: Path, monkeypatch) -> None:
+        self._install_hook_and_sidecar(tmp_path)
+        captured: dict[str, object] = {}
+        monkeypatch.setattr(
+            diag.subprocess, "run", lambda argv, **kw: captured.update(input=kw.get("input"))
+        )
+        respawn_supervisor(_CID, _CNAME, state_dir=tmp_path, container_pid=4321)
+        assert json.loads(captured["input"])["pid"] == 4321
+
+    def test_missing_hook_skips_spawn(self, tmp_path: Path, monkeypatch) -> None:
+        # sidecar present, hook absent → nothing to re-fire.
+        (tmp_path / "sidecar").mkdir(parents=True)
+        (tmp_path / "sidecar" / f"{_CNAME}.json").write_text("{}")
+        ran = False
+
+        def _fake_run(*_a, **_k):  # noqa: ANN202
+            nonlocal ran
+            ran = True
+
+        monkeypatch.setattr(diag.subprocess, "run", _fake_run)
+        result = respawn_supervisor(_CID, _CNAME, state_dir=tmp_path)
+        assert ran is False
+        assert result.alive is False
+
+    def test_reports_alive_after_a_successful_respawn(self, tmp_path: Path, monkeypatch) -> None:
+        self._install_hook_and_sidecar(tmp_path)
+        pid = os.getpid()
+        wrapper = str(tmp_path / "supervisor_wrapper.py")
+        proc = _plant_supervisor(
+            tmp_path, _CID, pid=pid, cmdline=["/usr/bin/python3", wrapper, _CID]
+        )
+        monkeypatch.setattr(diag, "_PROC_DIR", proc)
+        monkeypatch.setattr(diag.subprocess, "run", lambda *_a, **_k: None)
+
+        result = respawn_supervisor(_CID, _CNAME, state_dir=tmp_path)
+        assert result.alive is True
+        assert result.pid == pid
