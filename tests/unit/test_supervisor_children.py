@@ -31,20 +31,30 @@ from terok_sandbox.supervisor.children import (
     _run_signer,
     _run_vault,
     _run_verdict,
+    _writable_paths,
     run_child,
 )
 from terok_sandbox.supervisor.main import SidecarConfig, SupervisorPaths
 
 
 @pytest.fixture(autouse=True)
-def _no_pdeathsig(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep ``run_child`` tests from arming PDEATHSIG on the test process.
+def _no_irreversible_self_restriction(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep ``run_child`` tests from irreversibly restricting the pytest process.
 
-    The real prctl would tie the *pytest* process's life to its parent —
-    a side effect that outlives the test.  The dedicated
-    ``TestArmParentDeathSignal`` cases bypass this stub explicitly.
+    Two of ``run_child``'s startup steps are process-wide and permanent:
+    ``_arm_parent_death_signal`` would tie the pytest process's life to its
+    parent, and ``restrict_writes`` would Landlock-confine every later test's
+    writes.  Both are stubbed to no-ops here; the dedicated
+    ``TestArmParentDeathSignal`` cases bypass the first explicitly, and
+    ``TestWritablePaths`` exercises the policy without applying it.
     """
     monkeypatch.setattr("terok_sandbox.supervisor.children._arm_parent_death_signal", lambda: True)
+    from terok_sandbox._util._landlock import LandlockReport
+
+    monkeypatch.setattr(
+        "terok_sandbox.supervisor.children.restrict_writes",
+        lambda _paths: LandlockReport(confined=True, reason="stubbed in tests"),
+    )
 
 
 @pytest.fixture
@@ -544,3 +554,65 @@ class TestChildSignalHandlers:
             _install_signal_handlers(stop)
         assert signal.SIGTERM in registered
         assert signal.SIGINT in registered
+
+
+class TestWritablePaths:
+    """The per-service write policy Landlock enforces — everything else is denied."""
+
+    def test_secretless_services_get_only_the_runtime_root(self, tmp_path: Path) -> None:
+        cfg = _socket_cfg(tmp_path)
+        for service in ("verdict", "clearance", "signer"):
+            assert _writable_paths(service, cfg) == [tmp_path / "rt"]
+
+    def test_vault_adds_its_db_directory(self, tmp_path: Path) -> None:
+        cfg = _socket_cfg(tmp_path)  # db_path = tmp_path / "vault.db"
+        assert _writable_paths("vault", cfg) == [tmp_path / "rt", tmp_path]
+
+    def test_gate_adds_the_mirror_tree_when_wired(self, tmp_path: Path) -> None:
+        mirror = tmp_path / "gate"
+        cfg = _socket_cfg(tmp_path, gate_base_path=mirror, gate_token="tok")  # nosec B106
+        assert _writable_paths("gate", cfg) == [tmp_path / "rt", mirror]
+
+    def test_unwired_gate_gets_only_the_runtime_root(self, tmp_path: Path) -> None:
+        assert _writable_paths("gate", _socket_cfg(tmp_path)) == [tmp_path / "rt"]
+
+
+class TestWriteConfinementWiring:
+    """``run_child`` confines writes on a normal start and stays open in debug mode."""
+
+    def _run(self, tmp_path: Path, *, allow_debugger: bool) -> list[list[Path]]:
+        sidecar = tmp_path / "demo.json"
+        payload: dict[str, object] = {
+            "container_name": "demo",
+            "ipc_mode": "socket",
+            "db_path": str(tmp_path / "vault.db"),
+            "runtime_dir": str(tmp_path / "rt" / "sandbox"),
+        }
+        if allow_debugger:
+            payload["allow_debugger"] = True
+        sidecar.write_text(json.dumps(payload))
+
+        confined: list[list[Path]] = []
+
+        def _spy(paths: list[Path]) -> object:
+            confined.append(paths)
+            from terok_sandbox._util._landlock import LandlockReport
+
+            return LandlockReport(confined=True, reason="spy")
+
+        async def _noop(cfg: object, paths: object, stop: object) -> None:
+            return None
+
+        with (
+            patch("terok_sandbox.supervisor.children.restrict_writes", _spy),
+            patch.dict("terok_sandbox.supervisor.children._RUNNERS", {"vault": _noop}, clear=False),
+        ):
+            assert run_child("vault", "abc123def456", sidecar) == 0
+        return confined
+
+    def test_normal_start_confines_to_the_service_policy(self, tmp_path: Path) -> None:
+        confined = self._run(tmp_path, allow_debugger=False)
+        assert confined == [[tmp_path / "rt", tmp_path]]  # vault: runtime root + db dir
+
+    def test_debug_mode_leaves_the_filesystem_open(self, tmp_path: Path) -> None:
+        assert self._run(tmp_path, allow_debugger=True) == []
