@@ -101,6 +101,9 @@ class FakeKeyutils:
         self.perms[serial] = perm
         return 0
 
+    def keyctl_link(self, _key: int, _ring: int) -> int:  # noqa: N802 (mirror C name)
+        return 0
+
     def keyctl_unlink(self, serial: int, _ring: int) -> int:
         desc = self._by_serial.pop(serial, None)
         if desc is not None:

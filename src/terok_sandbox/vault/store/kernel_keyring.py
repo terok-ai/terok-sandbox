@@ -44,7 +44,10 @@ passphrases):
   would fall to the uid class and be unable to find or read it.  We
   therefore open uid ``view|read|write|search|setattr`` and zero the
   group/other classes — no other user can read it, and any same-uid
-  terminal can read, revoke, or update it.
+  terminal can read, revoke, or update it.  Applying that mask needs
+  the writer to *possess* the key, so ``store`` first links ``@u`` into
+  the session keyring (a headless supervisor / cron / CI has no
+  pam_keyinit possession otherwise, and the setperm would fail EACCES).
 - *No auto-expiry.*  The cache persists for the whole login session —
   until an explicit ``vault lock`` (or a move to a durable tier), just
   like the tmpfs file it replaces — rather than timing out mid-session.
@@ -77,6 +80,10 @@ KEY_DESCRIPTION: Final = b"terok-sandbox:vault-passphrase"
 #: ``KEY_SPEC_USER_KEYRING`` from ``linux/keyctl.h`` — the special id
 #: that resolves to the caller's per-uid user keyring (``@u``).
 _KEY_SPEC_USER_KEYRING: Final = -4
+
+#: ``KEY_SPEC_SESSION_KEYRING`` (``@s``).  We link ``@u`` into it before
+#: writing so the process *possesses* the new key (see ``store``).
+_KEY_SPEC_SESSION_KEYRING: Final = -3
 
 #: Permission mask applied right after the key is created
 #: (``keyctl_setperm``).  Nibbles, high→low: possessor · user(uid) ·
@@ -123,6 +130,18 @@ def store(passphrase: str) -> bool:
     except _KeyutilsUnavailable as exc:
         _logger.warning("kernel keyring unavailable, not caching passphrase: %s", exc)
         return False
+
+    # Ensure this process *possesses* the key it is about to create, so
+    # the keyctl_setperm below is permitted.  A fresh key grants the
+    # possessor everything but the uid only ``view`` (0x3f010000); on a
+    # host without a pam_keyinit-linked session keyring — a headless
+    # supervisor, cron, CI — the process does not possess ``@u`` and so
+    # falls to that uid class, and setperm (which needs ``setattr``)
+    # fails EACCES.  Linking ``@u`` into the session keyring makes its
+    # keys possessed for this process; it is an idempotent no-op where a
+    # login session already did it.  Best-effort: if it fails, the
+    # setperm below simply fails as it would have anyway.
+    lib.keyctl_link(_KEY_SPEC_USER_KEYRING, _KEY_SPEC_SESSION_KEYRING)
 
     ctypes.set_errno(0)
     serial = lib.add_key(KEY_TYPE, KEY_DESCRIPTION, payload, len(payload), _KEY_SPEC_USER_KEYRING)
@@ -273,6 +292,8 @@ def _load_library() -> ctypes.CDLL:
         lib.keyctl_read.argtypes = [ctypes.c_int32, ctypes.c_char_p, ctypes.c_size_t]
         lib.keyctl_setperm.restype = ctypes.c_long
         lib.keyctl_setperm.argtypes = [ctypes.c_int32, ctypes.c_uint32]
+        lib.keyctl_link.restype = ctypes.c_long
+        lib.keyctl_link.argtypes = [ctypes.c_int32, ctypes.c_int32]
         lib.keyctl_unlink.restype = ctypes.c_long
         lib.keyctl_unlink.argtypes = [ctypes.c_int32, ctypes.c_int32]
         lib.keyctl_get_keyring_ID.restype = ctypes.c_int32
