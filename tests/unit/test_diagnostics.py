@@ -5,12 +5,28 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
-from terok_sandbox import ContainerDiagnostics, container_diagnostics, diagnostics as diag
+from terok_sandbox import (
+    ContainerDiagnostics,
+    container_diagnostics,
+    diagnostics as diag,
+    supervisor_liveness,
+)
 
 _CID = "abc123def456"
 _CNAME = "demo-cli-w9xk3"
+
+
+def _plant_supervisor(tmp_path: Path, cid: str, *, pid: int, cmdline: list[str]) -> Path:
+    """Write a PID file + a fake ``/proc/<pid>/cmdline``; return the fake /proc dir."""
+    (tmp_path / "pids").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "pids" / f"supervisor-{cid}.pid").write_text(f"{pid}\n")
+    proc = tmp_path / "proc"
+    (proc / str(pid)).mkdir(parents=True, exist_ok=True)
+    (proc / str(pid) / "cmdline").write_bytes(b"\x00".join(a.encode() for a in cmdline) + b"\x00")
+    return proc
 
 
 def test_paths_key_on_id_and_name(tmp_path: Path) -> None:
@@ -56,3 +72,51 @@ def test_frozen(tmp_path: Path) -> None:
     d = container_diagnostics(_CID, _CNAME, state_dir=tmp_path)
     with pytest.raises(dataclasses.FrozenInstanceError):
         d.log = tmp_path  # type: ignore[misc]
+
+
+class TestSupervisorLiveness:
+    """Probe of ``<state>/pids/supervisor-<id>.pid`` + ``/proc`` argv match."""
+
+    def test_no_pid_file_is_not_alive(self, tmp_path: Path) -> None:
+        r = supervisor_liveness(_CID, state_dir=tmp_path)
+        assert r.alive is False
+        assert r.pid is None
+        assert "no PID file" in r.detail
+
+    def test_alive_when_pid_live_and_argv_matches(self, tmp_path: Path, monkeypatch) -> None:
+        pid = os.getpid()  # this test process is unquestionably alive
+        wrapper = str(tmp_path / "supervisor_wrapper.py")
+        proc = _plant_supervisor(
+            tmp_path, _CID, pid=pid, cmdline=["/usr/bin/python3", wrapper, _CID, "/s.json"]
+        )
+        monkeypatch.setattr(diag, "_PROC_DIR", proc)
+        r = supervisor_liveness(_CID, state_dir=tmp_path)
+        assert r.alive is True
+        assert r.pid == pid
+        assert f"pid {pid}" in r.detail
+
+    def test_stale_when_pid_dead(self, tmp_path: Path, monkeypatch) -> None:
+        wrapper = str(tmp_path / "supervisor_wrapper.py")
+        proc = _plant_supervisor(
+            tmp_path, _CID, pid=4242, cmdline=["/usr/bin/python3", wrapper, _CID]
+        )
+        monkeypatch.setattr(diag, "_PROC_DIR", proc)
+        monkeypatch.setattr(diag, "_pid_alive", lambda _pid: False)
+        r = supervisor_liveness(_CID, state_dir=tmp_path)
+        assert r.alive is False
+        assert r.pid == 4242
+        assert "stale" in r.detail
+
+    def test_recycled_pid_without_container_id_is_not_ours(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """A live PID whose argv lacks *this* container's id is a recycled process."""
+        pid = os.getpid()
+        wrapper = str(tmp_path / "supervisor_wrapper.py")
+        proc = _plant_supervisor(
+            tmp_path, _CID, pid=pid, cmdline=["/usr/bin/python3", wrapper, "SOME-OTHER-ID"]
+        )
+        monkeypatch.setattr(diag, "_PROC_DIR", proc)
+        r = supervisor_liveness(_CID, state_dir=tmp_path)
+        assert r.alive is False
+        assert r.pid == pid
