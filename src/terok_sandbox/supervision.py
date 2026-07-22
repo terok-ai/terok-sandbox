@@ -128,6 +128,12 @@ def verify_supervision(
     return SupervisionStatus(container_name, tuple(expected), missing, hook_log)
 
 
+def warn_unsupervised(status: SupervisionStatus) -> None:
+    """Print the loud warning for a failed check to stderr; no-op when healthy."""
+    if status.missing:
+        print(status.warning(), file=sys.stderr)
+
+
 def _poll_until_bound(expected: tuple[Path, ...], timeout: float) -> tuple[Path, ...]:
     """Return the sockets from *expected* still unbound when *timeout* elapses."""
     deadline = time.monotonic() + timeout
@@ -145,12 +151,6 @@ def _is_socket(path: Path) -> bool:
         return stat.S_ISSOCK(path.stat().st_mode)
     except OSError:
         return False
-
-
-def warn_unsupervised(status: SupervisionStatus) -> None:
-    """Print the loud warning for a failed check to stderr; no-op when healthy."""
-    if status.missing:
-        print(status.warning(), file=sys.stderr)
 
 
 __all__ = ["SupervisionStatus", "verify_supervision", "warn_unsupervised"]
