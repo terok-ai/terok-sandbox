@@ -181,13 +181,18 @@ def provision_passphrase_tier(
         _persist_mode_choice(PassphraseTier.KEYRING)
         return TierProvisionResult(passphrase, PassphraseTier.KEYRING, generated)
 
-    if not kernel_keyring.store(passphrase):
-        raise RuntimeError(
-            "the kernel keyring is unavailable here"
-            f" ({kernel_keyring.unavailable_reason() or 'add_key failed'});"
-            " choose a different storage mode"
-        )
-    return TierProvisionResult(passphrase, PassphraseTier.KERNEL_KEYRING, generated)
+    if tier is PassphraseTier.KERNEL_KEYRING:
+        if not kernel_keyring.store(passphrase):
+            raise RuntimeError(
+                "the kernel keyring is unavailable here"
+                f" ({kernel_keyring.unavailable_reason() or 'add_key failed'});"
+                " choose a different storage mode"
+            )
+        return TierProvisionResult(passphrase, PassphraseTier.KERNEL_KEYRING, generated)
+
+    # Every member of PROVISIONABLE_TIERS is handled above; a new one
+    # reaching here should fail loudly, not silently land in the keyring.
+    raise ValueError(f"unhandled provisionable tier: {tier!r}")
 
 
 def credentials_provisioned(cfg: SandboxConfig | None = None) -> bool:

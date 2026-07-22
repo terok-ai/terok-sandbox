@@ -44,7 +44,7 @@ passphrases):
   would fall to the uid class and be unable to find or read it.  We
   therefore open uid ``view|read|write|search|setattr`` and zero the
   group/other classes — no other user can read it, and any same-uid
-  terminal can read, refresh, or revoke.
+  terminal can read, revoke, or update it.
 - *No auto-expiry.*  The cache persists for the whole login session —
   until an explicit ``vault lock`` (or a move to a durable tier), just
   like the tmpfs file it replaces — rather than timing out mid-session.
@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.util
+import functools
 import logging
 import os
 from typing import Final
@@ -84,8 +85,8 @@ _KEY_SPEC_USER_KEYRING: Final = -4
 #:
 #: - possessor ``0x3f`` — the creating process keeps full control;
 #: - uid ``0x2f`` — any same-uid terminal may view/read (open the DB),
-#:   write/setattr (``vault lock`` revoke + timeout refresh), and search
-#:   (locate it), but **not** link it elsewhere;
+#:   write/setattr (``vault lock`` revoke, re-``store`` update), and
+#:   search (locate it), but **not** link it elsewhere;
 #: - group ``0x00`` / other ``0x00`` — no other user can even see it.
 _KEY_PERM: Final = 0x3F2F0000
 
@@ -95,88 +96,13 @@ _KEY_PERM: Final = 0x3F2F0000
 _MAX_PAYLOAD_BYTES: Final = 4096
 
 
-class _KeyutilsUnavailable(Exception):
-    """``libkeyutils`` could not be loaded or the facility is absent."""
-
-
-def _load_library() -> ctypes.CDLL:
-    """Return a configured ``libkeyutils`` handle, or raise ``_KeyutilsUnavailable``.
-
-    Prefers ``ctypes.util.find_library`` (walks the ``ld.so`` cache) and
-    falls back to the ``.so.1`` soname directly — the runtime library is
-    present wherever the containers stack is, even when the ``-dev``
-    package (and the bare ``libkeyutils.so`` symlink ``find_library``
-    needs) is not installed.
-    """
-    soname = ctypes.util.find_library("keyutils") or "libkeyutils.so.1"
-    try:
-        lib = ctypes.CDLL(soname, use_errno=True)
-    except OSError as exc:
-        raise _KeyutilsUnavailable(f"libkeyutils not loadable ({exc})") from exc
-
-    # key_serial_t is a signed 32-bit int; key_perm_t an unsigned 32-bit.
-    lib.add_key.restype = ctypes.c_int32
-    lib.add_key.argtypes = [
-        ctypes.c_char_p,
-        ctypes.c_char_p,
-        ctypes.c_void_p,
-        ctypes.c_size_t,
-        ctypes.c_int32,
-    ]
-    lib.keyctl_search.restype = ctypes.c_int32
-    lib.keyctl_search.argtypes = [
-        ctypes.c_int32,
-        ctypes.c_char_p,
-        ctypes.c_char_p,
-        ctypes.c_int32,
-    ]
-    lib.keyctl_read.restype = ctypes.c_long
-    lib.keyctl_read.argtypes = [ctypes.c_int32, ctypes.c_char_p, ctypes.c_size_t]
-    lib.keyctl_setperm.restype = ctypes.c_long
-    lib.keyctl_setperm.argtypes = [ctypes.c_int32, ctypes.c_uint32]
-    lib.keyctl_unlink.restype = ctypes.c_long
-    lib.keyctl_unlink.argtypes = [ctypes.c_int32, ctypes.c_int32]
-    lib.keyctl_get_keyring_ID.restype = ctypes.c_int32
-    lib.keyctl_get_keyring_ID.argtypes = [ctypes.c_int32, ctypes.c_int32]
-    return lib
-
-
-def unavailable_reason() -> str | None:
-    """Return why the kernel keyring can't be used here, or ``None`` if it can.
-
-    The setup/probe gate — mirrors
-    [`systemd_creds.unavailable_reason`][terok_sandbox.vault.store.systemd_creds.unavailable_reason]
-    so the frontends decide whether to *offer* the tier the same way for
-    both.  Side-effect free: it only resolves the id of the (already
-    existing) user keyring, creating and reading nothing.  A ``None``
-    return means "usable"; any string is a human reason a setup chooser
-    can surface.
-    """
-    try:
-        lib = _load_library()
-    except _KeyutilsUnavailable as exc:
-        return str(exc)
-    # keyctl_get_keyring_ID(@u, create=0): resolves the user keyring's
-    # real serial without creating anything.  ENOSYS ⇒ kernel built
-    # without CONFIG_KEYS (or a syscall-translation layer like WSL1);
-    # any other failure ⇒ the tier can't run here.
-    ctypes.set_errno(0)
-    if lib.keyctl_get_keyring_ID(_KEY_SPEC_USER_KEYRING, 0) != -1:
-        return None
-    errno = ctypes.get_errno()
-    if errno == 38:  # ENOSYS
-        return "kernel built without keyring support (CONFIG_KEYS)"
-    return f"user keyring unreachable ({os.strerror(errno)})"
-
-
 def store(passphrase: str) -> bool:
     """Cache *passphrase* in the user keyring; return success.
 
     Adds (or, if it already exists, updates in place — so the footprint
     stays a single long-lived key rather than one per unlock) a
     ``user``-type key under [`KEY_DESCRIPTION`][terok_sandbox.vault.store.kernel_keyring.KEY_DESCRIPTION]
-    in ``@u`` and tightens its permission mask to
-    [`_KEY_PERM`][terok_sandbox.vault.store.kernel_keyring._KEY_PERM].
+    in ``@u`` and tightens its permission mask to possessor+uid (``_KEY_PERM``).
     No timeout is armed: the cache persists for the whole login session
     until an explicit ``vault lock`` (or a move to a durable tier),
     matching the tmpfs file it replaces.  Any failure (facility
@@ -249,11 +175,11 @@ def load() -> str | None:
 def forget() -> bool:
     """Unlink the cached passphrase from the user keyring; return success.
 
-    Used by ``vault lock`` / relock.  A key that isn't there (already
-    expired or never stored) counts as success — the desired end state
-    is "no cached passphrase".  Works from any same-uid terminal because
-    [`_KEY_PERM`][terok_sandbox.vault.store.kernel_keyring._KEY_PERM]
-    grants the uid class ``write``.
+    Used by ``vault lock`` / relock.  A key that isn't there (never
+    stored, or already cleared) counts as success — the desired end
+    state is "no cached passphrase".  Works from any same-uid terminal
+    because the permission mask (``_KEY_PERM``) grants the uid class
+    ``write``.
     """
     try:
         lib = _load_library()
@@ -268,6 +194,94 @@ def forget() -> bool:
         _logger.warning("kernel keyring keyctl_unlink failed: %s", os.strerror(ctypes.get_errno()))
         return False
     return True
+
+
+def unavailable_reason() -> str | None:
+    """Return why the kernel keyring can't be used here, or ``None`` if it can.
+
+    The setup/probe gate — mirrors
+    [`systemd_creds.unavailable_reason`][terok_sandbox.vault.store.systemd_creds.unavailable_reason]
+    so the frontends decide whether to *offer* the tier the same way for
+    both.  Side-effect free: it only resolves the id of the (already
+    existing) user keyring, creating and reading nothing.  A ``None``
+    return means "usable"; any string is a human reason a setup chooser
+    can surface.
+    """
+    try:
+        lib = _load_library()
+    except _KeyutilsUnavailable as exc:
+        return str(exc)
+    # keyctl_get_keyring_ID(@u, create=0): resolves the user keyring's
+    # real serial without creating anything.  ENOSYS ⇒ kernel built
+    # without CONFIG_KEYS (or a syscall-translation layer like WSL1);
+    # any other failure ⇒ the tier can't run here.
+    ctypes.set_errno(0)
+    if lib.keyctl_get_keyring_ID(_KEY_SPEC_USER_KEYRING, 0) != -1:
+        return None
+    errno = ctypes.get_errno()
+    if errno == 38:  # ENOSYS
+        return "kernel built without keyring support (CONFIG_KEYS)"
+    return f"user keyring unreachable ({os.strerror(errno)})"
+
+
+# ── Library binding (private) ───────────────────────────────────────
+
+
+class _KeyutilsUnavailable(Exception):
+    """``libkeyutils`` could not be loaded or the facility is absent."""
+
+
+@functools.cache
+def _load_library() -> ctypes.CDLL:
+    """Return a configured ``libkeyutils`` handle, or raise ``_KeyutilsUnavailable``.
+
+    Prefers ``ctypes.util.find_library`` (walks the ``ld.so`` cache) and
+    falls back to the ``.so.1`` soname directly — the runtime library is
+    present wherever the containers stack is, even when the ``-dev``
+    package (and the bare ``libkeyutils.so`` symlink ``find_library``
+    needs) is not installed.
+
+    Cached: the handle and its ``argtypes``/``restype`` registrations are
+    process-stable, and ``vault status`` probes the tier a few times per
+    render.  ``functools.cache`` does not memoise the exception, so a
+    failed load is simply retried on the next call.  Both a load failure
+    (``OSError``) and a missing/ABI-mismatched symbol (``AttributeError``
+    from binding a function this ``libkeyutils`` doesn't export) degrade
+    to ``_KeyutilsUnavailable`` — the module's "drops out of the chain"
+    contract must hold even against a wrong library on the ``ld.so`` path.
+    """
+    soname = ctypes.util.find_library("keyutils") or "libkeyutils.so.1"
+    try:
+        lib = ctypes.CDLL(soname, use_errno=True)
+        # key_serial_t is a signed 32-bit int; key_perm_t an unsigned 32-bit.
+        lib.add_key.restype = ctypes.c_int32
+        lib.add_key.argtypes = [
+            ctypes.c_char_p,
+            ctypes.c_char_p,
+            ctypes.c_void_p,
+            ctypes.c_size_t,
+            ctypes.c_int32,
+        ]
+        lib.keyctl_search.restype = ctypes.c_int32
+        lib.keyctl_search.argtypes = [
+            ctypes.c_int32,
+            ctypes.c_char_p,
+            ctypes.c_char_p,
+            ctypes.c_int32,
+        ]
+        lib.keyctl_read.restype = ctypes.c_long
+        lib.keyctl_read.argtypes = [ctypes.c_int32, ctypes.c_char_p, ctypes.c_size_t]
+        lib.keyctl_setperm.restype = ctypes.c_long
+        lib.keyctl_setperm.argtypes = [ctypes.c_int32, ctypes.c_uint32]
+        lib.keyctl_unlink.restype = ctypes.c_long
+        lib.keyctl_unlink.argtypes = [ctypes.c_int32, ctypes.c_int32]
+        lib.keyctl_get_keyring_ID.restype = ctypes.c_int32
+        lib.keyctl_get_keyring_ID.argtypes = [ctypes.c_int32, ctypes.c_int32]
+    except OSError as exc:
+        raise _KeyutilsUnavailable(f"libkeyutils not loadable ({exc})") from exc
+    except AttributeError as exc:
+        raise _KeyutilsUnavailable(f"libkeyutils missing expected symbol ({exc})") from exc
+    return lib
 
 
 __all__ = [

@@ -92,7 +92,7 @@ def _seed_db(cfg: SandboxConfig, passphrase: str) -> None:
     db.close()
 
 
-def _write_session(cfg: SandboxConfig, value: str) -> None:
+def _write_kernel_keyring_cache(cfg: SandboxConfig, value: str) -> None:
     """Land *value* on the volatile kernel-keyring tier."""
     _KERNEL_CACHE["pw"] = value
 
@@ -310,10 +310,10 @@ class TestRekeyInPlaceContentionGuards:
 class TestChangePassphrase:
     """The prompt-free orchestration shared by CLI and TUI."""
 
-    def test_happy_path_over_the_session_tier(self, tmp_path: Path) -> None:
+    def test_happy_path_over_the_kernel_keyring_tier(self, tmp_path: Path) -> None:
         cfg = _cfg(tmp_path)
         _seed_db(cfg, OLD)
-        _write_session(cfg, OLD)
+        _write_kernel_keyring_cache(cfg, OLD)
         acknowledge(cfg.vault_recovery_marker_file)
 
         result = change_passphrase(cfg, new=NEW)
@@ -332,7 +332,7 @@ class TestChangePassphrase:
     def test_minted_when_new_is_omitted(self, tmp_path: Path) -> None:
         cfg = _cfg(tmp_path)
         _seed_db(cfg, OLD)
-        _write_session(cfg, OLD)
+        _write_kernel_keyring_cache(cfg, OLD)
 
         result = change_passphrase(cfg)
 
@@ -343,14 +343,16 @@ class TestChangePassphrase:
         """A session file left holding a stale value must not block the change."""
         cfg = _cfg(tmp_path)
         _seed_db(cfg, OLD)
-        _write_session(cfg, "stale-earlier-value")
+        _write_kernel_keyring_cache(cfg, "stale-earlier-value")
 
         result = change_passphrase(cfg, old=OLD, new=NEW)
 
         assert result.rekeyed
         assert _KERNEL_CACHE["pw"] == NEW
 
-    def test_locked_vault_with_supplied_old_lands_the_session_tier(self, tmp_path: Path) -> None:
+    def test_locked_vault_with_supplied_old_lands_the_kernel_keyring_tier(
+        self, tmp_path: Path
+    ) -> None:
         """No tier holds material → the new value must land somewhere reachable."""
         cfg = _cfg(tmp_path)
         _seed_db(cfg, OLD)
@@ -363,7 +365,7 @@ class TestChangePassphrase:
     def test_tier_only_change_without_a_db(self, tmp_path: Path) -> None:
         """Pre-first-use: nothing to rekey, but the tier value still rotates."""
         cfg = _cfg(tmp_path)
-        _write_session(cfg, OLD)
+        _write_kernel_keyring_cache(cfg, OLD)
 
         result = change_passphrase(cfg, new=NEW)
 
@@ -410,7 +412,7 @@ class TestChangePassphrase:
     def test_identical_new_is_rejected(self, tmp_path: Path) -> None:
         cfg = _cfg(tmp_path)
         _seed_db(cfg, OLD)
-        _write_session(cfg, OLD)
+        _write_kernel_keyring_cache(cfg, OLD)
 
         with pytest.raises(ValueError, match="identical"):
             change_passphrase(cfg, new=OLD)
@@ -449,7 +451,7 @@ class TestChangePassphrase:
     def test_wrong_old_raises_and_changes_nothing(self, tmp_path: Path) -> None:
         cfg = _cfg(tmp_path)
         _seed_db(cfg, OLD)
-        _write_session(cfg, OLD)
+        _write_kernel_keyring_cache(cfg, OLD)
         acknowledge(cfg.vault_recovery_marker_file)
 
         with pytest.raises(WrongPassphraseError):
@@ -642,7 +644,7 @@ class TestChangeOrExit:
         """ValueError refusals (here: identical new) exit with the refusal text."""
         cfg = _cfg(tmp_path)
         _seed_db(cfg, OLD)
-        _write_session(cfg, OLD)
+        _write_kernel_keyring_cache(cfg, OLD)
 
         with pytest.raises(SystemExit, match="nothing was changed: .*identical"):
             _change_or_exit(cfg, old=OLD, new=OLD)
@@ -685,7 +687,7 @@ class TestChangeHandlerPiped:
     ) -> None:
         cfg = _cfg(tmp_path)
         _seed_db(cfg, OLD)
-        _write_session(cfg, OLD)
+        _write_kernel_keyring_cache(cfg, OLD)
         monkeypatch.setattr(sys, "stdin", io.StringIO(NEW + "\n"))
 
         _handle_vault_passphrase_change(cfg=cfg)
@@ -700,7 +702,7 @@ class TestChangeHandlerPiped:
     ) -> None:
         """Pre-first-use (no DB): the tier rotates, and no re-encryption is claimed."""
         cfg = _cfg(tmp_path)
-        _write_session(cfg, OLD)
+        _write_kernel_keyring_cache(cfg, OLD)
         monkeypatch.setattr(sys, "stdin", io.StringIO(NEW + "\n"))
 
         _handle_vault_passphrase_change(cfg=cfg)
@@ -735,7 +737,7 @@ class TestChangeHandlerPiped:
         """A minted value needs a TTY to be displayed on — refuse up front."""
         cfg = _cfg(tmp_path)
         _seed_db(cfg, OLD)
-        _write_session(cfg, OLD)
+        _write_kernel_keyring_cache(cfg, OLD)
         acknowledge(cfg.vault_recovery_marker_file)
         monkeypatch.setattr(sys, "stdin", io.StringIO("\n"))
 
@@ -756,7 +758,7 @@ class TestChangeHandlerTTY:
 
         cfg = _cfg(tmp_path)
         _seed_db(cfg, OLD)
-        _write_session(cfg, OLD)
+        _write_kernel_keyring_cache(cfg, OLD)
         monkeypatch.setattr("sys.stdin.isatty", lambda: True)
         monkeypatch.setattr(encryption, "prompt_new_passphrase", lambda: None)
         announced: list[str] = []
@@ -822,7 +824,7 @@ class TestPlanProvisioning:
 
         monkeypatch.setattr(systemd_creds, "is_available", lambda: False)
         cfg = _cfg(tmp_path)
-        _write_session(cfg, OLD)
+        _write_kernel_keyring_cache(cfg, OLD)
         plan = plan_provisioning(cfg)
 
         assert plan.provisioned

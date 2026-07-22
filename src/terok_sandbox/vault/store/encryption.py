@@ -225,6 +225,9 @@ def probe_passphrase_chain(
     interactive ``prompt`` tier is omitted — it stores nothing, so it
     can never be "present".
     """
+    # Read the kernel keyring once and reuse it for both the presence
+    # bool and its detail line, rather than probing the tier twice.
+    kernel_cached = bool(_kernel_keyring.load())
     return (
         TierPresence(
             PassphraseTier.SYSTEMD_CREDS,
@@ -240,8 +243,8 @@ def probe_passphrase_chain(
         ),
         TierPresence(
             PassphraseTier.KERNEL_KEYRING,
-            bool(_kernel_keyring.load()),
-            _kernel_keyring_detail(),
+            kernel_cached,
+            _kernel_keyring_detail(cached=kernel_cached),
         ),
         TierPresence(
             PassphraseTier.PASSPHRASE_COMMAND,
@@ -279,21 +282,21 @@ def _systemd_creds_detail(path: Path | None) -> str:
     return f"{base} — unusable here: {reason}" if reason else base
 
 
-def _kernel_keyring_detail() -> str:
+def _kernel_keyring_detail(*, cached: bool) -> str:
     """Human detail for the kernel-keyring tier in the ``vault status`` chain.
 
     Distinguishes the three states an operator cares about: the facility
     can't run here at all (``unusable here: <reason>`` — no
     ``libkeyutils``, ``CONFIG_KEYS`` off, WSL1), the tier is usable but
     holds nothing right now (``no passphrase cached``), and a passphrase
-    is currently cached (``cached in the user keyring``).  The presence
-    bool the row carries is the load-bearing signal; this only colours
-    it.
+    is currently cached (``cached in the user keyring``).  *cached* is
+    the presence bool the caller already computed, threaded in so status
+    probes the keyring once rather than re-reading it here.
     """
     reason = _kernel_keyring.unavailable_reason()
     if reason is not None:
         return f"unusable here: {reason}"
-    return "cached in the user keyring" if _kernel_keyring.load() else "no passphrase cached"
+    return "cached in the user keyring" if cached else "no passphrase cached"
 
 
 # ── Tier primitives ─────────────────────────────────────────────────
