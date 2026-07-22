@@ -491,15 +491,16 @@ class TestDetectGpuVendors:
             assert detect_gpu_vendors() == frozenset({"nvidia"})
 
     def test_non_intel_render_node_does_not_count(self, tmp_path: Path) -> None:
-        """A render node from another vendor doesn't enable intel."""
-        vendor = tmp_path / "drm" / "renderD129" / "device" / "vendor"
-        vendor.parent.mkdir(parents=True)
-        vendor.write_text("0x1002\n")
-        with (
-            patch("terok_sandbox.runtime.gpu._declared_cdi_kinds", return_value=frozenset()),
-            patch("terok_sandbox.runtime.gpu._KFD_DEVICE", tmp_path / "kfd"),
-            patch("terok_sandbox.runtime.gpu._DRM_SYSFS", tmp_path / "drm"),
-        ):
+        """A render node from another vendor doesn't enable intel.
+
+        Routed through the full ``_host`` isolation so the real machine's
+        GPU can't leak in through the un-patched nvidia device probes — on
+        the NVIDIA matrix host, ``/dev/nvidiactl`` exists and would
+        otherwise surface ``nvidia`` here.  Only a synthetic AMD
+        (``0x1002``) render node is present, which grants neither intel
+        (wrong PCI vendor) nor amd (no KFD device).
+        """
+        with _host(drm_nodes={"renderD129": ("0x1002", "0000:00:03.0")}, tmp_path=tmp_path):
             assert detect_gpu_vendors() == frozenset()
 
 
