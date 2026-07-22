@@ -35,6 +35,7 @@ from socketserver import ThreadingMixIn
 from typing import IO, Any, cast
 
 from .._util._selinux import socket_selinux_context
+from .hooks import hooks_dir_for, install_hooks
 
 _logger = logging.getLogger("terok-gate")
 
@@ -123,6 +124,7 @@ def _build_cgi_env(
     content_type: str,
     protocol: str,
     content_length: int,
+    hooks_path: Path,
     http_headers: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Build the CGI environment for ``git http-backend``.
@@ -130,6 +132,12 @@ def _build_cgi_env(
     Inherits ``PATH`` and ``HOME`` from the parent process so that
     ``git http-backend`` can locate git sub-commands (e.g. ``git-upload-pack``)
     and read user config.
+
+    ``core.hooksPath`` is pinned to *hooks_path* — the sandbox-owned
+    directory outside every gate repo (see
+    [`install_hooks`][terok_sandbox.gate.hooks.install_hooks]).  This keeps
+    the original defense-in-depth property (hooks can never originate from
+    repo content) while running the sandbox's own push hooks.
 
     *http_headers* maps CGI variable names (e.g. ``HTTP_CONTENT_ENCODING``) to
     their values.  Only non-empty values are included.
@@ -150,9 +158,10 @@ def _build_cgi_env(
             "CONTENT_TYPE": content_type,
             "SERVER_PROTOCOL": protocol,
             "REMOTE_USER": "token",
-            # Defense in depth: disable hooks
+            # Defense in depth: hooks come only from the sandbox-owned dir,
+            # never from repo content.
             "GIT_CONFIG_KEY_0": "core.hooksPath",
-            "GIT_CONFIG_VALUE_0": "/dev/null",
+            "GIT_CONFIG_VALUE_0": str(hooks_path),
             "GIT_CONFIG_COUNT": "1",
         }
     )
@@ -301,6 +310,7 @@ def _make_handler_class(
                 self.headers.get("Content-Type", ""),
                 self.request_version,
                 content_length,
+                hooks_dir_for(base_path),
                 http_headers=http_headers,
             )
 
@@ -468,9 +478,15 @@ class GateServer:
         self._thread: threading.Thread | None = None
 
     async def start(self) -> None:
-        """Bind the listener and serve it on a daemon thread."""
+        """Bind the listener and serve it on a daemon thread.
+
+        Also (re-)renders the sandbox-owned push hooks next to the gates —
+        idempotent, so every server start converges the hook content to
+        this package version's.
+        """
         import asyncio
 
+        install_hooks(hooks_dir_for(self._mirror_root))
         handler = _make_handler_class(
             self._mirror_root, _SingleTokenStore(self._token, self._scope)
         )

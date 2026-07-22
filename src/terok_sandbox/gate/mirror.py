@@ -39,8 +39,14 @@ The gate keeps three ref namespaces, and the split is what makes sync safe:
   it is *lossless*), anything else diverged locally (*lossy*).
 - ``refs/terok/backup/<branch>/<stamp>-<sha12>`` — the old tip of every
   destructively changed branch, written before the change so nothing ever
-  becomes unreachable.  Expired per the retention policy by
-  [`prune_backups`][terok_sandbox.gate.mirror.GitGate.prune_backups].
+  becomes unreachable.  Sync writes these before applying a confirmed
+  destructive op; the gate's ``post-receive`` hook (see
+  [`terok_sandbox.gate.hooks`][]) writes the same refs when an *agent*
+  force-pushes or deletes a branch, so both sides of the gate share one
+  backup trail.  Expired per the retention policy by
+  [`prune_backups`][terok_sandbox.gate.mirror.GitGate.prune_backups];
+  behind the named backups, ``logAllRefUpdates=always`` keeps the reflog
+  as the unnamed last resort (``gc.reflogExpire``, 90 days by default).
 - ``refs/terok/attic/<branch>`` — the last upstream tip a branch had
   before it went pending (deleted upstream, or rewritten while the gate
   head stayed behind).  The pruning, force-updating snapshot forgets that
@@ -960,6 +966,16 @@ class GitGate:
         ref = f"{_BACKUP_PREFIX}{branch}/{stamp}-{sha[:12]}"
         result = _git(self._gate_path, "update-ref", ref, sha)
         return ref if result.returncode == 0 else None
+
+    def branch_heads(self) -> dict[str, str]:
+        """Return ``{branch: sha}`` for every ``refs/heads/*`` in the gate.
+
+        The gate's heads are the complete record of what agents have
+        published — tasks create and switch branches freely, so callers
+        wanting "everything the agent pushed" enumerate here, never from
+        task metadata.
+        """
+        return _read_refs(self._gate_path, _HEADS_PREFIX)
 
     def list_backups(self) -> list[BackupRef]:
         """Return all backup refs, newest first, parsed from their names."""

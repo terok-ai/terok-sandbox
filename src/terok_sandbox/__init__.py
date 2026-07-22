@@ -107,6 +107,7 @@ _LAZY: dict[str, str] = {
     "GateStalenessInfo": "gate.mirror:GateStalenessInfo",
     "GateSyncResult": "gate.mirror:GateSyncResult",
     "GitGate": "gate.mirror:GitGate",
+    "PUSH_MARKER_FILENAME": "gate.hooks:PUSH_MARKER_FILENAME",
     "PendingOp": "gate.mirror:PendingOp",
     "is_ssh_url": "gate.mirror:is_ssh_url",
     "GateServer": "gate.server:GateServer",
@@ -273,6 +274,7 @@ if TYPE_CHECKING:
     )
     from .diagnostics import ContainerDiagnostics, container_diagnostics
     from .doctor import CheckVerdict, DoctorCheck, sandbox_doctor_checks
+    from .gate.hooks import PUSH_MARKER_FILENAME
     from .gate.mirror import (
         AppliedOp,
         ApplyPendingResult,
@@ -435,6 +437,7 @@ __all__ = [
     "GateStalenessInfo",
     "GateSyncResult",
     "GitGate",
+    "PUSH_MARKER_FILENAME",
     "PendingOp",
     "is_ssh_url",
     # Credentials + vault
