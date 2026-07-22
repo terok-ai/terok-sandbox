@@ -46,6 +46,7 @@ from typing import TYPE_CHECKING
 
 from terok_util import harden_self
 
+from .._util._landlock import restrict_writes
 from .sidecar import SupervisorPaths, load_sidecar
 
 if TYPE_CHECKING:
@@ -308,10 +309,37 @@ def run_child(service: str, container_id: str, sidecar_path: Path) -> int:
         # purpose, so a partial report is not noteworthy there.)
         _logger.debug("%s child hardening partial: %s", service, report)
 
+    if not cfg.allow_debugger:
+        # Confine writes to this service's own lane so a bug in a binary it
+        # runs (gate → git, vault → systemd-creds) can't tamper outside it.
+        # Debug mode keeps the filesystem open for dump/trace tools.
+        fs = restrict_writes(_writable_paths(service, cfg))
+        if not fs.confined:
+            _logger.debug("%s child write-confinement not applied: %s", service, fs.reason)
+
     paths = SupervisorPaths.for_container(
         container_id, cfg.container_name, sidecar_path, cfg.runtime_dir
     )
     return asyncio.run(_drive(service, runner, cfg, paths))
+
+
+def _writable_paths(service: str, cfg: SidecarConfig) -> list[Path]:
+    """The directories *service*'s child may write into — everything else is denied.
+
+    Every child needs its socket directory, and those live under the shared
+    terok runtime root: ``cfg.runtime_dir``'s parent covers both the
+    sandbox-namespaced sockets (vault/gate/ssh, under ``runtime_dir/run``)
+    and the cross-package ones (clearance/verdict/control, beside it).  Only
+    the two secret-holders add on-disk data — vault the SQLCipher store (its
+    journal/WAL land beside it), gate the mirror tree it serves; verdict,
+    clearance, and signer keep nothing on disk of their own.
+    """
+    writable = [cfg.runtime_dir.parent]
+    if service == "vault":
+        writable.append(cfg.db_path.parent)
+    elif service == "gate" and cfg.gate_base_path:
+        writable.append(cfg.gate_base_path)
+    return writable
 
 
 async def _drive(
