@@ -177,13 +177,17 @@ class TestAgentOpBackups:
         _git(work, "reset", "-q", "--hard", "HEAD~1")
         new = _commit(work, "a.txt", "rewritten\n")
 
+        # A plain file where the backup subtree would live makes
+        # refs/terok/backup/* structurally impossible — even for a root
+        # test runner that permission bits wouldn't stop.
         refs_terok = gate._gate_path / "refs" / "terok"
         refs_terok.mkdir(parents=True, exist_ok=True)
-        refs_terok.chmod(0o555)
+        blocker = refs_terok / "backup"
+        blocker.write_text("not a directory\n")
         try:
             stderr = _hooked_push(work, hooks_dir, "HEAD:refs/heads/feat/x", force=True)
         finally:
-            refs_terok.chmod(0o755)
+            blocker.unlink()
 
         assert "WARNING could not back up" in stderr
         assert _backups(gate) == []

@@ -35,7 +35,6 @@ from socketserver import ThreadingMixIn
 from typing import IO, Any, cast
 
 from .._util._selinux import socket_selinux_context
-from .hooks import hooks_dir_for, install_hooks
 
 _logger = logging.getLogger("terok-gate")
 
@@ -124,7 +123,7 @@ def _build_cgi_env(
     content_type: str,
     protocol: str,
     content_length: int,
-    hooks_path: Path,
+    hooks_path: Path | None,
     http_headers: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Build the CGI environment for ``git http-backend``.
@@ -135,9 +134,10 @@ def _build_cgi_env(
 
     ``core.hooksPath`` is pinned to *hooks_path* — the sandbox-owned
     directory outside every gate repo (see
-    [`install_hooks`][terok_sandbox.gate.hooks.install_hooks]).  This keeps
-    the original defense-in-depth property (hooks can never originate from
-    repo content) while running the sandbox's own push hooks.
+    [`install_hooks`][terok_sandbox.gate.hooks.install_hooks]) — or to
+    ``/dev/null`` when the composer supplied none.  Either way the
+    defense-in-depth property holds: hooks can never originate from repo
+    content.
 
     *http_headers* maps CGI variable names (e.g. ``HTTP_CONTENT_ENCODING``) to
     their values.  Only non-empty values are included.
@@ -161,7 +161,7 @@ def _build_cgi_env(
             # Defense in depth: hooks come only from the sandbox-owned dir,
             # never from repo content.
             "GIT_CONFIG_KEY_0": "core.hooksPath",
-            "GIT_CONFIG_VALUE_0": str(hooks_path),
+            "GIT_CONFIG_VALUE_0": str(hooks_path) if hooks_path else "/dev/null",
             "GIT_CONFIG_COUNT": "1",
         }
     )
@@ -227,7 +227,7 @@ def _stream_response_body(stdout: IO[bytes], wfile: Any) -> None:
 
 
 def _make_handler_class(
-    base_path: Path, token_store: _SingleTokenStore
+    base_path: Path, token_store: _SingleTokenStore, hooks_path: Path | None = None
 ) -> type[BaseHTTPRequestHandler]:
     """Create a request handler class bound to the given base_path and token_store."""
 
@@ -310,7 +310,7 @@ def _make_handler_class(
                 self.headers.get("Content-Type", ""),
                 self.request_version,
                 content_length,
-                hooks_dir_for(base_path),
+                hooks_path,
                 http_headers=http_headers,
             )
 
@@ -466,9 +466,18 @@ class GateServer:
         socket_path: Path | None = None,
         host: str | None = None,
         port: int | None = None,
+        hooks_path: Path | None = None,
     ) -> None:
-        """Bind the gate's configuration; ``start`` brings the listener up."""
+        """Bind the gate's configuration; ``start`` brings the listener up.
+
+        *hooks_path* is the sandbox-owned hooks directory the composer
+        prepared (see [`install_hooks`][terok_sandbox.gate.hooks.install_hooks]);
+        ``None`` serves with hooks disabled (``core.hooksPath=/dev/null``).
+        Plain value by design — this component stays free of gate-model
+        imports.
+        """
         self._mirror_root = mirror_root
+        self._hooks_path = hooks_path
         self._token = token
         self._scope = scope
         self._socket_path = socket_path
@@ -478,17 +487,11 @@ class GateServer:
         self._thread: threading.Thread | None = None
 
     async def start(self) -> None:
-        """Bind the listener and serve it on a daemon thread.
-
-        Also (re-)renders the sandbox-owned push hooks next to the gates —
-        idempotent, so every server start converges the hook content to
-        this package version's.
-        """
+        """Bind the listener and serve it on a daemon thread."""
         import asyncio
 
-        install_hooks(hooks_dir_for(self._mirror_root))
         handler = _make_handler_class(
-            self._mirror_root, _SingleTokenStore(self._token, self._scope)
+            self._mirror_root, _SingleTokenStore(self._token, self._scope), self._hooks_path
         )
         if self._socket_path is not None:
             server: HTTPServer = await asyncio.get_running_loop().run_in_executor(

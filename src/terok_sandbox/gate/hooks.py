@@ -8,8 +8,9 @@ The gate's HTTP server historically pointed ``core.hooksPath`` at
 content must never become host-side code.  This module keeps that
 property while inverting the mechanism: hooks now live in a directory the
 sandbox owns *outside* every gate repo, rendered from the constants below
-at server start.  Repo content still can't inject code; the operator side
-gains exactly one enforcement point.
+by the supervisor when it composes the gate (the server itself only
+receives the path).  Repo content still can't inject code; the operator
+side gains exactly one enforcement point.
 
 One hook is installed, ``post-receive``, and it does two things:
 
@@ -41,6 +42,7 @@ and behave as before.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from terok_sandbox.gate.mirror import (
@@ -149,7 +151,9 @@ def install_hooks(hooks_dir: Path) -> None:
                 continue
         except (FileNotFoundError, UnicodeDecodeError):
             pass
-        tmp = hooks_dir / f".{name}.tmp"
+        # Per-invocation tmp name: concurrent installers must never rename
+        # each other's half-written file out from under themselves.
+        tmp = hooks_dir / f".{name}.{os.getpid()}.tmp"
         tmp.write_text(content, encoding="utf-8")
         tmp.chmod(0o755)
-        tmp.rename(target)
+        tmp.replace(target)

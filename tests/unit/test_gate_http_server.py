@@ -14,7 +14,6 @@ from pathlib import Path
 
 import pytest
 
-from terok_sandbox.gate.hooks import HOOKS_DIRNAME
 from terok_sandbox.gate.server import (
     _ROUTE,
     _extract_basic_auth_token,
@@ -252,7 +251,8 @@ class TestAuth:
         cgi_env = mock_popen.call_args.kwargs["env"]
         assert cgi_env["GIT_HTTP_EXPORT_ALL"] == "1"
         assert cgi_env["GIT_CONFIG_KEY_0"] == "core.hooksPath"
-        assert cgi_env["GIT_CONFIG_VALUE_0"].endswith(HOOKS_DIRNAME)
+        # No hooks_path supplied to the handler -> hooks stay disabled.
+        assert cgi_env["GIT_CONFIG_VALUE_0"] == "/dev/null"
         assert "GIT_PROJECT_ROOT" in cgi_env
 
     @unittest.mock.patch("terok_sandbox.gate.server._logger")

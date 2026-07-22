@@ -140,10 +140,16 @@ async def _run_gate(cfg: SidecarConfig, paths: SupervisorPaths, stop: asyncio.Ev
     per-container loopback port.  The parent only launches this child
     when the sidecar carried both ``gate_base_path`` and ``gate_token``.
     """
+    from terok_sandbox.gate.hooks import hooks_dir_for, install_hooks
     from terok_sandbox.gate.server import GateServer
 
     if not cfg.gate_base_path or not cfg.gate_token:
         raise RuntimeError("gate child launched without gate wiring in the sidecar")
+    # (Re-)render the sandbox-owned push hooks next to the gates —
+    # idempotent, so every gate start converges the hook content to this
+    # package version's.  The server itself only receives the path.
+    hooks_path = hooks_dir_for(cfg.gate_base_path)
+    install_hooks(hooks_path)
     if cfg.ipc_mode == "tcp":
         if not cfg.gate_port:
             raise RuntimeError(f"sidecar ipc_mode='tcp' but gate_port is {cfg.gate_port!r}")
@@ -153,6 +159,7 @@ async def _run_gate(cfg: SidecarConfig, paths: SupervisorPaths, stop: asyncio.Ev
             scope=cfg.project_id,
             host="127.0.0.1",
             port=cfg.gate_port,
+            hooks_path=hooks_path,
         )
     else:
         gate = GateServer(
@@ -160,6 +167,7 @@ async def _run_gate(cfg: SidecarConfig, paths: SupervisorPaths, stop: asyncio.Ev
             token=cfg.gate_token,
             scope=cfg.project_id,
             socket_path=paths.gate_socket,
+            hooks_path=hooks_path,
         )
     await gate.start()
     try:
