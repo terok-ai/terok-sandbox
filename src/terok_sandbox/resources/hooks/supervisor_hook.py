@@ -172,6 +172,10 @@ def _dispatch(
 ) -> None:
     """Dispatch by stage — spawn at createRuntime, reap at poststop."""
     root = sidecar_path.parent.parent  # <root>/sidecar/<name>.json → <root>
+    # Both anchors are now known, so arm the persistent hook diary before
+    # any log() below — a soft-fail from here on leaves a durable, tagged
+    # trace, not just swallowed runtime stderr.
+    _supervisor_state.set_log_context(root, container_id)
     if stage == "poststop":
         _reap_supervisor(container_id, root)
         return
@@ -218,7 +222,11 @@ def _spawn_supervisor(
         return
 
     if _supervisor_alive(pid_file, wrapper_path, container_id):
-        return  # idempotent respawn
+        _supervisor_state.log(
+            f"terok-sandbox supervisor hook: supervisor already alive for {container_id}"
+            " — idempotent respawn, nothing to do"
+        )
+        return
 
     env = _spawn_env(host_uid)
     try:
@@ -264,6 +272,13 @@ def _spawn_supervisor(
         else:
             with contextlib.suppress(ProcessLookupError, OSError):
                 os.kill(proc.pid, signal.SIGKILL)
+    else:
+        # Success — recorded so a non-empty hook.log means "the hook fired
+        # and here is what it did", and an empty/absent one means it never
+        # ran at all: exactly the fork a stuck-unsupervised container turns on.
+        _supervisor_state.log(
+            f"terok-sandbox supervisor hook: spawned supervisor pid {proc.pid} for {container_id}"
+        )
 
 
 def _spawn_env(host_uid: int) -> dict[str, str]:

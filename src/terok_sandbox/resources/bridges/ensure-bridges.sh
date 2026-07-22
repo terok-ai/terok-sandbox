@@ -70,13 +70,22 @@ fi
 # retry=/interval= (as on the gate bridge) hold each connection until the
 # host-side broker is accepting — the vault comes up after the gate, so an
 # early credentialed request would otherwise race the broker's bind.
-if [[ -n "${TEROK_VAULT_LOOPBACK_PORT:-}" ]] \
-   && [[ -S /run/terok/vault.sock ]] \
-   && command -v socat >/dev/null 2>&1 \
-   && ! _terok_bridge_alive "$_TEROK_PIDDIR/vault-loopback.pid"; then
-  socat "TCP-LISTEN:${TEROK_VAULT_LOOPBACK_PORT},bind=127.0.0.1,fork,reuseaddr" \
-    UNIX-CONNECT:/run/terok/vault.sock,retry=300,interval=0.1 &
-  echo $! > "$_TEROK_PIDDIR/vault-loopback.pid"
+#
+# Socket mode is TEROK_VAULT_LOOPBACK_PORT set with NO TEROK_TOKEN_BROKER_PORT
+# (that pins TCP mode, handled below).  In socket mode the mounted vault.sock
+# must exist; if it doesn't, the per-container supervisor never bound it — say
+# so, one line per shell, instead of skipping the bridge in silence (#458).
+if [[ -n "${TEROK_VAULT_LOOPBACK_PORT:-}" ]] && [[ -z "${TEROK_TOKEN_BROKER_PORT:-}" ]]; then
+  if [[ ! -S /run/terok/vault.sock ]]; then
+    echo "terok: vault loopback bridge skipped — socket mode announced" \
+      "(TEROK_VAULT_LOOPBACK_PORT=${TEROK_VAULT_LOOPBACK_PORT}) but /run/terok/vault.sock" \
+      "is absent; the per-container supervisor may not be running" >&2
+  elif command -v socat >/dev/null 2>&1 \
+       && ! _terok_bridge_alive "$_TEROK_PIDDIR/vault-loopback.pid"; then
+    socat "TCP-LISTEN:${TEROK_VAULT_LOOPBACK_PORT},bind=127.0.0.1,fork,reuseaddr" \
+      UNIX-CONNECT:/run/terok/vault.sock,retry=300,interval=0.1 &
+    echo $! > "$_TEROK_PIDDIR/vault-loopback.pid"
+  fi
 fi
 
 # ── Vault socket bridge (TCP mode) ───────────────────────────────────────

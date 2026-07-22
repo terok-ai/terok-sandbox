@@ -15,6 +15,7 @@ from __future__ import annotations
 import io
 import shlex
 import subprocess  # nosec B404 — container exec for ready-marker probing — container exec for ready-marker probing
+import sys
 import tarfile
 import warnings
 from dataclasses import InitVar, dataclass, field
@@ -698,6 +699,8 @@ class Sandbox:
         if hooks and hooks.post_start:
             hooks.post_start()
 
+        self._verify_supervision(spec.container_name)
+
     def create(self, spec: RunSpec, *, hooks: LifecycleHooks | None = None) -> str:
         """Create a container without starting it.
 
@@ -735,6 +738,25 @@ class Sandbox:
         self._runtime.container(container_name).start()
         if hooks and hooks.post_start:
             hooks.post_start()
+        self._verify_supervision(container_name)
+
+    def _verify_supervision(self, container_name: str) -> None:
+        """Shout if the per-container supervisor didn't come up (issue #458).
+
+        Best-effort and non-fatal: the container start already survives a
+        broken supervisor (soft-fail hook, independently fail-closed
+        shield), so this only makes a *silent* degradation loud — it never
+        raises out of the launch path.  See
+        [`verify_supervision`][terok_sandbox.supervision.verify_supervision].
+        """
+        from .supervision import verify_supervision, warn_unsupervised
+
+        try:
+            warn_unsupervised(verify_supervision(self._cfg, container_name))
+        except Exception as exc:  # noqa: BLE001 — diagnostics must never fail a launch
+            print(
+                f"warning: supervision check errored for {container_name!r}: {exc}", file=sys.stderr
+            )
 
     def _ensure_parents(self, container_name: str, volumes: tuple[VolumeSpec, ...]) -> None:
         """Create parent directories inside a stopped container.

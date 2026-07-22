@@ -22,12 +22,23 @@ Stdlib-only by design: OCI runtimes execute the hook with
 
 from __future__ import annotations
 
+import contextlib
 import os
 import sys
+import time
+from pathlib import Path
 
 #: Trusted ``$PATH`` for hook subprocess execution — same allowlist
 #: shield's ``_oci_state.py`` pins, kept in sync deliberately.
 _TRUSTED_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+#: Persistent hook diary ``log`` mirrors into, and the container tag it
+#: stamps on each line.  Both stay unset until ``set_log_context`` resolves
+#: the state root + container id from the sidecar annotation — an early
+#: failure (bad OCI state, unusable annotation) isn't yet tied to a
+#: container, so it goes to stderr alone.
+_hook_log_path: Path | None = None
+_log_tag: str = "-"
 
 
 def outer_host_uid() -> int:
@@ -100,14 +111,46 @@ def pid_exists(pid: int) -> bool:
     return True
 
 
-def log(msg: str) -> None:
-    """Write *msg* to stderr.
+def set_log_context(root: Path, container_id: str) -> None:
+    """Point ``log`` at the persistent hook diary.
 
-    The OCI runtime captures this into its journal (``journalctl
-    --user _COMM=conmon``).  Persistent per-container log files are
-    written by the supervisor itself, not by the hook — the hook
-    proper has no per-container log target until after the wrapper
-    is spawned, at which point its stdout / stderr inherit the log
-    file the hook opened for the wrapper.
+    Called by the hook the moment it has resolved both anchors — the
+    state *root* (derived from the sidecar path) and the *container_id*.
+    From here on every ``log`` line is *also* appended to
+    ``<root>/logs/hook.log``, tagged with the container, so a degraded
+    start leaves a durable trace the OCI runtime's own journal capture
+    can't be trusted to keep across crun/runc/podman versions.
+
+    Best-effort: it pre-creates the ``logs`` directory but never the log
+    file — the file stays absent until something is actually logged, so
+    an *empty / missing* ``hook.log`` means the hook never fired for a
+    container, while any content means it fired and said why.
+    """
+    global _hook_log_path, _log_tag
+    with contextlib.suppress(OSError):
+        (root / "logs").mkdir(parents=True, exist_ok=True)
+    _hook_log_path = root / "logs" / "hook.log"
+    _log_tag = container_id[:12] or "-"
+
+
+def log(msg: str) -> None:
+    """Write *msg* to stderr, and mirror it into the hook diary when armed.
+
+    The OCI runtime captures stderr into its journal (``journalctl
+    --user _COMM=conmon``) — unreliably, across runtime versions, which
+    is why ``set_log_context`` additionally routes each line to a
+    persistent, container-tagged ``hook.log``.  The per-container
+    supervisor keeps its own log; this
+    diary is the *cross-container* record of what the hook itself did.
+
+    The file append uses ``O_APPEND`` (one open-write-close per line), so
+    concurrent hooks for different containers interleave whole lines
+    without a lock, and a broken log target is swallowed — diagnostics
+    must never take down container start.
     """
     print(msg, file=sys.stderr)
+    if _hook_log_path is None:
+        return
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    with contextlib.suppress(OSError), _hook_log_path.open("a", encoding="utf-8") as fh:
+        fh.write(f"{stamp} [{_log_tag}] {msg}\n")

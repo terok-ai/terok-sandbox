@@ -96,6 +96,42 @@ def _add_process(proc: Path, pid: int, argv: list[str]) -> None:
     (pid_dir / "cmdline").write_bytes(b"\x00".join(a.encode() for a in argv) + b"\x00")
 
 
+def _arrange_spawn(
+    mod: object,
+    hook_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    container_id: str,
+    *,
+    install_wrapper: bool = True,
+    name: str = "demo",
+) -> Path:
+    """Wire a full createRuntime spawn: sidecar, fake hook tree, stdin, argv.
+
+    With *install_wrapper* False the wrapper is left absent, so the spawn
+    soft-fails on the ``wrapper missing`` path — used to prove the diary
+    records failures too.
+    """
+    sidecar_path = _write_sidecar(
+        hook_root,
+        name,
+        {"container_name": name, "db_path": str(hook_root / "v.db"), "ipc_mode": "socket"},
+    )
+    fake_hooks_dir = hook_root / "hooks"
+    fake_hooks_dir.mkdir(exist_ok=True)
+    fake_hook_file = fake_hooks_dir / "supervisor_hook.py"
+    fake_hook_file.write_text("# fake")
+    monkeypatch.setattr(mod, "__file__", str(fake_hook_file))
+    if install_wrapper:
+        _install_wrapper_alongside_hook(mod, hook_root / "supervisor_wrapper.py")
+    _feed_stdin(
+        monkeypatch,
+        {"id": container_id, "annotations": {"terok.sandbox.sidecar": str(sidecar_path)}},
+    )
+    monkeypatch.setattr(mod.sys, "argv", ["supervisor_hook", "createRuntime"])
+    monkeypatch.setattr(mod._supervisor_state, "outer_host_uid", lambda: os.getuid())
+    return sidecar_path
+
+
 class TestHookSoftFail:
     """Every error path must return ``None`` (rc 0) — container start never blocked."""
 
@@ -534,3 +570,87 @@ class TestSpawnEnv:
         env = mod._spawn_env(1017)
 
         assert env["HOME"] == "/somewhere/else"
+
+
+class TestHookDiary:
+    """The persistent, container-tagged ``hook.log`` (issue #458, fix 1).
+
+    An *absent or empty* file must mean the hook never fired; any content
+    means it fired and said why — success and soft-fail alike.
+    """
+
+    def test_successful_spawn_appends_tagged_timestamped_line(
+        self, hook_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A spawn writes one ISO-timestamped, container-tagged success line."""
+        mod = _load_hook_module()
+        cid = "abc123def456"
+        _arrange_spawn(mod, hook_root, monkeypatch, cid)
+        with patch.object(mod.subprocess, "Popen", return_value=MagicMock(pid=12345)):
+            mod.main()
+
+        text = (hook_root / "logs" / "hook.log").read_text()
+        assert text.count("\n") == 1
+        assert f"[{cid[:12]}] " in text
+        assert "spawned supervisor pid 12345" in text
+        assert text.startswith("20") and "Z [" in text  # ISO-8601 UTC stamp
+
+    def test_soft_fail_is_recorded(self, hook_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A wrapper-missing soft-fail still leaves a tagged diary line."""
+        mod = _load_hook_module()
+        cid = "abc123def456"
+        _arrange_spawn(mod, hook_root, monkeypatch, cid, install_wrapper=False)
+        mod.main()
+
+        text = (hook_root / "logs" / "hook.log").read_text()
+        assert f"[{cid[:12]}] " in text
+        assert "wrapper missing" in text
+
+    def test_no_diary_when_hook_never_fires(
+        self, hook_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A non-terok container (no sidecar annotation) leaves no file at all."""
+        mod = _load_hook_module()
+        _feed_stdin(monkeypatch, {"id": "abc123", "annotations": {}})
+        monkeypatch.setattr(mod.sys, "argv", ["supervisor_hook", "createRuntime"])
+        mod.main()
+
+        assert not (hook_root / "logs" / "hook.log").exists()
+
+
+class TestSupervisorStateLog:
+    """Unit-level behaviour of ``set_log_context`` / ``log`` in the ballast."""
+
+    def test_log_is_stderr_only_until_armed(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        mod = _load_hook_module()
+        state = mod._supervisor_state
+        state.log("unarmed line")
+        assert "unarmed line" in capsys.readouterr().err
+        assert not (tmp_path / "logs" / "hook.log").exists()
+
+    def test_set_log_context_arms_tagged_append(self, tmp_path: Path) -> None:
+        mod = _load_hook_module()
+        state = mod._supervisor_state
+        state.set_log_context(tmp_path, "abcdefghijklMNOP")  # tag = first 12 chars
+        state.log("one")
+        state.log("two")
+
+        lines = (tmp_path / "logs" / "hook.log").read_text().splitlines()
+        assert len(lines) == 2
+        assert all(line.split(" ", 1)[1].startswith("[abcdefghijkl] ") for line in lines)
+        assert [line.rsplit("] ", 1)[1] for line in lines] == ["one", "two"]
+
+    def test_diary_is_shared_across_containers(self, tmp_path: Path) -> None:
+        """Re-arming for a second container appends to the same cross-container file."""
+        mod = _load_hook_module()
+        state = mod._supervisor_state
+        state.set_log_context(tmp_path, "aaaaaaaaaaaa")
+        state.log("from A")
+        state.set_log_context(tmp_path, "bbbbbbbbbbbb")
+        state.log("from B")
+
+        text = (tmp_path / "logs" / "hook.log").read_text()
+        assert "[aaaaaaaaaaaa] from A" in text
+        assert "[bbbbbbbbbbbb] from B" in text

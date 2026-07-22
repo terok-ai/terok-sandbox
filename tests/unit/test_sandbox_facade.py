@@ -942,6 +942,24 @@ class TestSandboxStart:
 
         assert hook_called
 
+    def test_start_shouts_when_supervision_check_fails(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A failed supervision check surfaces loudly on stderr — but start still succeeds."""
+        from pathlib import Path
+
+        from terok_sandbox import supervision
+
+        sock = Path("/run/x/vault.sock")
+        bad = supervision.SupervisionStatus("my-ctr", (sock,), (sock,), Path("/s/logs/hook.log"))
+        monkeypatch.setattr(supervision, "verify_supervision", lambda *a, **k: bad)
+
+        with patch("terok_sandbox.runtime.podman.subprocess.run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stderr="")
+            Sandbox().start("my-ctr")  # must not raise — soft-fail preserved
+
+        assert "not responding" in capsys.readouterr().err
+
 
 class TestLifecycleHooks:
     """Verify LifecycleHooks dataclass."""

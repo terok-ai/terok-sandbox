@@ -23,6 +23,14 @@ def test_paths_key_on_id_and_name(tmp_path: Path) -> None:
     assert d.pid == tmp_path / "pids" / f"supervisor-{_CID}.pid"
     assert d.wrapper == tmp_path / "supervisor_wrapper.py"
     assert d.sidecar == tmp_path / "sidecar" / f"{_CNAME}.json"
+    assert d.hook_log == tmp_path / "logs" / "hook.log"
+
+
+def test_hook_log_is_container_independent(tmp_path: Path) -> None:
+    """The hook diary is install-global — same path for any container."""
+    a = container_diagnostics(_CID, _CNAME, state_dir=tmp_path)
+    b = container_diagnostics("ffffffffffff", "other-task-abc12", state_dir=tmp_path)
+    assert a.hook_log == b.hook_log == tmp_path / "logs" / "hook.log"
 
 
 def test_paths_are_computed_not_probed(tmp_path: Path) -> None:

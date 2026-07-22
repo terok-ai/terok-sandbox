@@ -460,6 +460,15 @@ path = "terok_sandbox.supervisor.sidecar"
 layer = "foundation"
 depends_on = []
 
+# Post-start supervision check — reads the sidecar + polls the supervisor's
+# sockets so the launch path can shout when a container comes up unsupervised.
+# Core so the surface facade (sandbox.py) may call it; leans only on the
+# foundation sidecar-path resolver.
+[[modules]]
+path = "terok_sandbox.supervision"
+layer = "core"
+depends_on = ["terok_sandbox.supervisor.sidecar"]
+
 # Round-trip YAML writer for setup-time config.yml edits.
 [[modules]]
 path = "terok_sandbox._yaml"

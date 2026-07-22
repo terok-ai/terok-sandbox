@@ -35,6 +35,7 @@ from .supervisor.install import _PIDS_DIR_NAME, _WRAPPER_NAME
 
 _LOGS_DIR_NAME = "logs"
 _SIDECAR_DIR_NAME = "sidecar"
+_HOOK_LOG_NAME = "hook.log"
 
 
 @dataclass(frozen=True)
@@ -54,6 +55,12 @@ class ContainerDiagnostics:
     """Install-global supervisor wrapper: ``<state>/supervisor_wrapper.py``."""
     sidecar: Path
     """Per-container sidecar bundle: ``<state>/sidecar/<name>.json``."""
+    hook_log: Path
+    """Install-global OCI-hook diary: ``<state>/logs/hook.log``.
+
+    Shared across every container (each line is container-tagged) — an
+    absent or empty file means the supervisor hook never fired, which is
+    the first thing to check when a container comes up unsupervised."""
 
 
 def container_diagnostics(
@@ -78,6 +85,7 @@ def container_diagnostics(
         pid=root / _PIDS_DIR_NAME / f"supervisor-{container_id}.pid",
         wrapper=root / _WRAPPER_NAME,
         sidecar=root / _SIDECAR_DIR_NAME / f"{container_name}.json",
+        hook_log=root / _LOGS_DIR_NAME / _HOOK_LOG_NAME,
     )
 
 

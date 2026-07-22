@@ -95,6 +95,9 @@ _LAZY: dict[str, str] = {
     # Container diagnostics
     "ContainerDiagnostics": "diagnostics:ContainerDiagnostics",
     "container_diagnostics": "diagnostics:container_diagnostics",
+    # Post-start supervision check
+    "SupervisionStatus": "supervision:SupervisionStatus",
+    "verify_supervision": "supervision:verify_supervision",
     # Doctor
     "CheckVerdict": "doctor:CheckVerdict",
     "DoctorCheck": "doctor:DoctorCheck",
@@ -344,6 +347,7 @@ if TYPE_CHECKING:
         read_stamp,
         stamp_path,
     )
+    from .supervision import SupervisionStatus, verify_supervision
     from .vault.daemon import CODEX_SHARED_OAUTH_MARKER, PHANTOM_CREDENTIALS_MARKER
     from .vault.ssh.keypair import ensure_infra_keypair, public_line_of
     from .vault.ssh.manager import SSHInitResult, SSHManager
@@ -489,6 +493,9 @@ __all__ = [
     # Container diagnostics (on-host supervisor/sidecar artifact paths)
     "ContainerDiagnostics",
     "container_diagnostics",
+    # Post-start supervision check
+    "SupervisionStatus",
+    "verify_supervision",
     # SELinux (one-call probe + install plumbing; the granular probes
     # stay in ``_util._selinux``).
     "SelinuxCheckResult",
