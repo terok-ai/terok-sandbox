@@ -102,7 +102,7 @@ allow-direct-references = true
 
 [tool.hatch.version]
 source = "vcs"
-fallback-version = "0.5.0a14"
+fallback-version = "0.5.0a15"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/terok_sandbox"]
