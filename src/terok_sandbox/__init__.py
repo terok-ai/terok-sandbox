@@ -95,6 +95,9 @@ _LAZY: dict[str, str] = {
     # Container diagnostics
     "ContainerDiagnostics": "diagnostics:ContainerDiagnostics",
     "container_diagnostics": "diagnostics:container_diagnostics",
+    "SupervisorLiveness": "diagnostics:SupervisorLiveness",
+    "supervisor_liveness": "diagnostics:supervisor_liveness",
+    "respawn_supervisor": "diagnostics:respawn_supervisor",
     # Post-start supervision check
     "SupervisionStatus": "supervision:SupervisionStatus",
     "verify_supervision": "supervision:verify_supervision",
@@ -277,7 +280,13 @@ if TYPE_CHECKING:
         ServicesMode,
         gate_use_personal_ssh_default,
     )
-    from .diagnostics import ContainerDiagnostics, container_diagnostics
+    from .diagnostics import (
+        ContainerDiagnostics,
+        SupervisorLiveness,
+        container_diagnostics,
+        respawn_supervisor,
+        supervisor_liveness,
+    )
     from .doctor import CheckVerdict, DoctorCheck, sandbox_doctor_checks
     from .gate.hooks import PUSH_MARKER_FILENAME
     from .gate.mirror import (
@@ -494,6 +503,9 @@ __all__ = [
     # Container diagnostics (on-host supervisor/sidecar artifact paths)
     "ContainerDiagnostics",
     "container_diagnostics",
+    "SupervisorLiveness",
+    "supervisor_liveness",
+    "respawn_supervisor",
     # Post-start supervision check
     "SupervisionStatus",
     "verify_supervision",
