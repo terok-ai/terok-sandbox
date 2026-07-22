@@ -222,6 +222,15 @@ class BackupRef(TypedDict):
     sha: str  # the backed-up tip (full sha the ref points at)
 
 
+class RestoreBackupResult(TypedDict):
+    """Outcome of restoring a branch from a backup ref."""
+
+    branch: str
+    restored_sha: str | None  # tip the branch points at after the restore
+    previous_backup_ref: str | None  # backup taken of the tip the restore replaced
+    error: str | None
+
+
 class CommitInfo(TypedDict):
     """Information about a single git commit."""
 
@@ -1015,6 +1024,71 @@ class GitGate:
             _git(self._gate_path, "update-ref", "-d", ref)
         return expired
 
+    def delete_backup(self, ref: str) -> str | None:
+        """Delete one backup ref ahead of its retention expiry.
+
+        Returns an error message, or ``None`` on success.  Only refs
+        under the backup namespace are deletable through here — this is
+        an operator-facing op and must not become a generic ref eraser.
+        """
+        if not ref.startswith(_BACKUP_PREFIX):
+            return f"not a backup ref: {ref}"
+        # ``update-ref -d`` deletes a missing ref "successfully" — verify
+        # first so the caller learns the ref was already gone.
+        if _git(self._gate_path, "show-ref", "--verify", "--quiet", ref).returncode != 0:
+            return f"no such backup: {ref}"
+        result = _git(self._gate_path, "update-ref", "-d", ref)
+        if result.returncode != 0:
+            return f"could not delete {ref}: {result.stderr.strip() or 'unknown error'}"
+        return None
+
+    def restore_backup(self, ref: str) -> RestoreBackupResult:
+        """Move a branch back to the tip a backup ref pinned.
+
+        Restoring is itself a destructive op, so it plays by the gate's
+        own rules: the tip being replaced is backed up first (a restore
+        can always be un-restored), the move is compare-and-swap against
+        the tip observed here (a branch that moved mid-restore is an
+        error, not a silent clobber), and a restore that cannot take its
+        safety backup is refused outright — unlike the push hook, an
+        operator-invoked op *can* fail loud before acting.  A branch the
+        backup outlived (deleted since) is simply recreated.
+        """
+        branch, _, leaf = ref.removeprefix(_BACKUP_PREFIX).rpartition("/")
+        if not ref.startswith(_BACKUP_PREFIX) or not branch or not _BACKUP_STAMP_RE.match(leaf):
+            return _restore_error(ref, "not a backup ref")
+        target_sha = _read_refs(self._gate_path, _BACKUP_PREFIX).get(f"{branch}/{leaf}")
+        if target_sha is None:
+            return _restore_error(branch, "backup ref no longer exists")
+
+        current_tip = self.branch_heads().get(branch)
+        if current_tip == target_sha:
+            return RestoreBackupResult(
+                branch=branch, restored_sha=target_sha, previous_backup_ref=None, error=None
+            )
+        previous_backup: str | None = None
+        if current_tip is not None:
+            previous_backup = self._write_backup(branch, current_tip)
+            if previous_backup is None:
+                return _restore_error(branch, "could not back up the current tip — restore refused")
+        result = _git(
+            self._gate_path,
+            "update-ref",
+            f"{_HEADS_PREFIX}{branch}",
+            target_sha,
+            current_tip if current_tip is not None else _ZERO_SHA,
+        )
+        if result.returncode != 0:
+            if previous_backup is not None:
+                _git(self._gate_path, "update-ref", "-d", previous_backup)
+            return _restore_error(branch, "branch moved during the restore — not applied")
+        return RestoreBackupResult(
+            branch=branch,
+            restored_sha=target_sha,
+            previous_backup_ref=previous_backup,
+            error=None,
+        )
+
     def _is_ancestor(self, ancestor: str, descendant: str) -> bool:
         """Return ``True`` iff *ancestor* is reachable from *descendant*."""
         result = _git(self._gate_path, "merge-base", "--is-ancestor", ancestor, descendant)
@@ -1640,6 +1714,13 @@ def _normalise_fresh_gate(gate_dir: Path | str) -> None:
             timeout=60,
             check=True,
         )
+
+
+def _restore_error(branch: str, message: str) -> RestoreBackupResult:
+    """A failed [`RestoreBackupResult`][terok_sandbox.gate.mirror.RestoreBackupResult] — nothing moved."""
+    return RestoreBackupResult(
+        branch=branch, restored_sha=None, previous_backup_ref=None, error=message
+    )
 
 
 def _empty_sync_result(path: str, *, created: bool) -> GateSyncResult:

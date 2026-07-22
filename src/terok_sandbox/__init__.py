@@ -109,6 +109,7 @@ _LAZY: dict[str, str] = {
     "GitGate": "gate.mirror:GitGate",
     "PUSH_MARKER_FILENAME": "gate.hooks:PUSH_MARKER_FILENAME",
     "PendingOp": "gate.mirror:PendingOp",
+    "RestoreBackupResult": "gate.mirror:RestoreBackupResult",
     "is_ssh_url": "gate.mirror:is_ssh_url",
     "GateServer": "gate.server:GateServer",
     "mint_gate_token": "gate.tokens:mint_gate_token",
@@ -284,6 +285,7 @@ if TYPE_CHECKING:
         GateSyncResult,
         GitGate,
         PendingOp,
+        RestoreBackupResult,
         is_ssh_url,
     )
     from .gate.tokens import mint_gate_token
@@ -439,6 +441,7 @@ __all__ = [
     "GitGate",
     "PUSH_MARKER_FILENAME",
     "PendingOp",
+    "RestoreBackupResult",
     "is_ssh_url",
     # Credentials + vault
     "CODEX_SHARED_OAUTH_MARKER",
