@@ -38,6 +38,7 @@ import json
 import os
 import subprocess  # nosec B404 — re-invokes our own installed OCI hook
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -62,6 +63,13 @@ _PROC_DIR = Path("/proc")
 #: only slow path is its own SIGTERM→SIGKILL reap on a pid-file write
 #: failure (~2 s), so this is generous.
 _RESPAWN_TIMEOUT_S = 15.0
+
+#: After the hook returns, how long to keep re-probing for the wrapper to
+#: show as alive.  The hook writes the PID file before returning, but the
+#: detached wrapper may not have finished ``exec`` (populating its ``/proc``
+#: argv) yet — so a single immediate probe can miss a healthy respawn.
+_RESPAWN_SETTLE_S = 2.0
+_RESPAWN_POLL_INTERVAL_S = 0.05
 
 
 @dataclass(frozen=True)
@@ -172,12 +180,17 @@ def supervisor_liveness(
 
 
 def _pid_alive(pid: int) -> bool:
-    """Signal-0 liveness probe for *pid* (EPERM counts as alive)."""
+    """Signal-0 liveness probe for *pid* (EPERM counts as alive).
+
+    A corrupt PID file can hold a value too large for the kernel's ``pid_t``;
+    ``os.kill`` raises ``OverflowError`` (not an ``OSError``) for those, so
+    catch it too and treat an out-of-range PID as dead.
+    """
     if pid <= 0:
         return False
     try:
         os.kill(pid, 0)
-    except ProcessLookupError:
+    except (ProcessLookupError, OverflowError):
         return False
     except OSError:
         return True
@@ -227,22 +240,33 @@ def respawn_supervisor(
     root = state_dir or state_root()
     hook = root / _HOOKS_DIR_NAME / _HOOK_SCRIPT_NAME
     sidecar = root / _SIDECAR_DIR_NAME / f"{container_name}.json"
-    if hook.is_file() and sidecar.is_file():
-        state: dict[str, object] = {
-            "id": container_id,
-            "annotations": {_TRIGGER_ANNOTATION: str(sidecar)},
-        }
-        if container_pid is not None:
-            state["pid"] = container_pid
-        with contextlib.suppress(OSError, subprocess.SubprocessError):
-            subprocess.run(  # nosec B603 — fixed argv, our own installed hook script
-                [sys.executable, str(hook), "createRuntime"],
-                input=json.dumps(state),
-                text=True,
-                timeout=_RESPAWN_TIMEOUT_S,
-                check=False,
-            )
-    return supervisor_liveness(container_id, state_dir=root)
+    if not (hook.is_file() and sidecar.is_file()):
+        return supervisor_liveness(container_id, state_dir=root)
+
+    state: dict[str, object] = {
+        "id": container_id,
+        "annotations": {_TRIGGER_ANNOTATION: str(sidecar)},
+    }
+    if container_pid is not None:
+        state["pid"] = container_pid
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        subprocess.run(  # nosec B603 — fixed argv, our own installed hook script
+            [sys.executable, str(hook), "createRuntime"],
+            input=json.dumps(state),
+            text=True,
+            timeout=_RESPAWN_TIMEOUT_S,
+            check=False,
+        )
+
+    # The hook writes the PID file before returning, but the detached
+    # wrapper may still be mid-``exec`` — poll briefly so a healthy respawn
+    # isn't reported as a failure on that race.
+    deadline = time.monotonic() + _RESPAWN_SETTLE_S
+    while True:
+        live = supervisor_liveness(container_id, state_dir=root)
+        if live.alive or time.monotonic() >= deadline:
+            return live
+        time.sleep(_RESPAWN_POLL_INTERVAL_S)
 
 
 __all__ = [

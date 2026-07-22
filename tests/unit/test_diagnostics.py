@@ -12,6 +12,7 @@ from pathlib import Path
 
 from terok_sandbox import (
     ContainerDiagnostics,
+    SupervisorLiveness,
     container_diagnostics,
     diagnostics as diag,
     respawn_supervisor,
@@ -124,6 +125,10 @@ class TestSupervisorLiveness:
         assert r.alive is False
         assert r.pid == pid
 
+    def test_oversized_pid_is_not_alive(self) -> None:
+        """A corrupt PID file value too large for ``pid_t`` (OverflowError) is dead, not a crash."""
+        assert diag._pid_alive(2**63) is False
+
 
 class TestRespawnSupervisor:
     """Re-firing the installed OCI hook to respawn a container's supervisor."""
@@ -137,6 +142,7 @@ class TestRespawnSupervisor:
 
     def test_reinvokes_hook_with_synthesized_oci_state(self, tmp_path: Path, monkeypatch) -> None:
         self._install_hook_and_sidecar(tmp_path)
+        monkeypatch.setattr(diag, "_RESPAWN_SETTLE_S", 0.0)  # no PID appears → don't poll
         captured: dict[str, object] = {}
 
         def _fake_run(argv, **kwargs):  # noqa: ANN001, ANN202
@@ -161,12 +167,30 @@ class TestRespawnSupervisor:
 
     def test_container_pid_is_forwarded_when_given(self, tmp_path: Path, monkeypatch) -> None:
         self._install_hook_and_sidecar(tmp_path)
+        monkeypatch.setattr(diag, "_RESPAWN_SETTLE_S", 0.0)
         captured: dict[str, object] = {}
         monkeypatch.setattr(
             diag.subprocess, "run", lambda argv, **kw: captured.update(input=kw.get("input"))
         )
         respawn_supervisor(_CID, _CNAME, state_dir=tmp_path, container_pid=4321)
         assert json.loads(captured["input"])["pid"] == 4321
+
+    def test_polls_until_the_wrapper_shows_alive(self, tmp_path: Path, monkeypatch) -> None:
+        """The detached wrapper may exec after the hook returns — the poll waits for it."""
+        self._install_hook_and_sidecar(tmp_path)
+        monkeypatch.setattr(diag.subprocess, "run", lambda *_a, **_k: None)
+        monkeypatch.setattr(diag.time, "sleep", lambda _s: None)  # keep the poll instant
+        probes = iter(
+            [
+                SupervisorLiveness(alive=False, pid=None, detail="not up yet"),
+                SupervisorLiveness(alive=True, pid=555, detail="supervisor pid 555 alive"),
+            ]
+        )
+        monkeypatch.setattr(diag, "supervisor_liveness", lambda *_a, **_k: next(probes))
+
+        result = respawn_supervisor(_CID, _CNAME, state_dir=tmp_path)
+        assert result.alive is True
+        assert result.pid == 555
 
     def test_missing_hook_skips_spawn(self, tmp_path: Path, monkeypatch) -> None:
         # sidecar present, hook absent → nothing to re-fire.
