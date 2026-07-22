@@ -11,6 +11,7 @@ import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from terok_sandbox.gate.hooks import HOOKS_DIRNAME
 from terok_sandbox.gate.server import (
     _build_cgi_env,  # noqa: PLC2701
     _extract_basic_auth_token,  # noqa: PLC2701
@@ -113,6 +114,7 @@ class TestBuildCgiEnv:
             content_type="",
             protocol="HTTP/1.1",
             content_length=0,
+            hooks_path=tmp_path / HOOKS_DIRNAME,
         )
         assert env["GIT_PROJECT_ROOT"] == str(tmp_path)
         assert env["PATH_INFO"] == "/repo.git/info/refs"
@@ -120,9 +122,9 @@ class TestBuildCgiEnv:
         assert env["REQUEST_METHOD"] == "GET"
         assert env["GIT_HTTP_EXPORT_ALL"] == "1"
         assert env["REMOTE_USER"] == "token"
-        # Hooks defense-in-depth
+        # Hooks defense-in-depth: only the sandbox-owned dir, never repo content
         assert env["GIT_CONFIG_KEY_0"] == "core.hooksPath"
-        assert env["GIT_CONFIG_VALUE_0"] == "/dev/null"
+        assert env["GIT_CONFIG_VALUE_0"] == str(tmp_path / HOOKS_DIRNAME)
         # No CONTENT_LENGTH when 0
         assert "CONTENT_LENGTH" not in env
 
@@ -131,13 +133,15 @@ class TestBuildCgiEnv:
             "os.environ",
             {"PATH": "/custom/bin", "HOME": "/custom/home", "GIT_EXEC_PATH": "/git/exec"},
         ):
-            env = _build_cgi_env(tmp_path, "/", "", "GET", "", "HTTP/1.1", 0)
+            env = _build_cgi_env(
+                tmp_path, "/", "", "GET", "", "HTTP/1.1", 0, tmp_path / HOOKS_DIRNAME
+            )
         assert env["PATH"] == "/custom/bin"
         assert env["HOME"] == "/custom/home"
         assert env["GIT_EXEC_PATH"] == "/git/exec"
 
     def test_content_length_added_when_truthy(self, tmp_path: Path) -> None:
-        env = _build_cgi_env(tmp_path, "/", "", "POST", "", "HTTP/1.1", 7)
+        env = _build_cgi_env(tmp_path, "/", "", "POST", "", "HTTP/1.1", 7, tmp_path / HOOKS_DIRNAME)
         assert env["CONTENT_LENGTH"] == "7"
 
     def test_http_headers_forwarded_when_non_empty(self, tmp_path: Path) -> None:
@@ -149,6 +153,7 @@ class TestBuildCgiEnv:
             "",
             "HTTP/1.1",
             0,
+            tmp_path / HOOKS_DIRNAME,
             http_headers={"HTTP_GIT_PROTOCOL": "version=2", "HTTP_CONTENT_ENCODING": ""},
         )
         assert env["HTTP_GIT_PROTOCOL"] == "version=2"

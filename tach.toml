@@ -292,6 +292,16 @@ path = "terok_sandbox.gate.mirror"
 layer = "core"
 depends_on = []
 
+# Sandbox-owned push hooks, rendered next to the gates from the mirror's
+# ref-model constants.  Installed by the supervisor (the gate composer);
+# the server only ever receives the resulting path as a plain value.
+[[modules]]
+path = "terok_sandbox.gate.hooks"
+layer = "core"
+depends_on = [
+    "terok_sandbox.gate.mirror",
+]
+
 # ── Surface ────────────────────────────────────────────────
 # Orchestration + CLI.  Core and foundation imports are implicit.
 # Only same-layer (surface↔surface) deps need explicit declaration.
@@ -432,6 +442,7 @@ depends_on = [
     "terok_sandbox.integrations.clearance",
     "terok_sandbox.vault.daemon.token_broker",
     "terok_sandbox.vault.ssh.signer",
+    "terok_sandbox.gate.hooks",
     "terok_sandbox.gate.server",
     "terok_sandbox._util._selinux",
 ]
