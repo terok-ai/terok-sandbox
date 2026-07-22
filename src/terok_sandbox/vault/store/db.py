@@ -770,7 +770,6 @@ def _looks_like_plaintext_db(db_path: Path) -> bool:
 def open_credential_db_with_source(
     db_path: Path,
     *,
-    passphrase_file: Path | None = None,
     systemd_creds_file: Path | None = None,
     use_keyring: bool = False,
     passphrase_command: str | None = None,
@@ -785,7 +784,6 @@ def open_credential_db_with_source(
     from .encryption import resolve_passphrase_with_source  # noqa: PLC0415
 
     passphrase, source = resolve_passphrase_with_source(
-        passphrase_file=passphrase_file,
         systemd_creds_file=systemd_creds_file,
         use_keyring=use_keyring,
         passphrase_command=passphrase_command,
@@ -799,7 +797,6 @@ def open_credential_db_with_source(
 def open_credential_db(
     db_path: Path,
     *,
-    passphrase_file: Path | None = None,
     systemd_creds_file: Path | None = None,
     use_keyring: bool = False,
     passphrase_command: str | None = None,
@@ -807,17 +804,16 @@ def open_credential_db(
 ) -> CredentialDB:
     """Open the credential DB, resolving the passphrase via the runtime chain.
 
-    Walks: *passphrase_file* (tmpfs session-unlock) → *systemd_creds_file*
-    (sealed credential decrypted via ``systemd-creds(1)``) → OS keyring
-    (when *use_keyring*) → *passphrase_command* (operator-supplied
-    helper, e.g. ``pass show …`` / ``op read …``) → (when
-    *prompt_on_tty* and a TTY is attached) interactive prompt.
+    Walks: *systemd_creds_file* (sealed credential decrypted via
+    ``systemd-creds(1)``) → OS keyring (when *use_keyring*) → the kernel
+    keyring (volatile unlock cache) → *passphrase_command*
+    (operator-supplied helper, e.g. ``pass show …`` / ``op read …``) →
+    (when *prompt_on_tty* and a TTY is attached) interactive prompt.
     CLI consumers pass ``prompt_on_tty=True``; daemons leave it
     ``False`` so they fail fast instead of blocking on stdin.
     """
     db, _source = open_credential_db_with_source(
         db_path,
-        passphrase_file=passphrase_file,
         systemd_creds_file=systemd_creds_file,
         use_keyring=use_keyring,
         passphrase_command=passphrase_command,

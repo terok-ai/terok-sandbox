@@ -58,17 +58,18 @@ def _resolve_cfg(cfg: SandboxConfig | None) -> SandboxConfig:
     return SandboxConfig()
 
 
-# ── Shadow detection ────────────────────────────────────────────────
+# ── Durable-tier probe ──────────────────────────────────────────────
 
 
 def active_durable_source(cfg: SandboxConfig) -> PassphraseTier | None:
     """Name the durable tier that already resolves the vault, or ``None``.
 
-    Probes the chain *minus* the session file (file presence only — no
-    unseal, no command exec): if a reboot-surviving tier is present, a
-    session write would merely shadow it.  The single source of truth
-    for the no-shadow guard, shared by the session writer and the CLI's
-    skip-the-prompt early-out.
+    Probes the chain for a reboot-surviving tier (presence only — no
+    unseal, no command exec).  The volatile kernel-keyring cache is
+    ``durable=False`` and so never counts here.  The single source of
+    truth for the no-cache guard, shared by the passphrase-cache writer
+    and the CLI's skip-the-prompt early-out: if a durable tier is
+    already present, there is nothing worth caching on top of it.
     """
     for tier in _encryption.probe_passphrase_chain(
         systemd_creds_file=cfg.vault_systemd_creds_file,
@@ -78,75 +79,6 @@ def active_durable_source(cfg: SandboxConfig) -> PassphraseTier | None:
         if tier.present and tier.source in DURABLE_TIERS:
             return tier.source
     return None
-
-
-@dataclass(frozen=True)
-class SessionShadow:
-    """A session-file tier sitting on top of a durable tier.
-
-    ``redundant`` is the actionable bit:
-
-    - ``True`` — the session copy is byte-identical to what the durable
-      tier resolves to, so it's pure residue (a past ``unlock`` on a
-      box that already auto-unlocks).  Safe to delete; nothing is lost.
-    - ``False`` — the two differ.  Either a deliberate re-key in
-      progress or a stale unlock masking the durable value; never
-      auto-removed.
-    - ``None`` — the durable tier is present but couldn't be read to
-      compare (broken seal, dead helper), so the session file may be
-      doing real work.  Left alone.
-    """
-
-    durable_source: PassphraseTier
-    redundant: bool | None
-
-
-def session_shadow_state(cfg: SandboxConfig) -> SessionShadow | None:
-    """Describe a session-file-over-durable-tier shadow, or ``None`` if there is none.
-
-    Returns ``None`` in the common cases — no session file, or no durable
-    tier beneath it — without resolving anything.  Only when both are
-    present does it resolve the *durable* chain (omitting the session
-    file) to compare values; that one comparison is the only place
-    status / remediation pay an unseal.  The session secret never leaves
-    the process — this reads two tiers and compares, exactly what the
-    resolver already does internally.
-    """
-    session_value = _encryption.load_passphrase_from_file(cfg.vault_passphrase_file)
-    if not session_value:
-        return None
-    durable_source = active_durable_source(cfg)
-    if durable_source is None:
-        return None
-    try:
-        durable_value, _ = _encryption.resolve_passphrase_with_source(
-            systemd_creds_file=cfg.vault_systemd_creds_file,
-            use_keyring=cfg.credentials_use_keyring,
-            passphrase_command=cfg.credentials_passphrase_command,
-            # ``passphrase_file`` omitted on purpose — resolve the durable
-            # chain *under* the session file so we can compare against it.
-        )
-    except (WrongPassphraseError, NoPassphraseError):
-        durable_value = None
-    if not durable_value:
-        return SessionShadow(durable_source, redundant=None)
-    return SessionShadow(durable_source, redundant=(durable_value == session_value))
-
-
-def clear_redundant_session_file(cfg: SandboxConfig) -> PassphraseTier | None:
-    """Remove the session-unlock file iff it merely duplicates a durable tier.
-
-    Same-key residue only: a session file whose passphrase differs from
-    the durable tier is a deliberate override (or a re-key mid-flight)
-    and is kept.  Re-verifies state at call time rather than trusting a
-    caller's stale read.  Returns the durable tier it deduplicated
-    against, or ``None`` when there was nothing safe to remove.
-    """
-    shadow = session_shadow_state(cfg)
-    if shadow is None or shadow.redundant is not True:
-        return None
-    cfg.vault_passphrase_file.unlink(missing_ok=True)
-    return shadow.durable_source
 
 
 # ── Classification ──────────────────────────────────────────────────
@@ -175,15 +107,13 @@ class VaultState(StrEnum):
 class ChainRow:
     """One tier of the resolution chain, annotated for display.
 
-    ``active`` marks the tier the resolver would use right now;
-    ``shadowed`` marks a durable tier outranked by a volatile one (the
-    "why is my TPM2 box reading a RAM-backed file?" diagnostic).
+    ``active`` marks the tier the resolver would use right now — the
+    first ``present`` tier in resolution order.
     """
 
     tier: PassphraseTier
     present: bool
     active: bool
-    shadowed: bool
     detail: str
 
 
@@ -193,9 +123,6 @@ class VaultWarningKind(StrEnum):
     BROKEN_TIER = "broken-tier"
     RECOVERY_UNCONFIRMED = "recovery-unconfirmed"
     RECOVERY_VOLATILE = "recovery-volatile"
-    SHADOW_REDUNDANT = "shadow-redundant"
-    SHADOW_OVERRIDE = "shadow-override"
-    SHADOW_UNREADABLE = "shadow-unreadable"
 
 
 @dataclass(frozen=True)
@@ -215,9 +142,7 @@ class VaultWarning:
     message: str
 
 
-def _build_warnings(
-    recovery: RecoveryStatus, shadow: SessionShadow | None
-) -> tuple[VaultWarning, ...]:
+def _build_warnings(recovery: RecoveryStatus) -> tuple[VaultWarning, ...]:
     """Derive the warning catalog from the loaded facts — the single wording source."""
     warnings: list[VaultWarning] = []
     if recovery.resolve_error is not None:
@@ -234,10 +159,11 @@ def _build_warnings(
             VaultWarning(
                 VaultWarningKind.RECOVERY_VOLATILE,
                 "error",
-                "recovery key UNSAVED, vault dies on reboot",
-                "the only copy of the vault passphrase is the session file, which is"
-                " cleared on reboot — save it off-host now or the vault becomes"
-                " unrecoverable the next time this machine restarts",
+                "recovery key UNSAVED, vault dies at logout",
+                "the only copy of the vault passphrase is the kernel-keyring cache,"
+                " which is cleared at logout and never survives a reboot — save it"
+                " off-host now or the vault becomes unrecoverable the next time this"
+                " login session ends",
             )
         )
     elif not recovery.acknowledged and recovery.source is not None:
@@ -251,40 +177,6 @@ def _build_warnings(
                 " hardware failure strands the vault without a written copy",
             )
         )
-    if shadow is not None:
-        src = shadow.durable_source
-        if shadow.redundant is True:
-            warnings.append(
-                VaultWarning(
-                    VaultWarningKind.SHADOW_REDUNDANT,
-                    "info",
-                    "redundant session file",
-                    f"the session-file tier duplicates the durable {src} tier (same"
-                    " passphrase) — redundant residue; it clears on the next reboot",
-                )
-            )
-        elif shadow.redundant is False:
-            warnings.append(
-                VaultWarning(
-                    VaultWarningKind.SHADOW_OVERRIDE,
-                    "warning",
-                    f"session file overrides {src}",
-                    f"the session-file tier shadows the durable {src} tier with a"
-                    " DIFFERENT passphrase — a deliberate override, or a stale unlock"
-                    " masking the durable value; the durable tier resumes once the"
-                    " session file is gone",
-                )
-            )
-        else:
-            warnings.append(
-                VaultWarning(
-                    VaultWarningKind.SHADOW_UNREADABLE,
-                    "warning",
-                    f"cannot compare session file with {src}",
-                    f"the session-file tier shadows {src}, but {src} could not be read"
-                    " to compare — fix or remove the durable tier",
-                )
-            )
     return tuple(warnings)
 
 
@@ -304,7 +196,6 @@ class VaultStatus:
     """The tier the resolver would use right now, or ``None``."""
 
     chain: tuple[ChainRow, ...]
-    shadow: SessionShadow | None
     recovery: RecoveryStatus
     db_path: Path
     db_exists: bool
@@ -336,40 +227,25 @@ class VaultStatus:
         ``cfg.open_credential_db()`` this never *creates* the DB — a
         fresh install stays fresh no matter how often status is
         rendered.  Never prompts (a status read must not block on
-        stdin) and pays the one durable-tier unseal only when a
-        session-shadow actually needs comparing.
+        stdin).
         """
         cfg = _resolve_cfg(cfg)
         recovery = RecoveryStatus.load(cfg)
         chain = _encryption.probe_passphrase_chain(
-            passphrase_file=cfg.vault_passphrase_file,
             systemd_creds_file=cfg.vault_systemd_creds_file,
             use_keyring=cfg.credentials_use_keyring,
             passphrase_command=cfg.credentials_passphrase_command,
         )
         active_index = next((i for i, tier in enumerate(chain) if tier.present), None)
-        active_source = chain[active_index].source if active_index is not None else None
-        # Shadowing only matters when a *volatile* tier (the session file)
-        # sits on top of a durable one.  A durable active tier legitimately
-        # outranks the tiers below it — that's just the resolution order.
-        active_is_durable = active_source in DURABLE_TIERS
         rows = tuple(
             ChainRow(
                 tier=presence.source,
                 present=presence.present,
                 active=(i == active_index),
-                shadowed=(
-                    presence.present
-                    and active_index is not None
-                    and i > active_index
-                    and presence.source in DURABLE_TIERS
-                    and not active_is_durable
-                ),
                 detail=presence.detail,
             )
             for i, presence in enumerate(chain)
         )
-        shadow = session_shadow_state(cfg) if any(row.shadowed for row in rows) else None
 
         db_exists = cfg.db_path.exists()
         access = _classify_db_access(cfg, recovery, db_exists=db_exists)
@@ -388,14 +264,13 @@ class VaultStatus:
             db_error=access.db_error,
             source=recovery.source,
             chain=rows,
-            shadow=shadow,
             recovery=recovery,
             db_path=cfg.db_path,
             db_exists=db_exists,
             providers=access.providers,
             credential_types=access.credential_types,
             ssh_keys=access.ssh_keys,
-            warnings=_build_warnings(recovery, shadow),
+            warnings=_build_warnings(recovery),
         )
 
 
@@ -479,12 +354,9 @@ def _classify_db_access(
 
 __all__ = [
     "ChainRow",
-    "SessionShadow",
     "VaultState",
     "VaultStatus",
     "VaultWarning",
     "VaultWarningKind",
     "active_durable_source",
-    "clear_redundant_session_file",
-    "session_shadow_state",
 ]

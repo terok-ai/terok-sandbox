@@ -33,14 +33,19 @@ class PassphraseTier(StrEnum):
     all speak the same vocabulary without conversion shims.
     """
 
-    SESSION_FILE = "session-file"
-    """Tmpfs session-unlock file — RAM-backed, cleared on reboot."""
-
     SYSTEMD_CREDS = "systemd-creds"
     """Sealed machine-bound credential (TPM2 / host key); needs systemd ≥ 257."""
 
     KEYRING = "keyring"
     """OS keyring entry, unlocked together with the login session."""
+
+    KERNEL_KEYRING = "kernel-keyring"
+    """Linux kernel keyring (``@u``) — a volatile unlock cache in
+    unswappable kernel memory, uid-scoped, cleared on logout.  Sits
+    below the zero-friction durable tiers but above the
+    ``passphrase-command`` helper: it never shadows a tier that already
+    unlocks non-interactively, yet still spares the operator from
+    re-running a helper or re-typing a prompt on every open."""
 
     PASSPHRASE_COMMAND = "passphrase-command"  # nosec: B105 — a tier label, not a secret
     """Operator-supplied helper command that prints the passphrase
@@ -91,13 +96,13 @@ class TierTraits:
 
 
 _TRAITS: dict[PassphraseTier, TierTraits] = {
-    PassphraseTier.SESSION_FILE: TierTraits(
-        durable=False, provisionable=True, chooser_offered=True
-    ),
     PassphraseTier.SYSTEMD_CREDS: TierTraits(
         durable=True, provisionable=True, chooser_offered=False
     ),
     PassphraseTier.KEYRING: TierTraits(durable=True, provisionable=True, chooser_offered=True),
+    PassphraseTier.KERNEL_KEYRING: TierTraits(
+        durable=False, provisionable=True, chooser_offered=True
+    ),
     PassphraseTier.PASSPHRASE_COMMAND: TierTraits(
         durable=True, provisionable=False, chooser_offered=False
     ),

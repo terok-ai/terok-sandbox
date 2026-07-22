@@ -157,16 +157,20 @@ def _isolate_systemd_creds_version_cache() -> Iterator[None]:
 def _isolate_credential_keyring(monkeypatch: pytest.MonkeyPatch) -> None:
     """Stub the resolution chain so tests get a deterministic ``"test"`` passphrase.
 
-    Tests pick up the platform-default ``runtime_dir`` which can hold
-    a stale ``vault.passphrase`` from a prior run, so we blank the
-    file tier as well as the keyring tier; the 4 tests that exercise
-    the file tier explicitly restore ``load_passphrase_from_file``
-    via a local monkeypatch.
+    The real kernel keyring is uid-global and may hold a stale cache
+    from a prior run (and is seccomp-blocked in some CI containers), so
+    we blank the kernel-keyring tier as well as the OS-keyring tier; the
+    tests that exercise the kernel-keyring tier explicitly restore its
+    functions via a local monkeypatch.
     """
     import terok_sandbox.config as _config
     import terok_sandbox.vault.store.encryption as _enc
+    import terok_sandbox.vault.store.kernel_keyring as _kk
 
-    monkeypatch.setattr(_enc, "load_passphrase_from_file", lambda _path: None)
+    monkeypatch.setattr(_kk, "load", lambda: None)
+    monkeypatch.setattr(_kk, "store", lambda _pw: True)
+    monkeypatch.setattr(_kk, "forget", lambda: True)
+    monkeypatch.setattr(_kk, "unavailable_reason", lambda: None)
     monkeypatch.setattr(_enc, "load_passphrase_from_keyring", lambda: "test")
     monkeypatch.setattr(_enc, "store_passphrase_in_keyring", lambda _pw: True)
     monkeypatch.setattr(_enc, "forget_passphrase_in_keyring", lambda: True)

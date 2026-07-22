@@ -153,43 +153,43 @@ class TestRecoveryStatus:
         status = RecoveryStatus.load(cfg)
         assert status.acknowledged is True
         assert status.source is PassphraseTier.KEYRING
-        assert status.session_only is False
+        assert status.volatile_only is False
         assert status.urgent is False
 
     def test_unacked_durable_tier_not_urgent(self, tmp_path: Path) -> None:
         """Unacknowledged + durable tier → warn but NOT urgent (no reboot loss risk)."""
         status = RecoveryStatus.load(_cfg(tmp_path))
         assert status.acknowledged is False
-        assert status.session_only is False
+        assert status.volatile_only is False
         assert status.urgent is False
 
-    def test_unacked_session_only_is_urgent(
+    def test_unacked_volatile_only_is_urgent(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Unacknowledged + session-file → urgent (one reboot away from loss)."""
+        """Unacknowledged + kernel-keyring → urgent (one logout away from loss)."""
         from terok_sandbox.vault.store import encryption as enc
 
-        # Spoof the chain so it resolves via the session-file tier.  We
-        # bypass the conftest stub that nulls ``load_passphrase_from_file``
+        # Spoof the chain so it resolves via the kernel-keyring tier.  We
+        # bypass the conftest stub that nulls the kernel-keyring tier
         # by patching the resolver entry point directly.
         cfg = _cfg(tmp_path)
         monkeypatch.setattr(
             enc,
             "resolve_passphrase_with_source",
-            lambda **_kw: ("p4ss", PassphraseTier.SESSION_FILE),
+            lambda **_kw: ("p4ss", PassphraseTier.KERNEL_KEYRING),
         )
         status = RecoveryStatus.load(cfg)
-        assert status.session_only is True
+        assert status.volatile_only is True
         assert status.urgent is True
 
-    def test_acked_session_only_not_urgent(
+    def test_acked_volatile_only_not_urgent(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Acknowledged + session-file → not urgent (operator saved it; rebooting just
+        """Acknowledged + kernel-keyring → not urgent (operator saved it; rebooting just
         means re-unlock + the ack stays valid because the marker is independent)."""
         from terok_sandbox.vault.store import encryption as enc
 
@@ -198,7 +198,7 @@ class TestRecoveryStatus:
         monkeypatch.setattr(
             enc,
             "resolve_passphrase_with_source",
-            lambda **_kw: ("p4ss", PassphraseTier.SESSION_FILE),
+            lambda **_kw: ("p4ss", PassphraseTier.KERNEL_KEYRING),
         )
         assert RecoveryStatus.load(cfg).urgent is False
 
@@ -206,7 +206,7 @@ class TestRecoveryStatus:
         """No resolvable passphrase → source=None, not urgent (locked-vault check owns it)."""
         status = RecoveryStatus.load(_cfg(tmp_path, unlocked=False))
         assert status.source is None
-        assert status.session_only is False
+        assert status.volatile_only is False
         assert status.urgent is False
 
     def test_resolver_exception_collapses_to_locked(

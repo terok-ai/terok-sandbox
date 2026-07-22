@@ -1,18 +1,18 @@
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""Vault passphrase CLI verbs — session unlock / lock plus passphrase management.
+"""Vault passphrase CLI verbs — unlock / lock plus passphrase management.
 
-The unlock/lock pair drives the session-tier slot of the SQLCipher
-passphrase resolution chain: ``unlock`` lands a passphrase on the
-session-unlock tmpfs file; ``lock`` removes it.  Everything else lives
-under ``vault passphrase``:
+The unlock/lock pair drives the volatile-cache slot of the SQLCipher
+passphrase resolution chain: ``unlock`` caches a passphrase in the
+kernel keyring; ``lock`` removes it.  Everything else lives under
+``vault passphrase``:
 
 - ``vault passphrase seal`` promotes the current passphrase into a
   machine-bound ``systemd-creds`` credential.
 - ``vault passphrase to-keyring`` moves it from whichever tier holds it
   now into the OS keyring (the recommended upgrade path off the
-  session-file tier).
+  volatile kernel-keyring cache).
 - ``vault passphrase reveal`` resolves and prints the current
   passphrase (to ``/dev/tty`` by default, or stdout with
   ``--allow-redirect``) and offers to mark the recovery key as saved.
@@ -22,13 +22,13 @@ under ``vault passphrase``:
   passphrase and rewrites every tier that stores the old one —
   [`change_passphrase`][terok_sandbox.commands.vault.change_passphrase]
   is the prompt-free core the TUI shares.
-``vault lock`` clears every stored copy of the passphrase — session
-file, keyring, and the sealed systemd-creds credential — so the vault
-becomes irrecoverable without an off-host copy.  The
-machine-bound tiers are an automatic-unlock convenience on top of a
-passphrase the operator is expected to have saved; locking peels them
-away.  ``purge_passphrase_tiers`` is the prompt-free core ``lock`` and
-panic share.
+``vault lock`` clears every stored copy of the passphrase — the
+kernel-keyring cache, the OS keyring, and the sealed systemd-creds
+credential — so the vault becomes irrecoverable without an off-host
+copy.  The machine-bound tiers are an automatic-unlock convenience on
+top of a passphrase the operator is expected to have saved; locking
+peels them away.  ``purge_passphrase_tiers`` is the prompt-free core
+``lock`` and panic share.
 
 Each container mounts its own short-lived
 [`VaultProxy`][terok_sandbox.vault.daemon.token_broker.VaultProxy]
@@ -74,12 +74,13 @@ class SessionProvisionResult:
     """Outcome of [`provision_session_passphrase`][terok_sandbox.commands.vault.provision_session_passphrase].
 
     ``written`` is the load-bearing bit: ``False`` means the write was
-    *refused* because a durable tier already resolves the vault, so a
-    session file would only shadow it (``shadowed_durable`` names that
-    tier).  Refusal is a normal outcome, not an error — callers report
-    it ("already unlocked via X") rather than raising.  ``validated``
-    says whether the written value was test-opened against an existing
-    DB (vs. an empty install where it becomes the key on first use).
+    *refused* because a durable tier already resolves the vault, so
+    caching the passphrase would be pointless (``shadowed_durable`` names
+    that tier).  Refusal is a normal outcome, not an error — callers
+    report it ("already unlocked via X") rather than raising.
+    ``validated`` says whether the written value was test-opened against
+    an existing DB (vs. an empty install where it becomes the key on
+    first use).
     """
 
     written: bool
@@ -90,31 +91,34 @@ class SessionProvisionResult:
 def provision_session_passphrase(
     cfg: SandboxConfig, passphrase: str, *, force: bool = False
 ) -> SessionProvisionResult:
-    """Validate *passphrase* against the DB, then land it on the session tier.
+    """Validate *passphrase* against the DB, then cache it in the kernel keyring.
 
-    The single writer of the session-unlock tmpfs file — the CLI
-    ``vault unlock`` and terok's TUI unlock modal both funnel through
-    here, so the no-shadow and validation guards apply to every caller
-    by construction; neither can store a value the DB rejects, nor
-    silently shadow a working durable tier.
+    The single writer of the volatile kernel-keyring unlock cache — the
+    CLI ``vault unlock`` and terok's TUI unlock modal both funnel through
+    here, so the no-cache and validation guards apply to every caller by
+    construction; neither can store a value the DB rejects, nor cache one
+    redundantly on top of a working durable tier.
 
     Two guards, in order:
 
-    1. **No-shadow.** The session tier is the highest-priority slot, so
-       writing it masks any durable tier (systemd-creds / keyring)
-       underneath — a reboot then wipes the session copy and the
-       operator only *thought* the sealed key was in use.  When a durable
-       tier already resolves and *force* is false, nothing is written and
-       the result reports ``written=False`` + the shadowed tier.  *force*
-       (re-key / deliberate override) skips this guard.
+    1. **No-cache.** The cache only earns its keep when no durable tier
+       already unlocks the vault non-interactively.  When a durable tier
+       (systemd-creds / keyring) resolves and *force* is false, nothing
+       is written and the result reports ``written=False`` + the durable
+       tier.  *force* (re-key / deliberate override) skips this guard.
     2. **Validation.** When the DB exists (and isn't a legacy plaintext
        file) the value is test-opened first; a mismatch raises
        [`WrongPassphraseError`][terok_sandbox.WrongPassphraseError] and
        **nothing is written**.  A missing DB skips validation (opening it
        just to check would create it as a side effect) — the value
        becomes its key on first use.
+
+    Raises [`RuntimeError`][RuntimeError] if the kernel keyring is
+    unavailable on this host (no ``libkeyutils``, ``CONFIG_KEYS`` off) —
+    a genuine "can't cache here", distinct from the ``written=False``
+    no-cache refusal.
     """
-    from .._yaml import write_secret_text
+    from ..vault.store import kernel_keyring
     from ..vault.store.db import CredentialDB
     from ..vault.store.encryption import is_plaintext_sqlite
     from ..vault.store.status import active_durable_source
@@ -130,16 +134,21 @@ def provision_session_passphrase(
         # deliberately before the write so a bad value never lands.
         CredentialDB(cfg.db_path, passphrase=passphrase).close()
         validated = True
-    write_secret_text(cfg.vault_passphrase_file, passphrase + "\n")
+    if not kernel_keyring.store(passphrase):
+        raise RuntimeError(
+            "the kernel keyring is unavailable here"
+            f" ({kernel_keyring.unavailable_reason() or 'add_key failed'});"
+            " seal a durable tier instead (vault passphrase seal / to-keyring)"
+        )
     return SessionProvisionResult(written=True, validated=validated)
 
 
 def _handle_vault_unlock(*, cfg: SandboxConfig | None = None, force: bool = False) -> None:
-    """Write the credentials-DB passphrase to the session-unlock tmpfs file.
+    """Cache the credentials-DB passphrase in the kernel keyring.
 
     Both guards live in
     [`provision_session_passphrase`][terok_sandbox.commands.vault.provision_session_passphrase]
-    (no-shadow + DB validation).  This handler adds only CLI ergonomics:
+    (no-cache + DB validation).  This handler adds only CLI ergonomics:
     a pre-prompt durable-tier check so the operator isn't asked to type a
     passphrase the writer would just refuse, and exit codes / messages
     for each outcome.
@@ -155,9 +164,8 @@ def _handle_vault_unlock(*, cfg: SandboxConfig | None = None, force: bool = Fals
     # value we'd discard.
     if not force and (durable := active_durable_source(cfg)) is not None:
         print(
-            f"vault already auto-unlocks via {durable}; not writing a session file"
-            " (it would shadow the durable tier and be lost on the next reboot)."
-            " Re-run with --force to override."
+            f"vault already auto-unlocks via {durable}; not caching a passphrase"
+            " (a durable tier already resolves it). Re-run with --force to override."
         )
         return
 
@@ -173,7 +181,7 @@ def _handle_vault_unlock(*, cfg: SandboxConfig | None = None, force: bool = Fals
     except PlaintextDBFoundError as exc:
         raise SystemExit(str(exc)) from exc
 
-    print(f"→ wrote passphrase to {cfg.vault_passphrase_file} (RAM-backed, cleared on reboot)")
+    print("→ cached passphrase in the kernel keyring (RAM-only, cleared at logout)")
     if result.validated:
         print("  verified: the value opens the credentials DB")
     else:
@@ -196,7 +204,7 @@ def _forget_config_tier_updates(cfg: SandboxConfig) -> dict[str, object | None]:
 def purge_passphrase_tiers(cfg: SandboxConfig) -> None:
     """Remove every stored copy of the credentials-DB passphrase.
 
-    Clears the session-unlock tmpfs file, the OS keyring entry, the
+    Clears the kernel-keyring cache, the OS keyring entry, the
     sealed systemd-creds credential, and the
     ``credentials.passphrase_command`` wiring in ``config.yml`` — then
     drops the recovery-acknowledged marker, since it's meaningless once
@@ -209,12 +217,17 @@ def purge_passphrase_tiers(cfg: SandboxConfig) -> None:
     confirmation when recovery is unacknowledged; panic calls it
     directly — no questions asked.
     """
+    from ..vault.store import kernel_keyring
     from ..vault.store.encryption import forget_passphrase_in_keyring, load_passphrase_from_keyring
 
-    path = cfg.vault_passphrase_file
-    if path.exists():
-        path.unlink()
-        print(f"→ removed {path}")
+    if kernel_keyring.load() is not None:
+        if kernel_keyring.forget():
+            print("→ cleared kernel-keyring cache")
+        else:
+            raise SystemExit(
+                "failed to clear the kernel-keyring cache;"
+                " future processes may still auto-unlock from it"
+            )
 
     if cfg.credentials_use_keyring:
         if forget_passphrase_in_keyring():
@@ -273,9 +286,9 @@ def _confirm_lock_when_unacknowledged(cfg: SandboxConfig, *, force: bool) -> Non
         return
 
     print(
-        "Locking clears EVERY stored copy of the vault passphrase (session file,"
-        " keyring, sealed systemd-creds credential, config.yml).  You have not"
-        " confirmed an off-host copy, so the vault would become UNRECOVERABLE."
+        "Locking clears EVERY stored copy of the vault passphrase (kernel-keyring"
+        " cache, keyring, sealed systemd-creds credential, config.yml).  You have"
+        " not confirmed an off-host copy, so the vault would become UNRECOVERABLE."
     )
     response = _read_from_controlling_tty("Type SAVED to confirm you have it stored elsewhere: ")
     if response != "SAVED":
@@ -387,14 +400,15 @@ def handle_vault_seal(*, cfg: SandboxConfig | None = None, key: str = "auto") ->
 
     print(f"→ sealed passphrase to {cfg.vault_systemd_creds_file} (--with-key={key_mode})")
 
-    # The passphrase now lives in the durable sealed credential, so the
-    # session file is redundant — and, being higher priority, it would
-    # *shadow* the seal until the next reboot wiped it.  Drop it so the
-    # chain resolves from the tier the operator just established (same
-    # cleanup ``to-keyring`` does).
-    if cfg.vault_passphrase_file.exists():
-        cfg.vault_passphrase_file.unlink()
-        print(f"→ removed now-redundant session file {cfg.vault_passphrase_file}")
+    # The passphrase now lives in the durable sealed credential, which
+    # outranks the volatile kernel-keyring cache in the chain — so the
+    # cache is superfluous residue.  Drop it so the chain resolves from
+    # the tier the operator just established (same cleanup ``to-keyring``
+    # does).
+    from ..vault.store import kernel_keyring
+
+    if kernel_keyring.load() is not None and kernel_keyring.forget():
+        print("→ cleared now-redundant kernel-keyring cache")
 
     print(
         "  the resolution chain will pick this up the next time a supervisor"
@@ -409,7 +423,7 @@ def handle_vault_to_keyring(*, cfg: SandboxConfig | None = None) -> None:
     writes it to the keyring, flips ``credentials.use_keyring`` to true
     in ``config.yml``, clears any plaintext ``credentials.passphrase`` /
     ``credentials.passphrase_command`` wiring, and removes the
-    session-file and sealed systemd-creds copies.
+    kernel-keyring cache and sealed systemd-creds copies.
 
     The validate-before-destroy ordering is deliberate: if the keyring
     write fails, the source tier is still intact.
@@ -456,13 +470,16 @@ def handle_vault_to_keyring(*, cfg: SandboxConfig | None = None) -> None:
         _config._credentials_section.cache_clear()
         print(f"→ updated {user_config} (use_keyring: true, plaintext fields cleared)")
 
-    # Remove the old tier's persistent copy.  Session file is removed
-    # because the chain prefers it over keyring; sealed systemd-creds
-    # likewise outranks keyring on the resolution order.
-    for stale in (cfg.vault_passphrase_file, cfg.vault_systemd_creds_file):
-        if stale.exists():
-            stale.unlink()
-            print(f"→ removed {sanitize_tty(str(stale))}")
+    # Remove the old tier's copies.  Sealed systemd-creds outranks
+    # keyring on the resolution order, so it must go; the volatile
+    # kernel-keyring cache is cleared too so nothing stale lingers.
+    from ..vault.store import kernel_keyring
+
+    if kernel_keyring.load() is not None and kernel_keyring.forget():
+        print("→ cleared kernel-keyring cache")
+    if cfg.vault_systemd_creds_file.exists():
+        cfg.vault_systemd_creds_file.unlink()
+        print(f"→ removed {sanitize_tty(str(cfg.vault_systemd_creds_file))}")
 
 
 def _handle_vault_passphrase_reveal(
@@ -744,7 +761,6 @@ def change_passphrase(
     present = [
         row.source
         for row in probe_passphrase_chain(
-            passphrase_file=cfg.vault_passphrase_file,
             systemd_creds_file=cfg.vault_systemd_creds_file,
             use_keyring=cfg.credentials_use_keyring,
             passphrase_command=cfg.credentials_passphrase_command,
@@ -755,7 +771,7 @@ def change_passphrase(
         # Locked vault changed via an explicitly-supplied *old*: nothing
         # holds material yet, so land the new value where `vault unlock`
         # would — otherwise the change succeeds and nobody can open the DB.
-        present = [PassphraseTier.SESSION_FILE]
+        present = [PassphraseTier.KERNEL_KEYRING]
     rewrites = tuple(_rewrite_tier(cfg, tier, new) for tier in present)
 
     # The confirmed-saved copy (if any) is now the wrong passphrase —
@@ -787,17 +803,25 @@ def _rewrite_tier(cfg: SandboxConfig, tier: PassphraseTier, passphrase: str) -> 
     every future resolve — a stale copy is strictly worse than a
     missing one.
     """
-    from .._yaml import write_secret_text
-    from ..vault.store import systemd_creds as _systemd_creds
+    from ..vault.store import kernel_keyring, systemd_creds as _systemd_creds
     from ..vault.store.encryption import (
         forget_passphrase_in_keyring,
         store_passphrase_in_keyring,
     )
 
     try:
-        if tier is PassphraseTier.SESSION_FILE:
-            write_secret_text(cfg.vault_passphrase_file, passphrase + "\n")
-            return TierRewrite(tier, ok=True, detail="session file rewritten")
+        if tier is PassphraseTier.KERNEL_KEYRING:
+            if kernel_keyring.store(passphrase):
+                return TierRewrite(tier, ok=True, detail="kernel-keyring cache rewritten")
+            kernel_keyring.forget()
+            return TierRewrite(
+                tier,
+                ok=False,
+                detail=(
+                    f"cannot cache ({kernel_keyring.unavailable_reason() or 'add_key failed'})"
+                    " — stale cache cleared"
+                ),
+            )
         if tier is PassphraseTier.SYSTEMD_CREDS:
             if not _systemd_creds.is_available():
                 reason = _systemd_creds.unavailable_reason() or "unavailable"
@@ -967,8 +991,8 @@ def _handle_vault_status(*, cfg: SandboxConfig | None = None, as_json: bool = Fa
     [`VaultStatus.load`][terok_sandbox.vault.store.status.VaultStatus.load]
     (the same snapshot the TUI and sickbay render), so this handler is
     pure presentation.  Unlike the daemon-startup log it reports the
-    *whole* chain rather than only the winning tier, so a session file
-    shadowing a durable systemd-creds / keyring tier is visible.
+    *whole* chain rather than only the winning tier, so every tier that
+    currently holds material is visible, not just the one that unlocks.
     """
     import json
 
@@ -990,20 +1014,10 @@ def _handle_vault_status(*, cfg: SandboxConfig | None = None, as_json: bool = Fa
                             "source": row.tier,
                             "present": row.present,
                             "active": row.active,
-                            "shadowed": row.shadowed,
                             "detail": row.detail,
                         }
                         for row in status.chain
                     ],
-                    "shadowed_tiers": [row.tier for row in status.chain if row.shadowed],
-                    "session_shadow": (
-                        {
-                            "durable_source": status.shadow.durable_source,
-                            "redundant": status.shadow.redundant,
-                        }
-                        if status.shadow
-                        else None
-                    ),
                     "recovery_acknowledged": status.recovery.acknowledged,
                     "warnings": [
                         {
@@ -1047,8 +1061,8 @@ def _chain_row_marker(row: ChainRow) -> str:
     """The one-word annotation for a chain-table row."""
     if row.active:
         return "active"
-    if row.shadowed:
-        return "shadowed"
+    if row.present:
+        return "present"
     return "–"
 
 
@@ -1330,13 +1344,13 @@ VAULT_COMMANDS: tuple[CommandDef, ...] = (
             ),
             CommandDef(
                 name="unlock",
-                help="Provision the credentials-DB passphrase for this session (tmpfs file)",
+                help="Cache the credentials-DB passphrase for this session (kernel keyring)",
                 handler=LazyHandler("terok_sandbox.commands.vault:_handle_vault_unlock"),
                 args=(
                     ArgDef(
                         name="--force",
                         action="store_true",
-                        help="Write the session file even if a durable tier already unlocks the vault",
+                        help="Cache even if a durable tier already unlocks the vault",
                     ),
                 ),
             ),

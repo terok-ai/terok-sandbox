@@ -5,7 +5,7 @@
 
 Whenever the sandbox mints a passphrase the operator never typed
 (auto-detected systemd-creds tier, fresh keyring entry, or the
-session-file fallback), they need a written copy stashed off-host —
+kernel-keyring cache), they need a written copy stashed off-host —
 every keystore tier is bound to *this* machine, account, or boot, so
 a disk failure or TPM transplant strands the vault.
 
@@ -93,20 +93,23 @@ class RecoveryStatus:
     ``None`` when resolution completed (with or without a source)."""
 
     @property
-    def session_only(self) -> bool:
-        """``True`` iff the passphrase lives only in the tmpfs session-unlock file.
+    def volatile_only(self) -> bool:
+        """``True`` iff the passphrase lives only in a volatile tier.
 
-        That tier dies on the next reboot — without an off-host copy
-        the vault becomes unrecoverable the moment the machine
-        restarts.  Severity should escalate accordingly on every
-        surface that renders this status.
+        The kernel-keyring cache dies at logout (and never survives a
+        reboot) — and the writer only populates it when no durable tier
+        holds the passphrase, so a volatile resolved source means there
+        is no reboot-surviving copy anywhere.  Without an off-host copy
+        the vault becomes unrecoverable the moment the login session
+        ends; severity escalates accordingly on every surface that
+        renders this status.
         """
-        return self.source is PassphraseTier.SESSION_FILE
+        return self.source is not None and not self.source.durable
 
     @property
     def urgent(self) -> bool:
-        """``True`` iff unacknowledged AND session-only (one reboot away from loss)."""
-        return not self.acknowledged and self.session_only
+        """``True`` iff unacknowledged AND volatile-only (one logout away from loss)."""
+        return not self.acknowledged and self.volatile_only
 
     @classmethod
     def load(cls, cfg: SandboxConfig | None = None) -> RecoveryStatus:
@@ -145,7 +148,7 @@ class RecoveryStatus:
         """Cheap marker-only check (no passphrase resolution).
 
         The vault's resolver tiers (systemd-creds, keyring,
-        session-file) are all bound to *this* machine, account, or
+        kernel-keyring) are all bound to *this* machine, account, or
         boot — a hardware failure or TPM transplant strands the vault
         without an off-host copy of the passphrase.  This check is
         what surfaces the "unconfirmed recovery key" warning in

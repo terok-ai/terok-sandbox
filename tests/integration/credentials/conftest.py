@@ -35,7 +35,6 @@ def cfg(tmp_path: Path) -> SandboxConfig:
 
     Every tier path is under ``tmp_path``:
 
-    - ``vault_passphrase_file`` (session-unlock) → ``runtime_dir/``
     - ``vault_systemd_creds_file`` → ``vault_dir/``
     - ``db_path`` (credentials.db) → ``vault_dir/``
 

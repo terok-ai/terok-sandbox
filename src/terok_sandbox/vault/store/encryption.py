@@ -3,13 +3,13 @@
 
 """Passphrase plumbing and SQLCipher helpers for at-rest credential encryption.
 
-Walks the five-tier resolution chain — session-unlock file →
-systemd-creds → OS keyring → ``passphrase_command`` helper →
-interactive prompt — and exposes the SQLCipher open / rekey / migrate
-primitives the rest of the package builds on.  The tier vocabulary
-lives in [`tiers`][terok_sandbox.vault.store.tiers];
-``resolve_passphrase`` documents the chain order; ``open_sqlcipher``
-is the only entry point that ever calls ``sqlcipher3.connect``.
+Walks the five-tier resolution chain — systemd-creds → OS keyring →
+kernel keyring → ``passphrase_command`` helper → interactive prompt —
+and exposes the SQLCipher open / rekey / migrate primitives the rest
+of the package builds on.  The tier vocabulary lives in
+[`tiers`][terok_sandbox.vault.store.tiers]; ``resolve_passphrase``
+documents the chain order; ``open_sqlcipher`` is the only entry point
+that ever calls ``sqlcipher3.connect``.
 
 The setup-time plaintext→SQLCipher migration (deprecated in 0.8.0,
 removed in 0.9.0) lives at the bottom of the file; nothing in the
@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import systemd_creds as _systemd_creds
+from . import kernel_keyring as _kernel_keyring, systemd_creds as _systemd_creds
 from .tiers import PassphraseTier
 
 KEYRING_SERVICE = "terok-sandbox"
@@ -63,7 +63,6 @@ class WrongPassphraseError(RuntimeError):
 def open_sqlcipher_via_chain(
     db_path: str | Path,
     *,
-    passphrase_file: Path | None = None,
     systemd_creds_file: Path | None = None,
     use_keyring: bool = False,
     passphrase_command: str | None = None,
@@ -77,7 +76,6 @@ def open_sqlcipher_via_chain(
     interactive fallback for CLI consumers; daemons leave it ``False``.
     """
     passphrase = resolve_passphrase(
-        passphrase_file=passphrase_file,
         systemd_creds_file=systemd_creds_file,
         use_keyring=use_keyring,
         passphrase_command=passphrase_command,
@@ -90,7 +88,6 @@ def open_sqlcipher_via_chain(
 
 def resolve_passphrase_with_source(
     *,
-    passphrase_file: Path | None = None,
     systemd_creds_file: Path | None = None,
     use_keyring: bool = False,
     passphrase_command: str | None = None,
@@ -109,10 +106,6 @@ def resolve_passphrase_with_source(
     # Truthy checks throughout: an empty string anywhere in the chain
     # is SQLCipher's no-encryption sentinel; treat it as "not present"
     # rather than letting it overrule a real later tier.
-    if passphrase_file is not None:
-        file_pw = load_passphrase_from_file(passphrase_file)
-        if file_pw:
-            return file_pw, PassphraseTier.SESSION_FILE
     if systemd_creds_file is not None and systemd_creds_file.is_file():
         sealed_pw = _systemd_creds.unseal(systemd_creds_file)
         if sealed_pw:
@@ -128,6 +121,14 @@ def resolve_passphrase_with_source(
         keyring_pw = load_passphrase_from_keyring()
         if keyring_pw:
             return keyring_pw, PassphraseTier.KEYRING
+    # Volatile unlock cache, below the zero-friction durable tiers and
+    # above the helper: fail-*open* like the OS keyring above it — an
+    # absent or expired key falls through rather than masking the
+    # durable ``passphrase_command`` beneath.  Read via the module
+    # namespace so tests can monkeypatch the kernel keyring away.
+    kernel_pw = _kernel_keyring.load()
+    if kernel_pw:
+        return kernel_pw, PassphraseTier.KERNEL_KEYRING
     if passphrase_command:
         cmd_pw = load_passphrase_from_command(passphrase_command)
         if cmd_pw:
@@ -147,7 +148,6 @@ def resolve_passphrase_with_source(
 
 def resolve_passphrase(
     *,
-    passphrase_file: Path | None = None,
     systemd_creds_file: Path | None = None,
     use_keyring: bool = False,
     passphrase_command: str | None = None,
@@ -157,13 +157,17 @@ def resolve_passphrase(
 
     Order:
 
-    1. *passphrase_file* — session-unlock tmpfs file (cleared on reboot).
-    2. *systemd_creds_file* — sealed credential decrypted via
+    1. *systemd_creds_file* — sealed credential decrypted via
        ``systemd-creds(1)``.  Machine-bound (TPM2 or host key), survives
        reboot, no OS keyring required.  See
        [`terok_sandbox.vault.store.systemd_creds`][terok_sandbox.vault.store.systemd_creds].
-    3. OS keyring — only when *use_keyring* is true; off by default because
+    2. OS keyring — only when *use_keyring* is true; off by default because
        Linux Secret Service grants access per-collection, not per-item.
+    3. Kernel keyring — the volatile unlock cache
+       ([`terok_sandbox.vault.store.kernel_keyring`][terok_sandbox.vault.store.kernel_keyring]).
+       Consulted unconditionally (an absent/expired/unavailable key just
+       yields ``None``); positioned so it never shadows a zero-friction
+       durable tier above but still spares re-running the helper below.
     4. *passphrase_command* — operator-supplied shell command
        (``pass show …``, ``bw get``, ``op read``, cloud secret-manager
        CLIs).  Delegates retrieval without per-backend integration code,
@@ -178,7 +182,6 @@ def resolve_passphrase(
     credentials.db, and the back-edge would close a tach cycle.
     """
     passphrase, _source = resolve_passphrase_with_source(
-        passphrase_file=passphrase_file,
         systemd_creds_file=systemd_creds_file,
         use_keyring=use_keyring,
         passphrase_command=passphrase_command,
@@ -195,9 +198,8 @@ class TierPresence:
     [`resolve_passphrase_with_source`][terok_sandbox.vault.store.encryption.resolve_passphrase_with_source]:
     that walker stops at the first tier that resolves, so it can only
     ever name the *winner*.  ``vault status`` needs the whole chain to
-    show when a high-priority tier (typically the session file) is
-    *shadowing* a durable tier underneath — the operator's "why is my
-    TPM2 box reading a RAM-backed file?" question.
+    show every tier that currently holds material, not just the one that
+    would unlock the vault.
     """
 
     source: PassphraseTier
@@ -207,7 +209,6 @@ class TierPresence:
 
 def probe_passphrase_chain(
     *,
-    passphrase_file: Path | None = None,
     systemd_creds_file: Path | None = None,
     use_keyring: bool = False,
     passphrase_command: str | None = None,
@@ -218,25 +219,13 @@ def probe_passphrase_chain(
     secret: the sealed systemd-creds credential is never unsealed and
     the ``passphrase_command`` is never executed (both can be slow or
     have side effects), so their mere configuration counts as present.
-    The session-file and keyring tiers are cheap to read, so those are
+    The keyring and kernel-keyring tiers are cheap to read, so those are
     probed for real.  Tiers appear in resolution order; the first
     ``present`` one is the tier that would unlock the vault.  The
     interactive ``prompt`` tier is omitted — it stores nothing, so it
-    can neither be "present" nor shadow anything.
+    can never be "present".
     """
-    session_value = load_passphrase_from_file(passphrase_file) if passphrase_file else None
-    session_detail = str(passphrase_file) if passphrase_file else "no session file"
-    # A file that exists but yields nothing is a fault (permissions,
-    # SELinux, empty write), not a locked vault — say so in the detail
-    # line; the silent variant cost us a debugging session already.
-    if passphrase_file is not None and session_value is None and passphrase_file.exists():
-        session_detail = f"{passphrase_file} (exists but unreadable or empty)"
     return (
-        TierPresence(
-            PassphraseTier.SESSION_FILE,
-            bool(session_value),
-            session_detail,
-        ),
         TierPresence(
             PassphraseTier.SYSTEMD_CREDS,
             bool(systemd_creds_file and systemd_creds_file.is_file()),
@@ -248,6 +237,11 @@ def probe_passphrase_chain(
             # "no passphrase" sentinel, so status must treat it as absent too.
             use_keyring and bool(load_passphrase_from_keyring()),
             "OS keyring" if use_keyring else "use_keyring off",
+        ),
+        TierPresence(
+            PassphraseTier.KERNEL_KEYRING,
+            bool(_kernel_keyring.load()),
+            _kernel_keyring_detail(),
         ),
         TierPresence(
             PassphraseTier.PASSPHRASE_COMMAND,
@@ -285,26 +279,24 @@ def _systemd_creds_detail(path: Path | None) -> str:
     return f"{base} — unusable here: {reason}" if reason else base
 
 
-# ── Tier primitives ─────────────────────────────────────────────────
+def _kernel_keyring_detail() -> str:
+    """Human detail for the kernel-keyring tier in the ``vault status`` chain.
 
-
-def load_passphrase_from_file(path: Path) -> str | None:
-    """Return the passphrase stored at *path*, or ``None`` if absent or unreadable.
-
-    An absent file is the normal locked state and stays silent.  Any
-    *other* ``OSError`` (EACCES from a permissions slip, an SELinux
-    denial, an unmounted tmpfs) also degrades to ``None`` so the chain
-    can fall through — but it logs a warning first: without the log a
-    blocked read is indistinguishable from "locked" on every surface,
-    which buries the actual fault.
+    Distinguishes the three states an operator cares about: the facility
+    can't run here at all (``unusable here: <reason>`` — no
+    ``libkeyutils``, ``CONFIG_KEYS`` off, WSL1), the tier is usable but
+    holds nothing right now (``no passphrase cached``), and a passphrase
+    is currently cached (``cached in the user keyring``).  The presence
+    bool the row carries is the load-bearing signal; this only colours
+    it.
     """
-    try:
-        return path.read_text(encoding="utf-8").rstrip("\n") or None
-    except FileNotFoundError:
-        return None
-    except OSError as exc:
-        _logger.warning("session passphrase file %s exists but is unreadable: %s", path, exc)
-        return None
+    reason = _kernel_keyring.unavailable_reason()
+    if reason is not None:
+        return f"unusable here: {reason}"
+    return "cached in the user keyring" if _kernel_keyring.load() else "no passphrase cached"
+
+
+# ── Tier primitives ─────────────────────────────────────────────────
 
 
 def load_passphrase_from_keyring() -> str | None:
@@ -370,8 +362,8 @@ def load_passphrase_from_command(
 ) -> str | None:
     """Run *command*, return its stdout with the trailing newline removed, or ``None`` on any failure.
 
-    Same shape as the other tier primitives ([`load_passphrase_from_file`][terok_sandbox.vault.store.encryption.load_passphrase_from_file],
-    [`load_passphrase_from_keyring`][terok_sandbox.vault.store.encryption.load_passphrase_from_keyring]):
+    Same shape as the other tier primitives
+    ([`load_passphrase_from_keyring`][terok_sandbox.vault.store.encryption.load_passphrase_from_keyring]):
     silent on every failure path so the resolver can decide whether
     ``None`` means "skip this tier" or "fail closed".  Diagnostic
     detail (parse error, exec failure, non-zero exit, helper stderr,
@@ -766,7 +758,6 @@ __all__ = [
     "is_plaintext_sqlite",
     "keyring_backend_available",
     "load_passphrase_from_command",
-    "load_passphrase_from_file",
     "load_passphrase_from_keyring",
     "open_sqlcipher",
     "open_sqlcipher_via_chain",

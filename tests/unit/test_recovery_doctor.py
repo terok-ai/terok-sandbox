@@ -6,8 +6,8 @@
 Three severity bands:
 
 * marker present → ``ok``
-* marker absent + session-file resolver → ``error`` (one reboot away
-  from losing the vault — the session tier is wiped on restart)
+* marker absent + kernel-keyring resolver → ``error`` (one logout away
+  from losing the vault — the volatile cache is wiped at logout)
 * marker absent + any durable tier → ``warn`` (machine-bound; needs
   an off-host copy for hardware-failure DR)
 
@@ -66,7 +66,7 @@ class TestRecoveryAcknowledgedCheck:
         assert "acknowledged" in verdict.detail
 
     def test_marker_missing_with_durable_tier_returns_warn(self, tmp_path: Path) -> None:
-        """Marker absent + non-session-file source → ``warn`` naming both remediations."""
+        """Marker absent + durable (non-volatile) source → ``warn`` naming both remediations."""
         # ``_cfg`` resolves via the keyring tier (a durable, machine-bound
         # store) — missing marker is "warn", not "error".
         verdict = _eval_recovery(_cfg(tmp_path))
@@ -78,31 +78,31 @@ class TestRecoveryAcknowledgedCheck:
         assert "vault passphrase reveal" in verdict.detail
         assert "vault passphrase acknowledge" in verdict.detail
 
-    def test_marker_missing_with_session_only_returns_error(self, tmp_path: Path) -> None:
-        """Marker absent + session-file source → ``error`` with loud "next reboot" text.
+    def test_marker_missing_with_volatile_only_returns_error(self, tmp_path: Path) -> None:
+        """Marker absent + kernel-keyring source → ``error`` with loud "logout" text.
 
-        The session-unlock tmpfs file is wiped on every reboot, so an
-        unconfirmed session-only key means the vault becomes
-        unrecoverable on the next restart — a genuinely higher-severity
-        state than the generic machine-bound warning.
+        The kernel-keyring cache is wiped at logout, so an unconfirmed
+        volatile-only key means the vault becomes unrecoverable the next
+        time the login session ends — a genuinely higher-severity state
+        than the generic machine-bound warning.
         """
         cfg = _cfg(tmp_path)
-        # Spoof the chain so it resolves via the session-file tier.
-        # We don't need a real session-file on disk — the doctor only
-        # reads the returned source string.
+        # Spoof the chain so it resolves via the kernel-keyring tier.
+        # We don't need a real cached key — the doctor only reads the
+        # returned source string.
         with patch.object(
             type(cfg),
             "resolve_passphrase_with_source",
-            lambda self, **_kw: ("p4ss", PassphraseTier.SESSION_FILE),
+            lambda self, **_kw: ("p4ss", PassphraseTier.KERNEL_KEYRING),
         ):
             verdict = _eval_recovery(cfg)
         assert verdict.severity == "error"
-        # The loud text must call out the reboot lifetime explicitly,
+        # The loud text must call out the logout lifetime explicitly,
         # not just generic "machine-bound" — the operator needs to
         # understand the difference between "save it eventually" and
-        # "save it NOW or lose it on the next reboot".
-        assert "session-unlock" in verdict.detail
-        assert "reboot" in verdict.detail.lower()
+        # "save it NOW or lose it at logout".
+        assert "kernel-keyring" in verdict.detail
+        assert "logout" in verdict.detail.lower()
         assert "UNRECOVERABLE" in verdict.detail
         # Remediation verbs still surface for the operator to act.
         assert "vault passphrase reveal" in verdict.detail

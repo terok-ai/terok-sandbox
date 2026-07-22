@@ -30,16 +30,20 @@ def db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     the same ``"test"`` value the DB was sealed with.
 
     Without this, the chain reaches into host state: a residual
-    session-unlock tmpfs file or sealed systemd-creds credential on
+    kernel-keyring cache or sealed systemd-creds credential on
     the developer machine would silently make ``_TokenDB`` open the
     DB with the *wrong* passphrase, surfacing as an opaque HMAC
     failure under the SQLCipher first-query path.
     """
     from terok_sandbox import config as _config
-    from terok_sandbox.vault.store import encryption as _enc, systemd_creds as _sc
+    from terok_sandbox.vault.store import (
+        encryption as _enc,
+        kernel_keyring as _kk,
+        systemd_creds as _sc,
+    )
 
     # Blank the upper tiers so the chain falls through to keyring.
-    monkeypatch.setattr(_enc, "load_passphrase_from_file", lambda _path: None)
+    monkeypatch.setattr(_kk, "load", lambda: None)
     monkeypatch.setattr(_sc, "unseal", lambda _path: None)
     # Pin keyring to the test passphrase.
     monkeypatch.setattr(_enc, "load_passphrase_from_keyring", lambda: "test")
