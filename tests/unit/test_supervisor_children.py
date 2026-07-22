@@ -268,6 +268,10 @@ class TestArmParentDeathSignal:
         libc = MagicMock()
         libc.prctl = MagicMock(side_effect=lambda *a: calls.append(a) or 0)
         monkeypatch.setattr("terok_sandbox.supervisor.children.ctypes.CDLL", lambda *a, **k: libc)
+        # Pin a live parent: in a container the pytest process can itself be
+        # a direct child of pid 1, which the orphan check would (correctly)
+        # read as "parent already gone".
+        monkeypatch.setattr("terok_sandbox.supervisor.children.os.getppid", lambda: 1000)
         assert _arm_parent_death_signal() is True
         assert calls and calls[0][:2] == (1, signal.SIGTERM)
 
@@ -283,6 +287,8 @@ class TestArmParentDeathSignal:
             "terok_sandbox.supervisor.children.ctypes.CDLL",
             MagicMock(side_effect=OSError("no libc")),
         )
+        # Pin a live parent — see test_arms_pdeathsig_and_reports_live_parent.
+        monkeypatch.setattr("terok_sandbox.supervisor.children.os.getppid", lambda: 1000)
         assert _arm_parent_death_signal() is True
 
     def test_run_child_exits_when_orphaned(

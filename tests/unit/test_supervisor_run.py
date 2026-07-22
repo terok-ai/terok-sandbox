@@ -314,9 +314,13 @@ class TestContainerPidWatch:
         """A PID already gone at open time resolves at once (tear down now)."""
         from terok_sandbox.supervisor.main import _wait_for_container_pid
 
+        # create=True: on kernels/libc without pidfd (musl, older glibc) the
+        # attribute is absent, and a plain patch would fail to find it — the
+        # production path already treats an AttributeError as "no pidfd".
         with patch(
             "terok_sandbox.supervisor.main.os.pidfd_open",
             side_effect=ProcessLookupError,
+            create=True,
         ):
             await asyncio.wait_for(_wait_for_container_pid(999999), timeout=2)
 
@@ -357,6 +361,7 @@ class TestContainerPidWatch:
             patch(
                 "terok_sandbox.supervisor.main.os.pidfd_open",
                 side_effect=OSError("no pidfd"),
+                create=True,  # absent on musl/older libc — see the dead-pid test
             ),
             patch("terok_sandbox.supervisor.main._PID_POLL_INTERVAL_S", 0.05),
         ):
