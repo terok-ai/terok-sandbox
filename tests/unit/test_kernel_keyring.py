@@ -28,7 +28,7 @@ from terok_sandbox.vault.store import kernel_keyring
 # them for every test here.
 _REAL_FUNCS = {
     name: getattr(kernel_keyring, name)
-    for name in ("load", "store", "forget", "unavailable_reason")
+    for name in ("load", "store", "forget", "is_cached", "unavailable_reason")
 }
 
 
@@ -229,6 +229,35 @@ def test_forget_removes_the_key(fake_lib: FakeKeyutils) -> None:
 
 def test_forget_is_idempotent_when_absent(fake_lib: FakeKeyutils) -> None:
     assert kernel_keyring.forget() is True
+
+
+def test_is_cached_reflects_presence(fake_lib: FakeKeyutils) -> None:
+    assert kernel_keyring.is_cached() is False
+    kernel_keyring.store("pw")
+    assert kernel_keyring.is_cached() is True
+    kernel_keyring.forget()
+    assert kernel_keyring.is_cached() is False
+
+
+def test_is_cached_never_reads_the_payload(
+    fake_lib: FakeKeyutils, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Presence must not materialise the secret — status surfaces poll this."""
+    kernel_keyring.store("pw")
+
+    def _explode(*_args: object) -> int:
+        raise AssertionError("is_cached must not call keyctl_read")
+
+    monkeypatch.setattr(fake_lib, "keyctl_read", _explode)
+    assert kernel_keyring.is_cached() is True
+
+
+def test_is_cached_false_when_library_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _raise() -> object:
+        raise kernel_keyring._KeyutilsUnavailable("nope")
+
+    monkeypatch.setattr(kernel_keyring, "_load_library", _raise)
+    assert kernel_keyring.is_cached() is False
 
 
 def test_forget_true_when_library_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:

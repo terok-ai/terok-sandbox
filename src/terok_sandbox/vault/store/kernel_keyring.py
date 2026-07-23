@@ -9,13 +9,14 @@ the userspace shim for the kernel key-retention service
 operations the vault's volatile passphrase cache needs, and nothing
 else:
 
-- [`store`][terok_sandbox.vault.store.kernel_keyring.store] — stash the
-  SQLCipher passphrase as a ``user``-type key in the caller's **user
-  keyring** (``@u``) and lock its permission mask to the owning uid;
-- [`load`][terok_sandbox.vault.store.kernel_keyring.load] — read it
-  back from any same-uid process;
-- [`forget`][terok_sandbox.vault.store.kernel_keyring.forget] — unlink
-  it early;
+- [`store`][terok_sandbox.vault.store.kernel_keyring.store] — cache the
+  SQLCipher passphrase for this uid;
+- [`load`][terok_sandbox.vault.store.kernel_keyring.load] — read it back
+  from any same-uid process;
+- [`forget`][terok_sandbox.vault.store.kernel_keyring.forget] — clear it;
+- [`is_cached`][terok_sandbox.vault.store.kernel_keyring.is_cached] —
+  answer the status surfaces' presence question without materialising
+  the secret;
 - [`unavailable_reason`][terok_sandbox.vault.store.kernel_keyring.unavailable_reason] —
   the setup/probe gate, mirroring
   [`terok_sandbox.vault.store.systemd_creds.unavailable_reason`][terok_sandbox.vault.store.systemd_creds.unavailable_reason].
@@ -104,21 +105,21 @@ _MAX_PAYLOAD_BYTES: Final = 4096
 
 
 def store(passphrase: str) -> bool:
-    """Cache *passphrase* in the user keyring; return success.
+    """Cache *passphrase* so later processes of this user can unlock the vault.
 
-    Adds (or, if it already exists, updates in place — so the footprint
-    stays a single long-lived key rather than one per unlock) a
-    ``user``-type key under [`KEY_DESCRIPTION`][terok_sandbox.vault.store.kernel_keyring.KEY_DESCRIPTION]
-    in ``@u`` and tightens its permission mask to possessor+uid (``_KEY_PERM``).
-    No timeout is armed: the cache persists for the whole login session
-    until an explicit ``vault lock`` (or a move to a durable tier),
-    matching the tmpfs file it replaces.  Any failure (facility
-    unavailable, quota ``EDQUOT``, permission fault) is logged at WARNING
-    and returns ``False`` so the caller falls through — this is a cache,
-    never the sole home of the secret.
+    The cache is deliberately untimed: it lives for the login session and
+    is cleared only by an explicit ``vault lock`` or a move to a durable
+    tier, matching the tmpfs file this tier replaces.  Failure is soft —
+    a cache is never the sole home of the secret — so an unreachable
+    facility, an exhausted key quota or a refused permission change is
+    logged and reported rather than raised.
 
-    Refuses an empty passphrase: an empty key would read back as
-    SQLCipher's no-encryption sentinel.
+    Returns:
+        True when the passphrase is cached and readable by this uid.
+
+    Raises:
+        ValueError: The passphrase is empty — SQLCipher reads that back
+            as "no encryption" — or implausibly large for a passphrase.
     """
     if not passphrase:
         raise ValueError("refusing to cache an empty passphrase in the kernel keyring")
@@ -158,25 +159,26 @@ def store(passphrase: str) -> bool:
 
 
 def load() -> str | None:
-    """Return the cached passphrase, or ``None`` if it's absent/unreachable.
+    """Return the cached passphrase.
 
-    Searches ``@u`` for the well-known key and reads its payload.  A
-    missing key (``ENOKEY``) or an unavailable facility yields ``None`` —
-    the normal "locked" outcome, kept silent so the resolver can fall
-    through to the next tier.
+    Silent on every miss: an absent key and an unusable facility are
+    both the ordinary "locked" outcome, which the next tier of the
+    resolver chain handles.  Reach for
+    [`is_cached`][terok_sandbox.vault.store.kernel_keyring.is_cached]
+    when only presence matters — this materialises the secret.
+
+    Returns:
+        The cached passphrase, or None when nothing is cached here.
     """
     try:
         lib = _load_library()
     except _KeyutilsUnavailable:
         return None
 
-    ctypes.set_errno(0)
-    serial = lib.keyctl_search(_KEY_SPEC_USER_KEYRING, KEY_TYPE, KEY_DESCRIPTION, 0)
-    if serial == -1:
+    serial = _find_cached_key(lib)
+    if serial is None:
         return None
-    # Two-pass read: NULL/0 returns the payload length, then fill a
-    # right-sized buffer.  Passphrases are tiny, but this stays correct
-    # without guessing a size.
+    # Sized by a first pass so the buffer is never a guess.
     length = lib.keyctl_read(serial, None, 0)
     if length <= 0:
         return None
@@ -187,44 +189,66 @@ def load() -> str | None:
     try:
         return buf.raw[:got].decode("utf-8") or None
     finally:
-        # Scrub the ctypes buffer; the decoded str is out of our hands.
+        # The decoded str is out of our hands; this buffer is not.
         ctypes.memset(buf, 0, length)
 
 
 def forget() -> bool:
-    """Unlink the cached passphrase from the user keyring; return success.
+    """Clear the cached passphrase.
 
-    Used by ``vault lock`` / relock.  A key that isn't there (never
-    stored, or already cleared) counts as success — the desired end
-    state is "no cached passphrase".  Works from any same-uid terminal
-    because the permission mask (``_KEY_PERM``) grants the uid class
-    ``write``.
+    Backs ``vault lock``.  An already-absent key counts as success: the
+    contract is the end state — nothing cached here — not the act of
+    removing something.  Any same-uid terminal may call it, not only the
+    one that cached the passphrase.
+
+    Returns:
+        True when no passphrase remains cached.
     """
     try:
         lib = _load_library()
     except _KeyutilsUnavailable:
         return True
 
-    ctypes.set_errno(0)
-    serial = lib.keyctl_search(_KEY_SPEC_USER_KEYRING, KEY_TYPE, KEY_DESCRIPTION, 0)
-    if serial == -1:
-        return True  # nothing to forget
+    serial = _find_cached_key(lib)
+    if serial is None:
+        return True
     if lib.keyctl_unlink(serial, _KEY_SPEC_USER_KEYRING) == -1:
         _logger.warning("kernel keyring keyctl_unlink failed: %s", os.strerror(ctypes.get_errno()))
         return False
     return True
 
 
-def unavailable_reason() -> str | None:
-    """Return why the kernel keyring can't be used here, or ``None`` if it can.
+def is_cached() -> bool:
+    """Whether a passphrase is currently cached here.
 
-    The setup/probe gate — mirrors
+    The presence question every status surface asks — ``vault status``,
+    the doctor checks, the TUI pill's poll — answered without reading
+    the payload, so reporting *on* the secret never materialises it.
+
+    Returns:
+        True when the well-known key exists in the user keyring.
+    """
+    try:
+        lib = _load_library()
+    except _KeyutilsUnavailable:
+        return False
+    return _find_cached_key(lib) is not None
+
+
+def unavailable_reason() -> str | None:
+    """Explain why this host cannot hold the cache, or ``None`` if it can.
+
+    The gate the setup chooser and the status surfaces consult before
+    *offering* the tier, mirroring
     [`systemd_creds.unavailable_reason`][terok_sandbox.vault.store.systemd_creds.unavailable_reason]
-    so the frontends decide whether to *offer* the tier the same way for
-    both.  Side-effect free: it only resolves the id of the (already
-    existing) user keyring, creating and reading nothing.  A ``None``
-    return means "usable"; any string is a human reason a setup chooser
-    can surface.
+    so both tiers are gated alike.  A probe, not a guarantee —
+    [`store`][terok_sandbox.vault.store.kernel_keyring.store]'s return
+    value is the definitive answer — and it neither creates nor reads a
+    key.
+
+    Returns:
+        A human-readable reason the tier is unusable here, or None when
+        it is usable.
     """
     try:
         lib = _load_library()
@@ -243,7 +267,19 @@ def unavailable_reason() -> str | None:
     return f"user keyring unreachable ({os.strerror(errno)})"
 
 
-# ── Library binding (private) ───────────────────────────────────────
+# ── Key lookup and library binding (private) ────────────────────────
+
+
+def _find_cached_key(lib: ctypes.CDLL) -> int | None:
+    """Serial of the cached passphrase key, or ``None`` when absent.
+
+    Returns:
+        The key's serial number, or None when the user keyring holds no
+        key under the well-known description.
+    """
+    ctypes.set_errno(0)
+    serial = lib.keyctl_search(_KEY_SPEC_USER_KEYRING, KEY_TYPE, KEY_DESCRIPTION, 0)
+    return None if serial == -1 else serial
 
 
 class _KeyutilsUnavailable(Exception):
@@ -309,6 +345,7 @@ __all__ = [
     "KEY_DESCRIPTION",
     "KEY_TYPE",
     "forget",
+    "is_cached",
     "load",
     "store",
     "unavailable_reason",

@@ -225,9 +225,9 @@ def probe_passphrase_chain(
     interactive ``prompt`` tier is omitted — it stores nothing, so it
     can never be "present".
     """
-    # Read the kernel keyring once and reuse it for both the presence
-    # bool and its detail line, rather than probing the tier twice.
-    kernel_cached = bool(_kernel_keyring.load())
+    # Presence only — the status chain reports *that* a tier holds
+    # material, never its value, so this must not read the passphrase.
+    kernel_cached = _kernel_keyring.is_cached()
     return (
         TierPresence(
             PassphraseTier.SYSTEMD_CREDS,
@@ -285,13 +285,17 @@ def _systemd_creds_detail(path: Path | None) -> str:
 def _kernel_keyring_detail(*, cached: bool) -> str:
     """Human detail for the kernel-keyring tier in the ``vault status`` chain.
 
-    Distinguishes the three states an operator cares about: the facility
-    can't run here at all (``unusable here: <reason>`` — no
-    ``libkeyutils``, ``CONFIG_KEYS`` off, WSL1), the tier is usable but
-    holds nothing right now (``no passphrase cached``), and a passphrase
-    is currently cached (``cached in the user keyring``).  *cached* is
-    the presence bool the caller already computed, threaded in so status
-    probes the keyring once rather than re-reading it here.
+    Separates the three states an operator acts on differently: the
+    facility cannot run on this host at all, it can but holds nothing,
+    or a passphrase is cached.
+
+    Args:
+        cached: Whether a passphrase is cached, as the caller already
+            determined — threaded in so one status render probes the
+            keyring once.
+
+    Returns:
+        A short phrase for the tier's detail column.
     """
     reason = _kernel_keyring.unavailable_reason()
     if reason is not None:

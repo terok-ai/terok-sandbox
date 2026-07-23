@@ -71,7 +71,7 @@ class TestVaultStatusLoad:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A cached kernel-keyring key + no DB → UNLOCKED ("the key is ready"), still no DB open."""
-        monkeypatch.setattr(_kk, "load", lambda: "hunter2")
+        monkeypatch.setattr(_kk, "is_cached", lambda: True)
         cfg = _load_cfg(tmp_path, resolved=("hunter2", PassphraseTier.KERNEL_KEYRING))
         status = VaultStatus.load(cfg)
         assert status.state is VaultState.UNLOCKED

@@ -48,17 +48,29 @@ class TestProbePassphraseChain:
         assert all(not t.present for t in chain)
 
     def test_kernel_keyring_present_when_cached(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(_kk, "load", lambda: "hunter2")
+        monkeypatch.setattr(_kk, "is_cached", lambda: True)
         chain = probe_passphrase_chain()
         assert chain[2].source == "kernel-keyring"
         assert chain[2].present is True
         assert "cached in the user keyring" in chain[2].detail
 
     def test_kernel_keyring_absent_when_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(_kk, "load", lambda: None)
+        monkeypatch.setattr(_kk, "is_cached", lambda: False)
         chain = probe_passphrase_chain()
         assert chain[2].present is False
         assert "no passphrase cached" in chain[2].detail
+
+    def test_chain_probe_never_reads_the_cached_passphrase(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Status reports that a tier holds material, never its value."""
+
+        def _explode() -> str:
+            raise AssertionError("probe_passphrase_chain must not read the passphrase")
+
+        monkeypatch.setattr(_kk, "is_cached", lambda: True)
+        monkeypatch.setattr(_kk, "load", _explode)
+        assert probe_passphrase_chain()[2].present is True
 
     def test_systemd_creds_present_when_sealed_file_exists(self, tmp_path: Path) -> None:
         sealed = tmp_path / "vault.passphrase.cred"
