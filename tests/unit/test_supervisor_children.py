@@ -16,6 +16,9 @@ from __future__ import annotations
 import asyncio
 import json
 import signal
+import subprocess
+import sys
+import textwrap
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -616,3 +619,59 @@ class TestWriteConfinementWiring:
 
     def test_debug_mode_leaves_the_filesystem_open(self, tmp_path: Path) -> None:
         assert self._run(tmp_path, allow_debugger=True) == []
+
+
+class TestPolicyConfinesOnTheLiveKernel:
+    """The per-service policy, applied through real Landlock, confines to its lane.
+
+    Unlike ``TestWritablePaths`` (which asserts *which* directories the policy
+    names) and ``test_landlock`` (which asserts the primitive works), this ties
+    the two together on the running kernel: the actual ``_writable_paths`` output
+    for a service is applied via ``restrict_writes`` in a fresh process, and the
+    lane it grants is writable while a sibling is denied.  It is the end-to-end
+    proof that a supervisor child's writes land only where the policy allows.
+    """
+
+    def test_vault_lane_is_writable_and_a_sibling_is_denied(self, tmp_path: Path) -> None:
+        # Nest runtime_dir and db_path so their granted parents stay under
+        # ``lane/`` and a sibling ``elsewhere/`` is outside every grant.
+        lane = tmp_path / "lane"
+        cfg = SidecarConfig(
+            container_name="demo",
+            ipc_mode="socket",
+            db_path=lane / "vault" / "vault.db",
+            runtime_dir=lane / "rt" / "sandbox",
+        )
+        writable = _writable_paths("vault", cfg)  # [lane/rt, lane/vault]
+        for path in writable:
+            path.mkdir(parents=True, exist_ok=True)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+
+        probe = textwrap.dedent(
+            f"""
+            import ctypes
+            from pathlib import Path
+            from terok_sandbox._util._landlock import restrict_writes
+
+            ctypes.CDLL(None, use_errno=True).prctl(38, 1, 0, 0, 0)  # no_new_privs
+            report = restrict_writes([Path(p) for p in {[str(p) for p in writable]!r}])
+            if not report.confined:
+                print(f"unsupported:{{report.reason}}")
+                raise SystemExit(0)
+            for granted in {[str(p) for p in writable]!r}:
+                Path(granted, "ok").write_text("x")  # in-lane → allowed
+            try:
+                Path({str(elsewhere)!r}, "no").write_text("x")
+                print("leaked")
+            except PermissionError:
+                print("confined")
+            """
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", probe], capture_output=True, text=True, check=True
+        )
+        out = result.stdout.strip()
+        if out.startswith("unsupported:"):
+            pytest.skip(f"kernel without Landlock: {out}")
+        assert out == "confined", f"vault policy failed to confine a sibling write: {out!r}"
