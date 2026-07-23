@@ -177,8 +177,19 @@ class ShieldManager:
 
     # ── Bypassable lifecycle operations ─────────────────
 
-    def pre_start(self, container: str) -> list[str]:
+    def pre_start(
+        self,
+        container: str,
+        *,
+        security_deny: tuple[str, ...] = (),
+        provider_allow: tuple[str, ...] = (),
+    ) -> list[str]:
         """Return extra ``podman run`` args for egress firewalling.
+
+        *security_deny* / *provider_allow* are executor's roster projection —
+        the generated t20 (deny direct-to-vault-host) and t30 (provider-allow)
+        tiers.  Shield writes them into the bundle, so this layer only carries
+        the data; empty tuples (the default) leave both tiers untouched.
 
         Returns an empty list (no firewall args) when the dangerous
         ``bypass_firewall_no_protection`` override is active.
@@ -190,7 +201,9 @@ class ShieldManager:
             warnings.warn(_BYPASS_WARNING, stacklevel=2)
             return []
         try:
-            return self.shield.pre_start(container)
+            return self.shield.pre_start(
+                container, security_deny=security_deny, provider_allow=provider_allow
+            )
         except ShieldNeedsSetup as exc:
             raise SystemExit(str(exc)) from None
 

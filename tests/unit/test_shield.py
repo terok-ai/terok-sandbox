@@ -238,6 +238,31 @@ def test_manager_pre_start_threads_runtime_into_shield() -> None:
         assert manager.shield.config.runtime is ShieldRuntime.KRUN
 
 
+def test_pre_start_threads_egress_projection_into_shield() -> None:
+    """ShieldManager.pre_start passes the roster projection through to Shield.pre_start."""
+    mock_shield = make_mock_shield(pre_start_args=["--hook"])
+    manager = ShieldManager(MOCK_TASK_DIR, SandboxConfig())
+    with patch.object(ShieldManager, "shield", new=mock_shield):
+        result = manager.pre_start(
+            "ctr",
+            security_deny=("api.anthropic.com",),
+            provider_allow=("telemetry.example",),
+        )
+    assert result == ["--hook"]
+    mock_shield.pre_start.assert_called_once_with(
+        "ctr", security_deny=("api.anthropic.com",), provider_allow=("telemetry.example",)
+    )
+
+
+def test_pre_start_defaults_projection_to_empty() -> None:
+    """With no projection, both generated tiers pass through as empty tuples."""
+    mock_shield = make_mock_shield(pre_start_args=["--hook"])
+    manager = ShieldManager(MOCK_TASK_DIR, SandboxConfig())
+    with patch.object(ShieldManager, "shield", new=mock_shield):
+        manager.pre_start("ctr")
+    mock_shield.pre_start.assert_called_once_with("ctr", security_deny=(), provider_allow=())
+
+
 def test_status_defaults() -> None:
     """Status reflects the default configured shield state."""
     assert ShieldManager(MOCK_TASK_DIR, SandboxConfig()).status() == {

@@ -56,6 +56,20 @@ class TestRunSpec:
         spec = _make_spec()
         assert spec.unrestricted is True
 
+    def test_egress_projection_defaults_empty(self) -> None:
+        """The generated-tier fields default to empty tuples (no projection)."""
+        spec = _make_spec()
+        assert spec.security_deny == ()
+        assert spec.provider_allow == ()
+
+    def test_egress_projection_carries_through(self) -> None:
+        """Executor's projection survives the frozen dataclass round-trip."""
+        spec = _make_spec(
+            security_deny=("api.anthropic.com",), provider_allow=("telemetry.example",)
+        )
+        assert spec.security_deny == ("api.anthropic.com",)
+        assert spec.provider_allow == ("telemetry.example",)
+
     def test_deprecated_gpu_enabled_alias_maps_to_gpus(self) -> None:
         """``gpu_enabled=True`` still works but warns and folds into ``gpus``."""
         with pytest.warns(DeprecationWarning, match="gpu_enabled"):
@@ -182,7 +196,39 @@ class TestSandbox:
                 runtime=ShieldRuntime.DEFAULT,
                 loopback_ports_override=None,
             )
-            Mgr.return_value.pre_start.assert_called_once_with("ctr")
+            Mgr.return_value.pre_start.assert_called_once_with(
+                "ctr", security_deny=(), provider_allow=()
+            )
+
+    def test_pre_start_args_threads_egress_projection(self) -> None:
+        """The executor roster projection reaches ShieldManager.pre_start verbatim."""
+        with patch("terok_sandbox.integrations.shield.ShieldManager") as Mgr:
+            Mgr.return_value.pre_start.return_value = ["--hook"]
+            s = Sandbox()
+            s.pre_start_args(
+                "ctr",
+                Path("/tmp/task"),
+                security_deny=("api.anthropic.com", "api.openai.com"),
+                provider_allow=("telemetry.example",),
+            )
+            Mgr.return_value.pre_start.assert_called_once_with(
+                "ctr",
+                security_deny=("api.anthropic.com", "api.openai.com"),
+                provider_allow=("telemetry.example",),
+            )
+
+    def test_build_cmd_threads_projection_from_runspec(self) -> None:
+        """A RunSpec's egress projection reaches pre_start_args during command assembly."""
+        spec = _make_spec(
+            security_deny=("api.anthropic.com",), provider_allow=("telemetry.example",)
+        )
+        s = Sandbox()
+        with patch.object(Sandbox, "pre_start_args", return_value=["--hook"]) as psa:
+            cmd = s._build_cmd(spec)
+        assert "--hook" in cmd
+        _, kwargs = psa.call_args
+        assert kwargs["security_deny"] == ("api.anthropic.com",)
+        assert kwargs["provider_allow"] == ("telemetry.example",)
 
     def test_pre_start_args_maps_krun_runtime_to_shield_enum(self) -> None:
         """``runtime="krun"`` flows through as ``ShieldRuntime.KRUN``."""
