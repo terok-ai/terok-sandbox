@@ -52,7 +52,7 @@ def _no_irreversible_self_restriction(monkeypatch: pytest.MonkeyPatch) -> None:
     ``TestWritablePaths`` exercises the policy without applying it.
     """
     monkeypatch.setattr("terok_sandbox.supervisor.children._arm_parent_death_signal", lambda: True)
-    from terok_sandbox._util._landlock import LandlockReport
+    from terok_util import LandlockReport
 
     monkeypatch.setattr(
         "terok_sandbox.supervisor.children.confine_filesystem",
@@ -599,7 +599,7 @@ class TestConfinementWiring:
 
         def _spy(read_exec: object, read_write: object) -> object:
             calls.append((read_exec, read_write))
-            from terok_sandbox._util._landlock import LandlockReport
+            from terok_util import LandlockReport
 
             return LandlockReport(confined=True, reason="spy")
 
@@ -625,66 +625,74 @@ class TestConfinementWiring:
 
 
 class TestPolicyConfinesOnTheLiveKernel:
-    """The per-service policy, applied through real Landlock, isolates the service.
+    """The whole ``run_child`` bring-up isolates the service on the running kernel.
 
-    Unlike ``TestWritablePaths`` (which asserts *which* directories the policy
-    names) and ``test_landlock`` (which asserts the primitive works), this ties
-    them together on the running kernel: the actual ``_SYSTEM_READABLE_ROOTS`` +
-    ``_writable_paths`` for a service are applied via ``confine_filesystem`` in a
-    fresh process, and the service can write its own lane but **cannot read a
-    sibling service's data**.  It is the end-to-end proof of cross-service
-    isolation, not just of the primitive.
+    The single high-surface proof: a fresh process loads a real sidecar and
+    calls [`run_child`][terok_sandbox.supervisor.children.run_child], which
+    hardens, applies ``_SYSTEM_READABLE_ROOTS`` + ``_writable_paths`` through
+    real Landlock, then drives a stub ``vault`` runner that probes its lane.
+    The service writes its own data but **cannot read a sibling service's** —
+    end-to-end cross-service isolation, not just the primitive (that lives in
+    terok-util's hardening tests).  Runs on every matrix slot, so each distro's
+    kernel exercises the confinement; a kernel without Landlock skips.
     """
 
     def test_vault_writes_its_lane_and_cannot_read_a_sibling(self, tmp_path: Path) -> None:
-        from terok_sandbox.supervisor.children import _SYSTEM_READABLE_ROOTS
-
         # Nest runtime_dir + db_path under ``lane/`` so the granted parents stay
         # there and a sibling service's dir under the same tree is outside them.
         lane = tmp_path / "lane"
-        cfg = SidecarConfig(
-            container_name="demo",
-            ipc_mode="socket",
-            db_path=lane / "vault" / "vault.db",
-            runtime_dir=lane / "rt" / "sandbox",
-        )
-        read_write = _writable_paths("vault", cfg)  # [lane/rt, lane/vault]
-        for path in read_write:
-            path.mkdir(parents=True, exist_ok=True)
+        db_path = lane / "vault" / "vault.db"
+        runtime_dir = lane / "rt" / "sandbox"
+        for parent in (db_path.parent, runtime_dir.parent):
+            parent.mkdir(parents=True, exist_ok=True)  # granted lanes must exist to be granted
         sibling = lane / "gate-mirror"  # another service's data, not in vault's lane
         sibling.mkdir(parents=True)
         (sibling / "secret").write_text("a gate secret vault must never read")
 
-        read_exec = [str(p) for p in _SYSTEM_READABLE_ROOTS]
-        writable = [str(p) for p in read_write]
+        sidecar = tmp_path / "demo.json"
+        sidecar.write_text(
+            json.dumps(
+                {
+                    "container_name": "demo",
+                    "ipc_mode": "socket",
+                    "db_path": str(db_path),
+                    "runtime_dir": str(runtime_dir),
+                }
+            )
+        )
+
+        # A stub vault runner: replaces the real proxy so run_child drives the
+        # full harden→confine→_drive path, then the runner probes the live lane.
         probe = textwrap.dedent(
             f"""
-            import ctypes
             from pathlib import Path
-            from terok_sandbox._util._landlock import confine_filesystem
+            from terok_util import hardening
+            from terok_sandbox.supervisor import children
 
-            ctypes.CDLL(None, use_errno=True).prctl(38, 1, 0, 0, 0)  # no_new_privs
-            report = confine_filesystem(
-                [Path(p) for p in {read_exec!r}], [Path(p) for p in {writable!r}]
-            )
-            if not report.confined:
-                print(f"unsupported:{{report.reason}}")
+            libc = hardening._libc()
+            if libc is None or hardening._landlock_abi(libc) < 1:
+                print("unsupported:no-landlock")
                 raise SystemExit(0)
-            out = []
-            Path({writable[0]!r}, "ok").write_text("x")
-            out.append("lane-write-ok")
-            try:
-                Path({str(sibling)!r}, "secret").read_text()
-                out.append("sibling-read-LEAK")
-            except (PermissionError, OSError):
-                out.append("sibling-read-denied")
-            print(";".join(out))
+
+            async def _probe(cfg, paths, stop):
+                out = []
+                Path(cfg.db_path.parent, "ok").write_text("x")   # vault write lane → OK
+                out.append("lane-write-ok")
+                try:
+                    Path({str(sibling)!r}, "secret").read_text()
+                    out.append("sibling-read-LEAK")
+                except (PermissionError, OSError):
+                    out.append("sibling-read-denied")            # outside the lane → unreadable
+                print(";".join(out))
+
+            children._RUNNERS["vault"] = _probe
+            raise SystemExit(children.run_child("vault", "abc123def456", Path({str(sidecar)!r})))
             """
         )
         result = subprocess.run(
             [sys.executable, "-c", probe], capture_output=True, text=True, check=True
         )
-        out = result.stdout.strip()
+        out = result.stdout.strip().splitlines()[-1] if result.stdout.strip() else ""
         if out.startswith("unsupported:"):
             pytest.skip(f"kernel without Landlock: {out}")
         assert out == "lane-write-ok;sibling-read-denied", f"vault policy leaked: {out!r}"
