@@ -42,16 +42,17 @@ import ctypes
 import logging
 import os
 import signal
+import sys
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from terok_util import harden_self
 
-from .._util._landlock import restrict_writes
+from .._util._landlock import confine_filesystem
 from .sidecar import SupervisorPaths, load_sidecar
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
-    from pathlib import Path
 
     from .sidecar import SidecarConfig
 
@@ -70,6 +71,21 @@ _EXIT_START_FAILED = 4
 
 #: ``prctl`` option arming the parent-death signal (Linux).
 _PR_SET_PDEATHSIG = 1
+
+#: Secret-free filesystem roots every child may read and execute — the OS,
+#: its shared libraries, and this interpreter.  Nothing sensitive lives here,
+#: so read-confinement grants them to all services uniformly; a service's own
+#: data (and any secret at rest) lives under the terok state/runtime tree and
+#: is granted per-service by ``_writable_paths``, never here — which is what
+#: keeps one child from reading another's.
+_SYSTEM_READABLE_ROOTS: tuple[Path, ...] = (
+    *(
+        Path(p)
+        for p in ("/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc", "/proc", "/dev", "/run")
+    ),
+    Path(sys.prefix),
+    Path(sys.base_prefix),
+)
 
 
 async def _run_verdict(cfg: SidecarConfig, paths: SupervisorPaths, stop: asyncio.Event) -> None:
@@ -310,12 +326,14 @@ def run_child(service: str, container_id: str, sidecar_path: Path) -> int:
         _logger.debug("%s child hardening partial: %s", service, report)
 
     if not cfg.allow_debugger:
-        # Confine writes to this service's own lane so a bug in a binary it
-        # runs (gate → git, vault → systemd-creds) can't tamper outside it.
-        # Debug mode keeps the filesystem open for dump/trace tools.
-        fs = restrict_writes(_writable_paths(service, cfg))
+        # Pin the filesystem to this service's lane: read+exec the shared
+        # runtime, read+write only its own data.  A bug in a binary it runs
+        # (gate → git, vault → systemd-creds) then can neither exfiltrate a
+        # sibling's secret nor write outside its lane.  Debug mode keeps the
+        # filesystem open for dump/trace tools.
+        fs = confine_filesystem(_SYSTEM_READABLE_ROOTS, _writable_paths(service, cfg))
         if not fs.confined:
-            _logger.debug("%s child write-confinement not applied: %s", service, fs.reason)
+            _logger.debug("%s child filesystem-confinement not applied: %s", service, fs.reason)
 
     paths = SupervisorPaths.for_container(
         container_id, cfg.container_name, sidecar_path, cfg.runtime_dir
