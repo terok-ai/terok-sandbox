@@ -44,7 +44,7 @@ class TestHandleSupervisor:
 
         with (
             patch("terok_sandbox.supervisor.run_supervisor", side_effect=_fake_run),
-            patch("logging.basicConfig") as basic_config,
+            patch("terok_util.configure") as configure_mock,
         ):
             rc = _handle_supervisor("abc123", "/run/terok/sidecar/demo.json", 4242)
 
@@ -55,7 +55,7 @@ class TestHandleSupervisor:
         assert isinstance(captured["sidecar_path"], Path)
         # Root logging is configured so module loggers reach the wrapper's
         # per-container stderr log file.
-        basic_config.assert_called_once()
+        configure_mock.assert_called_once()
 
     def test_runs_under_asyncio_run(self) -> None:
         """The coroutine is driven via ``asyncio.run`` (not awaited inline).
@@ -68,7 +68,7 @@ class TestHandleSupervisor:
         with (
             patch("terok_sandbox.supervisor.run_supervisor", new=sentinel) as run,
             patch("terok_sandbox.commands.supervisor.asyncio.run", return_value=0) as asyncio_run,
-            patch("logging.basicConfig"),
+            patch("terok_util.configure"),
         ):
             rc = _handle_supervisor("cid", "/sidecar.json")
 
@@ -85,13 +85,13 @@ class TestHandleSuperviseChild:
         """``service`` / ``container_id`` pass through; ``sidecar_path`` becomes a ``Path``."""
         with (
             patch("terok_sandbox.supervisor.children.run_child", return_value=4) as run_child,
-            patch("logging.basicConfig") as basic_config,
+            patch("terok_util.configure") as configure_mock,
         ):
             rc = _handle_supervise_child("vault", "abc123", "/run/terok/sidecar/demo.json")
 
         assert rc == 4
         run_child.assert_called_once_with("vault", "abc123", Path("/run/terok/sidecar/demo.json"))
-        basic_config.assert_called_once()
+        configure_mock.assert_called_once()
 
 
 class TestRegistration:

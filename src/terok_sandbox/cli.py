@@ -60,6 +60,12 @@ def main(argv: list[str] | None = None) -> None:
     """Entry point for the ``terok-sandbox`` command."""
     import sys
 
+    from terok_util import configure
+
+    # One-time unified logging: routes every getLogger(__name__) to journald
+    # (when present) or stderr — the non-supervisor CLI paths had no handler.
+    configure(identifier="terok-sandbox")
+
     if argv is None:
         argv = sys.argv[1:]
 
