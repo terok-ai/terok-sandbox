@@ -25,21 +25,18 @@ from ._types import ArgDef, CommandDef
 
 
 def _configure_supervisor_logging() -> None:
-    """Send supervisor / child logs to stderr (the wrapper's per-container log).
+    """Route supervisor / child logs through the unified facility, keeping stderr.
 
-    The wrapper redirects the process's stderr to
-    ``<state>/logs/<id>.log``; configuring the root logger here makes the
-    module loggers (``terok-supervisor``, ``terok_sandbox.*``,
-    ``terok_clearance.*``) actually write there.
+    The supervisor is a **host** process — the OCI hook spawns it detached,
+    outside the container's namespaces — whose stderr the wrapper redirects
+    to ``<state>/logs/<id>.log``.  ``stderr=True`` keeps that per-container
+    log fed while also sending the ``terok-supervisor`` / ``terok_sandbox.*``
+    / ``terok_clearance.*`` module loggers to the host journal when one is
+    present.  On a non-systemd host it falls back to that same stderr file.
     """
-    import logging
-    import sys
+    from terok_util import configure
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        stream=sys.stderr,
-    )
+    configure(identifier="terok-supervisor", stderr=True)
 
 
 def _handle_supervisor(
