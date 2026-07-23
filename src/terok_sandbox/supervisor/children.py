@@ -46,9 +46,8 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from terok_util import harden_self
+from terok_util import confine_filesystem, harden_self
 
-from .._util._landlock import confine_filesystem
 from .sidecar import SupervisorPaths, load_sidecar
 
 if TYPE_CHECKING:
