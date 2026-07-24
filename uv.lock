@@ -2345,8 +2345,8 @@ test = [
 
 [[package]]
 name = "terok-shield"
-version = "0.8.0a7.dev10+g50483d566"
-source = { git = "https://github.com/terok-ai/terok-shield.git?rev=refs%2Fpull%2F406%2Fhead#50483d566f43f337f55660d8ce77c1e2463e8922" }
+version = "0.8.0a7.dev11+g0554ae75c"
+source = { git = "https://github.com/terok-ai/terok-shield.git?rev=refs%2Fpull%2F406%2Fhead#0554ae75cc46eb756dd2efc5f19bc0d5e75dc97b" }
 dependencies = [
     { name = "pydantic" },
     { name = "pyyaml" },

@@ -40,6 +40,7 @@ from terok_shield import (
     ShieldState,  # noqa: F401 — re-exported
 )
 from terok_shield.container import (
+    resolve_shield_version as resolve_container_shield_version,  # noqa: F401 — re-exported
     resolve_state_dir as resolve_container_state_dir,  # noqa: F401 — re-exported
 )
 
@@ -60,6 +61,7 @@ from terok_shield.prereqs import (  # noqa: F401 — re-exported with concrete t
     check_krun_binaries,
 )
 from terok_shield.run import NftNotFoundError, ShieldNeedsSetup  # noqa: F401
+from terok_shield.state import BUNDLE_VERSION as BUNDLE_VERSION  # noqa: F401 — re-exported
 
 from ..config import SandboxConfig
 
