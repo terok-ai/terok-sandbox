@@ -16,6 +16,9 @@ from __future__ import annotations
 import asyncio
 import json
 import signal
+import subprocess
+import sys
+import textwrap
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -31,20 +34,30 @@ from terok_sandbox.supervisor.children import (
     _run_signer,
     _run_vault,
     _run_verdict,
+    _writable_paths,
     run_child,
 )
 from terok_sandbox.supervisor.main import SidecarConfig, SupervisorPaths
 
 
 @pytest.fixture(autouse=True)
-def _no_pdeathsig(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep ``run_child`` tests from arming PDEATHSIG on the test process.
+def _no_irreversible_self_restriction(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep ``run_child`` tests from irreversibly restricting the pytest process.
 
-    The real prctl would tie the *pytest* process's life to its parent —
-    a side effect that outlives the test.  The dedicated
-    ``TestArmParentDeathSignal`` cases bypass this stub explicitly.
+    Two of ``run_child``'s startup steps are process-wide and permanent:
+    ``_arm_parent_death_signal`` would tie the pytest process's life to its
+    parent, and ``confine_filesystem`` would Landlock-restrict every later
+    test's filesystem access.  Both are stubbed to no-ops here; the dedicated
+    ``TestArmParentDeathSignal`` cases bypass the first explicitly, and
+    ``TestWritablePaths`` exercises the policy without applying it.
     """
     monkeypatch.setattr("terok_sandbox.supervisor.children._arm_parent_death_signal", lambda: True)
+    from terok_util import LandlockReport
+
+    monkeypatch.setattr(
+        "terok_sandbox.supervisor.children.confine_filesystem",
+        lambda _re, _rw: LandlockReport(confined=True, reason="stubbed in tests"),
+    )
 
 
 @pytest.fixture
@@ -544,3 +557,142 @@ class TestChildSignalHandlers:
             _install_signal_handlers(stop)
         assert signal.SIGTERM in registered
         assert signal.SIGINT in registered
+
+
+class TestWritablePaths:
+    """The per-service write policy Landlock enforces — everything else is denied."""
+
+    def test_secretless_services_get_only_the_runtime_root(self, tmp_path: Path) -> None:
+        cfg = _socket_cfg(tmp_path)
+        for service in ("verdict", "clearance", "signer"):
+            assert _writable_paths(service, cfg) == [tmp_path / "rt"]
+
+    def test_vault_adds_its_db_directory(self, tmp_path: Path) -> None:
+        cfg = _socket_cfg(tmp_path)  # db_path = tmp_path / "vault.db"
+        assert _writable_paths("vault", cfg) == [tmp_path / "rt", tmp_path]
+
+    def test_gate_adds_the_mirror_tree_when_wired(self, tmp_path: Path) -> None:
+        mirror = tmp_path / "gate"
+        cfg = _socket_cfg(tmp_path, gate_base_path=mirror, gate_token="tok")  # nosec B106
+        assert _writable_paths("gate", cfg) == [tmp_path / "rt", mirror]
+
+    def test_unwired_gate_gets_only_the_runtime_root(self, tmp_path: Path) -> None:
+        assert _writable_paths("gate", _socket_cfg(tmp_path)) == [tmp_path / "rt"]
+
+
+class TestConfinementWiring:
+    """``run_child`` confines the filesystem on a normal start, opens it in debug mode."""
+
+    def _run(self, tmp_path: Path, *, allow_debugger: bool) -> list[tuple[object, object]]:
+        sidecar = tmp_path / "demo.json"
+        payload: dict[str, object] = {
+            "container_name": "demo",
+            "ipc_mode": "socket",
+            "db_path": str(tmp_path / "vault.db"),
+            "runtime_dir": str(tmp_path / "rt" / "sandbox"),
+        }
+        if allow_debugger:
+            payload["allow_debugger"] = True
+        sidecar.write_text(json.dumps(payload))
+
+        calls: list[tuple[object, object]] = []
+
+        def _spy(read_exec: object, read_write: object) -> object:
+            calls.append((read_exec, read_write))
+            from terok_util import LandlockReport
+
+            return LandlockReport(confined=True, reason="spy")
+
+        async def _noop(cfg: object, paths: object, stop: object) -> None:
+            return None
+
+        with (
+            patch("terok_sandbox.supervisor.children.confine_filesystem", _spy),
+            patch.dict("terok_sandbox.supervisor.children._RUNNERS", {"vault": _noop}, clear=False),
+        ):
+            assert run_child("vault", "abc123def456", sidecar) == 0
+        return calls
+
+    def test_normal_start_confines_to_the_service_policy(self, tmp_path: Path) -> None:
+        from terok_sandbox.supervisor.children import _SYSTEM_READABLE_ROOTS
+
+        ((read_exec, read_write),) = self._run(tmp_path, allow_debugger=False)
+        assert read_exec is _SYSTEM_READABLE_ROOTS  # shared read+exec roots
+        assert read_write == [tmp_path / "rt", tmp_path]  # vault write lane: runtime root + db dir
+
+    def test_debug_mode_leaves_the_filesystem_open(self, tmp_path: Path) -> None:
+        assert self._run(tmp_path, allow_debugger=True) == []
+
+
+class TestPolicyConfinesOnTheLiveKernel:
+    """The whole ``run_child`` bring-up isolates the service on the running kernel.
+
+    The single high-surface proof: a fresh process loads a real sidecar and
+    calls [`run_child`][terok_sandbox.supervisor.children.run_child], which
+    hardens, applies ``_SYSTEM_READABLE_ROOTS`` + ``_writable_paths`` through
+    real Landlock, then drives a stub ``vault`` runner that probes its lane.
+    The service writes its own data but **cannot read a sibling service's** —
+    end-to-end cross-service isolation, not just the primitive (that lives in
+    terok-util's hardening tests).  Runs on every matrix slot, so each distro's
+    kernel exercises the confinement; a kernel without Landlock skips.
+    """
+
+    def test_vault_writes_its_lane_and_cannot_read_a_sibling(self, tmp_path: Path) -> None:
+        # Nest runtime_dir + db_path under ``lane/`` so the granted parents stay
+        # there and a sibling service's dir under the same tree is outside them.
+        lane = tmp_path / "lane"
+        db_path = lane / "vault" / "vault.db"
+        runtime_dir = lane / "rt" / "sandbox"
+        for parent in (db_path.parent, runtime_dir.parent):
+            parent.mkdir(parents=True, exist_ok=True)  # granted lanes must exist to be granted
+        sibling = lane / "gate-mirror"  # another service's data, not in vault's lane
+        sibling.mkdir(parents=True)
+        (sibling / "secret").write_text("a gate secret vault must never read")
+
+        sidecar = tmp_path / "demo.json"
+        sidecar.write_text(
+            json.dumps(
+                {
+                    "container_name": "demo",
+                    "ipc_mode": "socket",
+                    "db_path": str(db_path),
+                    "runtime_dir": str(runtime_dir),
+                }
+            )
+        )
+
+        # A stub vault runner: replaces the real proxy so run_child drives the
+        # full harden→confine→_drive path, then the runner probes the live lane.
+        probe = textwrap.dedent(
+            f"""
+            from pathlib import Path
+            from terok_util import hardening
+            from terok_sandbox.supervisor import children
+
+            libc = hardening._libc()
+            if libc is None or hardening._landlock_abi(libc) < 1:
+                print("unsupported:no-landlock")
+                raise SystemExit(0)
+
+            async def _probe(cfg, paths, stop):
+                out = []
+                Path(cfg.db_path.parent, "ok").write_text("x")   # vault write lane → OK
+                out.append("lane-write-ok")
+                try:
+                    Path({str(sibling)!r}, "secret").read_text()
+                    out.append("sibling-read-LEAK")
+                except (PermissionError, OSError):
+                    out.append("sibling-read-denied")            # outside the lane → unreadable
+                print(";".join(out))
+
+            children._RUNNERS["vault"] = _probe
+            raise SystemExit(children.run_child("vault", "abc123def456", Path({str(sidecar)!r})))
+            """
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", probe], capture_output=True, text=True, check=True
+        )
+        out = result.stdout.strip().splitlines()[-1] if result.stdout.strip() else ""
+        if out.startswith("unsupported:"):
+            pytest.skip(f"kernel without Landlock: {out}")
+        assert out == "lane-write-ok;sibling-read-denied", f"vault policy leaked: {out!r}"
