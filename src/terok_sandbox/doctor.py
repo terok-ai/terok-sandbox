@@ -119,10 +119,11 @@ def sandbox_doctor_checks(
 def _make_vault_unlocked_check() -> DoctorCheck:
     """Verify the credentials-DB passphrase resolves through some tier.
 
-    Host-side check: walks the resolution chain (session-unlock file →
-    OS keyring → config-file fallback) and reports an actionable error
-    when nothing yields.  The vault daemon won't start without a
-    passphrase, so this is the first check operators should see fail.
+    Host-side check: walks the resolution chain (systemd-creds → OS
+    keyring → kernel keyring → passphrase-command) and reports an
+    actionable error when nothing yields.  The vault daemon won't start
+    without a passphrase, so this is the first check operators should
+    see fail.
     """
 
     def _eval(_rc: int, _stdout: str, _stderr: str) -> CheckVerdict:
@@ -139,7 +140,7 @@ def _make_vault_unlocked_check() -> DoctorCheck:
         return CheckVerdict(
             "error",
             "vault is locked — no passphrase available."
-            " Run `terok-sandbox vault unlock` (session-unlock)"
+            " Run `terok-sandbox vault unlock` (kernel-keyring cache)"
             " or `terok-sandbox setup` to provision.",
         )
 
@@ -159,11 +160,11 @@ def make_recovery_acknowledged_check() -> DoctorCheck:
     """Warn when the operator hasn't confirmed they saved the recovery key.
 
     Two severity bands depending on the resolved tier when the marker
-    is absent — the session-file tier dies on the next reboot, so
-    "unconfirmed AND session-only" is a genuine ``error`` (you are
-    literally one reboot away from losing the vault), while every
-    durable tier (keyring, systemd-creds, config) is "only" a ``warn``
-    (machine-bound; needs an off-host copy for disaster recovery).
+    is absent — the kernel-keyring cache dies at logout, so "unconfirmed
+    AND volatile-only" is a genuine ``error`` (you are literally one
+    logout away from losing the vault), while every durable tier
+    (keyring, systemd-creds, config) is "only" a ``warn`` (machine-bound;
+    needs an off-host copy for disaster recovery).
 
     Intentionally NOT bundled into
     [`sandbox_doctor_checks`][terok_sandbox.doctor.sandbox_doctor_checks]:
@@ -183,12 +184,12 @@ def make_recovery_acknowledged_check() -> DoctorCheck:
             return CheckVerdict("ok", "recovery key acknowledged")
         reveal = bold("terok-sandbox vault passphrase reveal")
         ack = bold("terok-sandbox vault passphrase acknowledge")
-        if status.session_only:
+        if status.volatile_only:
             return CheckVerdict(
                 "error",
                 "vault recovery key UNCONFIRMED and the passphrase lives ONLY"
-                " in the session-unlock tmpfs file — it will be wiped on the"
-                " next reboot and your vault becomes UNRECOVERABLE then."
+                " in the kernel-keyring cache — it will be wiped at logout"
+                " and your vault becomes UNRECOVERABLE then."
                 f" Run {reveal} NOW and save the value off-host,"
                 f" or {ack} if you already captured it.",
             )

@@ -9,9 +9,9 @@ key under ``/var/lib/systemd/credential.secret``.  Decryption only
 works on the same machine — moving the encrypted blob to another host
 yields ``Failed to decrypt: Operation not supported``.
 
-The sandbox uses systemd-creds as the tier just below session-unlock
-in the SQLCipher passphrase resolution chain: machine-bound, no OS
-keyring required, survives reboots, no plaintext-on-disk.
+The sandbox uses systemd-creds as the top tier of the SQLCipher
+passphrase resolution chain: machine-bound, no OS keyring required,
+survives reboots, no plaintext-on-disk.
 
 **Why this works for a non-root user.** Both ``encrypt`` and
 ``decrypt`` are always called with ``--user``.  In that mode a

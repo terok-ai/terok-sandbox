@@ -51,17 +51,34 @@ for the operator-in-the-loop verdict path.
 ```python
 from terok_sandbox import (
     # Lifecycle
-    Sandbox, SandboxConfig, RunSpec, VolumeSpec, Sharing,
+    Sandbox,
+    SandboxConfig,
+    RunSpec,
+    VolumeSpec,
+    Sharing,
     # Runtime backends
-    PodmanRuntime, KrunRuntime, NullRuntime, ContainerRuntime,
+    PodmanRuntime,
+    KrunRuntime,
+    NullRuntime,
+    ContainerRuntime,
     # Vault + credentials
-    CredentialDB, SSHManager, NoPassphraseError, WrongPassphraseError,
+    CredentialDB,
+    SSHManager,
+    NoPassphraseError,
+    WrongPassphraseError,
     # Gate
-    GateServer, GitGate, mint_gate_token,
+    GateServer,
+    GitGate,
+    mint_gate_token,
     # Shield adapter
-    ShieldManager, ShieldHooks, check_environment,
+    ShieldManager,
+    ShieldHooks,
+    check_environment,
     # Per-container wiring / setup state
-    write_sidecar, remove_container_state, sandbox_uninstall, needs_setup,
+    write_sidecar,
+    remove_container_state,
+    sandbox_uninstall,
+    needs_setup,
 )
 ```
 

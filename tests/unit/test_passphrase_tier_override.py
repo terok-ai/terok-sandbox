@@ -5,8 +5,8 @@
 
 The chooser auto-detect path stays untouched for desktop installs.
 The new explicit-tier knob exists for headless / CI bootstraps where
-the silent ``session-file`` fall-through was removed (mint-without-
-reveal → lost recovery key on the first reboot).
+the silent volatile-tier fall-through was removed (mint-without-
+reveal → lost recovery key on the first logout).
 """
 
 from __future__ import annotations
@@ -15,23 +15,9 @@ from pathlib import Path
 
 import pytest
 
+import terok_sandbox.vault.store.kernel_keyring as _kk
 from terok_sandbox import SandboxConfig
 from terok_sandbox.commands import _handle_credentials_encrypt_db
-
-
-def _real_load_from_file(path: Path) -> str | None:
-    """Bypass the conftest stub of ``load_passphrase_from_file``.
-
-    The autouse fixture in ``conftest.py`` replaces the function with a
-    null-returning stub for the entire test session; tests that need to
-    exercise the file tier restore the real reader via monkeypatch.
-    Inlining the implementation here keeps the test independent of
-    private symbols on the encryption module.
-    """
-    try:
-        return path.read_text(encoding="utf-8").rstrip("\n") or None
-    except OSError:
-        return None
 
 
 def _cfg(tmp_path: Path) -> SandboxConfig:
@@ -63,29 +49,21 @@ class TestExplicitTier:
         with pytest.raises(SystemExit, match="systemd-creds is\\s*unavailable"):
             _handle_credentials_encrypt_db(cfg=_cfg(tmp_path), passphrase_tier="systemd-creds")
 
-    def test_session_tier_uses_existing_file(
+    def test_kernel_keyring_tier_uses_existing_cache(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """An explicit ``session-file`` tier picks up an existing tmpfs file silently."""
-        from terok_sandbox.vault.store import encryption as enc
-
+        """An explicit ``kernel-keyring`` tier picks up an existing cached value silently."""
         monkeypatch.setattr("terok_sandbox.vault.store.systemd_creds.is_available", lambda: False)
-        # Undo conftest's autouse stub so the real reader runs against
-        # the file we just dropped on disk.
-        monkeypatch.setattr(
-            enc,
-            "load_passphrase_from_file",
-            enc.load_passphrase_from_file.__wrapped__
-            if hasattr(enc.load_passphrase_from_file, "__wrapped__")
-            else _real_load_from_file,
-        )
+        # Back the kernel-keyring tier with an in-memory cache already
+        # holding a value, undoing conftest's autouse blank.
+        cache = {"pw": "preset-passphrase"}
+        monkeypatch.setattr(_kk, "load", lambda: cache["pw"])
+        monkeypatch.setattr(_kk, "store", lambda pw, **_kw: cache.__setitem__("pw", pw) or True)
         cfg = _cfg(tmp_path)
-        cfg.vault_passphrase_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        cfg.vault_passphrase_file.write_text("preset-passphrase\n")
         # No DB → handler short-circuits after provisioning; no ack
         # required because the value pre-existed (not auto-generated).
-        _handle_credentials_encrypt_db(cfg=cfg, passphrase_tier="session-file")
-        assert cfg.vault_passphrase_file.read_text() == "preset-passphrase\n"
+        _handle_credentials_encrypt_db(cfg=cfg, passphrase_tier="kernel-keyring")
+        assert cache["pw"] == "preset-passphrase"
         assert not cfg.vault_recovery_marker_file.exists()
 
 
@@ -95,7 +73,7 @@ class TestNonTtyRefusalFromSetup:
     def test_non_tty_chooser_path_refuses(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The historical silent ``session-file`` default is gone."""
+        """The historical silent volatile-tier default is gone."""
         monkeypatch.setattr("terok_sandbox.vault.store.systemd_creds.is_available", lambda: False)
         monkeypatch.setattr("sys.stdin.isatty", lambda: False)
         with pytest.raises(SystemExit, match="--passphrase-tier"):

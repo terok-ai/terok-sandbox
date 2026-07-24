@@ -154,9 +154,18 @@ depends_on = []
 path = "terok_sandbox.vault.store.encryption"
 layer = "foundation"
 depends_on = [
+    "terok_sandbox.vault.store.kernel_keyring",
     "terok_sandbox.vault.store.systemd_creds",
     "terok_sandbox.vault.store.tiers",
 ]
+
+# Vault.store.kernel_keyring — the ``libkeyutils`` ctypes binding for the
+# volatile kernel-keyring unlock cache tier.  A leaf: it talks only to
+# the kernel key-retention service, with no terok-* dependencies.
+[[modules]]
+path = "terok_sandbox.vault.store.kernel_keyring"
+layer = "foundation"
+depends_on = []
 
 # Vault.store.recovery — sidecar marker + the ``RecoveryStatus`` bundle
 # (marker presence + resolved passphrase source) used by every surface

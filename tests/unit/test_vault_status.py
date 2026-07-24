@@ -4,14 +4,13 @@
 """Tests for the ``vault status`` CLI verb and its chain probe.
 
 ``vault status`` is a read-only diagnostic.  It walks the passphrase
-resolution chain *without short-circuiting* (so a session file
-shadowing a durable systemd-creds / keyring tier is visible), reports
-the lock state, re-states the shared warning catalog (recovery-key and
-session-shadow warnings), and lists stored credential providers on a
-best-effort DB open.  The probe ([`probe_passphrase_chain`][terok_sandbox.vault.store.encryption.probe_passphrase_chain])
+resolution chain *without short-circuiting* (so every tier that holds
+material is visible), reports the lock state, re-states the shared
+warning catalog (recovery-key warnings), and lists stored credential
+providers on a best-effort DB open.  The probe ([`probe_passphrase_chain`][terok_sandbox.vault.store.encryption.probe_passphrase_chain])
 is pure and exercised directly; the handler is driven through a mock
-``SandboxConfig`` with the recovery / shadow seams patched.  The
-snapshot the handler renders ([`VaultStatus`][terok_sandbox.vault.store.status.VaultStatus])
+``SandboxConfig`` with the recovery seam patched.  The snapshot the
+handler renders ([`VaultStatus`][terok_sandbox.vault.store.status.VaultStatus])
 has its own tests in ``test_vault_state_classifier.py``.
 """
 
@@ -23,28 +22,16 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import terok_sandbox.vault.store.kernel_keyring as _kk
 from terok_sandbox.commands.vault import _handle_vault_status
 from terok_sandbox.vault.store import encryption
 from terok_sandbox.vault.store.encryption import probe_passphrase_chain
 from terok_sandbox.vault.store.recovery import RecoveryStatus
-from terok_sandbox.vault.store.status import SessionShadow, _classify_db_access
+from terok_sandbox.vault.store.status import _classify_db_access
 from terok_sandbox.vault.store.tiers import PassphraseTier
 from tests.constants import MOCK_BASE
 
-# Captured at import time — before conftest's autouse ``_isolate_credential_keyring``
-# stubs ``load_passphrase_from_file`` to ``None`` — so file-tier tests can restore
-# the real reader.  Same idiom as ``test_credential_encryption.py``.
-from terok_sandbox.vault.store.encryption import (  # noqa: E402  isort: skip
-    load_passphrase_from_file as _real_load_file,
-)
-
 MOCK_DB_PATH = MOCK_BASE / "vault" / "credentials.db"
-
-
-@pytest.fixture
-def real_file_tier(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Undo the conftest stub so the session-file tier reads real files."""
-    monkeypatch.setattr(encryption, "load_passphrase_from_file", _real_load_file)
 
 
 class TestProbePassphraseChain:
@@ -53,51 +40,44 @@ class TestProbePassphraseChain:
     def test_empty_chain_all_absent(self) -> None:
         chain = probe_passphrase_chain()
         assert [t.source for t in chain] == [
-            "session-file",
             "systemd-creds",
             "keyring",
+            "kernel-keyring",
             "passphrase-command",
         ]
         assert all(not t.present for t in chain)
 
-    def test_session_file_present_when_nonempty(self, tmp_path: Path, real_file_tier: None) -> None:
-        session = tmp_path / "vault.passphrase"
-        session.write_text("hunter2\n")
-        chain = probe_passphrase_chain(passphrase_file=session)
-        assert chain[0].source == "session-file"
-        assert chain[0].present is True
+    def test_kernel_keyring_present_when_cached(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(_kk, "is_cached", lambda: True)
+        chain = probe_passphrase_chain()
+        assert chain[2].source == "kernel-keyring"
+        assert chain[2].present is True
+        assert "cached in the user keyring" in chain[2].detail
 
-    def test_empty_session_file_is_absent(self, tmp_path: Path, real_file_tier: None) -> None:
-        session = tmp_path / "vault.passphrase"
-        session.write_text("")  # SQLCipher no-encryption sentinel — treat as absent
-        chain = probe_passphrase_chain(passphrase_file=session)
-        assert chain[0].present is False
-        assert "exists but unreadable or empty" in chain[0].detail
+    def test_kernel_keyring_absent_when_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(_kk, "is_cached", lambda: False)
+        chain = probe_passphrase_chain()
+        assert chain[2].present is False
+        assert "no passphrase cached" in chain[2].detail
 
-    def test_unreadable_session_file_is_flagged(
-        self, tmp_path: Path, real_file_tier: None, monkeypatch: pytest.MonkeyPatch
+    def test_chain_probe_never_reads_the_cached_passphrase(
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A blocked read (EACCES / SELinux) must not masquerade as a locked vault."""
-        session = tmp_path / "vault.passphrase"
-        session.write_text("pw\n")
-        real_read_text = Path.read_text
+        """Status reports that a tier holds material, never its value."""
 
-        def _denied(self: Path, *args: object, **kwargs: object) -> str:
-            if self == session:
-                raise PermissionError(13, "Permission denied")
-            return real_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+        def _explode() -> str:
+            raise AssertionError("probe_passphrase_chain must not read the passphrase")
 
-        monkeypatch.setattr(Path, "read_text", _denied)
-        chain = probe_passphrase_chain(passphrase_file=session)
-        assert chain[0].present is False
-        assert "exists but unreadable or empty" in chain[0].detail
+        monkeypatch.setattr(_kk, "is_cached", lambda: True)
+        monkeypatch.setattr(_kk, "load", _explode)
+        assert probe_passphrase_chain()[2].present is True
 
     def test_systemd_creds_present_when_sealed_file_exists(self, tmp_path: Path) -> None:
         sealed = tmp_path / "vault.passphrase.cred"
         sealed.write_text("sealed-blob")
         chain = probe_passphrase_chain(systemd_creds_file=sealed)
-        assert chain[1].source == "systemd-creds"
-        assert chain[1].present is True
+        assert chain[0].source == "systemd-creds"
+        assert chain[0].present is True
 
     def test_systemd_creds_not_unsealed(self, tmp_path: Path) -> None:
         """Presence is file existence — the probe must never call unseal()."""
@@ -110,16 +90,16 @@ class TestProbePassphraseChain:
     def test_systemd_creds_unconfigured_says_not_configured(self) -> None:
         """No path wired at all reads like the other absent tiers, not a blank."""
         chain = probe_passphrase_chain()
-        assert chain[1].detail == "not configured"
+        assert chain[0].detail == "not configured"
 
     def test_systemd_creds_absent_file_says_not_sealed(self, tmp_path: Path) -> None:
         """A configured path with nothing sealed must not masquerade as a live tier."""
         cred = tmp_path / "vault.passphrase.cred"  # never created
         with patch.object(encryption._systemd_creds, "unavailable_reason", return_value=None):
             chain = probe_passphrase_chain(systemd_creds_file=cred)
-        assert chain[1].present is False
-        assert "not sealed" in chain[1].detail
-        assert str(cred) in chain[1].detail
+        assert chain[0].present is False
+        assert "not sealed" in chain[0].detail
+        assert str(cred) in chain[0].detail
 
     def test_systemd_creds_unusable_reason_surfaced(self, tmp_path: Path) -> None:
         """When the tier can't run here (e.g. systemd 255), status says why."""
@@ -127,8 +107,8 @@ class TestProbePassphraseChain:
         reason = "needs systemd ≥ 257 for non-root --user mode (host has 255)"
         with patch.object(encryption._systemd_creds, "unavailable_reason", return_value=reason):
             chain = probe_passphrase_chain(systemd_creds_file=cred)
-        assert "unusable here" in chain[1].detail
-        assert "host has 255" in chain[1].detail
+        assert "unusable here" in chain[0].detail
+        assert "host has 255" in chain[0].detail
 
     def test_systemd_creds_sealed_and_usable_shows_bare_path(self, tmp_path: Path) -> None:
         """Sealed + tier available → detail is just the path, no noise appended."""
@@ -136,15 +116,15 @@ class TestProbePassphraseChain:
         cred.write_text("sealed-blob")
         with patch.object(encryption._systemd_creds, "unavailable_reason", return_value=None):
             chain = probe_passphrase_chain(systemd_creds_file=cred)
-        assert chain[1].present is True
-        assert chain[1].detail == str(cred)
+        assert chain[0].present is True
+        assert chain[0].detail == str(cred)
 
     def test_keyring_only_probed_when_enabled(self) -> None:
         with patch.object(encryption, "load_passphrase_from_keyring", return_value="k") as load:
             on = probe_passphrase_chain(use_keyring=True)
-            assert on[2].present is True
+            assert on[1].present is True
             off = probe_passphrase_chain(use_keyring=False)
-            assert off[2].present is False
+            assert off[1].present is False
         # one lookup for the enabled probe, none for the disabled one
         assert load.call_count == 1
 
@@ -152,7 +132,7 @@ class TestProbePassphraseChain:
         """An empty keyring value is the resolver's no-passphrase sentinel — treat as absent."""
         with patch.object(encryption, "load_passphrase_from_keyring", return_value=""):
             chain = probe_passphrase_chain(use_keyring=True)
-        assert chain[2].present is False
+        assert chain[1].present is False
 
     def test_passphrase_command_present_but_not_executed(self) -> None:
         chain = probe_passphrase_chain(passphrase_command="pass show vault")
@@ -269,7 +249,6 @@ class TestClassifyDbAccess:
 
 def _status_cfg(
     *,
-    session: Path | None = None,
     sealed: Path | None = None,
     use_keyring: bool = False,
     passphrase_command: str | None = None,
@@ -285,7 +264,6 @@ def _status_cfg(
     refuses to open a DB that doesn't exist.
     """
     cfg = MagicMock()
-    cfg.vault_passphrase_file = session or MOCK_BASE / "absent" / "session"
     cfg.vault_systemd_creds_file = sealed or MOCK_BASE / "absent" / "sealed"
     cfg.credentials_use_keyring = use_keyring
     cfg.credentials_passphrase_command = passphrase_command
@@ -314,22 +292,16 @@ def _run_status(
     as_json: bool = False,
     source: str | None = None,
     resolve_error: str | None = None,
-    shadow: SessionShadow | None = None,
 ) -> None:
-    """Drive the handler with the recovery / session-shadow seams pinned.
+    """Drive the handler with the recovery seam pinned.
 
     *source* / *resolve_error* shape the stubbed ``RecoveryStatus`` —
     the lock classification reads them, so tests state the resolution
     outcome explicitly instead of inheriting a hardwired ``None``.
-    *shadow* is what ``session_shadow_state`` reports; the comparison
-    logic has its own tests, so no real unseal is paid here.
     """
-    with (
-        patch(
-            "terok_sandbox.vault.store.recovery.RecoveryStatus.load",
-            return_value=_recovery(source, resolve_error, acknowledged=acknowledged),
-        ),
-        patch("terok_sandbox.vault.store.status.session_shadow_state", return_value=shadow),
+    with patch(
+        "terok_sandbox.vault.store.recovery.RecoveryStatus.load",
+        return_value=_recovery(source, resolve_error, acknowledged=acknowledged),
     ):
         _handle_vault_status(cfg=cfg, as_json=as_json)
 
@@ -366,9 +338,9 @@ class TestHandleVaultStatusText:
         cfg = _status_cfg(
             db_error=WrongPassphraseError("could not decrypt"), db_path=_existing_db(tmp_path)
         )
-        _run_status(cfg, source="session-file")
+        _run_status(cfg, source="kernel-keyring")
         out = capsys.readouterr().out
-        assert "LOCKED — the passphrase via session-file does not open the DB" in out
+        assert "LOCKED — the passphrase via kernel-keyring does not open the DB" in out
 
     def test_locked_header_names_broken_tier(self, capsys: pytest.CaptureFixture[str]) -> None:
         """A fail-closed tier (broken seal) is surfaced verbatim, not as a plain lock."""
@@ -414,76 +386,22 @@ class TestHandleVaultStatusText:
         assert "passphrase via systemd-creds" in out
         assert "systemd-creds       active" in out
 
-    def test_session_file_shadows_durable_tier(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], real_file_tier: None
-    ) -> None:
-        """The chain table marks the shadow; the warning names same-vs-different."""
-        session = tmp_path / "session"
-        session.write_text("pw\n")
-        sealed = tmp_path / "sealed.cred"
-        sealed.write_text("blob")
-        cfg = _status_cfg(session=session, sealed=sealed)
-        _run_status(
-            cfg,
-            source="session-file",
-            shadow=SessionShadow(PassphraseTier.SYSTEMD_CREDS, redundant=False),
-        )
-        out = capsys.readouterr().out
-        assert "session-file        active" in out
-        assert "systemd-creds       shadowed" in out
-        assert "shadows the durable systemd-creds tier with a DIFFERENT passphrase" in out
-
-    def test_redundant_shadow_renders_as_note(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], real_file_tier: None
-    ) -> None:
-        session = tmp_path / "session"
-        session.write_text("pw\n")
-        sealed = tmp_path / "sealed.cred"
-        sealed.write_text("blob")
-        cfg = _status_cfg(session=session, sealed=sealed)
-        _run_status(
-            cfg,
-            source="session-file",
-            shadow=SessionShadow(PassphraseTier.SYSTEMD_CREDS, redundant=True),
-        )
-        out = capsys.readouterr().out
-        assert "duplicates the durable systemd-creds tier (same passphrase)" in out
-        assert "redundant residue" in out
-        assert "note:" in out
-
-    def test_unverifiable_shadow_renders_as_warning(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], real_file_tier: None
-    ) -> None:
-        session = tmp_path / "session"
-        session.write_text("pw\n")
-        sealed = tmp_path / "sealed.cred"
-        sealed.write_text("blob")
-        cfg = _status_cfg(session=session, sealed=sealed)
-        _run_status(
-            cfg,
-            source="session-file",
-            shadow=SessionShadow(PassphraseTier.SYSTEMD_CREDS, redundant=None),
-        )
-        out = capsys.readouterr().out
-        assert "shadows systemd-creds" in out
-        assert "could not be read to compare" in out
-        assert "warning:" in out
-
-    def test_durable_active_tier_does_not_report_shadow(
+    def test_present_but_inactive_tier_marked_present(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """A durable active tier outranking a lower durable tier is not 'shadowing'."""
+        """A durable active tier outranking a lower present tier marks the latter 'present'."""
         sealed = tmp_path / "sealed.cred"
         sealed.write_text("blob")
-        # systemd-creds (durable) active, passphrase-command (durable) present below it.
+        # systemd-creds (durable) active, passphrase-command present below it.
         cfg = _status_cfg(
             sealed=sealed, passphrase_command="pass show vault", db_path=_existing_db(tmp_path)
         )
         _run_status(cfg, source="systemd-creds")
         out = capsys.readouterr().out
         assert "passphrase via systemd-creds" in out
+        assert "systemd-creds       active" in out
+        assert "passphrase-command  present" in out
         assert "shadowed" not in out
-        assert "shadowing a durable tier" not in out
 
     def test_unacknowledged_recovery_warns(self, capsys: pytest.CaptureFixture[str]) -> None:
         cfg = _status_cfg()
@@ -499,14 +417,14 @@ class TestHandleVaultStatusText:
         out = capsys.readouterr().out
         assert "warning: the vault passphrase is not confirmed saved off-host" in out
 
-    def test_urgent_recovery_warning_for_session_only(
+    def test_urgent_recovery_warning_for_volatile_only(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """Session-file-only + unacknowledged escalates to the reboot-loss error."""
+        """Kernel-keyring-only + unacknowledged escalates to the logout-loss error."""
         cfg = _status_cfg(db_path=_existing_db(tmp_path))
-        _run_status(cfg, source="session-file", acknowledged=False)
+        _run_status(cfg, source="kernel-keyring", acknowledged=False)
         out = capsys.readouterr().out
-        assert "error: the only copy of the vault passphrase is the session file" in out
+        assert "error: the only copy of the vault passphrase is the kernel-keyring cache" in out
         assert "not confirmed saved off-host" not in out  # the urgent variant replaces it
 
     def test_credentials_listed_when_open(
@@ -527,20 +445,15 @@ class TestHandleVaultStatusText:
 class TestHandleVaultStatusJson:
     """``--json`` carries the same facts in a machine-readable shape."""
 
-    def test_json_shape(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], real_file_tier: None
-    ) -> None:
-        session = tmp_path / "session"
-        session.write_text("pw\n")
+    def test_json_shape(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         sealed = tmp_path / "sealed.cred"
         sealed.write_text("blob")
         cfg = _status_cfg(
-            session=session,
             sealed=sealed,
             db_error=RuntimeError("x"),
             db_path=_existing_db(tmp_path),
         )
-        _run_status(cfg, acknowledged=True, as_json=True, source="session-file")
+        _run_status(cfg, acknowledged=True, as_json=True, source="kernel-keyring")
         data = json.loads(capsys.readouterr().out)
         # The open failed for a non-passphrase reason — that's a DB error,
         # not a lock; the chain still reports what's on hand.
@@ -548,14 +461,15 @@ class TestHandleVaultStatusJson:
         assert data["locked"] is True  # anything non-unlocked counts as locked
         assert data["lock_reason"] is None
         assert data["db_error"] == "x"
-        assert data["passphrase_source"] == "session-file"
-        assert data["shadowed_tiers"] == ["systemd-creds"]
+        assert data["passphrase_source"] == "kernel-keyring"
         assert data["recovery_acknowledged"] is True
         assert data["credentials"] is None  # DB wouldn't open
-        assert [c["source"] for c in data["chain"]][0] == "session-file"
+        assert [c["source"] for c in data["chain"]][0] == "systemd-creds"
         assert len(data["chain"]) == 4
         assert isinstance(data["warnings"], list)
         assert "plaintext_passphrase_path" not in data
+        assert "shadowed_tiers" not in data
+        assert "session_shadow" not in data
 
     def test_json_unprovisioned(self, capsys: pytest.CaptureFixture[str]) -> None:
         """A fresh install is a distinct machine-readable state, not a plain lock."""
@@ -594,127 +508,6 @@ class TestHandleVaultStatusJson:
         assert data["locked"] is True
         assert "unreadable" in data["lock_reason"]
         assert "could not be unsealed" in data["lock_reason"]
-
-    def test_json_session_shadow(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], real_file_tier: None
-    ) -> None:
-        """``session_shadow`` carries the durable source + redundancy verdict."""
-        session = tmp_path / "session"
-        session.write_text("pw\n")
-        sealed = tmp_path / "sealed.cred"
-        sealed.write_text("blob")
-        cfg = _status_cfg(session=session, sealed=sealed)
-        _run_status(
-            cfg,
-            as_json=True,
-            source="session-file",
-            shadow=SessionShadow(PassphraseTier.SYSTEMD_CREDS, redundant=True),
-        )
-        data = json.loads(capsys.readouterr().out)
-        assert data["session_shadow"] == {"durable_source": "systemd-creds", "redundant": True}
-
-    def test_json_session_shadow_absent(self, capsys: pytest.CaptureFixture[str]) -> None:
-        """No shadow → the field is explicitly null, never an unseal on the common path."""
-        _run_status(_status_cfg(), as_json=True, source="keyring")
-        assert json.loads(capsys.readouterr().out)["session_shadow"] is None
-
-
-class TestSessionShadowState:
-    """``session_shadow_state`` / ``clear_redundant_session_file`` over real tiers.
-
-    Uses the keyring tier as the durable one — the conftest keyring stub
-    is repinned per test, so the same/different-key comparison is
-    exercised end to end without a TPM.  ``status`` calls the file
-    reader through the ``encryption`` namespace, so the conftest's
-    blanket file-tier stub applies — the autouse fixture below restores
-    the real reader for this class.
-    """
-
-    @pytest.fixture(autouse=True)
-    def _file_tier(self, real_file_tier: None) -> None:
-        """Every test in this class reads a real session file."""
-
-    @pytest.fixture
-    def keyring_value(self, monkeypatch: pytest.MonkeyPatch) -> str:
-        """Pin the (conftest-stubbed) keyring tier to a known durable passphrase."""
-        monkeypatch.setattr(encryption, "load_passphrase_from_keyring", lambda: "K")
-        return "K"
-
-    def test_no_session_file_is_no_shadow(self, keyring_value: str) -> None:
-        from terok_sandbox.vault.store.status import session_shadow_state
-
-        cfg = _status_cfg(use_keyring=True)  # durable present, but no session file
-        assert session_shadow_state(cfg) is None
-
-    def test_no_durable_tier_is_no_shadow(self, tmp_path: Path) -> None:
-        from terok_sandbox.vault.store.status import session_shadow_state
-
-        session = tmp_path / "session"
-        session.write_text("only-tier\n")
-        cfg = _status_cfg(session=session)  # session present, nothing durable under it
-        assert session_shadow_state(cfg) is None
-
-    def test_same_key_is_redundant(self, tmp_path: Path, keyring_value: str) -> None:
-        from terok_sandbox.vault.store.status import session_shadow_state
-
-        session = tmp_path / "session"
-        session.write_text(f"{keyring_value}\n")
-        cfg = _status_cfg(session=session, use_keyring=True)
-        shadow = session_shadow_state(cfg)
-        assert shadow is not None
-        assert shadow.durable_source is PassphraseTier.KEYRING
-        assert shadow.redundant is True
-
-    def test_different_key_is_not_redundant(self, tmp_path: Path, keyring_value: str) -> None:
-        from terok_sandbox.vault.store.status import session_shadow_state
-
-        session = tmp_path / "session"
-        session.write_text("session-key\n")
-        cfg = _status_cfg(session=session, use_keyring=True)
-        shadow = session_shadow_state(cfg)
-        assert shadow is not None and shadow.redundant is False
-
-    def test_clear_removes_only_redundant(self, tmp_path: Path, keyring_value: str) -> None:
-        from terok_sandbox.vault.store.status import clear_redundant_session_file
-
-        session = tmp_path / "session"
-        session.write_text(f"{keyring_value}\n")
-        cfg = _status_cfg(session=session, use_keyring=True)
-        assert clear_redundant_session_file(cfg) is PassphraseTier.KEYRING
-        assert not session.exists()
-
-    def test_clear_keeps_a_different_key_override(self, tmp_path: Path, keyring_value: str) -> None:
-        from terok_sandbox.vault.store.status import clear_redundant_session_file
-
-        session = tmp_path / "session"
-        session.write_text("override\n")
-        cfg = _status_cfg(session=session, use_keyring=True)
-        assert clear_redundant_session_file(cfg) is None
-        assert session.exists()  # a deliberate override is never auto-removed
-
-    def test_unreadable_durable_tier_is_an_unverifiable_shadow(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A present-but-unsealable durable tier can't be compared → ``redundant=None``.
-
-        The session file may be doing real work in that state, so the
-        shadow is reported without a verdict and never auto-removed.
-        """
-        from terok_sandbox.vault.store import systemd_creds
-        from terok_sandbox.vault.store.status import session_shadow_state
-
-        session = tmp_path / "session"
-        session.write_text("session-key\n")
-        sealed = tmp_path / "sealed.cred"
-        sealed.write_bytes(b"sealed-on-another-boot")
-        monkeypatch.setattr(systemd_creds, "unseal", lambda _path: None)
-        cfg = _status_cfg(session=session, sealed=sealed)
-
-        shadow = session_shadow_state(cfg)
-
-        assert shadow is not None
-        assert shadow.durable_source is PassphraseTier.SYSTEMD_CREDS
-        assert shadow.redundant is None
 
 
 class TestResolveCfg:

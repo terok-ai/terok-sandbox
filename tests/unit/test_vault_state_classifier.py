@@ -20,10 +20,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
+import terok_sandbox.vault.store.kernel_keyring as _kk
 from terok_sandbox.vault.store import encryption
 from terok_sandbox.vault.store.recovery import RecoveryStatus
 from terok_sandbox.vault.store.status import (
-    SessionShadow,
     VaultState,
     VaultStatus,
     VaultWarningKind,
@@ -31,18 +31,10 @@ from terok_sandbox.vault.store.status import (
 )
 from terok_sandbox.vault.store.tiers import PassphraseTier
 
-# Captured at import time — before conftest's autouse ``_isolate_credential_keyring``
-# stubs ``load_passphrase_from_file`` to ``None`` — so session-file tests can restore
-# the real reader.  Same idiom as ``test_vault_status.py``.
-from terok_sandbox.vault.store.encryption import (  # noqa: E402  isort: skip
-    load_passphrase_from_file as _real_load_file,
-)
-
 
 def _load_cfg(
     tmp_path: Path,
     *,
-    session: Path | None = None,
     resolved: tuple[str | None, PassphraseTier | None] = (None, None),
 ) -> MagicMock:
     """A mock ``SandboxConfig`` for ``VaultStatus.load`` over a fresh install.
@@ -52,7 +44,6 @@ def _load_cfg(
     seam reports, feeding ``RecoveryStatus.load`` without a stub.
     """
     cfg = MagicMock()
-    cfg.vault_passphrase_file = session or tmp_path / "no-session"
     cfg.vault_systemd_creds_file = tmp_path / "no-sealed.cred"
     cfg.credentials_use_keyring = False
     cfg.credentials_passphrase_command = None
@@ -76,22 +67,19 @@ class TestVaultStatusLoad:
         assert not cfg.db_path.exists()  # the read minted no DB on disk
         cfg.open_credential_db.assert_not_called()
 
-    def test_ready_session_tier_without_db_is_unlocked(
+    def test_ready_kernel_keyring_tier_without_db_is_unlocked(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A session file + no DB → UNLOCKED ("the key is ready"), still no DB open."""
-        monkeypatch.setattr(encryption, "load_passphrase_from_file", _real_load_file)
-        session = tmp_path / "vault.passphrase"
-        session.write_text("hunter2\n")
-        cfg = _load_cfg(
-            tmp_path, session=session, resolved=("hunter2", PassphraseTier.SESSION_FILE)
-        )
+        """A cached kernel-keyring key + no DB → UNLOCKED ("the key is ready"), still no DB open."""
+        monkeypatch.setattr(_kk, "is_cached", lambda: True)
+        cfg = _load_cfg(tmp_path, resolved=("hunter2", PassphraseTier.KERNEL_KEYRING))
         status = VaultStatus.load(cfg)
         assert status.state is VaultState.UNLOCKED
         assert status.db_exists is False
-        assert status.source is PassphraseTier.SESSION_FILE
+        assert status.source is PassphraseTier.KERNEL_KEYRING
         assert status.providers == ()  # nothing stored yet, but readable-by-key
-        assert status.chain[0].active is True
+        # The kernel-keyring row (index 2) is the active one.
+        assert status.chain[2].active is True
         assert not cfg.db_path.exists()  # unlocked-by-classification, not by opening
         cfg.open_credential_db.assert_not_called()
 
@@ -120,18 +108,20 @@ def _recovery(
 class TestBuildWarnings:
     """The warning catalog authors each situation's wording exactly once."""
 
-    def test_unacked_session_only_is_urgent(self) -> None:
-        """Session-file-only + unacknowledged → the reboot-loss error, nothing softer."""
-        warnings = _build_warnings(_recovery(PassphraseTier.SESSION_FILE), None)
+    def test_unacked_volatile_only_is_urgent(self) -> None:
+        """Kernel-keyring-only + unacknowledged → the logout-loss error, nothing softer."""
+        warnings = _build_warnings(_recovery(PassphraseTier.KERNEL_KEYRING))
         assert [w.kind for w in warnings] == [VaultWarningKind.RECOVERY_VOLATILE]
         (warning,) = warnings
         assert warning.severity == "error"
-        assert "the only copy of the vault passphrase is the session file" in warning.message
+        assert (
+            "the only copy of the vault passphrase is the kernel-keyring cache" in warning.message
+        )
         assert "unrecoverable" in warning.message
 
     def test_unacked_durable_tier_is_unconfirmed(self) -> None:
         """A durable tier without an off-host copy gets the softer machine-bound warning."""
-        warnings = _build_warnings(_recovery(PassphraseTier.KEYRING), None)
+        warnings = _build_warnings(_recovery(PassphraseTier.KEYRING))
         assert [w.kind for w in warnings] == [VaultWarningKind.RECOVERY_UNCONFIRMED]
         (warning,) = warnings
         assert warning.severity == "warning"
@@ -143,38 +133,6 @@ class TestBuildWarnings:
 
     def test_acknowledged_or_unresolved_emits_no_recovery_warning(self) -> None:
         """An acked vault (or one with nothing resolved) has nothing to nag about."""
-        assert (
-            _build_warnings(_recovery(PassphraseTier.SESSION_FILE, acknowledged=True), None) == ()
-        )
-        assert _build_warnings(_recovery(PassphraseTier.KEYRING, acknowledged=True), None) == ()
-        assert _build_warnings(_recovery(None), None) == ()
-
-    def test_redundant_shadow_is_info(self) -> None:
-        warnings = _build_warnings(
-            _recovery(PassphraseTier.SESSION_FILE, acknowledged=True),
-            SessionShadow(PassphraseTier.SYSTEMD_CREDS, redundant=True),
-        )
-        assert [w.kind for w in warnings] == [VaultWarningKind.SHADOW_REDUNDANT]
-        (warning,) = warnings
-        assert warning.severity == "info"
-        assert "duplicates the durable systemd-creds tier (same passphrase)" in warning.message
-
-    def test_override_shadow_is_warning(self) -> None:
-        warnings = _build_warnings(
-            _recovery(PassphraseTier.SESSION_FILE, acknowledged=True),
-            SessionShadow(PassphraseTier.KEYRING, redundant=False),
-        )
-        assert [w.kind for w in warnings] == [VaultWarningKind.SHADOW_OVERRIDE]
-        (warning,) = warnings
-        assert warning.severity == "warning"
-        assert "shadows the durable keyring tier with a DIFFERENT passphrase" in warning.message
-
-    def test_unreadable_shadow_is_warning(self) -> None:
-        warnings = _build_warnings(
-            _recovery(PassphraseTier.SESSION_FILE, acknowledged=True),
-            SessionShadow(PassphraseTier.SYSTEMD_CREDS, redundant=None),
-        )
-        assert [w.kind for w in warnings] == [VaultWarningKind.SHADOW_UNREADABLE]
-        (warning,) = warnings
-        assert warning.severity == "warning"
-        assert "could not be read to compare" in warning.message
+        assert _build_warnings(_recovery(PassphraseTier.KERNEL_KEYRING, acknowledged=True)) == ()
+        assert _build_warnings(_recovery(PassphraseTier.KEYRING, acknowledged=True)) == ()
+        assert _build_warnings(_recovery(None)) == ()
