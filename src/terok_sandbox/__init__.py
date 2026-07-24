@@ -123,8 +123,10 @@ _LAZY: dict[str, str] = {
     # Shield (sandbox-side policy classes)
     "EnvironmentCheck": "integrations.shield:EnvironmentCheck",
     "ShieldHooks": "integrations.shield:ShieldHooks",
+    "BUNDLE_VERSION": "integrations.shield:BUNDLE_VERSION",
     "ShieldManager": "integrations.shield:ShieldManager",
     "check_environment": "integrations.shield:check_environment",
+    "resolve_container_shield_version": "integrations.shield:resolve_container_shield_version",
     "resolve_container_state_dir": "integrations.shield:resolve_container_state_dir",
     # Per-container launch/state
     "PerContainerResources": "launch:PerContainerResources",
@@ -303,10 +305,12 @@ if TYPE_CHECKING:
     )
     from .gate.tokens import mint_gate_token
     from .integrations.shield import (
+        BUNDLE_VERSION,
         EnvironmentCheck,
         ShieldHooks,
         ShieldManager,
         check_environment,
+        resolve_container_shield_version,
         resolve_container_state_dir,
     )
     from .launch import PerContainerResources, allocate_per_container_resources
@@ -442,8 +446,10 @@ __all__ = [
     # Shield (sandbox-side policy classes; the egress-firewall layer lives in terok-shield)
     "EnvironmentCheck",
     "ShieldHooks",
+    "BUNDLE_VERSION",
     "ShieldManager",
     "check_environment",
+    "resolve_container_shield_version",
     "resolve_container_state_dir",
     # Git gate
     "AppliedOp",

@@ -40,6 +40,7 @@ from terok_shield import (
     ShieldState,  # noqa: F401 — re-exported
 )
 from terok_shield.container import (
+    resolve_shield_version as resolve_container_shield_version,  # noqa: F401 — re-exported
     resolve_state_dir as resolve_container_state_dir,  # noqa: F401 — re-exported
 )
 
@@ -60,6 +61,7 @@ from terok_shield.prereqs import (  # noqa: F401 — re-exported with concrete t
     check_krun_binaries,
 )
 from terok_shield.run import NftNotFoundError, ShieldNeedsSetup  # noqa: F401
+from terok_shield.state import BUNDLE_VERSION as BUNDLE_VERSION  # noqa: F401 — re-exported
 
 from ..config import SandboxConfig
 
@@ -177,8 +179,23 @@ class ShieldManager:
 
     # ── Bypassable lifecycle operations ─────────────────
 
-    def pre_start(self, container: str) -> list[str]:
+    def pre_start(
+        self,
+        container: str,
+        *,
+        security_deny: tuple[str, ...] = (),
+        provider_allow: tuple[str, ...] = (),
+        project_allow: tuple[str, ...] = (),
+        override: tuple[str, ...] = (),
+    ) -> list[str]:
         """Return extra ``podman run`` args for egress firewalling.
+
+        The four tier arguments are the orchestrator's generated policy tiers,
+        which shield writes into the bundle so this layer only carries the data:
+        *security_deny* → t20 (deny direct-to-vault-host), *provider_allow* → t30
+        (provider egress), *project_allow* → t40 (git remote + custom, merged
+        with the composed profiles), *override* → t10 (break-glass allow above
+        the deny).  Empty tuples (the default) leave a tier untouched.
 
         Returns an empty list (no firewall args) when the dangerous
         ``bypass_firewall_no_protection`` override is active.
@@ -190,7 +207,13 @@ class ShieldManager:
             warnings.warn(_BYPASS_WARNING, stacklevel=2)
             return []
         try:
-            return self.shield.pre_start(container)
+            return self.shield.pre_start(
+                container,
+                security_deny=security_deny,
+                provider_allow=provider_allow,
+                project_allow=project_allow,
+                override=override,
+            )
         except ShieldNeedsSetup as exc:
             raise SystemExit(str(exc)) from None
 

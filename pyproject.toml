@@ -35,7 +35,7 @@ dynamic = ["version"]
 # pyproject.toml Hygiene").  Keep the dependency list comment-free.
 dependencies = [
     "terok-util @ https://github.com/terok-ai/terok-util/releases/download/v0.3.1a3/terok_util-0.3.1a3-py3-none-any.whl",
-    "terok-shield @ https://github.com/terok-ai/terok-shield/releases/download/v0.8.0a6/terok_shield-0.8.0a6-py3-none-any.whl",
+    "terok-shield @ git+https://github.com/terok-ai/terok-shield.git@refs/pull/406/head",
     "terok-clearance @ https://github.com/terok-ai/terok-clearance/releases/download/v0.8.0a6/terok_clearance-0.8.0a6-py3-none-any.whl",
     "platformdirs~=4.10",
     "aiohttp~=3.14.1",
