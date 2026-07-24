@@ -62,7 +62,7 @@ terok-sandbox = "terok_sandbox.cli:main"
 
 [dependency-groups]
 dev = [
-    "ruff>=0.15.20",
+    "ruff~=0.16",
     "bandit>=1.7",
     "docstr-coverage>=2.3.2,<3",
     "complexipy>=6.0.1",
