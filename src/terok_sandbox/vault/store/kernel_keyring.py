@@ -65,6 +65,7 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.util
+import errno
 import functools
 import logging
 import os
@@ -175,7 +176,11 @@ def load() -> str | None:
     except _KeyutilsUnavailable:
         return None
 
-    serial = _find_cached_key(lib)
+    try:
+        serial = _find_cached_key(lib)
+    except OSError as exc:
+        _logger.warning("kernel keyring search failed: %s", exc)
+        return None
     if serial is None:
         return None
     # Sized by a first pass so the buffer is never a guess.
@@ -198,8 +203,10 @@ def forget() -> bool:
 
     Backs ``vault lock``.  An already-absent key counts as success: the
     contract is the end state — nothing cached here — not the act of
-    removing something.  Any same-uid terminal may call it, not only the
-    one that cached the passphrase.
+    removing something.  A lookup that *fails* is not that end state, so
+    it reports failure rather than claim the passphrase is gone.  Any
+    same-uid terminal may call it, not only the one that cached the
+    passphrase.
 
     Returns:
         True when no passphrase remains cached.
@@ -209,7 +216,11 @@ def forget() -> bool:
     except _KeyutilsUnavailable:
         return True
 
-    serial = _find_cached_key(lib)
+    try:
+        serial = _find_cached_key(lib)
+    except OSError as exc:
+        _logger.warning("kernel keyring search failed, cannot confirm removal: %s", exc)
+        return False
     if serial is None:
         return True
     if lib.keyctl_unlink(serial, _KEY_SPEC_USER_KEYRING) == -1:
@@ -232,7 +243,11 @@ def is_cached() -> bool:
         lib = _load_library()
     except _KeyutilsUnavailable:
         return False
-    return _find_cached_key(lib) is not None
+    try:
+        return _find_cached_key(lib) is not None
+    except OSError as exc:
+        _logger.warning("kernel keyring search failed: %s", exc)
+        return False
 
 
 def unavailable_reason() -> str | None:
@@ -261,25 +276,39 @@ def unavailable_reason() -> str | None:
     ctypes.set_errno(0)
     if lib.keyctl_get_keyring_ID(_KEY_SPEC_USER_KEYRING, 0) != -1:
         return None
-    errno = ctypes.get_errno()
-    if errno == 38:  # ENOSYS
+    err = ctypes.get_errno()
+    if err == errno.ENOSYS:
         return "kernel built without keyring support (CONFIG_KEYS)"
-    return f"user keyring unreachable ({os.strerror(errno)})"
+    return f"user keyring unreachable ({os.strerror(err)})"
 
 
 # ── Key lookup and library binding (private) ────────────────────────
 
 
 def _find_cached_key(lib: ctypes.CDLL) -> int | None:
-    """Serial of the cached passphrase key, or ``None`` when absent.
+    """Serial of the cached passphrase key, or ``None`` when genuinely absent.
+
+    Only ``ENOKEY`` — no key under the well-known description — is a
+    miss.  Any other failure (a revoked or expired key, a permission
+    fault) is a lookup the caller must not read as "absent": a ``forget``
+    that did so would report the passphrase cleared while it may still be
+    cached.
 
     Returns:
-        The key's serial number, or None when the user keyring holds no
-        key under the well-known description.
+        The key's serial number, or None when no such key exists.
+
+    Raises:
+        OSError: The keyring search failed for a reason other than a
+            missing key; ``errno`` carries which.
     """
     ctypes.set_errno(0)
     serial = lib.keyctl_search(_KEY_SPEC_USER_KEYRING, KEY_TYPE, KEY_DESCRIPTION, 0)
-    return None if serial == -1 else serial
+    if serial != -1:
+        return serial
+    err = ctypes.get_errno()
+    if err == errno.ENOKEY:
+        return None
+    raise OSError(err, os.strerror(err))
 
 
 class _KeyutilsUnavailable(Exception):

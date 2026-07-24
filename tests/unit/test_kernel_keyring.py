@@ -55,6 +55,7 @@ class FakeKeyutils:
         get_keyring_id: int = 100,
         add_key_errno: int | None = None,
         setperm_ok: bool = True,
+        search_errno: int | None = None,
     ) -> None:
         self._keys: dict[bytes, tuple[int, bytes]] = {}
         self._by_serial: dict[int, bytes] = {}
@@ -62,6 +63,7 @@ class FakeKeyutils:
         self._get_keyring_id = get_keyring_id
         self._add_key_errno = add_key_errno
         self._setperm_ok = setperm_ok
+        self._search_errno = search_errno
         self.perms: dict[int, int] = {}
 
     def keyctl_get_keyring_ID(self, _ring: int, _create: int) -> int:  # noqa: N802
@@ -80,6 +82,9 @@ class FakeKeyutils:
         return serial
 
     def keyctl_search(self, _ring: int, _ktype: bytes, desc: bytes, _dest: int) -> int:
+        if self._search_errno is not None:
+            ctypes.set_errno(self._search_errno)
+            return -1
         if desc not in self._keys:
             ctypes.set_errno(126)  # ENOKEY
             return -1
@@ -257,6 +262,29 @@ def test_is_cached_false_when_library_unavailable(monkeypatch: pytest.MonkeyPatc
         raise kernel_keyring._KeyutilsUnavailable("nope")
 
     monkeypatch.setattr(kernel_keyring, "_load_library", _raise)
+    assert kernel_keyring.is_cached() is False
+
+
+def test_forget_reports_failure_on_lookup_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-ENOKEY search failure must NOT read as 'nothing to forget'.
+
+    Otherwise ``vault lock`` claims the passphrase is cleared while a key
+    may still be cached.
+    """
+    lib = FakeKeyutils(search_errno=13)  # EACCES — not ENOKEY
+    monkeypatch.setattr(kernel_keyring, "_load_library", lambda: lib)
+    assert kernel_keyring.forget() is False
+
+
+def test_load_none_on_lookup_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    lib = FakeKeyutils(search_errno=13)  # EACCES
+    monkeypatch.setattr(kernel_keyring, "_load_library", lambda: lib)
+    assert kernel_keyring.load() is None
+
+
+def test_is_cached_false_on_lookup_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    lib = FakeKeyutils(search_errno=13)  # EACCES
+    monkeypatch.setattr(kernel_keyring, "_load_library", lambda: lib)
     assert kernel_keyring.is_cached() is False
 
 
