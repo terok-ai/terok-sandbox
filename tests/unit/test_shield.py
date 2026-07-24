@@ -247,10 +247,16 @@ def test_pre_start_threads_egress_projection_into_shield() -> None:
             "ctr",
             security_deny=("api.anthropic.com",),
             provider_allow=("telemetry.example",),
+            project_allow=("github.com",),
+            override=("api.foo.com",),
         )
     assert result == ["--hook"]
     mock_shield.pre_start.assert_called_once_with(
-        "ctr", security_deny=("api.anthropic.com",), provider_allow=("telemetry.example",)
+        "ctr",
+        security_deny=("api.anthropic.com",),
+        provider_allow=("telemetry.example",),
+        project_allow=("github.com",),
+        override=("api.foo.com",),
     )
 
 
@@ -260,7 +266,9 @@ def test_pre_start_defaults_projection_to_empty() -> None:
     manager = ShieldManager(MOCK_TASK_DIR, SandboxConfig())
     with patch.object(ShieldManager, "shield", new=mock_shield):
         manager.pre_start("ctr")
-    mock_shield.pre_start.assert_called_once_with("ctr", security_deny=(), provider_allow=())
+    mock_shield.pre_start.assert_called_once_with(
+        "ctr", security_deny=(), provider_allow=(), project_allow=(), override=()
+    )
 
 
 def test_status_defaults() -> None:

@@ -61,13 +61,20 @@ class TestRunSpec:
         spec = _make_spec()
         assert spec.security_deny == ()
         assert spec.provider_allow == ()
+        assert spec.project_allow == ()
+        assert spec.override == ()
 
     def test_egress_projection_carries_through(self) -> None:
-        """Executor's projection survives the frozen dataclass round-trip."""
+        """Every generated tier survives the frozen dataclass round-trip."""
         spec = _make_spec(
-            security_deny=("api.anthropic.com",), provider_allow=("telemetry.example",)
+            security_deny=("api.anthropic.com",),
+            provider_allow=("telemetry.example",),
+            project_allow=("github.com",),
+            override=("api.foo.com",),
         )
         assert spec.security_deny == ("api.anthropic.com",)
+        assert spec.project_allow == ("github.com",)
+        assert spec.override == ("api.foo.com",)
         assert spec.provider_allow == ("telemetry.example",)
 
     def test_deprecated_gpu_enabled_alias_maps_to_gpus(self) -> None:
@@ -197,11 +204,11 @@ class TestSandbox:
                 loopback_ports_override=None,
             )
             Mgr.return_value.pre_start.assert_called_once_with(
-                "ctr", security_deny=(), provider_allow=()
+                "ctr", security_deny=(), provider_allow=(), project_allow=(), override=()
             )
 
     def test_pre_start_args_threads_egress_projection(self) -> None:
-        """The executor roster projection reaches ShieldManager.pre_start verbatim."""
+        """Every generated tier reaches ShieldManager.pre_start verbatim."""
         with patch("terok_sandbox.integrations.shield.ShieldManager") as Mgr:
             Mgr.return_value.pre_start.return_value = ["--hook"]
             s = Sandbox()
@@ -210,11 +217,15 @@ class TestSandbox:
                 Path("/tmp/task"),
                 security_deny=("api.anthropic.com", "api.openai.com"),
                 provider_allow=("telemetry.example",),
+                project_allow=("github.com",),
+                override=("api.foo.com",),
             )
             Mgr.return_value.pre_start.assert_called_once_with(
                 "ctr",
                 security_deny=("api.anthropic.com", "api.openai.com"),
                 provider_allow=("telemetry.example",),
+                project_allow=("github.com",),
+                override=("api.foo.com",),
             )
 
     def test_build_cmd_threads_projection_from_runspec(self) -> None:

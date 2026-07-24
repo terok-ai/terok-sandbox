@@ -183,13 +183,17 @@ class ShieldManager:
         *,
         security_deny: tuple[str, ...] = (),
         provider_allow: tuple[str, ...] = (),
+        project_allow: tuple[str, ...] = (),
+        override: tuple[str, ...] = (),
     ) -> list[str]:
         """Return extra ``podman run`` args for egress firewalling.
 
-        *security_deny* / *provider_allow* are executor's roster projection —
-        the generated t20 (deny direct-to-vault-host) and t30 (provider-allow)
-        tiers.  Shield writes them into the bundle, so this layer only carries
-        the data; empty tuples (the default) leave both tiers untouched.
+        The four tier arguments are the orchestrator's generated policy tiers,
+        which shield writes into the bundle so this layer only carries the data:
+        *security_deny* → t20 (deny direct-to-vault-host), *provider_allow* → t30
+        (provider egress), *project_allow* → t40 (git remote + custom, merged
+        with the composed profiles), *override* → t10 (break-glass allow above
+        the deny).  Empty tuples (the default) leave a tier untouched.
 
         Returns an empty list (no firewall args) when the dangerous
         ``bypass_firewall_no_protection`` override is active.
@@ -202,7 +206,11 @@ class ShieldManager:
             return []
         try:
             return self.shield.pre_start(
-                container, security_deny=security_deny, provider_allow=provider_allow
+                container,
+                security_deny=security_deny,
+                provider_allow=provider_allow,
+                project_allow=project_allow,
+                override=override,
             )
         except ShieldNeedsSetup as exc:
             raise SystemExit(str(exc)) from None

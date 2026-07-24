@@ -338,6 +338,18 @@ class RunSpec:
     Executor's roster projection: extra provider runtime egress.  Empty by
     default."""
 
+    project_allow: tuple[str, ...] = ()
+    """Hosts allowed at egress — shield's authored t40 tier.
+
+    Orchestrator-authored project allowlist (git remote, custom domains),
+    merged with shield's composed profiles.  Empty by default."""
+
+    override: tuple[str, ...] = ()
+    """Hosts allowed *above* the security-deny — shield's authored t10 tier.
+
+    Orchestrator-authored break-glass overrides (single host/IP each).  Empty
+    by default."""
+
     gpu_enabled: InitVar[bool | None] = None
     """Deprecated constructor alias for ``gpus`` (the pre-vendor bool knob).
 
@@ -519,6 +531,8 @@ class Sandbox:
         loopback_ports: tuple[int, ...] = (),
         security_deny: tuple[str, ...] = (),
         provider_allow: tuple[str, ...] = (),
+        project_allow: tuple[str, ...] = (),
+        override: tuple[str, ...] = (),
     ) -> list[str]:
         """Return extra podman args for shield integration.
 
@@ -530,8 +544,8 @@ class Sandbox:
         *loopback_ports* overrides shield's cfg-derived allowlist
         with per-container ports (see ``RunSpec.loopback_ports``).
 
-        *security_deny* / *provider_allow* are executor's roster projection
-        for shield's generated t20 / t30 tiers (see
+        *security_deny* / *provider_allow* / *project_allow* / *override* are the
+        orchestrator's generated t20 / t30 / t40 / t10 tiers (see
         [`RunSpec.security_deny`][terok_sandbox.sandbox.RunSpec.security_deny]).
         """
         from .integrations.shield import ShieldManager, ShieldRuntime
@@ -541,7 +555,13 @@ class Sandbox:
             self._cfg,
             runtime=ShieldRuntime.from_runtime_name(runtime),
             loopback_ports_override=loopback_ports or None,
-        ).pre_start(container, security_deny=security_deny, provider_allow=provider_allow)
+        ).pre_start(
+            container,
+            security_deny=security_deny,
+            provider_allow=provider_allow,
+            project_allow=project_allow,
+            override=override,
+        )
 
     def shield_down(self, container: str, container_id: str, task_dir: Path) -> None:
         """Remove shield rules for a container (allow all egress).
@@ -610,6 +630,8 @@ class Sandbox:
                     loopback_ports=spec.loopback_ports,
                     security_deny=spec.security_deny,
                     provider_allow=spec.provider_allow,
+                    project_allow=spec.project_allow,
+                    override=spec.override,
                 )
             except SystemExit:
                 raise  # ShieldNeedsSetup; let the caller handle it
