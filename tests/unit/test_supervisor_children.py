@@ -540,14 +540,13 @@ class TestServicePassphraseResolution:
     def test_missing_passphrase_raises(self, tmp_path: Path) -> None:
         from terok_sandbox.vault.store.encryption import NoPassphraseError
 
-        with (
-            patch(
-                "terok_sandbox.vault.store.encryption.resolve_passphrase_with_source",
-                return_value=(None, None),
-            ),
-            pytest.raises(NoPassphraseError, match="no SQLCipher passphrase"),
+        cfg = _socket_cfg(tmp_path)
+        with patch(
+            "terok_sandbox.vault.store.encryption.resolve_passphrase_with_source",
+            return_value=(None, None),
         ):
-            _resolve_service_passphrase("signer", _socket_cfg(tmp_path))
+            with pytest.raises(NoPassphraseError, match="no SQLCipher passphrase"):
+                _resolve_service_passphrase("signer", cfg)
 
 
 class TestVaultRunner:
