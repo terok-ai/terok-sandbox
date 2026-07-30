@@ -286,12 +286,12 @@ class TestStreamResponseBody:
 class TestRunCgiErrors:
     """_run_cgi handles git-missing, OSError, and CGI timeout via mocked subprocess."""
 
-    def _build_handler(self, tmp_path: Path):
+    def _build_handler(self, tmp_path: Path, *, home_path: Path | None = None):
         """Construct a GateRequestHandler instance bound to mocked I/O."""
         from terok_sandbox.gate.server import _make_handler_class
 
         store = _SingleTokenStore("good-token", "myrepo")
-        cls = _make_handler_class(tmp_path, store)
+        cls = _make_handler_class(tmp_path, store, home_path=home_path)
         handler = cls.__new__(cls)
         handler.headers = {}
         handler.command = "GET"
@@ -312,6 +312,16 @@ class TestRunCgiErrors:
         with patch("subprocess.Popen", side_effect=FileNotFoundError):
             handler._run_cgi("/myrepo.git/info/refs", "")
         handler.send_error.assert_called_once_with(500, "git not found")
+
+    def test_private_home_sets_environment_and_working_directory(self, tmp_path: Path) -> None:
+        private_home = tmp_path / "gate-home"
+        handler = self._build_handler(tmp_path, home_path=private_home)
+
+        with patch("subprocess.Popen", side_effect=FileNotFoundError) as popen:
+            handler._run_cgi("/myrepo.git/info/refs", "")
+
+        assert popen.call_args.kwargs["env"]["HOME"] == str(private_home)
+        assert popen.call_args.kwargs["cwd"] == private_home
 
     def test_oserror_emits_500(self, tmp_path: Path) -> None:
         handler = self._build_handler(tmp_path)

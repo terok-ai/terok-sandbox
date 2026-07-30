@@ -172,7 +172,7 @@ def allocate_per_container_resources(cfg: SandboxConfig, container: str) -> PerC
 
 
 def _validate_service_socket_paths(container_runtime_dir: Path) -> None:
-    """Fail early when a host service socket cannot fit in ``sun_path``."""
+    """Service socket paths: reject host paths that cannot fit in ``sun_path``."""
     container_mount = Path(CONTAINER_RUNTIME_DIR)
     for container_socket in _CONTAINER_SERVICE_SOCKETS:
         relative_socket = Path(container_socket).relative_to(container_mount)
