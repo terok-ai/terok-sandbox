@@ -140,6 +140,22 @@ class TestBuildCgiEnv:
         assert env["HOME"] == "/custom/home"
         assert env["GIT_EXEC_PATH"] == "/git/exec"
 
+    def test_explicit_home_replaces_the_operator_home(self, tmp_path: Path) -> None:
+        private_home = tmp_path / "gate-home"
+        with patch.dict("os.environ", {"HOME": "/operator/home"}):
+            env = _build_cgi_env(
+                tmp_path,
+                "/",
+                "",
+                "GET",
+                "",
+                "HTTP/1.1",
+                0,
+                tmp_path / HOOKS_DIRNAME,
+                private_home,
+            )
+        assert env["HOME"] == str(private_home)
+
     def test_content_length_added_when_truthy(self, tmp_path: Path) -> None:
         env = _build_cgi_env(tmp_path, "/", "", "POST", "", "HTTP/1.1", 7, tmp_path / HOOKS_DIRNAME)
         assert env["CONTENT_LENGTH"] == "7"

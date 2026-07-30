@@ -140,20 +140,22 @@ terok-sandbox cleanup mybox
 $ terok-sandbox prepare mybox --scope myproj
 --annotation=… --userns=keep-id:uid=1000,gid=1000 \
   -v <pkg>/resources/bridges:/usr/local/share/terok-sandbox/bridges:z,ro \
-  -v /run/user/1000/terok/sandbox/run/mybox:/run/terok:z \
+  -v /run/user/1000/terok/sandbox/run/mybox:/run/terok:z,ro \
   -e TEROK_VAULT_LOOPBACK_PORT=9419 \
-  -e TEROK_GATE_SOCKET=/run/terok/gate-server.sock \
+  -e TEROK_VAULT_SOCKET=/run/terok/vault/vault.sock \
+  -e TEROK_GATE_SOCKET=/run/terok/gate/gate-server.sock \
   -e TEROK_GATE_TOKEN=terok-g-… \
   -e TEROK_SSH_SIGNER_TOKEN=terok-p-… \
-  -e TEROK_SSH_SIGNER_SOCKET=/run/terok/ssh-agent.sock \
+  -e TEROK_SSH_SIGNER_SOCKET=/run/terok/signer/ssh-agent.sock \
   --name mybox \
   --annotation terok.sandbox.sidecar=~/.local/share/terok/sandbox/sidecar/mybox.json
 ```
 
 (Socket mode, the default.  The per-container host directory
-`…/run/mybox` is bind-mounted at `/run/terok/`; the supervisor binds
-`vault.sock` / `ssh-agent.sock` / `gate-server.sock` inside it.  In TCP
-mode the env vars carry per-container loopback ports instead.)
+`…/run/mybox` is bind-mounted read-only at `/run/terok/`; each supervisor
+service binds its socket in a service-only child directory.  The container
+can connect to those sockets but cannot replace their inodes or gate runtime
+files.  In TCP mode the env vars carry per-container loopback ports instead.)
 
 Splice into your own `podman run`:
 

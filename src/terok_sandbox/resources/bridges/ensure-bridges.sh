@@ -1,6 +1,6 @@
-# shellcheck shell=bash
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
+# shellcheck shell=bash
 # terok:container — this file is deployed into containers, not used on the host.
 
 # Idempotent socat bridge launcher for container ↔ host-side sandbox services.
@@ -8,7 +8,7 @@
 # Manages up to four bridges:
 #
 #   1. SSH signer        — UNIX socket → ssh-agent-bridge.sh → TCP or host socket
-#   2. Vault (HTTP leg)  — in socket mode: TCP-LISTEN → /run/terok/vault.sock
+#   2. Vault (HTTP leg)  — in socket mode: TCP-LISTEN → TEROK_VAULT_SOCKET
 #                          (lets HTTP-only clients reach the vault via localhost)
 #   3. Vault (socket leg) — in TCP mode:    /tmp/terok-vault.sock → TCP broker
 #                          (lets socket-only clients — gh, claude — reach the
@@ -18,8 +18,8 @@
 #
 # Transport selection is env-var driven (set at container creation):
 #
-#   Socket mode: TEROK_VAULT_LOOPBACK_PORT=<port>, /run/terok/vault.sock mounted;
-#                TEROK_GATE_SOCKET=<path>
+#   Socket mode: TEROK_VAULT_LOOPBACK_PORT=<port>,
+#                TEROK_VAULT_SOCKET=<path>, TEROK_GATE_SOCKET=<path>
 #   TCP mode:    TEROK_TOKEN_BROKER_PORT=<port>, TEROK_GATE_PORT=<port>
 #
 # Uses PID files (not socket existence) to detect dead bridges — stale
@@ -64,7 +64,7 @@ if [[ -n "${TEROK_SSH_SIGNER_TOKEN:-}" ]] \
 fi
 
 # ── Vault loopback bridge (socket mode) ──────────────────────────────────
-# The host vault socket is mounted at /run/terok/vault.sock.  Socket-native
+# The host vault socket is mounted at TEROK_VAULT_SOCKET.  Socket-native
 # clients (gh, claude) use it directly; everyone else reaches it via this
 # TCP loopback so their "base URL" knob has something to point at.
 # retry=/interval= (as on the gate bridge) hold each connection until the
@@ -72,18 +72,19 @@ fi
 # early credentialed request would otherwise race the broker's bind.
 #
 # Socket mode is TEROK_VAULT_LOOPBACK_PORT set with NO TEROK_TOKEN_BROKER_PORT
-# (that pins TCP mode, handled below).  In socket mode the mounted vault.sock
-# must exist; if it doesn't, the per-container supervisor never bound it — say
-# so, one line per shell, instead of skipping the bridge in silence (#458).
+# (that pins TCP mode, handled below).  In socket mode the mounted socket
+# must exist; if it doesn't, the per-container supervisor never bound it —
+# say so, one line per shell, instead of skipping the bridge in silence (#458).
 if [[ -n "${TEROK_VAULT_LOOPBACK_PORT:-}" ]] && [[ -z "${TEROK_TOKEN_BROKER_PORT:-}" ]]; then
-  if [[ ! -S /run/terok/vault.sock ]]; then
+  if [[ -z "${TEROK_VAULT_SOCKET:-}" ]] || [[ ! -S "${TEROK_VAULT_SOCKET}" ]]; then
     echo "terok: vault loopback bridge skipped — socket mode announced" \
-      "(TEROK_VAULT_LOOPBACK_PORT=${TEROK_VAULT_LOOPBACK_PORT}) but /run/terok/vault.sock" \
+      "(TEROK_VAULT_LOOPBACK_PORT=${TEROK_VAULT_LOOPBACK_PORT}) but" \
+      "${TEROK_VAULT_SOCKET:-TEROK_VAULT_SOCKET is unset}" \
       "is absent; the per-container supervisor may not be running" >&2
   elif command -v socat >/dev/null 2>&1 \
        && ! _terok_bridge_alive "$_TEROK_PIDDIR/vault-loopback.pid"; then
     socat "TCP-LISTEN:${TEROK_VAULT_LOOPBACK_PORT},bind=127.0.0.1,fork,reuseaddr" \
-      UNIX-CONNECT:/run/terok/vault.sock,retry=300,interval=0.1 &
+      UNIX-CONNECT:"${TEROK_VAULT_SOCKET}",retry=300,interval=0.1 &
     echo $! > "$_TEROK_PIDDIR/vault-loopback.pid"
   fi
 fi

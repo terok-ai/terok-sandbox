@@ -15,10 +15,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import shutil
 import signal
+import socket
 import subprocess
 import sys
 import textwrap
+import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -38,6 +42,7 @@ from terok_sandbox.supervisor.children import (
     run_child,
 )
 from terok_sandbox.supervisor.main import SidecarConfig, SupervisorPaths
+from tests.constants import LOCALHOST, SYSTEM_RUNTIME_ROOT
 
 
 @pytest.fixture(autouse=True)
@@ -58,6 +63,10 @@ def _no_irreversible_self_restriction(monkeypatch: pytest.MonkeyPatch) -> None:
         "terok_sandbox.supervisor.children.confine_filesystem",
         lambda _re, _rw: LandlockReport(confined=True, reason="stubbed in tests"),
     )
+    monkeypatch.setattr(
+        "terok_sandbox.supervisor.children._resolve_service_passphrase",
+        lambda service, _cfg: "test-passphrase" if service in {"vault", "signer"} else None,
+    )
 
 
 @pytest.fixture
@@ -77,8 +86,10 @@ def _socket_cfg(tmp_path: Path, **extra: object) -> SidecarConfig:
         ipc_mode="socket",
         db_path=tmp_path / "vault.db",
         runtime_dir=tmp_path / "rt" / "sandbox",
+        routes_path=tmp_path / "routes.json",
         scope_id="proj",
         project_id="proj",
+        _resolved_passphrase="test-passphrase",
         **extra,
     )
 
@@ -91,8 +102,10 @@ def _tcp_cfg(tmp_path: Path, **extra: object) -> SidecarConfig:
         ipc_mode="tcp",
         db_path=tmp_path / "vault.db",
         runtime_dir=tmp_path / "rt" / "sandbox",
+        routes_path=tmp_path / "routes.json",
         scope_id="proj",
         project_id="proj",
+        _resolved_passphrase="test-passphrase",
         **kw,  # type: ignore[arg-type]
     )
 
@@ -179,8 +192,10 @@ class TestSelinuxSocketContext:
         # The ingester socket must be distinct from the varlink subscriber
         # socket and live under the dedicated ``events/`` dir.
         assert captured["reader_socket"] != captured["clearance_socket"]
-        assert captured["reader_socket"].parent.name == "events"  # type: ignore[union-attr]
-        assert captured["clearance_socket"].parent.name == "clearance"  # type: ignore[union-attr]
+        assert captured["reader_socket"].name == "ingester.sock"  # type: ignore[union-attr]
+        assert captured["reader_socket"].parent.parent.name == "events"  # type: ignore[union-attr]
+        assert captured["clearance_socket"].name == "hub.sock"  # type: ignore[union-attr]
+        assert captured["clearance_socket"].parent.parent.name == "clearance"  # type: ignore[union-attr]
 
 
 class TestGateRunner:
@@ -204,6 +219,9 @@ class TestGateRunner:
             await _run_gate(cfg, paths, _preset_stop())
         assert captured["socket_path"] == paths.gate_socket
         assert captured["token"] == "terok-g-abc"
+        assert captured["home_path"] == paths.gate_socket.parent / "home"
+        assert captured["hooks_path"] == paths.gate_socket.parent / "hooks"
+        assert not (tmp_path / "mirrors" / ".terok-hooks").exists()
         assert "port" not in captured
 
     @pytest.mark.asyncio
@@ -270,6 +288,36 @@ class TestEnsureSocketDirs:
         parent = paths.vault_socket.parent
         assert parent.is_dir()
         assert (parent.stat().st_mode & 0o777) == 0o700
+
+    def test_secret_services_have_distinct_socket_parents(self, paths: SupervisorPaths) -> None:
+        """A write grant for one listener cannot replace a sibling listener."""
+        assert (
+            len(
+                {
+                    paths.vault_socket.parent,
+                    paths.ssh_signer_socket.parent,
+                    paths.gate_socket.parent,
+                }
+            )
+            == 3
+        )
+
+    def test_cross_package_sockets_have_per_container_parents(self, tmp_path: Path) -> None:
+        """A clearance child cannot replace another container's event sockets."""
+        first = SupervisorPaths.for_container(
+            "abc123def456",
+            "first",
+            tmp_path / "state" / "sidecar" / "first.json",
+            tmp_path / "runtime" / "sandbox",
+        )
+        second = SupervisorPaths.for_container(
+            "def456abc123",
+            "second",
+            tmp_path / "state" / "sidecar" / "second.json",
+            tmp_path / "runtime" / "sandbox",
+        )
+        assert first.clearance_socket.parent != second.clearance_socket.parent
+        assert first.events_socket.parent != second.events_socket.parent
 
 
 class TestArmParentDeathSignal:
@@ -375,7 +423,7 @@ class TestRunChildGuards:
             assert run_child("vault", "abc123def456", sidecar) == 0
         assert ran == [True]
         # the vault socket dir was created + tightened
-        vault_dir = tmp_path / "rt" / "sandbox" / "run" / "demo"
+        vault_dir = tmp_path / "rt" / "sandbox" / "run" / "demo" / "vault"
         assert vault_dir.is_dir()
         assert (vault_dir.stat().st_mode & 0o777) == 0o700
 
@@ -464,6 +512,8 @@ class TestVaultRunner:
             await _run_vault(_socket_cfg(tmp_path), paths, _preset_stop())
         assert captured["db_path"] == (tmp_path / "vault.db")
         assert captured["scope_id"] == "proj"
+        assert captured["routes_path"] == tmp_path / "routes.json"
+        assert captured["passphrase"] == "test-passphrase"
         assert captured["stopped"] is True
 
     @pytest.mark.asyncio
@@ -510,6 +560,7 @@ class TestSignerRunner:
         ) as start:
             await _run_signer(_socket_cfg(tmp_path), paths, _preset_stop())
         start.assert_awaited_once()
+        assert start.await_args.kwargs["passphrase"] == "test-passphrase"
         server.close.assert_called_once()
         server.wait_closed.assert_awaited_once()
 
@@ -562,22 +613,48 @@ class TestChildSignalHandlers:
 class TestWritablePaths:
     """The per-service write policy Landlock enforces — everything else is denied."""
 
-    def test_secretless_services_get_only_the_runtime_root(self, tmp_path: Path) -> None:
+    def test_socket_services_get_only_their_own_socket_directories(
+        self, tmp_path: Path, paths: SupervisorPaths
+    ) -> None:
         cfg = _socket_cfg(tmp_path)
-        for service in ("verdict", "clearance", "signer"):
-            assert _writable_paths(service, cfg) == [tmp_path / "rt"]
+        assert _writable_paths("verdict", cfg, paths) == [paths.verdict_socket.parent]
+        assert _writable_paths("clearance", cfg, paths) == [
+            paths.clearance_socket.parent,
+            paths.events_socket.parent,
+        ]
 
-    def test_vault_adds_its_db_directory(self, tmp_path: Path) -> None:
+    def test_secret_holders_add_db_and_vault_adds_its_lock_lane(
+        self, tmp_path: Path, paths: SupervisorPaths
+    ) -> None:
         cfg = _socket_cfg(tmp_path)  # db_path = tmp_path / "vault.db"
-        assert _writable_paths("vault", cfg) == [tmp_path / "rt", tmp_path]
+        assert _writable_paths("signer", cfg, paths) == [
+            paths.ssh_signer_socket.parent,
+            tmp_path,
+        ]
+        assert _writable_paths("vault", cfg, paths) == [
+            paths.vault_socket.parent,
+            tmp_path,
+            cfg.runtime_dir / "terok" / "vault" / "locks",
+        ]
 
-    def test_gate_adds_the_mirror_tree_when_wired(self, tmp_path: Path) -> None:
+    def test_gate_adds_only_its_scoped_repo_and_dev_null(
+        self, tmp_path: Path, paths: SupervisorPaths
+    ) -> None:
         mirror = tmp_path / "gate"
         cfg = _socket_cfg(tmp_path, gate_base_path=mirror, gate_token="tok")  # nosec B106
-        assert _writable_paths("gate", cfg) == [tmp_path / "rt", mirror]
+        assert _writable_paths("gate", cfg, paths) == [
+            paths.gate_socket.parent,
+            mirror / "proj.git",
+            Path(os.devnull),
+        ]
 
-    def test_unwired_gate_gets_only_the_runtime_root(self, tmp_path: Path) -> None:
-        assert _writable_paths("gate", _socket_cfg(tmp_path)) == [tmp_path / "rt"]
+    def test_unwired_gate_still_gets_private_runtime_and_dev_null(
+        self, tmp_path: Path, paths: SupervisorPaths
+    ) -> None:
+        assert _writable_paths("gate", _socket_cfg(tmp_path), paths) == [
+            paths.gate_socket.parent,
+            Path(os.devnull),
+        ]
 
 
 class TestConfinementWiring:
@@ -617,37 +694,111 @@ class TestConfinementWiring:
         from terok_sandbox.supervisor.children import _SYSTEM_READABLE_ROOTS
 
         ((read_exec, read_write),) = self._run(tmp_path, allow_debugger=False)
-        assert read_exec is _SYSTEM_READABLE_ROOTS  # shared read+exec roots
-        assert read_write == [tmp_path / "rt", tmp_path]  # vault write lane: runtime root + db dir
+        assert read_exec == (*_SYSTEM_READABLE_ROOTS, tmp_path / "routes.json")
+        assert read_write == [
+            tmp_path / "rt" / "sandbox" / "run" / "demo" / "vault",
+            tmp_path,
+            tmp_path / "rt" / "sandbox" / "terok" / "vault" / "locks",
+        ]
 
     def test_debug_mode_leaves_the_filesystem_open(self, tmp_path: Path) -> None:
         assert self._run(tmp_path, allow_debugger=True) == []
 
+    def test_verdict_broker_leaves_the_filesystem_open(self, tmp_path: Path) -> None:
+        """The Podman/nsenter broker cannot run inside the service path policy."""
+        sidecar = tmp_path / "demo.json"
+        sidecar.write_text(
+            json.dumps(
+                {
+                    "container_name": "demo",
+                    "ipc_mode": "socket",
+                    "db_path": str(tmp_path / "vault.db"),
+                    "runtime_dir": str(tmp_path / "rt" / "sandbox"),
+                }
+            )
+        )
+
+        async def _noop(cfg: object, paths: object, stop: object) -> None: ...
+
+        with (
+            patch("terok_sandbox.supervisor.children.confine_filesystem") as confine,
+            patch.dict(
+                "terok_sandbox.supervisor.children._RUNNERS",
+                {"verdict": _noop},
+                clear=False,
+            ),
+        ):
+            assert run_child("verdict", "abc123def456", sidecar) == 0
+        confine.assert_not_called()
+
+    def test_shared_roots_exclude_the_runtime_tree(self) -> None:
+        from terok_sandbox.supervisor.children import _SYSTEM_READABLE_ROOTS
+
+        assert SYSTEM_RUNTIME_ROOT not in _SYSTEM_READABLE_ROOTS
+
+    def test_unavailable_policy_warns(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A fail-open kernel is visible at the default log level."""
+        from terok_util import LandlockReport
+
+        sidecar = tmp_path / "demo.json"
+        sidecar.write_text(
+            json.dumps(
+                {
+                    "container_name": "demo",
+                    "ipc_mode": "socket",
+                    "db_path": str(tmp_path / "vault.db"),
+                    "runtime_dir": str(tmp_path / "rt" / "sandbox"),
+                }
+            )
+        )
+
+        async def _noop(cfg: object, paths: object, stop: object) -> None: ...
+
+        with (
+            patch(
+                "terok_sandbox.supervisor.children.confine_filesystem",
+                return_value=LandlockReport(confined=False, reason="unsupported"),
+            ),
+            patch.dict(
+                "terok_sandbox.supervisor.children._RUNNERS",
+                {"clearance": _noop},
+                clear=False,
+            ),
+            caplog.at_level("WARNING"),
+        ):
+            assert run_child("clearance", "abc123def456", sidecar) == 0
+        assert "filesystem-confinement not applied: unsupported" in caplog.text
+
 
 class TestPolicyConfinesOnTheLiveKernel:
-    """The whole ``run_child`` bring-up isolates the service on the running kernel.
+    """The whole ``run_child`` bring-up isolates filesystem paths on the live kernel.
 
     The single high-surface proof: a fresh process loads a real sidecar and
     calls [`run_child`][terok_sandbox.supervisor.children.run_child], which
     hardens, applies ``_SYSTEM_READABLE_ROOTS`` + ``_writable_paths`` through
     real Landlock, then drives a stub ``vault`` runner that probes its lane.
-    The service writes its own data but **cannot read a sibling service's** —
-    end-to-end cross-service isolation, not just the primitive (that lives in
-    terok-util's hardening tests).  Runs on every matrix slot, so each distro's
-    kernel exercises the confinement; a kernel without Landlock skips.
+    The service writes its own data but cannot read the runtime passphrase
+    escrow or replace a sibling service's socket.  This deliberately proves
+    path isolation only: Linux keyring permissions remain a separate same-UID
+    boundary.  Runs on every matrix slot, so each distro's kernel exercises the
+    confinement; a kernel without Landlock skips.
     """
 
-    def test_vault_writes_its_lane_and_cannot_read_a_sibling(self, tmp_path: Path) -> None:
-        # Nest runtime_dir + db_path under ``lane/`` so the granted parents stay
-        # there and a sibling service's dir under the same tree is outside them.
+    def test_vault_cannot_read_escrow_or_replace_sibling_socket(self, tmp_path: Path) -> None:
         lane = tmp_path / "lane"
         db_path = lane / "vault" / "vault.db"
         runtime_dir = lane / "rt" / "sandbox"
-        for parent in (db_path.parent, runtime_dir.parent):
-            parent.mkdir(parents=True, exist_ok=True)  # granted lanes must exist to be granted
-        sibling = lane / "gate-mirror"  # another service's data, not in vault's lane
-        sibling.mkdir(parents=True)
-        (sibling / "secret").write_text("a gate secret vault must never read")
+        db_path.parent.mkdir(parents=True)
+        runtime_dir.mkdir(parents=True)
+        routes_path = db_path.parent / "routes.json"
+        routes_path.write_text("{}")
+        pending_passphrase = runtime_dir / "vault.passphrase.pending"
+        pending_passphrase.write_text("rekey escrow")
+        signer_socket = runtime_dir / "run" / "demo" / "signer" / "ssh-agent.sock"
+        signer_socket.parent.mkdir(parents=True)
+        signer_socket.write_text("stand-in sibling socket inode")
 
         sidecar = tmp_path / "demo.json"
         sidecar.write_text(
@@ -657,6 +808,8 @@ class TestPolicyConfinesOnTheLiveKernel:
                     "ipc_mode": "socket",
                     "db_path": str(db_path),
                     "runtime_dir": str(runtime_dir),
+                    "routes_path": str(routes_path),
+                    "credentials_passphrase_command": "printf test-passphrase",
                 }
             )
         )
@@ -676,13 +829,18 @@ class TestPolicyConfinesOnTheLiveKernel:
 
             async def _probe(cfg, paths, stop):
                 out = []
-                Path(cfg.db_path.parent, "ok").write_text("x")   # vault write lane → OK
+                Path(cfg.db_path.parent, "ok").write_text("x")
                 out.append("lane-write-ok")
                 try:
-                    Path({str(sibling)!r}, "secret").read_text()
-                    out.append("sibling-read-LEAK")
+                    Path({str(pending_passphrase)!r}).read_text()
+                    out.append("escrow-read-LEAK")
                 except (PermissionError, OSError):
-                    out.append("sibling-read-denied")            # outside the lane → unreadable
+                    out.append("escrow-read-denied")
+                try:
+                    Path({str(signer_socket)!r}).unlink()
+                    out.append("sibling-unlink-LEAK")
+                except (PermissionError, OSError):
+                    out.append("sibling-unlink-denied")
                 print(";".join(out))
 
             children._RUNNERS["vault"] = _probe
@@ -695,4 +853,260 @@ class TestPolicyConfinesOnTheLiveKernel:
         out = result.stdout.strip().splitlines()[-1] if result.stdout.strip() else ""
         if out.startswith("unsupported:"):
             pytest.skip(f"kernel without Landlock: {out}")
-        assert out == "lane-write-ok;sibling-read-denied", f"vault policy leaked: {out!r}"
+        assert out == "lane-write-ok;escrow-read-denied;sibling-unlink-denied", (
+            f"vault policy leaked: {out!r}"
+        )
+
+    def test_passphrase_helper_runs_before_config_becomes_unreadable(self, tmp_path: Path) -> None:
+        """A config-selected helper resolves once; its files stay outside the long-lived lane."""
+        operator_dir = tmp_path / "operator-config"
+        operator_dir.mkdir()
+        helper_secret = operator_dir / "vault-passphrase"
+        helper_secret.write_text("headless-passphrase\n")
+        config_file = operator_dir / "config.yml"
+        config_file.write_text(
+            f"credentials:\n  use_keyring: false\n  passphrase_command: cat {helper_secret}\n"
+        )
+
+        state_dir = tmp_path / "state"
+        runtime_dir = tmp_path / "runtime" / "sandbox"
+        vault_dir = tmp_path / "vault"
+        vault_dir.mkdir()
+        (vault_dir / "routes.json").write_text("{}")
+        worker = textwrap.dedent(
+            f"""
+            from pathlib import Path
+            from terok_util import hardening
+            from terok_sandbox.config import SandboxConfig
+            from terok_sandbox.launch import PerContainerResources, write_sidecar
+            from terok_sandbox.supervisor import children
+
+            libc = hardening._libc()
+            if libc is None or hardening._landlock_abi(libc) < 1:
+                print("unsupported:no-landlock")
+                raise SystemExit(0)
+
+            cfg = SandboxConfig(
+                state_dir=Path({str(state_dir)!r}),
+                runtime_dir=Path({str(runtime_dir)!r}),
+                vault_dir=Path({str(vault_dir)!r}),
+                services_mode="socket",
+            )
+            sidecar = write_sidecar(
+                "demo",
+                cfg=cfg,
+                per_container=PerContainerResources(
+                    container_runtime_dir=cfg.container_runtime_dir("demo"),
+                    token_broker_port=None,
+                    ssh_signer_port=None,
+                    gate_port=None,
+                ),
+            )
+            assert sidecar is not None
+
+            confine = children.confine_filesystem
+            def reporting_confine(read_exec, read_write):
+                report = confine(read_exec, read_write)
+                print(f"landlock:{{int(report.confined)}}:{{report.reason}}", flush=True)
+                return report
+
+            async def probe(resolved, paths, stop):
+                checks = [
+                    f"resolved={{int(resolved._resolved_passphrase == 'headless-passphrase')}}",
+                    f"keyring-off={{int(resolved.credentials_use_keyring is False)}}",
+                ]
+                for label, path in (
+                    ("config", Path({str(config_file)!r})),
+                    ("helper", Path({str(helper_secret)!r})),
+                ):
+                    try:
+                        path.read_text()
+                        checks.append(f"{{label}}-LEAK")
+                    except (PermissionError, OSError):
+                        checks.append(f"{{label}}-denied")
+                print(";".join(checks), flush=True)
+
+            children.confine_filesystem = reporting_confine
+            children._RUNNERS["vault"] = probe
+            raise SystemExit(children.run_child("vault", "abc123def456", sidecar))
+            """
+        )
+        env = {**os.environ, "TEROK_CONFIG_FILE": str(config_file)}
+        result = subprocess.run(
+            [sys.executable, "-c", worker],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=True,
+        )
+        lines = result.stdout.strip().splitlines()
+        if lines and lines[0].startswith("unsupported:"):
+            pytest.skip(f"kernel without Landlock: {lines[0]}")
+        assert lines[0].startswith("landlock:1:"), result.stderr
+        assert lines[-1] == "resolved=1;keyring-off=1;config-denied;helper-denied"
+
+    def test_gate_accepts_real_git_push_inside_scoped_policy(self, tmp_path: Path) -> None:
+        """Git can migrate quarantine objects without opening the other mirrors."""
+        if shutil.which("git") is None:
+            pytest.skip("needs git")
+        mirror_root = tmp_path / "mirrors"
+        scoped_repo = mirror_root / "proj.git"
+        other_repo = mirror_root / "other.git"
+        source = tmp_path / "source"
+        for repo in (scoped_repo, other_repo):
+            subprocess.run(  # nosec B603 B607
+                ["git", "init", "--bare", str(repo)],
+                capture_output=True,
+                check=True,
+            )
+        subprocess.run(  # nosec B603 B607
+            ["git", "init", str(source)],
+            capture_output=True,
+            check=True,
+        )
+        (source / "README").write_text("landlocked push\n")
+        subprocess.run(  # nosec B603 B607
+            ["git", "-C", str(source), "add", "README"],
+            capture_output=True,
+            check=True,
+        )
+        subprocess.run(  # nosec B603 B607
+            [
+                "git",
+                "-C",
+                str(source),
+                "-c",
+                "user.name=Terok Test",
+                "-c",
+                "user.email=terok@example.invalid",
+                "commit",
+                "-m",
+                "test",
+            ],
+            capture_output=True,
+            check=True,
+        )
+
+        with socket.socket() as listener:
+            listener.bind((LOCALHOST, 0))
+            port = listener.getsockname()[1]
+
+        runtime_dir = tmp_path / "runtime" / "sandbox"
+        runtime_dir.mkdir(parents=True)
+        sidecar = tmp_path / "gate.json"
+        token = "terok-g-landlock"
+        sidecar.write_text(
+            json.dumps(
+                {
+                    "container_name": "demo",
+                    "ipc_mode": "tcp",
+                    "db_path": str(tmp_path / "vault.db"),
+                    "runtime_dir": str(runtime_dir),
+                    "project_id": "proj",
+                    "gate_port": port,
+                    "gate_base_path": str(mirror_root),
+                    "gate_token": token,
+                }
+            )
+        )
+        worker = textwrap.dedent(
+            f"""
+            from pathlib import Path
+            from terok_sandbox.supervisor import children
+
+            confine = children.confine_filesystem
+            def reporting_confine(read_exec, read_write):
+                report = confine(read_exec, read_write)
+                print(f"landlock:{{int(report.confined)}}:{{report.reason}}", flush=True)
+                return report
+
+            run_gate = children._RUNNERS["gate"]
+            async def probing_gate(cfg, paths, stop):
+                probes = []
+                try:
+                    Path({str(other_repo / "HEAD")!r}).read_text()
+                    probes.append("read-LEAK")
+                except (PermissionError, OSError):
+                    probes.append("read-denied")
+                try:
+                    Path({str(other_repo / "landlock-leak")!r}).write_text("leak")
+                    probes.append("write-LEAK")
+                except (PermissionError, OSError):
+                    probes.append("write-denied")
+                print("other-mirror:" + ",".join(probes), flush=True)
+                await run_gate(cfg, paths, stop)
+
+            children.confine_filesystem = reporting_confine
+            children._RUNNERS["gate"] = probing_gate
+            raise SystemExit(
+                children.run_child("gate", "abc123def456", Path({str(sidecar)!r}))
+            )
+            """
+        )
+        process = subprocess.Popen(  # nosec B603
+            [sys.executable, "-c", worker],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            assert process.stdout is not None
+            report = process.stdout.readline().strip()
+            if report.startswith("landlock:0:"):
+                pytest.skip(f"kernel cannot install the complete gate policy: {report}")
+            assert report.startswith("landlock:1:"), (
+                f"gate child failed before reporting confinement: {report!r}"
+            )
+            assert process.stdout.readline().strip() == "other-mirror:read-denied,write-denied"
+
+            deadline = time.monotonic() + 5
+            while True:
+                try:
+                    with socket.create_connection((LOCALHOST, port), timeout=0.1):
+                        break
+                except OSError:
+                    if process.poll() is not None or time.monotonic() >= deadline:
+                        assert process.stderr is not None
+                        pytest.fail(f"gate did not start: {process.stderr.read()}")
+                    time.sleep(0.02)
+
+            gate_url = f"http://{token}:x@{LOCALHOST}:{port}/proj.git"
+            pushed = subprocess.run(  # nosec B603 B607
+                [
+                    "git",
+                    "-C",
+                    str(source),
+                    "-c",
+                    "credential.helper=",
+                    "push",
+                    gate_url,
+                    "HEAD:refs/heads/main",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+            )
+            assert pushed.returncode == 0, pushed.stderr
+            assert (
+                subprocess.run(  # nosec B603 B607
+                    ["git", "--git-dir", str(scoped_repo), "rev-parse", "refs/heads/main"],
+                    capture_output=True,
+                    check=True,
+                    text=True,
+                ).stdout.strip()
+                == subprocess.run(  # nosec B603 B607
+                    ["git", "-C", str(source), "rev-parse", "HEAD"],
+                    capture_output=True,
+                    check=True,
+                    text=True,
+                ).stdout.strip()
+            )
+            assert not any(other_repo.glob("objects/??/*"))
+        finally:
+            process.terminate()
+            try:
+                process.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.communicate()

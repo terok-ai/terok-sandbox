@@ -31,3 +31,10 @@ def test_sandbox_uninstall_is_public_alias_of_aggregator() -> None:
 def test_sandbox_uninstall_listed_in_all() -> None:
     """``__all__`` lists ``sandbox_uninstall`` — pins the star-import contract."""
     assert "sandbox_uninstall" in terok_sandbox.__all__
+
+
+def test_nested_container_socket_paths_are_public() -> None:
+    """Upper layers consume one canonical set of container socket paths."""
+    assert terok_sandbox.CONTAINER_VAULT_SOCKET == "/run/terok/vault/vault.sock"
+    assert terok_sandbox.CONTAINER_SSH_SIGNER_SOCKET == "/run/terok/signer/ssh-agent.sock"
+    assert terok_sandbox.CONTAINER_GATE_SOCKET == "/run/terok/gate/gate-server.sock"

@@ -45,6 +45,9 @@ from terok_sandbox.launch import (
     write_sidecar,
 )
 from terok_sandbox.podman_args import (
+    CONTAINER_GATE_SOCKET,
+    CONTAINER_SSH_SIGNER_SOCKET,
+    CONTAINER_VAULT_SOCKET,
     reject_managed_flags,
     reject_managed_volumes,
     validate_passthrough_args,
@@ -111,19 +114,22 @@ class TestCompose:
         # Bridge resources mount
         assert CONTAINER_BRIDGES_DIR in joined
         # Per-container runtime dir mounted at /run/terok/ (the supervisor
-        # binds vault.sock + ssh-agent.sock + gate-server.sock inside it).
-        assert ":/run/terok" in joined
+        # binds each socket in its service-only subdirectory).  The agent
+        # may connect through the mount but cannot replace host-side sockets
+        # or gate runtime files.
+        assert ":/run/terok:z,ro" in joined
         assert "/run/myc" in joined  # host-side dir name = container name
         assert f"TEROK_VAULT_LOOPBACK_PORT={LOOPBACK_VAULT_PORT}" in joined
+        assert f"TEROK_VAULT_SOCKET={CONTAINER_VAULT_SOCKET}" in joined
         # Gate socket env + token (the socket is bound by the supervisor
         # inside the per-container dir mount — no separate -v sub-mount).
-        assert "TEROK_GATE_SOCKET=/run/terok/gate-server.sock" in joined
+        assert f"TEROK_GATE_SOCKET={CONTAINER_GATE_SOCKET}" in joined
         assert "TEROK_GATE_TOKEN=terok-g-abc" in joined
         # The gate socket is NOT a -v sub-mount anymore.
         assert not any(a == "-v" and "gate-server.sock" in args[i + 1] for i, a in enumerate(args))
         # SSH signer env var (the socket itself is bound by the supervisor
         # inside the per-container dir mount above).
-        assert "TEROK_SSH_SIGNER_SOCKET=/run/terok/ssh-agent.sock" in joined
+        assert f"TEROK_SSH_SIGNER_SOCKET={CONTAINER_SSH_SIGNER_SOCKET}" in joined
         assert "TEROK_SSH_SIGNER_TOKEN=terok-p-xyz" in joined
         # Name flag (followed by the supervisor sidecar annotation)
         assert "--name" in args and "myc" in args
@@ -158,7 +164,7 @@ class TestCompose:
         assert re.search(r"TEROK_SSH_SIGNER_PORT=\d+", joined)
         assert re.search(r"TEROK_GATE_PORT=\d+", joined)
         assert "TEROK_GATE_TOKEN=terok-g-abc" in joined
-        assert "/run/terok/vault.sock" not in joined
+        assert CONTAINER_VAULT_SOCKET not in joined
 
     def test_no_shield_skips_shield_pre_start(self, tmp_path: Path) -> None:
         """--no-shield path doesn't call shield.pre_start."""
@@ -341,6 +347,10 @@ class TestWriteSidecar:
         assert payload["project_id"] == "proj"
         assert payload["gate_token"] == "terok-g-abc"
         assert payload["gate_base_path"] == str(cfg.gate_base_path)
+        assert payload["routes_path"] == str(cfg.routes_path)
+        assert payload["vault_systemd_creds_file"] == str(cfg.vault_systemd_creds_file)
+        assert payload["credentials_use_keyring"] is cfg.credentials_use_keyring
+        assert payload["credentials_passphrase_command"] is cfg.credentials_passphrase_command
         # Socket mode carries no TCP ports.
         assert "tcp_port" not in payload
         assert "gate_port" not in payload
@@ -623,7 +633,7 @@ class TestRejectManagedFlags:
 
     def test_volume_aliases_recognised(self) -> None:
         with pytest.raises(SystemExit):
-            reject_managed_volumes(["--volume=/foo:/run/terok/vault.sock:Z"])
+            reject_managed_volumes([f"--volume=/foo:{CONTAINER_VAULT_SOCKET}:Z"])
 
     def test_user_volume_unrelated_target_passes(self) -> None:
         reject_managed_volumes(["-v", "/workspace:/workspace:Z"])
@@ -642,7 +652,7 @@ class TestValidatePassthroughArgs:
 
     def test_rejects_managed_volume_target(self) -> None:
         with pytest.raises(SystemExit, match="vault.sock"):
-            validate_passthrough_args(["-v", "/foo:/run/terok/vault.sock"])
+            validate_passthrough_args(["-v", f"/foo:{CONTAINER_VAULT_SOCKET}"])
 
     @pytest.mark.parametrize("flag", ["--privileged", "--security-opt=seccomp=unconfined"])
     def test_rejects_isolation_weakening_flags(self, flag: str) -> None:
@@ -1005,6 +1015,18 @@ class TestValidateContainerName:
 class TestAllocatePerContainerResources:
     """Both modes get a 0700 per-container runtime dir; only TCP gets ports."""
 
+    def test_socket_mode_rejects_overlong_service_path_before_creating_dir(
+        self, tmp_path: Path
+    ) -> None:
+        """An oversized ``sun_path`` fails clearly before leaving runtime state."""
+        cfg = _make_cfg(tmp_path, services_mode="socket")
+        container = "x" * 200
+
+        with pytest.raises(SystemExit, match=r"Unix socket path too long.*shorter container name"):
+            allocate_per_container_resources(cfg, container)
+
+        assert not cfg.container_runtime_dir(container).exists()
+
     def test_socket_mode_makes_dir_and_no_ports(self, tmp_path: Path) -> None:
         """Socket mode: directory created mode 0700, all ports ``None``."""
         cfg = _make_cfg(tmp_path, services_mode="socket")
@@ -1016,6 +1038,13 @@ class TestAllocatePerContainerResources:
         assert res.token_broker_port is None
         assert res.ssh_signer_port is None
         assert res.gate_port is None
+
+    def test_tcp_mode_allows_name_beyond_unix_socket_limit(self, tmp_path: Path) -> None:
+        """TCP listeners do not inherit the filesystem socket path limit."""
+        cfg = _make_cfg(tmp_path, services_mode="tcp")
+        res = allocate_per_container_resources(cfg, "x" * 200)
+
+        assert res.container_runtime_dir.is_dir()
 
     def test_tcp_mode_allocates_three_distinct_ports(self, tmp_path: Path) -> None:
         """TCP mode: three distinct free ports come back alongside the dir."""

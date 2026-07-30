@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 _logger = logging.getLogger("terok-supervisor")
@@ -51,6 +51,21 @@ class SidecarConfig:
     because the supervisor cannot re-derive it from inside crun's
     rootless user namespace (its ``os.getuid()`` is 0 there, which
     misroutes generic resolvers to the root-only ``/run/terok``)."""
+    routes_path: Path | None = None
+    """Vault routing table captured by the launch process.
+
+    ``None`` derives ``routes.json`` beside ``db_path`` for sidecars made
+    outside the canonical writer.
+    """
+    vault_systemd_creds_file: Path | None = None
+    """Machine-bound passphrase credential captured by the launch process.
+
+    ``None`` derives ``vault.passphrase.cred`` beside ``db_path``.
+    """
+    credentials_use_keyring: bool = False
+    """Whether the pre-confinement passphrase walk may consult the OS keyring."""
+    credentials_passphrase_command: str | None = None
+    """Optional helper the child executes before installing Landlock."""
     scope_id: str | None = None
     project_id: str = ""
     task_id: str = ""
@@ -76,6 +91,8 @@ class SidecarConfig:
     """Debug mode — the children leave themselves ptrace-able instead of
     clearing the dumpable flag, so a debugger can attach.  ``False`` (fully
     hardened) unless the launch path opted the task in."""
+    _resolved_passphrase: str | None = field(default=None, repr=False, compare=False)
+    """Ephemeral in-memory passphrase; never present in sidecar JSON."""
 
 
 @dataclass(frozen=True)
@@ -88,18 +105,21 @@ class SupervisorPaths:
 
     container_id: str
     container_runtime_dir: Path
-    """Per-container directory holding ``vault.sock`` and
-    ``ssh-agent.sock``.  Keyed on ``container_name`` (which the
-    launch path knows before ``podman run`` so it can pre-create
-    the dir and bind-mount it as ``/run/terok/`` inside the
-    container).  Different containers get different host dirs;
-    the in-container view of these sockets is always /run/terok/."""
+    """Per-container directory holding isolated service subdirectories.
+
+    Keyed on ``container_name`` (which the launch path knows before
+    ``podman run`` so it can pre-create the dir and bind-mount it as
+    ``/run/terok/`` inside the container).  Different containers get
+    different host dirs.
+    """
     vault_socket: Path
     ssh_signer_socket: Path
     gate_socket: Path
-    """Per-container git-gate Unix socket inside ``container_runtime_dir``
-    (= the in-container ``/run/terok``).  Used only in socket mode; in
-    TCP mode the gate binds a loopback port instead."""
+    """Per-container git-gate Unix socket in its service-only directory.
+
+    Used only in socket mode; in TCP mode the gate binds a loopback port
+    instead.
+    """
     clearance_socket: Path
     events_socket: Path
     """Per-container ingester socket the shield reader and ``shield
@@ -136,8 +156,8 @@ class SupervisorPaths:
         Sockets carry the **12-char short container ID** (podman's
         display convention) rather than the full UUID — AF_UNIX's
         ``sun_path`` is 108 bytes including the null terminator, and
-        ``<terok-runtime>/clearance/<64-char-uuid>.sock`` lands at or
-        past that limit.  Twelve characters of hex give 48 bits of
+        ``<terok-runtime>/clearance/<64-char-uuid>/hub.sock`` lands at
+        or past that limit.  Twelve characters of hex give 48 bits of
         entropy, well past the no-collisions-within-one-host bar.
         Logs keep the full UUID because they live on the filesystem
         with no AF_UNIX limit and the full UUID is easier to grep.
@@ -148,10 +168,10 @@ class SupervisorPaths:
         terok-clearance semantically and consumed by every package
         that subscribes (terok-shield's NFLOG reader, terok-clearance
         TUI, …).  Sandbox-specific sockets (vault, ssh-agent) live in
-        a per-container ``runtime_dir/run/<short_id>/`` directory the
-        launch path bind-mounts at ``/run/terok/`` inside the
-        container — keeping every container's sockets distinct on
-        the host so concurrent containers don't collide.
+        a per-container ``runtime_dir/run/<container_name>/`` directory
+        the launch path bind-mounts at ``/run/terok/`` inside the
+        container.  Each service gets a child directory so its Landlock
+        write grant cannot replace a sibling's socket.
         """
         short_id = container_id[:12]
         clearance_root = runtime_dir.parent  # <terok>/sandbox/  →  <terok>/
@@ -166,11 +186,11 @@ class SupervisorPaths:
         return cls(
             container_id=container_id,
             container_runtime_dir=container_runtime_dir,
-            vault_socket=container_runtime_dir / "vault.sock",
-            ssh_signer_socket=container_runtime_dir / "ssh-agent.sock",
-            gate_socket=container_runtime_dir / "gate-server.sock",
-            clearance_socket=clearance_root / "clearance" / f"{short_id}.sock",
-            events_socket=clearance_root / "events" / f"{short_id}.sock",
+            vault_socket=container_runtime_dir / "vault" / "vault.sock",
+            ssh_signer_socket=container_runtime_dir / "signer" / "ssh-agent.sock",
+            gate_socket=container_runtime_dir / "gate" / "gate-server.sock",
+            clearance_socket=clearance_root / "clearance" / short_id / "hub.sock",
+            events_socket=clearance_root / "events" / short_id / "ingester.sock",
             verdict_socket=clearance_root / "verdict" / f"{short_id}.sock",
             control_socket=clearance_root / "control" / f"{short_id}.sock",
             log_path=state_anchor / "logs" / f"{container_id}.log",
@@ -222,6 +242,14 @@ def _build_config(raw: dict, sidecar_path: Path) -> SidecarConfig:
         ipc_mode=_checked_ipc_mode(raw, sidecar_path),
         db_path=_required_absolute_path(raw, "db_path", sidecar_path),
         runtime_dir=_required_absolute_path(raw, "runtime_dir", sidecar_path),
+        routes_path=_optional_absolute_path(raw, "routes_path", sidecar_path),
+        vault_systemd_creds_file=_optional_absolute_path(
+            raw, "vault_systemd_creds_file", sidecar_path
+        ),
+        credentials_use_keyring=_optional_bool(raw, "credentials_use_keyring", sidecar_path),
+        credentials_passphrase_command=_optional_string(
+            raw, "credentials_passphrase_command", sidecar_path
+        ),
         scope_id=str(raw["scope_id"]) if raw.get("scope_id") else None,
         project_id=str(raw.get("project_id") or ""),
         task_id=str(raw.get("task_id") or ""),
@@ -231,7 +259,7 @@ def _build_config(raw: dict, sidecar_path: Path) -> SidecarConfig:
         gate_base_path=_optional_absolute_path(raw, "gate_base_path", sidecar_path),
         gate_token=str(raw["gate_token"]) if raw.get("gate_token") else None,
         dossier_path=_optional_absolute_path(raw, "dossier_path", sidecar_path),
-        allow_debugger=bool(raw.get("allow_debugger")),
+        allow_debugger=_optional_bool(raw, "allow_debugger", sidecar_path),
     )
 
 
@@ -269,6 +297,28 @@ def _checked_ipc_mode(raw: dict, sidecar_path: Path) -> str:
 def _optional_int(raw: dict, key: str) -> int | None:
     """``int(raw[key])`` when present, else ``None``."""
     return int(raw[key]) if raw.get(key) is not None else None
+
+
+def _optional_bool(raw: dict, key: str, sidecar_path: Path) -> bool:
+    """Return a bool field, defaulting absent/null to ``False``."""
+    value = raw.get(key)
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        _logger.error("sidecar %s must be a boolean, got %r: %s", key, value, sidecar_path)
+        raise _BadSidecar
+    return value
+
+
+def _optional_string(raw: dict, key: str, sidecar_path: Path) -> str | None:
+    """Return an optional string field, rejecting non-string values."""
+    value = raw.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        _logger.error("sidecar %s must be a string, got %r: %s", key, value, sidecar_path)
+        raise _BadSidecar
+    return value or None
 
 
 def _required_absolute_path(raw: dict, key: str, sidecar_path: Path) -> Path:

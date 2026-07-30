@@ -24,6 +24,13 @@ from collections.abc import Sequence
 # Container-side mount point for the host runtime directory (socket mode).
 CONTAINER_RUNTIME_DIR = "/run/terok"
 
+# Each host service binds in its own directory beneath the shared mount.
+# The split lets Landlock grant only that service's socket parent instead
+# of making every supervisor child a writer of every sibling socket.
+CONTAINER_VAULT_SOCKET = f"{CONTAINER_RUNTIME_DIR}/vault/vault.sock"
+CONTAINER_SSH_SIGNER_SOCKET = f"{CONTAINER_RUNTIME_DIR}/signer/ssh-agent.sock"
+CONTAINER_GATE_SOCKET = f"{CONTAINER_RUNTIME_DIR}/gate/gate-server.sock"
+
 # Container-side path where bridge resources are bind-mounted (runtime
 # pattern) or `COPY`ed into the image (build-time pattern).  The host
 # source is always the package's ``resources/bridges/`` directory.
@@ -54,9 +61,9 @@ _MANAGED_VOLUME_TARGETS = frozenset(
     {
         CONTAINER_BRIDGES_DIR,
         CONTAINER_RUNTIME_DIR,
-        f"{CONTAINER_RUNTIME_DIR}/vault.sock",
-        f"{CONTAINER_RUNTIME_DIR}/ssh-agent.sock",
-        f"{CONTAINER_RUNTIME_DIR}/gate-server.sock",
+        CONTAINER_VAULT_SOCKET,
+        CONTAINER_SSH_SIGNER_SOCKET,
+        CONTAINER_GATE_SOCKET,
     }
 )
 

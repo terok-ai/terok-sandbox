@@ -33,7 +33,10 @@ from .doctor import CheckVerdict, DoctorCheck
 from .gate.tokens import mint_gate_token
 from .podman_args import (
     CONTAINER_BRIDGES_DIR,
+    CONTAINER_GATE_SOCKET,
     CONTAINER_RUNTIME_DIR,
+    CONTAINER_SSH_SIGNER_SOCKET,
+    CONTAINER_VAULT_SOCKET,
     reject_managed_flags,
     reject_managed_volumes,
 )
@@ -44,6 +47,15 @@ from .sandbox import Sharing, VolumeSpec
 # ensure-bridges.sh, downstream tools) imports the same value so the
 # wire stays in sync.
 LOOPBACK_VAULT_PORT = 9419
+
+# Linux stores filesystem-backed AF_UNIX addresses in a 108-byte
+# ``sockaddr_un.sun_path`` buffer, including the terminating null byte.
+_AF_UNIX_PATH_MAX_BYTES = 107
+_CONTAINER_SERVICE_SOCKETS = (
+    CONTAINER_VAULT_SOCKET,
+    CONTAINER_SSH_SIGNER_SOCKET,
+    CONTAINER_GATE_SOCKET,
+)
 
 
 @dataclass(frozen=True)
@@ -98,8 +110,8 @@ class PerContainerResources:
 
     container_runtime_dir: Path
     """Host-side directory that becomes ``/run/terok/`` inside the
-    container.  Contains the supervisor-bound ``vault.sock`` /
-    ``ssh-agent.sock``.  Created (mode 0700) before the bind mount."""
+    container.  Contains one subdirectory per supervisor service.
+    Created (mode 0700) before the bind mount."""
 
     token_broker_port: int | None
     """Per-container TCP port for the vault proxy in TCP mode; ``None``
@@ -127,7 +139,14 @@ def allocate_per_container_resources(cfg: SandboxConfig, container: str) -> PerC
     The narrow window between ``bind(0)``'s close and the supervisor's
     re-bind on the same port is an EADDRINUSE-loud failure mode, not
     silent breakage.
+
+    Raises:
+        SystemExit: If a socket-mode service path exceeds Linux's
+            filesystem-backed AF_UNIX address limit.
     """
+    container_runtime_dir = cfg.container_runtime_dir(container)
+    if cfg.services_mode == "socket":
+        _validate_service_socket_paths(container_runtime_dir)
     container_runtime_dir = cfg.ensure_container_runtime_dir(container)
 
     if cfg.services_mode != "tcp":
@@ -150,6 +169,21 @@ def allocate_per_container_resources(cfg: SandboxConfig, container: str) -> PerC
         ssh_signer_port=signer_port,
         gate_port=gate_port,
     )
+
+
+def _validate_service_socket_paths(container_runtime_dir: Path) -> None:
+    """Fail early when a host service socket cannot fit in ``sun_path``."""
+    container_mount = Path(CONTAINER_RUNTIME_DIR)
+    for container_socket in _CONTAINER_SERVICE_SOCKETS:
+        relative_socket = Path(container_socket).relative_to(container_mount)
+        host_socket = container_runtime_dir / relative_socket
+        path_bytes = len(os.fsencode(host_socket))
+        if path_bytes > _AF_UNIX_PATH_MAX_BYTES:
+            raise SystemExit(
+                f"Unix socket path too long ({path_bytes} bytes; "
+                f"maximum {_AF_UNIX_PATH_MAX_BYTES}): {host_socket}. "
+                "Use a shorter container name or configure a shorter runtime directory."
+            )
 
 
 def _pick_free_tcp_ports(count: int) -> tuple[int, ...]:
@@ -359,15 +393,15 @@ def compose(
         )
 
     # Socket-mode: bind-mount the per-container dir at /run/terok/ so
-    # the supervisor's later-bound vault.sock / ssh-agent.sock /
-    # gate-server.sock appear inside the container at the well-known
-    # paths.  The supervisor binds all three inside this directory.
+    # each supervisor child's later-bound socket appears inside the
+    # container in that service's isolated subdirectory.
     if cfg.services_mode == "socket" and (effective_broker or effective_ssh or effective_gate):
         args += _volume_args(
             VolumeSpec(
                 per_container.container_runtime_dir,
                 CONTAINER_RUNTIME_DIR,
                 sharing=Sharing.SHARED,
+                read_only=True,
                 live=True,
             )
         )
@@ -377,20 +411,25 @@ def compose(
     # build its forwarder.
     if effective_broker:
         if cfg.services_mode == "socket":
-            args += ["-e", f"TEROK_VAULT_LOOPBACK_PORT={LOOPBACK_VAULT_PORT}"]
+            args += [
+                "-e",
+                f"TEROK_VAULT_LOOPBACK_PORT={LOOPBACK_VAULT_PORT}",
+                "-e",
+                f"TEROK_VAULT_SOCKET={CONTAINER_VAULT_SOCKET}",
+            ]
         elif per_container.token_broker_port is not None:
             args += ["-e", f"TEROK_TOKEN_BROKER_PORT={per_container.token_broker_port}"]
 
     # Gate — mint a per-container token; the gate lives in the
-    # supervisor, which binds ``gate-server.sock`` inside the already-
-    # mounted ``/run/terok/`` dir (socket mode) or a per-container
-    # loopback port (TCP mode).  The token travels only via the sidecar
-    # + the env var the in-container bridge reads.
+    # supervisor, which binds its socket in the gate-only directory
+    # beneath the already-mounted ``/run/terok/`` root (socket mode) or
+    # a per-container loopback port (TCP mode).  The token travels only
+    # via the sidecar + the env var the in-container bridge reads.
     gate_token: str | None = None
     if effective_gate:
         gate_token = mint_gate_token()
         if cfg.services_mode == "socket":
-            args += ["-e", f"TEROK_GATE_SOCKET={CONTAINER_RUNTIME_DIR}/gate-server.sock"]
+            args += ["-e", f"TEROK_GATE_SOCKET={CONTAINER_GATE_SOCKET}"]
         elif per_container.gate_port is not None:
             args += ["-e", f"TEROK_GATE_PORT={per_container.gate_port}"]
         args += ["-e", f"TEROK_GATE_TOKEN={gate_token}"]
@@ -410,7 +449,7 @@ def compose(
             db.close()
         args += ["-e", f"TEROK_SSH_SIGNER_TOKEN={ssh_token}"]
         if cfg.services_mode == "socket":
-            args += ["-e", f"TEROK_SSH_SIGNER_SOCKET={CONTAINER_RUNTIME_DIR}/ssh-agent.sock"]
+            args += ["-e", f"TEROK_SSH_SIGNER_SOCKET={CONTAINER_SSH_SIGNER_SOCKET}"]
         elif per_container.ssh_signer_port is not None:
             args += ["-e", f"TEROK_SSH_SIGNER_PORT={per_container.ssh_signer_port}"]
 
@@ -515,6 +554,10 @@ def write_sidecar(
         "container_name": container_name,
         "ipc_mode": cfg.services_mode,
         "db_path": str(cfg.db_path),
+        "routes_path": str(cfg.routes_path),
+        "vault_systemd_creds_file": str(cfg.vault_systemd_creds_file),
+        "credentials_use_keyring": cfg.credentials_use_keyring,
+        "credentials_passphrase_command": cfg.credentials_passphrase_command,
         "scope_id": scope_id or "",
         "project_id": project_id or "",
         "task_id": task_id or "",

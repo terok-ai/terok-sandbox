@@ -440,9 +440,8 @@ class SandboxConfig:
 
         The single source of the ``runtime_dir/run/<name>`` convention:
         the launch path bind-mounts this directory into the container so
-        the supervisor's ``vault.sock`` / ``ssh-agent.sock`` /
-        ``gate-server.sock`` (socket mode) surface at the well-known
-        ``/run/terok/`` paths inside it.  A method, not a property,
+        the supervisor's service-specific socket directories (socket
+        mode) surface beneath ``/run/terok/``.  A method, not a property,
         because it is keyed on the container name.
 
         *container_name* must be a single safe path component — the
