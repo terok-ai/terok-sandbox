@@ -2334,8 +2334,8 @@ test = [
 
 [[package]]
 name = "terok-shield"
-version = "0.8.0a9.dev356+gc213a3c88"
-source = { git = "https://github.com/sliwowitz/terok-shield.git?rev=feat%2Flandlock-confinement#c213a3c88a896d5c18bd2703f7af7f469a8fa1cf" }
+version = "0.8.0a9.dev357+gc85a3b0fc"
+source = { git = "https://github.com/sliwowitz/terok-shield.git?rev=feat%2Flandlock-confinement#c85a3b0fc43bb3aaa32dcc30e8055cfe2cdf276f" }
 dependencies = [
     { name = "pydantic" },
     { name = "pyyaml" },
