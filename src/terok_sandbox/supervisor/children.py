@@ -420,9 +420,10 @@ def _systemd_creds_path(cfg: SidecarConfig) -> Path:
 
 def _readable_paths(service: str, cfg: SidecarConfig) -> tuple[Path, ...]:
     """Return service-specific exact files needed after confinement."""
+    readable: list[Path] = []
     if service == "vault":
-        return (_routes_path(cfg),)
-    return ()
+        readable.append(_routes_path(cfg))
+    return tuple(readable)
 
 
 def _writable_paths(

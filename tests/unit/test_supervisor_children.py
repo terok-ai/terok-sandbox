@@ -33,6 +33,7 @@ from terok_sandbox.supervisor.children import (
     _arm_parent_death_signal,
     _ensure_socket_dirs,
     _install_signal_handlers,
+    _resolve_service_passphrase,
     _run_clearance,
     _run_gate,
     _run_signer,
@@ -393,6 +394,26 @@ class TestRunChildGuards:
         ):
             assert run_child("vault", "abc123def456", sidecar) == 4
 
+    def test_passphrase_resolution_failure_returns_start_failed_code(self, tmp_path: Path) -> None:
+        """A secret-holder that cannot unlock its DB fails before confinement."""
+        sidecar = tmp_path / "demo.json"
+        sidecar.write_text(
+            json.dumps(
+                {
+                    "container_name": "demo",
+                    "ipc_mode": "socket",
+                    "db_path": str(tmp_path / "vault.db"),
+                    "runtime_dir": str(tmp_path / "rt"),
+                }
+            )
+        )
+
+        with patch(
+            "terok_sandbox.supervisor.children._resolve_service_passphrase",
+            side_effect=RuntimeError("unavailable"),
+        ):
+            assert run_child("vault", "abc123def456", sidecar) == 4
+
     def test_happy_path_runs_the_service_and_returns_ok(self, tmp_path: Path) -> None:
         """A clean run hardens, binds the socket dir, runs the service, exits 0.
 
@@ -489,6 +510,44 @@ class TestRunChildGuards:
         ):
             assert run_child("vault", "abc123def456", sidecar) == 0
         assert captured["allow_debugger"] is True
+
+
+class TestServicePassphraseResolution:
+    """Secret holders resolve the configured tier before installing Landlock."""
+
+    def test_non_secret_service_needs_no_passphrase(self, tmp_path: Path) -> None:
+        assert _resolve_service_passphrase("gate", _socket_cfg(tmp_path)) is None
+
+    def test_vault_resolves_captured_policy(self, tmp_path: Path) -> None:
+        cfg = _socket_cfg(
+            tmp_path,
+            credentials_use_keyring=True,
+            credentials_passphrase_command="secret-helper",
+        )
+        with patch(
+            "terok_sandbox.vault.store.encryption.resolve_passphrase_with_source",
+            return_value=("resolved-secret", "command"),
+        ) as resolve:
+            assert _resolve_service_passphrase("vault", cfg) == "resolved-secret"
+
+        resolve.assert_called_once_with(
+            credentials_db=cfg.db_path,
+            systemd_creds_file=tmp_path / "vault.passphrase.cred",
+            use_keyring=True,
+            passphrase_command="secret-helper",
+        )
+
+    def test_missing_passphrase_raises(self, tmp_path: Path) -> None:
+        from terok_sandbox.vault.store.encryption import NoPassphraseError
+
+        with (
+            patch(
+                "terok_sandbox.vault.store.encryption.resolve_passphrase_with_source",
+                return_value=(None, None),
+            ),
+            pytest.raises(NoPassphraseError, match="no SQLCipher passphrase"),
+        ):
+            _resolve_service_passphrase("signer", _socket_cfg(tmp_path))
 
 
 class TestVaultRunner:
@@ -770,6 +829,43 @@ class TestConfinementWiring:
         ):
             assert run_child("clearance", "abc123def456", sidecar) == 0
         assert "filesystem-confinement not applied: unsupported" in caplog.text
+
+    def test_partial_policy_warns(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+        """An ABI-limited policy is distinguished from no confinement."""
+        from terok_util import LandlockReport
+
+        sidecar = tmp_path / "demo.json"
+        sidecar.write_text(
+            json.dumps(
+                {
+                    "container_name": "demo",
+                    "ipc_mode": "socket",
+                    "db_path": str(tmp_path / "vault.db"),
+                    "runtime_dir": str(tmp_path / "rt" / "sandbox"),
+                }
+            )
+        )
+
+        async def _noop(cfg: object, paths: object, stop: object) -> None: ...
+
+        with (
+            patch(
+                "terok_sandbox.supervisor.children.confine_filesystem",
+                return_value=LandlockReport(
+                    confined=False,
+                    reason="ABI 2 cannot deny truncation",
+                    partially_confined=True,
+                ),
+            ),
+            patch.dict(
+                "terok_sandbox.supervisor.children._RUNNERS",
+                {"clearance": _noop},
+                clear=False,
+            ),
+            caplog.at_level("WARNING"),
+        ):
+            assert run_child("clearance", "abc123def456", sidecar) == 0
+        assert "filesystem-confinement partial: ABI 2 cannot deny truncation" in caplog.text
 
 
 class TestPolicyConfinesOnTheLiveKernel:

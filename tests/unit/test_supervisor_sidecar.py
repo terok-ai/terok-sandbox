@@ -15,6 +15,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from terok_sandbox.supervisor.main import SidecarConfig, load_sidecar
 
 
@@ -83,6 +85,28 @@ class TestLoadSidecar:
         }
         for field in ("allow_debugger", "credentials_use_keyring"):
             assert load_sidecar(_write_sidecar(tmp_path, {**base, field: "false"})) is None
+
+    def test_invalid_field_logs_do_not_expose_values(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Schema diagnostics report types without serializing untrusted values."""
+        marker = "do-not-log-this-value"
+        base = {
+            "container_name": "demo",
+            "ipc_mode": "socket",
+            "db_path": "/home/dev/.terok/vault.db",
+            "runtime_dir": "/run/user/1000/terok/sandbox",
+        }
+
+        with caplog.at_level("ERROR"):
+            for field in ("allow_debugger", "credentials_passphrase_command"):
+                assert (
+                    load_sidecar(_write_sidecar(tmp_path, {**base, field: {"private": marker}}))
+                    is None
+                )
+
+        assert marker not in caplog.text
+        assert caplog.text.count("got dict") == 2
 
     def test_null_container_name_is_rejected(self, tmp_path: Path) -> None:
         """A JSON ``null`` container_name is missing, not the literal ``"None"``."""

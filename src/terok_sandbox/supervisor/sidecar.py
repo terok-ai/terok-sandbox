@@ -246,10 +246,8 @@ def _build_config(raw: dict, sidecar_path: Path) -> SidecarConfig:
         vault_systemd_creds_file=_optional_absolute_path(
             raw, "vault_systemd_creds_file", sidecar_path
         ),
-        credentials_use_keyring=_optional_bool(raw, "credentials_use_keyring", sidecar_path),
-        credentials_passphrase_command=_optional_string(
-            raw, "credentials_passphrase_command", sidecar_path
-        ),
+        credentials_use_keyring=_optional_bool(raw, "credentials_use_keyring"),
+        credentials_passphrase_command=_optional_string(raw, "credentials_passphrase_command"),
         scope_id=str(raw["scope_id"]) if raw.get("scope_id") else None,
         project_id=str(raw.get("project_id") or ""),
         task_id=str(raw.get("task_id") or ""),
@@ -259,7 +257,7 @@ def _build_config(raw: dict, sidecar_path: Path) -> SidecarConfig:
         gate_base_path=_optional_absolute_path(raw, "gate_base_path", sidecar_path),
         gate_token=str(raw["gate_token"]) if raw.get("gate_token") else None,
         dossier_path=_optional_absolute_path(raw, "dossier_path", sidecar_path),
-        allow_debugger=_optional_bool(raw, "allow_debugger", sidecar_path),
+        allow_debugger=_optional_bool(raw, "allow_debugger"),
     )
 
 
@@ -299,24 +297,24 @@ def _optional_int(raw: dict, key: str) -> int | None:
     return int(raw[key]) if raw.get(key) is not None else None
 
 
-def _optional_bool(raw: dict, key: str, sidecar_path: Path) -> bool:
+def _optional_bool(raw: dict, key: str) -> bool:
     """Return a bool field, defaulting absent/null to ``False``."""
     value = raw.get(key)
     if value is None:
         return False
     if not isinstance(value, bool):
-        _logger.error("sidecar %s must be a boolean, got %r: %s", key, value, sidecar_path)
+        _logger.error("sidecar %s must be a boolean, got %s", key, type(value).__name__)
         raise _BadSidecar
     return value
 
 
-def _optional_string(raw: dict, key: str, sidecar_path: Path) -> str | None:
+def _optional_string(raw: dict, key: str) -> str | None:
     """Return an optional string field, rejecting non-string values."""
     value = raw.get(key)
     if value is None:
         return None
     if not isinstance(value, str):
-        _logger.error("sidecar %s must be a string, got %r: %s", key, value, sidecar_path)
+        _logger.error("sidecar %s must be a string, got %s", key, type(value).__name__)
         raise _BadSidecar
     return value or None
 
