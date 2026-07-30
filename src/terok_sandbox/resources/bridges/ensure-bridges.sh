@@ -72,15 +72,14 @@ fi
 # early credentialed request would otherwise race the broker's bind.
 #
 # Socket mode is TEROK_VAULT_LOOPBACK_PORT set with NO TEROK_TOKEN_BROKER_PORT
-# (that pins TCP mode, handled below).  In socket mode the mounted socket
-# must exist; if it doesn't, the per-container supervisor never bound it —
-# say so, one line per shell, instead of skipping the bridge in silence (#458).
+# (that pins TCP mode, handled below).  The socket path may not exist yet when
+# shell startup races the supervisor's bind; start socat anyway and let its
+# retry policy absorb that delay.  An unset path is a configuration error.
 if [[ -n "${TEROK_VAULT_LOOPBACK_PORT:-}" ]] && [[ -z "${TEROK_TOKEN_BROKER_PORT:-}" ]]; then
-  if [[ -z "${TEROK_VAULT_SOCKET:-}" ]] || [[ ! -S "${TEROK_VAULT_SOCKET}" ]]; then
+  if [[ -z "${TEROK_VAULT_SOCKET:-}" ]]; then
     echo "terok: vault loopback bridge skipped — socket mode announced" \
       "(TEROK_VAULT_LOOPBACK_PORT=${TEROK_VAULT_LOOPBACK_PORT}) but" \
-      "${TEROK_VAULT_SOCKET:-TEROK_VAULT_SOCKET is unset}" \
-      "is absent; the per-container supervisor may not be running" >&2
+      "TEROK_VAULT_SOCKET is unset" >&2
   elif command -v socat >/dev/null 2>&1 \
        && ! _terok_bridge_alive "$_TEROK_PIDDIR/vault-loopback.pid"; then
     socat "TCP-LISTEN:${TEROK_VAULT_LOOPBACK_PORT},bind=127.0.0.1,fork,reuseaddr" \

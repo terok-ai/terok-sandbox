@@ -932,6 +932,17 @@ class TestEdgeCases:
         assert (d / "ensure-bridges.sh").is_file()
         assert (d / "ssh-agent-bridge.sh").is_file()
 
+    def test_vault_loopback_bridge_tolerates_late_socket_bind(self) -> None:
+        """Socket startup relies on socat retry rather than a racy existence check."""
+        script = (bridges_resource_dir() / "ensure-bridges.sh").read_text()
+        socket_mode = script.partition("Vault loopback bridge (socket mode)")[2].partition(
+            "Vault socket bridge (TCP mode)"
+        )[0]
+
+        assert '[[ ! -S "${TEROK_VAULT_SOCKET}" ]]' not in socket_mode
+        assert 'if [[ -z "${TEROK_VAULT_SOCKET:-}" ]]; then' in socket_mode
+        assert 'UNIX-CONNECT:"${TEROK_VAULT_SOCKET}",retry=300,interval=0.1' in socket_mode
+
     def test_reject_managed_volumes_skips_no_target(self) -> None:
         """`-v hostpath` (no colon) is skipped, not flagged."""
         reject_managed_volumes(["-v", "/just/a/path"])
