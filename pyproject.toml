@@ -39,7 +39,7 @@ dependencies = [
     "terok-clearance @ https://github.com/terok-ai/terok-clearance/releases/download/v0.8.0a7/terok_clearance-0.8.0a7-py3-none-any.whl",
     "platformdirs~=4.10",
     "aiohttp~=3.14.1",
-    "cryptography~=49.0",
+    "cryptography>=49,<51",
     "jinja2~=3.1",
     "pydantic~=2.13",
     "packaging~=26.2",
