@@ -40,6 +40,26 @@ top-to-bottom and stops at the first hit:
     `passphrase_command: cat /path/to/that/file` at it.  Same trust
     boundary (filesystem-level protection), one tier instead of two.
 
+## Runtime service boundaries
+
+The per-container supervisor runs vault, signer, gate, and clearance in
+separate processes.  Outside debugger mode, Landlock also limits each
+process to its own filesystem lane: service sockets have distinct writable
+directories, vault and signer can open the credentials DB, and a gate can
+mutate only its scoped bare mirror.  The verdict broker is deliberately
+exempt because its job requires Podman runtime state.
+
+This is a filesystem-path boundary, not a same-UID kernel-keyring boundary.
+Vault and signer both resolve the credentials passphrase through the
+configured keyring policy by design.  Operators who do not want that shared
+keyring trust can disable `credentials.use_keyring` and choose another tier.
+The launch sidecar snapshots that non-secret policy.  Each secret-holder
+resolves it after process hardening but before installing Landlock, so an
+operator-selected `passphrase_command` may use its normal files while the
+long-lived service cannot.
+On kernels where the complete Landlock policy is unavailable, startup logs
+whether confinement was partial or not applied.
+
 ## Headless setup (data-center terminals)
 
 For hosts reached over SSH where systemd-creds isn't available (older

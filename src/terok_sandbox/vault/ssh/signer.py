@@ -391,6 +391,8 @@ async def start_ssh_signer(
     host: str | None = None,
     port: int | None = None,
     socket_path: str | None = None,
+    *,
+    passphrase: str | None = None,
 ) -> asyncio.Server:
     """Start the container-facing SSH signer (token-gated).
 
@@ -399,6 +401,9 @@ async def start_ssh_signer(
         host: Bind address for TCP (typically ``"127.0.0.1"``).
         port: TCP port to listen on.
         socket_path: Unix socket path to listen on.
+        passphrase: Pre-resolved SQLCipher passphrase.  Confined supervisor
+            children supply it after resolving the operator policy before
+            Landlock is installed.
 
     Returns:
         The running [`asyncio.Server`][asyncio.Server] — caller is responsible for closing it.
@@ -408,7 +413,7 @@ async def start_ssh_signer(
     """
     from ..daemon.token_broker import _TokenDB
 
-    token_db = _TokenDB(db_path)
+    token_db = _TokenDB(db_path, passphrase=passphrase)
     key_cache = _DBKeyCache(token_db)
 
     async def _on_connect(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:

@@ -15,6 +15,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from terok_sandbox.supervisor.main import SidecarConfig, load_sidecar
 
 
@@ -53,6 +55,58 @@ class TestLoadSidecar:
         assert cfg.scope_id == "default"
         assert cfg.tcp_port is None
         assert cfg.ssh_signer_port is None
+
+    def test_credential_policy_round_trips(self, tmp_path: Path) -> None:
+        """Credential policy is captured before the child installs Landlock."""
+        payload = {
+            "container_name": "demo",
+            "ipc_mode": "socket",
+            "db_path": "/home/dev/.terok/vault/credentials.db",
+            "runtime_dir": "/run/user/1000/terok/sandbox",
+            "routes_path": "/home/dev/.terok/vault/routes.json",
+            "vault_systemd_creds_file": "/home/dev/.terok/vault/vault.passphrase.cred",
+            "credentials_use_keyring": False,
+            "credentials_passphrase_command": "pass show terok/vault",
+        }
+        cfg = load_sidecar(_write_sidecar(tmp_path, payload))
+        assert cfg is not None
+        assert cfg.routes_path == Path(str(payload["routes_path"]))
+        assert cfg.vault_systemd_creds_file == Path(str(payload["vault_systemd_creds_file"]))
+        assert cfg.credentials_use_keyring is False
+        assert cfg.credentials_passphrase_command == "pass show terok/vault"
+
+    def test_security_booleans_reject_strings(self, tmp_path: Path) -> None:
+        """JSON strings cannot truthily opt into debugger or keyring access."""
+        base = {
+            "container_name": "demo",
+            "ipc_mode": "socket",
+            "db_path": "/home/dev/.terok/vault.db",
+            "runtime_dir": "/run/user/1000/terok/sandbox",
+        }
+        for field in ("allow_debugger", "credentials_use_keyring"):
+            assert load_sidecar(_write_sidecar(tmp_path, {**base, field: "false"})) is None
+
+    def test_invalid_field_logs_do_not_expose_values(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Schema diagnostics report types without serializing untrusted values."""
+        marker = "do-not-log-this-value"
+        base = {
+            "container_name": "demo",
+            "ipc_mode": "socket",
+            "db_path": "/home/dev/.terok/vault.db",
+            "runtime_dir": "/run/user/1000/terok/sandbox",
+        }
+
+        with caplog.at_level("ERROR"):
+            for field in ("allow_debugger", "credentials_passphrase_command"):
+                assert (
+                    load_sidecar(_write_sidecar(tmp_path, {**base, field: {"private": marker}}))
+                    is None
+                )
+
+        assert marker not in caplog.text
+        assert caplog.text.count("got dict") == 2
 
     def test_null_container_name_is_rejected(self, tmp_path: Path) -> None:
         """A JSON ``null`` container_name is missing, not the literal ``"None"``."""

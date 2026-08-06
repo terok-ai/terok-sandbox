@@ -47,7 +47,10 @@ def _write_sidecar(
 def _socket_paths(runtime_dir: Path) -> tuple[Path, Path]:
     """The (vault, gate) sockets the supervisor binds for ``_NAME`` in socket mode."""
     per_container = runtime_dir / "run" / _NAME
-    return per_container / "vault.sock", per_container / "gate-server.sock"
+    return (
+        per_container / "vault" / "vault.sock",
+        per_container / "gate" / "gate-server.sock",
+    )
 
 
 def _bind(path: Path) -> socket.socket:
@@ -118,7 +121,7 @@ class TestVerifySupervision:
 
 class TestSupervisionStatus:
     def test_warning_names_container_socket_and_diary(self, tmp_path: Path) -> None:
-        missing = tmp_path / "run" / _NAME / "vault.sock"
+        missing = tmp_path / "run" / _NAME / "vault" / "vault.sock"
         hook_log = tmp_path / "logs" / "hook.log"
         status = SupervisionStatus(_NAME, (missing,), (missing,), hook_log)
         text = status.warning()
@@ -136,6 +139,6 @@ class TestSupervisionStatus:
     def test_warn_unsupervised_shouts_on_failure(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        missing = tmp_path / "run" / _NAME / "vault.sock"
+        missing = tmp_path / "run" / _NAME / "vault" / "vault.sock"
         warn_unsupervised(SupervisionStatus(_NAME, (missing,), (missing,), tmp_path / "hook.log"))
         assert "not responding" in capsys.readouterr().err

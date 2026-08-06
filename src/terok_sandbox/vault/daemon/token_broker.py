@@ -919,7 +919,13 @@ async def _handle_health(_request: web.Request) -> web.Response:
     return web.json_response({"status": "ok"})
 
 
-def _build_app(db_path: str, routes_path: str, audit_path: Path | None = None) -> web.Application:
+def _build_app(
+    db_path: str,
+    routes_path: str,
+    audit_path: Path | None = None,
+    *,
+    passphrase: str | None = None,
+) -> web.Application:
     """Construct the aiohttp application.
 
     *audit_path* — when supplied, every credential-bearing request lands
@@ -929,7 +935,7 @@ def _build_app(db_path: str, routes_path: str, audit_path: Path | None = None) -
     """
     app = web.Application(client_max_size=_MAX_REQUEST_BODY_SIZE)
     app[_KEY_ROUTES] = _RouteTable(routes_path)
-    app[_KEY_TOKEN_DB] = _TokenDB(db_path)
+    app[_KEY_TOKEN_DB] = _TokenDB(db_path, passphrase=passphrase)
     # Default refresh-lock dir for standalone callers; VaultProxy.start
     # overrides this with the dir resolved from its injected runtime_dir.
     app[_KEY_LOCK_DIR] = _ambient_lock_dir()
@@ -1013,6 +1019,7 @@ class VaultProxy:
         routes_path: Path | str | None = None,
         audit_path: Path | None = None,
         runtime_dir: Path | None = None,
+        passphrase: str | None = None,
     ) -> None:
         """Wire the proxy to the credential DB and a transport.
 
@@ -1030,16 +1037,23 @@ class VaultProxy:
         crun's rootless userns (``getuid()`` reports ``0`` there but
         the actual host runtime dir is under the operator's uid); if
         omitted, falls back to ``$XDG_RUNTIME_DIR`` / ``/run/user/<uid>``.
-        """
-        from terok_sandbox.config import SandboxConfig
 
-        cfg = SandboxConfig()
+        *passphrase* — an already-resolved SQLCipher key.  Confined supervisor
+        children resolve it before installing Landlock, then inject it here so
+        app construction never needs to re-read operator config or invoke a
+        helper from inside the filesystem policy.
+        """
         self._db_path = str(db_path)
         self._scope_id = scope_id
         self._bind = bind
-        self._routes_path = str(routes_path) if routes_path else str(cfg.routes_path)
+        if routes_path is None:
+            from terok_sandbox.config import SandboxConfig
+
+            routes_path = SandboxConfig().routes_path
+        self._routes_path = str(routes_path)
         self._audit_path = audit_path
         self._runtime_dir = runtime_dir
+        self._passphrase = passphrase
         self._app: web.Application | None = None
         self._runner: Any | None = None
         self._site: Any | None = None
@@ -1065,7 +1079,12 @@ class VaultProxy:
         """
         from aiohttp.web_runner import AppRunner, SockSite, TCPSite
 
-        self._app = _build_app(self._db_path, self._routes_path, audit_path=self._audit_path)
+        self._app = _build_app(
+            self._db_path,
+            self._routes_path,
+            audit_path=self._audit_path,
+            passphrase=self._passphrase,
+        )
         self._refresh_lock_dir = self._compute_refresh_lock_dir()
         # The refresh loop reads the lock dir off the app, so pin the
         # one resolved here (from the injected runtime_dir) over the

@@ -42,15 +42,17 @@ import ctypes
 import logging
 import os
 import signal
+import sys
+from dataclasses import replace
+from pathlib import Path
 from typing import TYPE_CHECKING
 
-from terok_util import harden_self
+from terok_util import confine_filesystem, harden_self
 
 from .sidecar import SupervisorPaths, load_sidecar
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
-    from pathlib import Path
 
     from .sidecar import SidecarConfig
 
@@ -69,6 +71,29 @@ _EXIT_START_FAILED = 4
 
 #: ``prctl`` option arming the parent-death signal (Linux).
 _PR_SET_PDEATHSIG = 1
+
+#: Filesystem roots every confined child needs to read or execute: the OS,
+#: its shared libraries, this interpreter, and this package's source tree
+#: when running from an editable development install.  Runtime trees such
+#: as ``/run`` are deliberately absent; each service receives only its own
+#: explicit runtime lane from ``_writable_paths``.
+_SYSTEM_READABLE_ROOTS: tuple[Path, ...] = (
+    *(Path(p) for p in ("/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc", "/proc", "/dev")),
+    Path(sys.prefix),
+    Path(sys.base_prefix),
+    Path(__file__).resolve().parents[2],
+)
+
+#: Git opens this device read-write while serving pushes.  Passing the
+#: device itself lets terok-util install an exact-file rule rather than a
+#: write grant over all of ``/dev``.
+_DEV_NULL = Path(os.devnull)
+
+#: Cross-supervisor OAuth refresh locks used by ``VaultProxy``.
+_VAULT_LOCKS_RELATIVE = Path("terok") / "vault" / "locks"
+
+_GATE_HOME_DIRNAME = "home"
+_GATE_HOOKS_DIRNAME = "hooks"
 
 
 async def _run_verdict(cfg: SidecarConfig, paths: SupervisorPaths, stop: asyncio.Event) -> None:
@@ -140,15 +165,19 @@ async def _run_gate(cfg: SidecarConfig, paths: SupervisorPaths, stop: asyncio.Ev
     per-container loopback port.  The parent only launches this child
     when the sidecar carried both ``gate_base_path`` and ``gate_token``.
     """
-    from terok_sandbox.gate.hooks import hooks_dir_for, install_hooks
+    from terok_sandbox.gate.hooks import install_hooks
     from terok_sandbox.gate.server import GateServer
 
     if not cfg.gate_base_path or not cfg.gate_token:
         raise RuntimeError("gate child launched without gate wiring in the sidecar")
-    # (Re-)render the sandbox-owned push hooks next to the gates —
-    # idempotent, so every gate start converges the hook content to this
-    # package version's.  The server itself only receives the path.
-    hooks_path = hooks_dir_for(cfg.gate_base_path)
+
+    # Keep Git's config and hooks in this gate child's private runtime lane.
+    # In particular, never inherit the operator's HOME: it sits outside the
+    # Landlock policy and can carry user-controlled Git includes.
+    gate_runtime = paths.gate_socket.parent
+    gate_home = gate_runtime / _GATE_HOME_DIRNAME
+    gate_home.mkdir(mode=0o700, parents=True, exist_ok=True)
+    hooks_path = gate_runtime / _GATE_HOOKS_DIRNAME
     install_hooks(hooks_path)
     if cfg.ipc_mode == "tcp":
         if not cfg.gate_port:
@@ -160,6 +189,7 @@ async def _run_gate(cfg: SidecarConfig, paths: SupervisorPaths, stop: asyncio.Ev
             host="127.0.0.1",
             port=cfg.gate_port,
             hooks_path=hooks_path,
+            home_path=gate_home,
         )
     else:
         gate = GateServer(
@@ -168,6 +198,7 @@ async def _run_gate(cfg: SidecarConfig, paths: SupervisorPaths, stop: asyncio.Ev
             scope=cfg.project_id,
             socket_path=paths.gate_socket,
             hooks_path=hooks_path,
+            home_path=gate_home,
         )
     await gate.start()
     try:
@@ -196,7 +227,9 @@ async def _run_vault(cfg: SidecarConfig, paths: SupervisorPaths, stop: asyncio.E
         db_path=cfg.db_path,
         scope_id=cfg.scope_id,
         bind=bind,
+        routes_path=_routes_path(cfg),
         runtime_dir=cfg.runtime_dir,
+        passphrase=cfg._resolved_passphrase,
     )
     await vault.start()
     try:
@@ -220,11 +253,16 @@ async def _run_signer(cfg: SidecarConfig, paths: SupervisorPaths, stop: asyncio.
                 f"sidecar ipc_mode='tcp' but ssh_signer_port is {cfg.ssh_signer_port!r}"
             )
         server = await start_ssh_signer(
-            db_path=str(cfg.db_path), host="127.0.0.1", port=cfg.ssh_signer_port
+            db_path=str(cfg.db_path),
+            host="127.0.0.1",
+            port=cfg.ssh_signer_port,
+            passphrase=cfg._resolved_passphrase,
         )
     else:
         server = await start_ssh_signer(
-            db_path=str(cfg.db_path), socket_path=str(paths.ssh_signer_socket)
+            db_path=str(cfg.db_path),
+            socket_path=str(paths.ssh_signer_socket),
+            passphrase=cfg._resolved_passphrase,
         )
     try:
         await stop.wait()
@@ -308,10 +346,117 @@ def run_child(service: str, container_id: str, sidecar_path: Path) -> int:
         # purpose, so a partial report is not noteworthy there.)
         _logger.debug("%s child hardening partial: %s", service, report)
 
+    try:
+        cfg = replace(cfg, _resolved_passphrase=_resolve_service_passphrase(service, cfg))
+    except Exception:
+        _logger.exception("%s child passphrase resolution failed", service)
+        return _EXIT_START_FAILED
+
     paths = SupervisorPaths.for_container(
         container_id, cfg.container_name, sidecar_path, cfg.runtime_dir
     )
+    _ensure_socket_dirs(service, paths)
+    _ensure_policy_dirs(service, cfg)
+
+    if not cfg.allow_debugger and service != "verdict":
+        # Pin filesystem path access to this service's lane.  Verdict is
+        # intentionally exempt: it is the small Podman/nsenter broker, whose
+        # job requires the operator's container-runtime state.  Debug mode
+        # likewise keeps paths open for dump/trace tools.
+        #
+        # This is path isolation, not a same-UID kernel-keyring boundary:
+        # vault and signer still resolve the shared vault key through the
+        # existing keyring policy.  Process memory has the separate
+        # ``harden_self`` floor above.
+        fs = confine_filesystem(
+            (*_SYSTEM_READABLE_ROOTS, *_readable_paths(service, cfg)),
+            _writable_paths(service, cfg, paths),
+        )
+        if fs.partially_confined:
+            _logger.warning("%s child filesystem-confinement partial: %s", service, fs.reason)
+        elif not fs.confined:
+            _logger.warning("%s child filesystem-confinement not applied: %s", service, fs.reason)
+
     return asyncio.run(_drive(service, runner, cfg, paths))
+
+
+def _resolve_service_passphrase(service: str, cfg: SidecarConfig) -> str | None:
+    """Resolve secret-holder DB access before Landlock closes helper paths.
+
+    The launch process captures the operator's non-secret passphrase policy
+    in the sidecar.  Vault and signer walk it here, while arbitrary
+    ``passphrase_command`` executables and systemd credentials are still
+    reachable, then retain only the resolved value in process memory.
+    """
+    if service not in {"vault", "signer"}:
+        return None
+
+    from terok_sandbox.vault.store.encryption import (
+        NoPassphraseError,
+        resolve_passphrase_with_source,
+    )
+
+    passphrase, source = resolve_passphrase_with_source(
+        credentials_db=cfg.db_path,
+        systemd_creds_file=_systemd_creds_path(cfg),
+        use_keyring=cfg.credentials_use_keyring,
+        passphrase_command=cfg.credentials_passphrase_command,
+    )
+    if passphrase is None:
+        raise NoPassphraseError(f"no SQLCipher passphrase available for {cfg.db_path}")
+    _logger.info("%s child vault passphrase resolved via %s tier", service, source)
+    return passphrase
+
+
+def _routes_path(cfg: SidecarConfig) -> Path:
+    """Return the captured route table, or its sidecar-safe DB-local default."""
+    return cfg.routes_path or cfg.db_path.parent / "routes.json"
+
+
+def _systemd_creds_path(cfg: SidecarConfig) -> Path:
+    """Return the captured sealed credential, or its DB-local default."""
+    return cfg.vault_systemd_creds_file or cfg.db_path.parent / "vault.passphrase.cred"
+
+
+def _readable_paths(service: str, cfg: SidecarConfig) -> tuple[Path, ...]:
+    """Return service-specific exact files needed after confinement."""
+    readable: list[Path] = []
+    if service == "vault":
+        readable.append(_routes_path(cfg))
+    return tuple(readable)
+
+
+def _writable_paths(
+    service: str,
+    cfg: SidecarConfig,
+    paths: SupervisorPaths,
+) -> list[Path]:
+    """Return the exact files and recursive directories *service* may mutate.
+
+    Socket parents are service-specific, including the cross-package
+    clearance/event directories.  Vault and signer both add the SQLCipher
+    parent because opening the DB can create WAL/journal files and run schema
+    migrations.  Gate receives only its scoped bare repo, its private runtime
+    lane, and the exact ``/dev/null`` device Git opens read-write.
+    """
+    sockets = {
+        "verdict": (paths.verdict_socket,),
+        "clearance": (paths.clearance_socket, paths.events_socket),
+        "gate": (paths.gate_socket,),
+        "vault": (paths.vault_socket,),
+        "signer": (paths.ssh_signer_socket,),
+    }[service]
+    writable = list(dict.fromkeys(socket.parent for socket in sockets))
+
+    if service in {"vault", "signer"}:
+        writable.append(cfg.db_path.parent)
+    if service == "vault":
+        writable.append(cfg.runtime_dir / _VAULT_LOCKS_RELATIVE)
+    elif service == "gate":
+        if cfg.gate_base_path and cfg.project_id:
+            writable.append(cfg.gate_base_path / f"{cfg.project_id}.git")
+        writable.append(_DEV_NULL)
+    return writable
 
 
 async def _drive(
@@ -320,8 +465,7 @@ async def _drive(
     cfg: SidecarConfig,
     paths: SupervisorPaths,
 ) -> int:
-    """Bind the service's socket dir, install signal handlers, run the runner."""
-    _ensure_socket_dirs(service, paths)
+    """Install signal handlers, then run the already-confined service."""
     stop = asyncio.Event()
     _install_signal_handlers(stop)
     try:
@@ -349,6 +493,17 @@ def _ensure_socket_dirs(service: str, paths: SupervisorPaths) -> None:
     for sock in sockets:
         sock.parent.mkdir(parents=True, exist_ok=True)
         sock.parent.chmod(0o700)
+
+
+def _ensure_policy_dirs(service: str, cfg: SidecarConfig) -> None:
+    """Create non-socket writable lanes before Landlock needs path FDs."""
+    directories: tuple[Path, ...] = ()
+    if service in {"vault", "signer"}:
+        directories = (cfg.db_path.parent,)
+    if service == "vault":
+        directories += (cfg.runtime_dir / _VAULT_LOCKS_RELATIVE,)
+    for directory in directories:
+        directory.mkdir(parents=True, exist_ok=True)
 
 
 def _install_signal_handlers(stop: asyncio.Event) -> None:

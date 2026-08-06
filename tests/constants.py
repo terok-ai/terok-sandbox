@@ -48,6 +48,9 @@ NONEXISTENT_TOKENS_PATH = NONEXISTENT_DIR / "tokens.json"
 MISSING_TOKENS_PATH = MOCK_BASE / "does-not-exist" / "tokens.json"
 """Absent token-store path with a writable parent used by token-lock tests."""
 
+SYSTEM_RUNTIME_ROOT = Path("/run")
+"""System runtime tree that service confinement must never grant wholesale."""
+
 # ── Network constants ────────────────────────────────────────────────────────
 
 LOCALHOST = "127.0.0.1"

@@ -84,6 +84,9 @@ _LAZY: dict[str, str] = {
     "sandbox_uninstall": "commands:_handle_sandbox_uninstall",
     # Config
     "CONTAINER_RUNTIME_DIR": "config:CONTAINER_RUNTIME_DIR",
+    "CONTAINER_GATE_SOCKET": "podman_args:CONTAINER_GATE_SOCKET",
+    "CONTAINER_SSH_SIGNER_SOCKET": "podman_args:CONTAINER_SSH_SIGNER_SOCKET",
+    "CONTAINER_VAULT_SOCKET": "podman_args:CONTAINER_VAULT_SOCKET",
     "SandboxConfig": "config:SandboxConfig",
     # Config schema view / fragments
     "RawRunSection": "config_schema:RawRunSection",
@@ -318,6 +321,9 @@ if TYPE_CHECKING:
     )
     from .launch import PerContainerResources, allocate_per_container_resources
     from .podman_args import (
+        CONTAINER_GATE_SOCKET,
+        CONTAINER_SSH_SIGNER_SOCKET,
+        CONTAINER_VAULT_SOCKET,
         PASSTHROUGH_DENIED_FLAGS,
         SANDBOX_MANAGED_FLAGS,
         reject_managed_flags,
@@ -391,7 +397,10 @@ if TYPE_CHECKING:
 
 __all__ = [
     # Config
+    "CONTAINER_GATE_SOCKET",
     "CONTAINER_RUNTIME_DIR",
+    "CONTAINER_SSH_SIGNER_SOCKET",
+    "CONTAINER_VAULT_SOCKET",
     "ConfigScope",
     "RawRunSection",
     "RawSSHSection",

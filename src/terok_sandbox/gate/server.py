@@ -124,13 +124,15 @@ def _build_cgi_env(
     protocol: str,
     content_length: int,
     hooks_path: Path | None,
+    home_path: Path | None = None,
     http_headers: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Build the CGI environment for ``git http-backend``.
 
-    Inherits ``PATH`` and ``HOME`` from the parent process so that
-    ``git http-backend`` can locate git sub-commands (e.g. ``git-upload-pack``)
-    and read user config.
+    Inherits ``PATH`` so that ``git http-backend`` can locate git
+    sub-commands (e.g. ``git-upload-pack``).  ``HOME`` is pinned to
+    *home_path* when the supervisor supplies its private gate directory;
+    standalone callers retain the ambient home.
 
     ``core.hooksPath`` is pinned to *hooks_path* — the sandbox-owned
     directory outside every gate repo (see
@@ -144,10 +146,13 @@ def _build_cgi_env(
     """
     env: dict[str, str] = {}
     # Inherit essential system variables
-    for key in ("PATH", "HOME", "GIT_EXEC_PATH"):
+    for key in ("PATH", "GIT_EXEC_PATH"):
         val = os.environ.get(key)
         if val is not None:
             env[key] = val
+    home = str(home_path) if home_path is not None else os.environ.get("HOME")
+    if home is not None:
+        env["HOME"] = home
     env.update(
         {
             "GIT_PROJECT_ROOT": str(base_path),
@@ -227,7 +232,10 @@ def _stream_response_body(stdout: IO[bytes], wfile: Any) -> None:
 
 
 def _make_handler_class(
-    base_path: Path, token_store: _SingleTokenStore, hooks_path: Path | None = None
+    base_path: Path,
+    token_store: _SingleTokenStore,
+    hooks_path: Path | None = None,
+    home_path: Path | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     """Create a request handler class bound to the given base_path and token_store."""
 
@@ -311,6 +319,7 @@ def _make_handler_class(
                 self.request_version,
                 content_length,
                 hooks_path,
+                home_path,
                 http_headers=http_headers,
             )
 
@@ -321,6 +330,7 @@ def _make_handler_class(
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     env=cgi_env,
+                    cwd=home_path,
                 )
             except FileNotFoundError:
                 self.send_error(500, "git not found")
@@ -467,17 +477,21 @@ class GateServer:
         host: str | None = None,
         port: int | None = None,
         hooks_path: Path | None = None,
+        home_path: Path | None = None,
     ) -> None:
         """Bind the gate's configuration; ``start`` brings the listener up.
 
         *hooks_path* is the sandbox-owned hooks directory the composer
         prepared (see [`install_hooks`][terok_sandbox.gate.hooks.install_hooks]);
         ``None`` serves with hooks disabled (``core.hooksPath=/dev/null``).
-        Plain value by design — this component stays free of gate-model
-        imports.
+        *home_path* pins Git's home/config lookup to a composer-owned
+        directory; ``None`` preserves the ambient home for standalone
+        callers.  Plain values by design — this component stays free of
+        gate-model imports.
         """
         self._mirror_root = mirror_root
         self._hooks_path = hooks_path
+        self._home_path = home_path
         self._token = token
         self._scope = scope
         self._socket_path = socket_path
@@ -491,7 +505,10 @@ class GateServer:
         import asyncio
 
         handler = _make_handler_class(
-            self._mirror_root, _SingleTokenStore(self._token, self._scope), self._hooks_path
+            self._mirror_root,
+            _SingleTokenStore(self._token, self._scope),
+            self._hooks_path,
+            self._home_path,
         )
         if self._socket_path is not None:
             server: HTTPServer = await asyncio.get_running_loop().run_in_executor(
