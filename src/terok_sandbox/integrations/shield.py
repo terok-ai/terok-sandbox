@@ -7,12 +7,12 @@ Two classes carry the sandbox-side policy layer over terok-shield:
 
 * [`ShieldManager`][terok_sandbox.integrations.shield.ShieldManager] —
   per-task wrapper around [`Shield`][terok_shield.Shield].  Caches the
-  underlying instance.  Bypassable methods (``pre_start``, ``up``,
+  underlying instance.  Kill-switch-aware methods (``pre_start``, ``up``,
   ``down``, ``check_environment``) short-circuit when
-  ``shield_bypass`` is set; non-bypassable methods (``quarantine``,
-  ``state``) always hit the live shield because panic overrides every
-  safety bypass and state probes report what nft actually sees.
-  ``status`` is config-level only and surfaces the bypass flag in
+  ``shield_disabled`` is set; always-on methods (``quarantine``,
+  ``state``) always hit the live shield because panic overrides the
+  kill-switch and state probes report what nft actually sees.
+  ``status`` is config-level only and surfaces the kill-switch flag in
   its dict rather than short-circuiting.
 * [`ShieldHooks`][terok_sandbox.integrations.shield.ShieldHooks] — the
   host-wide OCI hooks installer, scoped to the root/user dual-scope
@@ -68,12 +68,12 @@ from ..config import SandboxConfig
 if TYPE_CHECKING:
     from terok_shield import HOOK_ENTRYPOINT_NAME  # noqa: F401 — re-export typing
 
-#: Warning emitted by every bypassable [`ShieldManager`][terok_sandbox.integrations.shield.ShieldManager]
-#: method when ``shield_bypass`` is set.  DANGEROUS TRANSITIONAL OVERRIDE —
+#: Warning emitted by every kill-switch-aware [`ShieldManager`][terok_sandbox.integrations.shield.ShieldManager]
+#: method when ``shield_disabled`` is set.  DANGEROUS TRANSITIONAL OVERRIDE —
 #: will be removed once terok-shield supports all target podman versions
 #: (see terok-shield#71, #101).
-_BYPASS_WARNING = (
-    "WARNING: shield.bypass_firewall_no_protection is set — "
+_DISABLED_WARNING = (
+    "WARNING: shield.disable_firewall_no_protection is set — "
     "the egress firewall is DISABLED.  Containers have unrestricted "
     "network access.  Remove this setting once your podman version "
     "is compatible with terok-shield."
@@ -92,11 +92,11 @@ class ShieldManager:
     ``ShieldConfig`` + collaborator-wiring cost twice for every
     transition pair (``pre_start`` → ``up``, ``up`` → ``down``, …).
 
-    Bypassable methods (``pre_start``, ``up``, ``down``) short-circuit
-    when ``shield_bypass`` is set on the configuration.
-    Non-bypassable methods (``quarantine``, ``state``) always run —
-    panic overrides every safety bypass, and state probes report what
-    nft actually sees regardless of operator intent.
+    Kill-switch-aware methods (``pre_start``, ``up``, ``down``)
+    short-circuit when ``shield_disabled`` is set on the configuration.
+    Always-on methods (``quarantine``, ``state``) always run — panic
+    overrides the kill-switch, and state probes report what nft
+    actually sees regardless of operator intent.
     """
 
     def __init__(
@@ -133,9 +133,9 @@ class ShieldManager:
         return self._task_dir / "shield"
 
     @property
-    def bypass(self) -> bool:
-        """True when ``shield_bypass`` is set on the sandbox configuration."""
-        return self._cfg.shield_bypass
+    def disabled(self) -> bool:
+        """True when ``shield_disabled`` is set on the sandbox configuration."""
+        return self._cfg.shield_disabled
 
     @cached_property
     def shield(self) -> Shield:
@@ -177,7 +177,7 @@ class ShieldManager:
         )
         return Shield(config)
 
-    # ── Bypassable lifecycle operations ─────────────────
+    # ── Kill-switch-aware lifecycle operations ──────────
 
     def pre_start(
         self,
@@ -200,13 +200,13 @@ class ShieldManager:
         current data — never rely on a previous launch's content surviving.
 
         Returns an empty list (no firewall args) when the dangerous
-        ``bypass_firewall_no_protection`` override is active.
+        ``disable_firewall_no_protection`` override is active.
 
         Raises [`SystemExit`][SystemExit] with setup instructions when
         the podman environment requires one-time hook installation.
         """
-        if self.bypass:
-            warnings.warn(_BYPASS_WARNING, stacklevel=2)
+        if self.disabled:
+            warnings.warn(_DISABLED_WARNING, stacklevel=2)
             return []
         try:
             return self.shield.pre_start(
@@ -238,8 +238,8 @@ class ShieldManager:
         instead of the bundle frozen at creation.  No podman args are
         produced — the container keeps its launch-time configuration.
         """
-        if self.bypass:
-            warnings.warn(_BYPASS_WARNING, stacklevel=2)
+        if self.disabled:
+            warnings.warn(_DISABLED_WARNING, stacklevel=2)
             return
         self.shield.refresh(
             container,
@@ -258,37 +258,37 @@ class ShieldManager:
         terok-shield removed the global-hub fallback in
         ``feat/per-container-supervisor``.
         """
-        if self.bypass:
+        if self.disabled:
             return
         self.shield.up(container, container_id)
 
-    def down(self, container: str, container_id: str, *, allow_all: bool = False) -> None:
-        """Set shield to bypass mode (allow egress) for a running container.
+    def down(self, container: str, container_id: str, *, disengaged: bool = False) -> None:
+        """Switch shield to the DOWN posture (allow egress) for a running container.
 
         *container* / *container_id* — see
         [`up`][terok_sandbox.integrations.shield.ShieldManager.up].  When
-        *allow_all* is True, also permits private-range (RFC 1918)
-        traffic.
+        *disengaged* is True, the DISENGAGED posture also permits
+        private-range (RFC 1918) traffic.
         """
-        if self.bypass:
+        if self.disabled:
             return
-        self.shield.down(container, container_id, allow_all=allow_all)
+        self.shield.down(container, container_id, disengaged=disengaged)
 
-    # ── Non-bypassable operations ───────────────────────
+    # ── Always-on operations ────────────────────────────
 
     def quarantine(self, container: str) -> None:
         """Total network blackout — drop all traffic, log dropped traffic.
 
-        Ignores ``shield_bypass`` because panic overrides every safety bypass.
+        Ignores ``shield_disabled`` because panic overrides the kill-switch.
         """
         self.shield.quarantine(container)
 
     def state(self, container: str) -> ShieldState:
         """Return the live shield state for a running container.
 
-        Queries actual nft state even when bypass is set, because
-        containers started *before* bypass was enabled may still have
-        active rules.
+        Queries actual nft state even when the kill-switch is set,
+        because containers started *before* it was enabled may still
+        have active rules.
         """
         return self.shield.state(container)
 
@@ -306,21 +306,21 @@ class ShieldManager:
             "profiles": list(self._cfg.shield_profiles),
             "audit_enabled": self._cfg.shield_audit,
         }
-        if self.bypass:
-            result["bypass_firewall_no_protection"] = True
+        if self.disabled:
+            result["disable_firewall_no_protection"] = True
         return result
 
     def check_environment(self) -> EnvironmentCheck:
         """Check the podman environment for shield compatibility.
 
         Returns a synthetic [`EnvironmentCheck`][terok_shield.EnvironmentCheck]
-        with bypass info when the dangerous bypass override is active.
+        flagging the kill-switch when the dangerous disable override is active.
         """
-        if self.bypass:
+        if self.disabled:
             return EnvironmentCheck(
                 ok=False,
-                health="bypass",
-                issues=["bypass_firewall_no_protection is set — egress firewall disabled"],
+                health="disabled",
+                issues=["disable_firewall_no_protection is set — egress firewall disabled"],
             )
         return self.shield.check_environment()
 
@@ -383,14 +383,14 @@ class ShieldHooks:
         HooksInstaller().uninstall()
 
 
-# ── Bypass-aware environment probe (no task context) ────
+# ── Kill-switch-aware environment probe (no task context) ────
 
 
 def check_environment(cfg: SandboxConfig | None = None) -> EnvironmentCheck:
     """Probe the podman environment with no task context.
 
     Returns a synthetic [`EnvironmentCheck`][terok_shield.EnvironmentCheck]
-    when ``shield_bypass`` is set; otherwise constructs a throwaway
+    when ``shield_disabled`` is set; otherwise constructs a throwaway
     [`ShieldManager`][terok_sandbox.integrations.shield.ShieldManager]
     bound to a temp directory and delegates to its
     [`check_environment`][terok_sandbox.integrations.shield.ShieldManager.check_environment].

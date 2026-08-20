@@ -29,9 +29,9 @@ from .config import SandboxConfig
 from .runtime import ContainerRuntime, PodmanRuntime
 from .runtime.gpu import GpuSelector, check_gpu_error, gpu_run_args
 from .runtime.podman import (
-    bypass_network_args,
     find_init_binary,
     redact_env_args,
+    unshielded_network_args,
 )
 
 if TYPE_CHECKING:
@@ -619,7 +619,7 @@ class Sandbox:
     # -- Container launch ---------------------------------------------------
     #
     # The launch path still drives podman directly because shield and
-    # bypass-network integration produces podman-flavoured CLI args.  A
+    # unshielded-network integration produces podman-flavoured CLI args.  A
     # future krun backend will push this down into the runtime as well.
 
     def _build_cmd(self, spec: RunSpec, verb: str = "run") -> list[str]:
@@ -660,9 +660,9 @@ class Sandbox:
         if not spec.unrestricted:
             cmd += ["--security-opt", "no-new-privileges"]
 
-        if self._cfg.shield_bypass:
-            print("\n!! SHIELD BYPASSED — egress firewall DISABLED (shield_bypass is set) !!\n")
-            cmd += bypass_network_args(self._cfg.gate_port)
+        if self._cfg.shield_disabled:
+            print("\n!! SHIELD DISABLED — egress firewall off (shield_disabled is set) !!\n")
+            cmd += unshielded_network_args(self._cfg.gate_port)
         else:
             try:
                 cmd += self.pre_start_args(
@@ -681,13 +681,13 @@ class Sandbox:
                 # Refuse to launch with silent unfiltered egress: a shielded
                 # spec asked for the firewall; soft-failing past it would
                 # weaken the security posture the operator explicitly chose.
-                # ``SandboxConfig(shield_bypass=True)`` is the documented
+                # ``SandboxConfig(shield_disabled=True)`` is the documented
                 # opt-out and skips this whole branch above.
                 raise SystemExit(
                     f"Shield setup failed: {exc}\n"
                     f"Refusing to launch {spec.container_name} with unfiltered "
                     f"egress. Diagnose with `terok sickbay`, or set "
-                    f"SandboxConfig(shield_bypass=True) if filtering is "
+                    f"SandboxConfig(shield_disabled=True) if filtering is "
                     f"intentionally disabled for this run."
                 ) from None
 

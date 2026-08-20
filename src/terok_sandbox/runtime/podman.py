@@ -90,7 +90,7 @@ def _detect_rootless_network_mode() -> str:
         return "slirp4netns"
 
 
-def bypass_network_args(gate_port: int | None) -> list[str]:
+def unshielded_network_args(gate_port: int | None) -> list[str]:
     """Return podman network args for running without shield.
 
     Replicates shield's normal networking (reachable ``host.containers.internal``)

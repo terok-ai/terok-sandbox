@@ -200,11 +200,11 @@ def _default_ssh_signer_port() -> int | None:
     return vault_ssh_signer_port()
 
 
-# Deliberately not exposing a ``shield_bypass()`` reader nor a
-# ``_default_shield_bypass`` factory.  ``shield.bypass_firewall_no_protection``
+# Deliberately not exposing a ``shield_disabled()`` reader nor a
+# ``_default_shield_disabled`` factory.  ``shield.disable_firewall_no_protection``
 # is in the pydantic schema (orchestrators can pass it through their
-# own resolution chain) but ``SandboxConfig.shield_bypass`` stays
-# hardcoded ``False``: enabling bypass via a user-writable config
+# own resolution chain) but ``SandboxConfig.shield_disabled`` stays
+# hardcoded ``False``: enabling the kill-switch via a user-writable config
 # scope (``~/.config/terok/config.yml``) or via ``TEROK_CONFIG_FILE``
 # would let anything that can drop a file under ``$HOME`` silently
 # disable the egress firewall.  Higher-layer orchestrators are
@@ -269,7 +269,7 @@ class SandboxConfig:
     default.  Direct ``SandboxConfig(shield_audit=…)`` always wins.
     """
 
-    shield_bypass: bool = False
+    shield_disabled: bool = False
     """DANGEROUS: when True, the egress firewall is completely disabled.
 
     Hardcoded ``False`` here — sandbox refuses to read this field
@@ -277,8 +277,8 @@ class SandboxConfig:
     user-writable scope (``~/.config/terok/config.yml``) and an
     ``$ENV``-controllable override (``TEROK_CONFIG_FILE``), so anything
     that drops a file in ``$HOME`` could silently disable the egress
-    firewall.  Orchestrators that want bypass must pass it explicitly
-    to ``SandboxConfig(shield_bypass=True)`` after resolving from
+    firewall.  Orchestrators that want the kill-switch must pass it
+    explicitly to ``SandboxConfig(shield_disabled=True)`` after resolving from
     their own trusted source.
     """
 

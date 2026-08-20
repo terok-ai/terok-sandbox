@@ -240,7 +240,7 @@ class RawShieldSection(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    bypass_firewall_no_protection: bool = Field(
+    disable_firewall_no_protection: bool = Field(
         default=False, description="**Dangerous**: disable egress firewall entirely"
     )
     profiles: dict[str, Any] | None = Field(
