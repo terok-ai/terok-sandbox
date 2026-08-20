@@ -20,7 +20,7 @@ from terok_shield import (
 
 from terok_sandbox.config import SandboxConfig
 from terok_sandbox.integrations.shield import (
-    _BYPASS_WARNING,
+    _DISABLED_WARNING,
     ShieldHooks,
     ShieldManager,
     check_environment,
@@ -216,13 +216,13 @@ def test_manager_state_returns_shield_state() -> None:
     mock_shield.state.assert_called_once_with("ctr")
 
 
-def test_manager_down_passes_allow_all() -> None:
-    """``ShieldManager.down`` forwards ``container_id`` + ``allow_all=True`` to the underlying Shield."""
+def test_manager_down_passes_disengaged() -> None:
+    """``ShieldManager.down`` forwards ``container_id`` + ``disengaged=True`` to the underlying Shield."""
     mock_shield = make_mock_shield()
     manager = ShieldManager(MOCK_TASK_DIR)
     with patch.object(ShieldManager, "shield", new=mock_shield):
-        manager.down("ctr", "ctr-uuid", allow_all=True)
-    mock_shield.down.assert_called_once_with("ctr", "ctr-uuid", allow_all=True)
+        manager.down("ctr", "ctr-uuid", disengaged=True)
+    mock_shield.down.assert_called_once_with("ctr", "ctr-uuid", disengaged=True)
 
 
 def test_manager_pre_start_threads_runtime_into_shield() -> None:
@@ -295,7 +295,7 @@ def test_refresh_threads_tiers_into_shield() -> None:
 def test_bypass_refresh_is_noop_with_warning() -> None:
     """Bypass mode makes ``ShieldManager.refresh`` a loud no-op, like pre_start."""
     mock_shield = MagicMock(spec=Shield)
-    manager = ShieldManager(MOCK_TASK_DIR, SandboxConfig(shield_bypass=True))
+    manager = ShieldManager(MOCK_TASK_DIR, SandboxConfig(shield_disabled=True))
     with patch.object(ShieldManager, "shield", new=mock_shield), pytest.warns(UserWarning):
         manager.refresh("ctr")
     mock_shield.refresh.assert_not_called()
@@ -327,7 +327,7 @@ def test_status_custom_config() -> None:
 def test_bypass_makes_down_and_up_noops(method_name: str) -> None:
     """Bypass mode makes ``ShieldManager.up`` / ``.down`` no-ops without touching Shield."""
     mock_shield = MagicMock(spec=Shield)
-    manager = ShieldManager(MOCK_TASK_DIR, SandboxConfig(shield_bypass=True))
+    manager = ShieldManager(MOCK_TASK_DIR, SandboxConfig(shield_disabled=True))
     with patch.object(ShieldManager, "shield", new=mock_shield):
         getattr(manager, method_name)("ctr", "ctr-uuid")
     mock_shield.up.assert_not_called()
@@ -337,7 +337,7 @@ def test_bypass_makes_down_and_up_noops(method_name: str) -> None:
 def test_quarantine_ignores_bypass() -> None:
     """Quarantine overrides bypass — panic must always work."""
     mock_shield = make_mock_shield()
-    manager = ShieldManager(MOCK_TASK_DIR, SandboxConfig(shield_bypass=True))
+    manager = ShieldManager(MOCK_TASK_DIR, SandboxConfig(shield_disabled=True))
     with patch.object(ShieldManager, "shield", new=mock_shield):
         manager.quarantine("ctr")
     mock_shield.quarantine.assert_called_once_with("ctr")
@@ -345,16 +345,16 @@ def test_quarantine_ignores_bypass() -> None:
 
 def test_bypass_pre_start_returns_empty_with_warning() -> None:
     """Bypass mode returns no pre-start podman args and warns loudly."""
-    manager = ShieldManager(MOCK_TASK_DIR, SandboxConfig(shield_bypass=True))
+    manager = ShieldManager(MOCK_TASK_DIR, SandboxConfig(shield_disabled=True))
     with pytest.warns(UserWarning) as caught:
         assert manager.pre_start("ctr") == []
-    assert any(_BYPASS_WARNING in str(item.message) for item in caught)
+    assert any(_DISABLED_WARNING in str(item.message) for item in caught)
 
 
 def test_bypass_state_still_queries_real_shield() -> None:
     """State lookup still queries the real shield to handle pre-bypass containers."""
     mock_shield = make_mock_shield(shield_state=ShieldState.UP)
-    manager = ShieldManager(MOCK_TASK_DIR, SandboxConfig(shield_bypass=True))
+    manager = ShieldManager(MOCK_TASK_DIR, SandboxConfig(shield_disabled=True))
     with patch.object(ShieldManager, "shield", new=mock_shield):
         assert manager.state("ctr") == ShieldState.UP
     mock_shield.state.assert_called_once_with("ctr")
@@ -372,8 +372,8 @@ def test_status_includes_bypass_flag_only_when_active(
     expected_key: bool,
 ) -> None:
     """Status output surfaces the dangerous bypass flag only when it is active."""
-    result = ShieldManager(MOCK_TASK_DIR, SandboxConfig(shield_bypass=bypass_enabled)).status()
-    assert ("bypass_firewall_no_protection" in result) is expected_key
+    result = ShieldManager(MOCK_TASK_DIR, SandboxConfig(shield_disabled=bypass_enabled)).status()
+    assert ("disable_firewall_no_protection" in result) is expected_key
     assert result["mode"] == "hook"
     assert "profiles" in result
 
@@ -391,12 +391,12 @@ def test_check_environment_forwards_result() -> None:
     mock_shield.check_environment.assert_called_once()
 
 
-def test_check_environment_bypass_returns_synthetic_result() -> None:
-    """Bypass mode surfaces a synthetic degraded environment result."""
-    result = check_environment(cfg=SandboxConfig(shield_bypass=True))
+def test_check_environment_disabled_returns_synthetic_result() -> None:
+    """The kill-switch surfaces a synthetic degraded environment result."""
+    result = check_environment(cfg=SandboxConfig(shield_disabled=True))
     assert not result.ok
-    assert result.health == "bypass"
-    assert any("bypass" in issue for issue in result.issues)
+    assert result.health == "disabled"
+    assert any("disable_firewall_no_protection" in issue for issue in result.issues)
 
 
 def test_pre_start_converts_shield_needs_setup_to_system_exit() -> None:

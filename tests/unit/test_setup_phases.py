@@ -307,15 +307,15 @@ class TestShieldInstallPhase:
         setup.assert_called_once_with()
         assert "ok" in capsys.readouterr().out
 
-    def test_bypass_mode_reports_warn_but_still_ok(
+    def test_disabled_shield_reports_warn_but_still_ok(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """A bypass-firewall host lands as WARN but counts as ``ok`` for the aggregator."""
+        """A disabled-firewall host lands as WARN but counts as ``ok`` for the aggregator."""
         with (
             patch("terok_sandbox.integrations.shield.ShieldHooks.install"),
             patch(
                 "terok_sandbox.integrations.shield.check_environment",
-                return_value=MagicMock(health="bypass"),
+                return_value=MagicMock(health="disabled"),
             ),
         ):
             assert run_shield_install_phase() is True

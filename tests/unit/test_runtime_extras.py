@@ -16,8 +16,8 @@ from terok_sandbox import PodmanRuntime
 from terok_sandbox.runtime import ContainerRemoveResult
 from terok_sandbox.runtime.podman import (
     _detect_rootless_network_mode,
-    bypass_network_args,
     redact_env_args,
+    unshielded_network_args,
 )
 
 # ── Argv helpers (pure functions on the podman backend) ───────────────────
@@ -607,12 +607,12 @@ class TestDetectRootlessNetworkMode:
 
 
 class TestBypassNetworkArgs:
-    """``bypass_network_args`` picks args based on euid + detected network mode."""
+    """``unshielded_network_args`` picks args based on euid + detected network mode."""
 
     @patch("terok_sandbox.runtime.podman.os.geteuid", return_value=0)
     def test_root_emits_nothing(self, _euid) -> None:
         """Running as root requires no bypass args."""
-        assert bypass_network_args(9418) == []
+        assert unshielded_network_args(9418) == []
 
     @patch(
         "terok_sandbox.runtime.podman._detect_rootless_network_mode",
@@ -621,7 +621,7 @@ class TestBypassNetworkArgs:
     @patch("terok_sandbox.runtime.podman.os.geteuid", return_value=1000)
     def test_slirp_args_include_loopback_allow(self, _euid, _net) -> None:
         """Slirp mode emits ``allow_host_loopback=true``."""
-        args = bypass_network_args(9418)
+        args = unshielded_network_args(9418)
         assert "slirp4netns:allow_host_loopback=true" in args
         assert any("host.containers.internal:" in a for a in args)
 
@@ -632,5 +632,5 @@ class TestBypassNetworkArgs:
     @patch("terok_sandbox.runtime.podman.os.geteuid", return_value=1000)
     def test_pasta_args_include_map_host_loopback(self, _euid, _net) -> None:
         """Pasta mode emits ``--map-host-loopback``."""
-        args = bypass_network_args(9418)
+        args = unshielded_network_args(9418)
         assert any("--map-host-loopback" in a for a in args)

@@ -240,14 +240,14 @@ class RawShieldSection(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    bypass_firewall_no_protection: bool = Field(
+    disable_firewall_no_protection: bool = Field(
         default=False, description="**Dangerous**: disable egress firewall entirely"
     )
     profiles: dict[str, Any] | None = Field(
         default=None, description="Named shield profiles for per-project firewall rules"
     )
     audit: bool = Field(default=True, description="Enable shield audit logging")
-    drop_on_task_run: bool = True
+    down_on_task_run: bool = True
     on_task_restart: Literal["retain", "up"] = "retain"
 
 
