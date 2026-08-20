@@ -247,7 +247,7 @@ class RawShieldSection(BaseModel):
         default=None, description="Named shield profiles for per-project firewall rules"
     )
     audit: bool = Field(default=True, description="Enable shield audit logging")
-    drop_on_task_run: bool = True
+    down_on_task_run: bool = True
     on_task_restart: Literal["retain", "up"] = "retain"
 
 
