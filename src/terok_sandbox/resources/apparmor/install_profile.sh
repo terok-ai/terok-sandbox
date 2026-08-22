@@ -80,10 +80,14 @@ if [[ -f "$local_include" ]]; then
     sed -i '/# >>> terok-shield apparmor/,/# <<< terok-shield apparmor/d' "$local_include"
 fi
 cat >> "$local_include" <<EOF
-# >>> terok-shield apparmor (managed; do not edit between markers) >>>
-owner ${state_root}/tasks/*/*/shield/dnsmasq.conf r,
-owner ${state_root}/tasks/*/*/shield/dnsmasq.pid rwk,
-owner ${state_root}/tasks/*/*/shield/dnsmasq.log rwk,
+# >>> terok-shield apparmor r2 (managed; do not edit between markers) >>>
+# The revision (r2) lets terok detect a stale addendum and prompt a reinstall;
+# bump it here and in _util/_apparmor.py:_ADDENDUM_REVISION when these rules
+# change.  One glob covers dnsmasq's config, pid, log, and any future
+# per-container dnsmasq artifact under a shield state dir. The old rules named
+# each file, so when shield added a new file (such as the query log) DNS broke
+# again on AppArmor hosts until the operator reinstalled (terok-ai/terok#1246).
+owner ${state_root}/tasks/*/*/shield/dnsmasq.* rwk,
 /usr/share/iproute2/* r,
 # <<< terok-shield apparmor (managed) <<<
 EOF
@@ -94,4 +98,3 @@ apparmor_parser -r -W "$profile"
 echo
 echo "${_green}terok-shield AppArmor addendum installed.${_reset}"
 echo "Profile: ${_bold}${profile}${_reset}  (rules added to ${local_include})"
-echo "Re-run your task — the dnsmasq DNS tier should now be used."

@@ -23,7 +23,9 @@ from aiohttp.test_utils import TestServer
 from terok_sandbox.vault.daemon.token_broker import _build_app
 from terok_sandbox.vault.store.db import CredentialDB
 
-pytestmark = pytest.mark.needs_vault
+# Every story stands up real aiohttp servers on loopback (proxy + mock upstream);
+# krun's TSI refuses loopback server sockets, so the whole module skips there.
+pytestmark = [pytest.mark.needs_vault, pytest.mark.needs_loopback]
 
 
 # ---------------------------------------------------------------------------

@@ -61,7 +61,10 @@ from terok_shield.prereqs import (  # noqa: F401 — re-exported with concrete t
     check_krun_binaries,
 )
 from terok_shield.run import NftNotFoundError, ShieldNeedsSetup  # noqa: F401
-from terok_shield.state import BUNDLE_VERSION as BUNDLE_VERSION  # noqa: F401 — re-exported
+from terok_shield.state import (
+    BUNDLE_VERSION as BUNDLE_VERSION,  # noqa: F401 — re-exported
+    recorded_dns_tier,  # concrete type; the top-level lazy re-export is ``object``
+)
 
 from ..config import SandboxConfig
 
@@ -293,6 +296,19 @@ class ShieldManager:
         return self.shield.state(container)
 
     # ── Configuration probes ────────────────────────────
+
+    @property
+    def dns_tier(self) -> str | None:
+        """DNS tier this task launched with (``dnsmasq``/``dig``/``getent``).
+
+        Reads only the recorded tier file — like
+        [`status`][terok_sandbox.integrations.shield.ShieldManager.status], it
+        pays no Shield wire-up cost.  ``None`` when the task recorded no tier (never
+        shielded, or predates tier recording).  A degraded tier
+        (``dig``/``getent``) tells the operator this task's egress
+        allowlist resolves statically, without IP-rotation handling.
+        """
+        return recorded_dns_tier(self.state_dir)
 
     def status(self) -> dict:
         """Return shield status dict from the sandbox configuration.

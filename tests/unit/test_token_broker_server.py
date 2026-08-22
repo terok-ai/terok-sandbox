@@ -38,6 +38,7 @@ from terok_sandbox.vault.store.db import CredentialDB
 # ── Health endpoint ──────────────────────────────────────────────────────
 
 
+@pytest.mark.needs_loopback  # binds an aiohttp loopback server; krun TSI refuses it
 @pytest.mark.asyncio
 class TestHealthEndpoint:
     """Verify the /-/health readiness probe."""
@@ -329,6 +330,7 @@ def _broker_env(tmp_path: Path):
     }
 
 
+@pytest.mark.needs_loopback  # binds an aiohttp loopback server; krun TSI refuses it
 @pytest.mark.asyncio
 class TestHandlerEdgeCases:
     """Exercise _handle_request edge cases via aiohttp TestClient."""
@@ -428,6 +430,7 @@ def _static_marker_env(tmp_path: Path):
     return _build_app(str(tmp_path / "test.db"), str(routes))
 
 
+@pytest.mark.needs_loopback  # binds an aiohttp loopback server; krun TSI refuses it
 @pytest.mark.asyncio
 class TestStaticPhantomMarker:
     """Verify the static PHANTOM_CREDENTIALS_MARKER is accepted by the token broker."""
@@ -558,6 +561,7 @@ def _forwarding_env(tmp_path: Path):
     return upstream_app, tmp_path, {"claude": claude_token, "vibe": vibe_token, "glab": glab_token}
 
 
+@pytest.mark.needs_loopback  # binds an aiohttp loopback server; krun TSI refuses it
 @pytest.mark.asyncio
 class TestForwardingPath:
     """Exercise the full request forwarding with a mock upstream."""
@@ -1181,6 +1185,7 @@ class TestForwardingPath:
 # ── Audit-log integration ─────────────────────────────────────────────
 
 
+@pytest.mark.needs_loopback  # binds an aiohttp loopback server; krun TSI refuses it
 @pytest.mark.asyncio
 class TestAuditLogIntegration:
     """Wire ``_build_app`` with ``audit_path`` and verify lines land per request."""
@@ -1554,6 +1559,7 @@ class TestTokenDBRefresh:
 # ── OAuth refresh logic ──────────────────────────────────────────────────
 
 
+@pytest.mark.needs_loopback  # binds an aiohttp loopback server; krun TSI refuses it
 @pytest.mark.asyncio
 class TestDoOAuthRefresh:
     """Exercise _do_oauth_refresh against a mock token endpoint."""
@@ -1652,6 +1658,7 @@ class TestDoOAuthRefresh:
         await server.close()
 
 
+@pytest.mark.needs_loopback  # binds an aiohttp loopback server; krun TSI refuses it
 @pytest.mark.asyncio
 class TestRefreshAll:
     """Exercise _refresh_all with real DB and mock token endpoint."""
@@ -1845,6 +1852,7 @@ class TestRefreshAll:
 # ── ServerDisconnectedError retry paths ─────────────────────────────────
 
 
+@pytest.mark.needs_loopback  # binds an aiohttp loopback server; krun TSI refuses it
 @pytest.mark.asyncio
 class TestServerDisconnectRetry:
     """Verify ServerDisconnectedError retry logic and the resulting 502 path."""
@@ -1946,6 +1954,7 @@ class TestServerDisconnectRetry:
 # bring-up now and tests for that path live in ``test_vault_proxy.py``.
 
 
+@pytest.mark.needs_loopback  # binds an aiohttp loopback server; krun TSI refuses it
 @pytest.mark.asyncio
 class TestRedirectFollowing:
     """The broker resolves storage redirects itself, with the credential withheld.
@@ -2054,6 +2063,7 @@ class TestRedirectFollowing:
         assert seen["storage_auth"] == "unset"  # storage was never reached
 
 
+@pytest.mark.needs_loopback  # binds an aiohttp loopback server; krun TSI refuses it
 @pytest.mark.asyncio
 class TestResponseHeaderRelay:
     """The broker forwards the provider's response headers, not a hand-picked few.

@@ -32,6 +32,8 @@ slots:
   alpine:
   void:
   mageia:
+  manjaro:
+    extra-packages: [systemd]
 
 phases:
   - name: unit tests

@@ -38,6 +38,9 @@ pytestmark = [pytest.mark.needs_vault, pytest.mark.needs_podman]
 _CURL_IMAGE = "terok-sandbox-itest:latest"
 _CONTAINER_PREFIX = "terok-sandbox-itest"
 _REAL_KEY = "sk-ant-real-secret-001"  # nosec B105 — fixture value, not a real credential
+# Generous build ceiling: a slow runner (a krun microVM, or a loaded crun
+# host) building this image can take minutes; only a hung build should trip it.
+_BUILD_TIMEOUT_S = 900
 
 
 @dataclass
@@ -67,7 +70,7 @@ def curl_image() -> str:
             input=f"FROM {PODMAN_BASE_IMAGE}\nRUN apk add --no-cache curl\n",
             check=True,
             text=True,
-            timeout=120,
+            timeout=_BUILD_TIMEOUT_S,
         )
     return _CURL_IMAGE
 
@@ -97,7 +100,8 @@ async def vault_socket(
     # fixture (the session-file tier was replaced by kernel-keyring in #461).
     monkeypatch.setattr(_kk, "load", lambda _db=None: None)
     monkeypatch.setattr(_sc, "unseal", lambda _path: None)
-    monkeypatch.setattr(_enc, "load_passphrase_from_keyring", lambda: "test")
+    # ``**_kw`` absorbs ``allow_prompt``, which the encryption chain now passes.
+    monkeypatch.setattr(_enc, "load_passphrase_from_keyring", lambda **_kw: "test")
     monkeypatch.setattr(_config, "credentials_use_keyring", lambda: True)
 
     state = _VaultSocket(

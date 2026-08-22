@@ -223,6 +223,8 @@ def _report_apparmor() -> AppArmorCheckResult:
     with _stage_line("AppArmor profile") as s:
         if result.status is AppArmorStatus.OK:
             s.ok("installed")
+        elif result.status is AppArmorStatus.PROFILE_OUTDATED:
+            s.missing(f"outdated — reinstall: {apparmor_install_command(_apparmor_state_root())}")
         else:
             s.missing(f"install: {apparmor_install_command(_apparmor_state_root())}")
     return result
@@ -231,17 +233,27 @@ def _report_apparmor() -> AppArmorCheckResult:
 def print_apparmor_install_hint() -> None:
     """Print the AppArmor addendum install command at end of setup, if needed.
 
-    No-op unless the dnsmasq profile addendum is missing.  Rendered last
-    (alongside the SELinux hint) so the command isn't scrolled away.
+    No-op unless the dnsmasq profile addendum is missing or outdated.
+    Rendered last (alongside the SELinux hint) so the command isn't
+    scrolled away.
     """
-    if check_apparmor_status().status is not AppArmorStatus.PROFILE_MISSING:
+    status = check_apparmor_status().status
+    if status not in (AppArmorStatus.PROFILE_MISSING, AppArmorStatus.PROFILE_OUTDATED):
         return
+    outdated = status is AppArmorStatus.PROFILE_OUTDATED
     print()
     print("─ AppArmor profile recommended ────────────────────────────────")
-    print("dnsmasq is AppArmor-confined here; without the terok addendum the")
-    print("per-container DNS drops to the dig tier (no live IP-rotation).")
+    if outdated:
+        print("Your terok dnsmasq AppArmor addendum is an older revision; until")
+        print("it is refreshed the per-container DNS drops to the dig tier (no")
+        print("live IP-rotation).")
+    else:
+        print("dnsmasq is AppArmor-confined here; without the terok addendum the")
+        print("per-container DNS drops to the dig tier (no live IP-rotation).")
     print()
-    print("Install the addendum (keeps dnsmasq otherwise confined):")
+    print(
+        f"{'Reinstall' if outdated else 'Install'} the addendum (keeps dnsmasq otherwise confined):"
+    )
     print()
     print(f"  {apparmor_install_command(_apparmor_state_root())}")
     print()

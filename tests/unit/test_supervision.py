@@ -6,7 +6,10 @@
 from __future__ import annotations
 
 import json
+import shutil
 import socket
+import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -17,6 +20,7 @@ from terok_sandbox.supervision import (
     verify_supervision,
     warn_unsupervised,
 )
+from tests.constants import MOCK_BASE
 
 _NAME = "demo-cli-w9xk3"
 _FAST = 0.2  # timeout for the intentionally-missing cases — keep the suite snappy
@@ -61,6 +65,25 @@ def _bind(path: Path) -> socket.socket:
     return sock
 
 
+@pytest.fixture
+def short_rt() -> Iterator[Path]:
+    """A short runtime dir for the tests that bind real sockets.
+
+    The supervisor binds sockets at ``<rt>/run/<name>/…/vault.sock``.  Under
+    pytest's deep ``tmp_path`` that overruns AF_UNIX's 108-byte ``sun_path``
+    in the container filesystem — the same overflow production avoids by
+    keeping the runtime dir short (``/run/user/<uid>/…``).  Mirror that with
+    a short unique dir under ``MOCK_BASE``; the sidecar/state stay on
+    ``tmp_path``.
+    """
+    MOCK_BASE.mkdir(parents=True, exist_ok=True)
+    rt = Path(tempfile.mkdtemp(dir=MOCK_BASE, prefix="sv"))
+    try:
+        yield rt
+    finally:
+        shutil.rmtree(rt, ignore_errors=True)
+
+
 class TestVerifySupervision:
     def test_no_sidecar_is_skipped(self, tmp_path: Path) -> None:
         """No sidecar on disk ⇒ nothing to verify, no polling, healthy-ok."""
@@ -74,8 +97,8 @@ class TestVerifySupervision:
         status = verify_supervision(_cfg(tmp_path), _NAME, timeout=_FAST)
         assert status.skipped and status.ok
 
-    def test_vault_socket_present_is_ok(self, tmp_path: Path) -> None:
-        rt = tmp_path / "rt"
+    def test_vault_socket_present_is_ok(self, tmp_path: Path, short_rt: Path) -> None:
+        rt = short_rt
         _write_sidecar(tmp_path, rt)
         vault, _gate = _socket_paths(rt)
         keepalive = _bind(vault)
@@ -93,8 +116,8 @@ class TestVerifySupervision:
         assert not status.ok
         assert status.missing == (vault,)
 
-    def test_gate_socket_polled_only_when_wired(self, tmp_path: Path) -> None:
-        rt = tmp_path / "rt"
+    def test_gate_socket_polled_only_when_wired(self, tmp_path: Path, short_rt: Path) -> None:
+        rt = short_rt
         _write_sidecar(tmp_path, rt, gate=True)
         vault, gate = _socket_paths(rt)
         va, ga = _bind(vault), _bind(gate)
@@ -106,9 +129,9 @@ class TestVerifySupervision:
         assert status.ok
         assert set(status.checked) == {vault, gate}
 
-    def test_missing_gate_socket_is_flagged(self, tmp_path: Path) -> None:
+    def test_missing_gate_socket_is_flagged(self, tmp_path: Path, short_rt: Path) -> None:
         """Vault up but the wired gate never bound ⇒ only the gate is reported."""
-        rt = tmp_path / "rt"
+        rt = short_rt
         _write_sidecar(tmp_path, rt, gate=True)
         vault, gate = _socket_paths(rt)
         keepalive = _bind(vault)

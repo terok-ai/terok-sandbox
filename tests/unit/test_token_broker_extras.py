@@ -326,6 +326,7 @@ def _populate_db_and_routes(
     return db_path, routes_path, phantom
 
 
+@pytest.mark.needs_loopback  # drives an aiohttp handler over loopback; krun TSI refuses it
 @pytest.mark.asyncio
 class TestHandleRequestApiKeyEdges:
     """Cover dynamic auth_header and missing-token-field branches."""

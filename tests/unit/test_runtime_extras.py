@@ -536,6 +536,7 @@ class TestReservePort:
         with PodmanRuntime().reserve_port() as reservation:
             assert 1024 <= reservation.port <= 65535
 
+    @pytest.mark.needs_loopback  # connects to the held port on loopback; krun TSI refuses it
     def test_port_is_usable_while_held(self) -> None:
         """The bound socket can be listened on and connected to."""
         reservation = PodmanRuntime().reserve_port()

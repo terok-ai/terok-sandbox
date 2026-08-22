@@ -28,8 +28,13 @@ def _arrange(
     dnsmasq: bool = True,
     profile: bool = True,
     addendum: bool = False,
+    outdated: bool = False,
 ) -> None:
-    """Point the module's sysfs/profile probes at a tmp fixture tree."""
+    """Point the module's sysfs/profile probes at a tmp fixture tree.
+
+    *addendum* installs the current-revision block; *outdated* installs one
+    carrying the base marker but not the current revision (a stale install).
+    """
     enabled = tmp_path / "enabled"
     enabled.write_text("Y\n" if apparmor else "N\n")
     monkeypatch.setattr(_apparmor, "_APPARMOR_ENABLED", enabled)
@@ -40,10 +45,14 @@ def _arrange(
     if profile:
         prof.parent.mkdir(parents=True, exist_ok=True)
         prof.write_text("# dnsmasq profile\n")
-        if addendum:
+        if addendum or outdated:
+            # Build the markers from the module constants so bumping the
+            # revision never silently rots this fixture.
+            revision = "" if outdated else f" {_apparmor._ADDENDUM_REVISION}"
+            marker = f"# >>> {_apparmor._ADDENDUM_MARKER}{revision} (managed) >>>"
             local = prof.parent / "local" / "dnsmasq"
             local.parent.mkdir(parents=True, exist_ok=True)
-            local.write_text("# >>> terok-shield apparmor (managed) >>>\nowner x r,\n")
+            local.write_text(f"{marker}\nowner x r,\n")
     monkeypatch.setattr(_apparmor, "_DNSMASQ_PROFILES", (prof,))
 
 
@@ -72,9 +81,39 @@ def test_profile_missing_without_addendum(monkeypatch: pytest.MonkeyPatch, tmp_p
 
 
 def test_ok_when_addendum_installed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """The terok addendum present in the local include → OK."""
+    """The current-revision addendum present in the local include → OK."""
     _arrange(monkeypatch, tmp_path, addendum=True)
     assert check_status().status is AppArmorStatus.OK
+
+
+def test_profile_outdated_when_addendum_is_old_revision(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An addendum with the base marker but not the current revision → PROFILE_OUTDATED."""
+    _arrange(monkeypatch, tmp_path, outdated=True)
+    assert check_status().status is AppArmorStatus.PROFILE_OUTDATED
+
+
+def test_profile_outdated_when_revision_is_a_superstring(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A future revision like r20 must not read as the current r2 (token boundary)."""
+    _arrange(monkeypatch, tmp_path, addendum=True)
+    local = tmp_path / "etc" / "apparmor.d" / "local" / "dnsmasq"
+    local.write_text(
+        f"# >>> {_apparmor._ADDENDUM_MARKER} {_apparmor._ADDENDUM_REVISION}0 (managed) >>>\nowner x r,\n"
+    )
+    assert check_status().status is AppArmorStatus.PROFILE_OUTDATED
+
+
+def test_installer_stamps_the_current_revision_marker() -> None:
+    """The bundled installer writes the exact marker check_status treats as current.
+
+    The staleness check hinges on the shell installer and this module agreeing
+    on the marker text, so pin that contract.
+    """
+    script = _apparmor.install_script_path().read_text()
+    assert f">>> {_apparmor._ADDENDUM_MARKER} {_apparmor._ADDENDUM_REVISION} " in script
 
 
 def test_install_command_shape(tmp_path: Path) -> None:
@@ -132,14 +171,31 @@ def test_report_apparmor_missing_shows_install_command(
     assert "install_profile.sh" in capsys.readouterr().out
 
 
-def test_install_hint_only_when_profile_missing(
+def test_report_apparmor_outdated_flags_reinstall(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The end-of-setup hint block fires for PROFILE_MISSING and stays quiet otherwise."""
+    """A stale addendum reports 'outdated' and the reinstall command, not a bare OK."""
+    _patch_status(monkeypatch, AppArmorStatus.PROFILE_OUTDATED)
+    _setup._report_apparmor()
+    out = capsys.readouterr().out
+    assert "outdated" in out
+    assert "install_profile.sh" in out
+
+
+def test_install_hint_fires_for_missing_and_outdated(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The end-of-setup hint block fires for a missing OR outdated addendum, quiet otherwise."""
     _patch_status(monkeypatch, AppArmorStatus.PROFILE_MISSING)
     _setup.print_apparmor_install_hint()
     out = capsys.readouterr().out
     assert "AppArmor profile recommended" in out
+    assert "install_profile.sh" in out
+
+    _patch_status(monkeypatch, AppArmorStatus.PROFILE_OUTDATED)
+    _setup.print_apparmor_install_hint()
+    out = capsys.readouterr().out
+    assert "older revision" in out
     assert "install_profile.sh" in out
 
     for quiet in (AppArmorStatus.OK, AppArmorStatus.NOT_APPLICABLE):

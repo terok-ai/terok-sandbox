@@ -632,6 +632,7 @@ async def _read_response(reader: asyncio.StreamReader) -> tuple[int, bytes]:
     return body[0], body[1:]
 
 
+@pytest.mark.needs_loopback  # round-trips over a loopback socket; krun TSI refuses it
 @pytest.mark.asyncio
 class TestSSHSignerRoundTrip:
     """Full TCP round-trip tests using a real asyncio server."""

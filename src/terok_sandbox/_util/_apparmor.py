@@ -13,7 +13,9 @@ the bundled installer that adds an addendum permitting the shield tree.
 
 Detection is by file presence — unprivileged, no ``aa-status``/root: an
 AppArmor-enabled host that has dnsmasq and a stock dnsmasq profile but no
-terok addendum is ``PROFILE_MISSING``.  Install is delegated to
+terok addendum is ``PROFILE_MISSING``, and one whose addendum is an older
+revision (marker present, current revision absent) is ``PROFILE_OUTDATED``
+— both point the operator at the installer.  Install is delegated to
 ``resources/apparmor/install_profile.sh`` — a short, auditable script run
 with ``sudo bash`` (no compilation, just ``apparmor_parser -r``).
 """
@@ -36,8 +38,17 @@ _DNSMASQ_PROFILES = (
     Path("/etc/apparmor.d/dnsmasq"),  # apparmor.d project / Arch
 )
 
-# Marker the installer writes into the local include (see install_profile.sh).
+# Marker the installer writes into the local include (see install_profile.sh),
+# and the revision suffix that identifies the CURRENT rule set.  Bump the
+# revision whenever install_profile.sh's rules change: an older on-disk block
+# still carries the base marker but not the current revision, so it reads as
+# installed-but-outdated and the operator is prompted to reinstall — the rules
+# live in the shell installer, so this revision is the single fact the two
+# sides share.  ``r2`` = the one ``dnsmasq.*`` glob that replaced the per-file
+# (conf/pid/log) rules, which broke DNS whenever shield added a file
+# (terok-ai/terok#1246).
 _ADDENDUM_MARKER = "terok-shield apparmor"
+_ADDENDUM_REVISION = "r2"
 
 
 def is_apparmor_enabled() -> bool:
@@ -53,13 +64,12 @@ def _dnsmasq_profile() -> Path | None:
     return next((p for p in _DNSMASQ_PROFILES if p.is_file()), None)
 
 
-def _addendum_installed(profile: Path) -> bool:
-    """Return ``True`` if the terok addendum is present in *profile*'s local include."""
-    local = profile.parent / "local" / profile.name
+def _local_include_text(profile: Path) -> str:
+    """Return *profile*'s local-include text, or ``""`` if absent/unreadable."""
     try:
-        return _ADDENDUM_MARKER in local.read_text()
+        return (profile.parent / "local" / profile.name).read_text()
     except OSError:
-        return False
+        return ""
 
 
 class AppArmorStatus(Enum):
@@ -71,8 +81,13 @@ class AppArmorStatus(Enum):
     PROFILE_MISSING = "profile_missing"
     """dnsmasq is AppArmor-profiled but the terok addendum isn't installed."""
 
+    PROFILE_OUTDATED = "profile_outdated"
+    """The terok addendum is installed but at an older revision whose rules no
+    longer cover what shield writes — dnsmasq stays confined and DNS silently
+    rides the dig tier until the operator reinstalls (terok-ai/terok#1246)."""
+
     OK = "ok"
-    """The terok addendum is installed."""
+    """The terok addendum is installed at the current revision."""
 
 
 @dataclass(frozen=True)
@@ -83,20 +98,27 @@ class AppArmorCheckResult:
 
 
 def check_status() -> AppArmorCheckResult:
-    """Evaluate whether the dnsmasq AppArmor addendum is needed or installed.
+    """Evaluate whether the dnsmasq AppArmor addendum is needed, stale, or current.
 
-    File-based and unprivileged: an AppArmor-enabled host with dnsmasq and
-    a stock dnsmasq profile but no terok addendum is ``PROFILE_MISSING``;
-    everything else is ``NOT_APPLICABLE`` or ``OK``.
+    File-based and unprivileged.  An AppArmor-enabled host with dnsmasq and
+    a stock dnsmasq profile is ``PROFILE_MISSING`` with no terok addendum,
+    ``PROFILE_OUTDATED`` when an older-revision addendum is present (the
+    marker but not the current revision), and ``OK`` at the current
+    revision; anything else is ``NOT_APPLICABLE``.
     """
     if not is_apparmor_enabled() or shutil.which("dnsmasq") is None:
         return AppArmorCheckResult(AppArmorStatus.NOT_APPLICABLE)
     profile = _dnsmasq_profile()
     if profile is None:
         return AppArmorCheckResult(AppArmorStatus.NOT_APPLICABLE)
-    if _addendum_installed(profile):
-        return AppArmorCheckResult(AppArmorStatus.OK)
-    return AppArmorCheckResult(AppArmorStatus.PROFILE_MISSING)
+    addendum = _local_include_text(profile)
+    if _ADDENDUM_MARKER not in addendum:
+        return AppArmorCheckResult(AppArmorStatus.PROFILE_MISSING)
+    # Match the revision as a whole token (trailing space), so a future ``r20``
+    # is not read as the current ``r2`` and wrongly reported OK.
+    if f"{_ADDENDUM_MARKER} {_ADDENDUM_REVISION} " not in addendum:
+        return AppArmorCheckResult(AppArmorStatus.PROFILE_OUTDATED)
+    return AppArmorCheckResult(AppArmorStatus.OK)
 
 
 @lru_cache(maxsize=1)

@@ -216,6 +216,19 @@ def test_manager_state_returns_shield_state() -> None:
     mock_shield.state.assert_called_once_with("ctr")
 
 
+def test_manager_dns_tier_reads_recorded_value(tmp_path: Path) -> None:
+    """``ShieldManager.dns_tier`` returns the tier the task recorded, else None."""
+    from terok_shield.state import StateBundle
+
+    manager = ShieldManager(tmp_path)
+    assert manager.dns_tier is None  # nothing recorded yet
+
+    tier_file = StateBundle(manager.state_dir).dns_tier
+    tier_file.parent.mkdir(parents=True)
+    tier_file.write_text("dig\n")
+    assert manager.dns_tier == "dig"
+
+
 def test_manager_down_passes_allow_all() -> None:
     """``ShieldManager.down`` forwards ``container_id`` + ``allow_all=True`` to the underlying Shield."""
     mock_shield = make_mock_shield()
