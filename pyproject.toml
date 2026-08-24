@@ -35,7 +35,7 @@ dynamic = ["version"]
 # pyproject.toml Hygiene").  Keep the dependency list comment-free.
 dependencies = [
     "terok-util @ https://github.com/terok-ai/terok-util/releases/download/v0.3.1a6/terok_util-0.3.1a6-py3-none-any.whl",
-    "terok-shield @ git+https://github.com/sliwowitz/terok-shield.git@feat/posture-vocabulary",
+    "terok-shield @ https://github.com/terok-ai/terok-shield/releases/download/v0.8.0a12/terok_shield-0.8.0a12-py3-none-any.whl",
     "terok-clearance @ https://github.com/terok-ai/terok-clearance/releases/download/v0.8.0a9/terok_clearance-0.8.0a9-py3-none-any.whl",
     "platformdirs~=4.11",
     "aiohttp~=3.14.3",
@@ -102,7 +102,7 @@ allow-direct-references = true
 
 [tool.hatch.version]
 source = "vcs"
-fallback-version = "0.5.0a24"
+fallback-version = "0.5.0a25"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/terok_sandbox"]

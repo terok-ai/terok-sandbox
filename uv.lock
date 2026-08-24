@@ -2480,7 +2480,7 @@ requires-dist = [
     { name = "ruamel-yaml", specifier = "==0.19.1" },
     { name = "sqlcipher3", specifier = "==0.6.2" },
     { name = "terok-clearance", url = "https://github.com/terok-ai/terok-clearance/releases/download/v0.8.0a9/terok_clearance-0.8.0a9-py3-none-any.whl" },
-    { name = "terok-shield", git = "https://github.com/sliwowitz/terok-shield.git?rev=feat%2Fposture-vocabulary" },
+    { name = "terok-shield", url = "https://github.com/terok-ai/terok-shield/releases/download/v0.8.0a12/terok_shield-0.8.0a12-py3-none-any.whl" },
     { name = "terok-util", url = "https://github.com/terok-ai/terok-util/releases/download/v0.3.1a6/terok_util-0.3.1a6-py3-none-any.whl" },
 ]
 
@@ -2515,12 +2515,22 @@ test = [
 
 [[package]]
 name = "terok-shield"
-version = "0.8.0a12.dev363+gc614cd198"
-source = { git = "https://github.com/sliwowitz/terok-shield.git?rev=feat%2Fposture-vocabulary#c614cd1980419636182fc9f9d93135e726d85bf7" }
+version = "0.8.0a12"
+source = { url = "https://github.com/terok-ai/terok-shield/releases/download/v0.8.0a12/terok_shield-0.8.0a12-py3-none-any.whl" }
 dependencies = [
     { name = "pydantic" },
     { name = "pyyaml" },
     { name = "terok-util" },
+]
+wheels = [
+    { url = "https://github.com/terok-ai/terok-shield/releases/download/v0.8.0a12/terok_shield-0.8.0a12-py3-none-any.whl", hash = "sha256:f08c179686756ce4d1c725da051fb92acdc98177342395ca5cc5b048cc588d0a" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "pydantic", specifier = "~=2.13" },
+    { name = "pyyaml", specifier = "~=6.0" },
+    { name = "terok-util", url = "https://github.com/terok-ai/terok-util/releases/download/v0.3.1a6/terok_util-0.3.1a6-py3-none-any.whl" },
 ]
 
 [[package]]
