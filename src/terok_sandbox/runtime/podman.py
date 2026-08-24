@@ -72,25 +72,7 @@ _SLIRP_GATEWAY = "10.0.2.2"
 _PASTA_HOST_LOOPBACK_MAP = "169.254.1.2"
 
 
-def _detect_rootless_network_mode() -> str:
-    """Return ``"pasta"`` or ``"slirp4netns"``; falls back to the latter."""
-    try:
-        out = subprocess.run(  # nosec B603 B607 — argv built from fixed verbs + caller-controlled scope/container names — binary PATH lookup is the cross-distro contract
-            ["podman", "info", "-f", "{{.Host.RootlessNetworkCmd}}"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if out.returncode != 0:
-            log_debug(f"podman info failed (rc={out.returncode}), defaulting to slirp4netns")
-            return "slirp4netns"
-        cmd = out.stdout.strip()
-        return cmd if cmd in ("pasta", "slirp4netns") else "slirp4netns"
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return "slirp4netns"
-
-
-def bypass_network_args(gate_port: int | None) -> list[str]:
+def unshielded_network_args(gate_port: int | None) -> list[str]:
     """Return podman network args for running without shield.
 
     Replicates shield's normal networking (reachable ``host.containers.internal``)
@@ -111,6 +93,24 @@ def bypass_network_args(gate_port: int | None) -> list[str]:
         "--add-host",
         f"host.containers.internal:{_PASTA_HOST_LOOPBACK_MAP}",
     ]
+
+
+def _detect_rootless_network_mode() -> str:
+    """Return ``"pasta"`` or ``"slirp4netns"``; falls back to the latter."""
+    try:
+        out = subprocess.run(  # nosec B603 B607 — argv built from fixed verbs + caller-controlled scope/container names — binary PATH lookup is the cross-distro contract
+            ["podman", "info", "-f", "{{.Host.RootlessNetworkCmd}}"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if out.returncode != 0:
+            log_debug(f"podman info failed (rc={out.returncode}), defaulting to slirp4netns")
+            return "slirp4netns"
+        cmd = out.stdout.strip()
+        return cmd if cmd in ("pasta", "slirp4netns") else "slirp4netns"
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return "slirp4netns"
 
 
 # ── Init binary (podman run --init) ───────────────────────────────────────

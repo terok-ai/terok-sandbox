@@ -332,8 +332,8 @@ def run_shield_install_phase() -> bool:
         if env.health == "ok":
             s.ok("active")
             return True
-        if env.health == "bypass":
-            s.warn("bypass_firewall_no_protection is active")
+        if env.health == "disabled":
+            s.warn("disable_firewall_no_protection is active")
             return True
         s.fail(f"installed but health: {env.health}")
         return False

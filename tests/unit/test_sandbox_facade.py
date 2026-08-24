@@ -637,24 +637,24 @@ class TestSandbox:
         cmd = mock_run.call_args[0][0]
         assert "no-new-privileges" not in " ".join(cmd)
 
-    def test_run_bypass_shield_uses_bypass_args(self) -> None:
-        """Bypass mode uses bypass_network_args when cfg.shield_bypass is set."""
+    def test_run_disabled_shield_uses_unshielded_args(self) -> None:
+        """The kill-switch path uses unshielded_network_args when cfg.shield_disabled is set."""
         from terok_sandbox.config import SandboxConfig
 
-        cfg = SandboxConfig(shield_bypass=True)
+        cfg = SandboxConfig(shield_disabled=True)
         with (
             patch("subprocess.run"),
             patch("builtins.print"),
             patch(
-                "terok_sandbox.sandbox.bypass_network_args",
+                "terok_sandbox.sandbox.unshielded_network_args",
                 return_value=["--network", "pasta:-T,9418"],
-            ) as mock_bypass,
+            ) as mock_unshielded,
             patch("terok_sandbox.integrations.shield.ShieldManager.pre_start") as mock_shield,
         ):
             s = Sandbox(config=cfg)
             s.run(_make_spec())
 
-        mock_bypass.assert_called_once()
+        mock_unshielded.assert_called_once()
         mock_shield.assert_not_called()
 
     def test_run_refuses_when_shield_setup_fails(self) -> None:
@@ -679,7 +679,7 @@ class TestSandbox:
         message = str(exc_info.value)
         assert "Shield setup failed" in message
         assert spec.container_name in message
-        assert "shield_bypass" in message
+        assert "shield_disabled" in message
         mock_run.assert_not_called()
 
     def test_run_fires_lifecycle_hooks(self) -> None:
