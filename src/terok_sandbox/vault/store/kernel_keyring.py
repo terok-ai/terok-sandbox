@@ -47,6 +47,14 @@ passphrases):
   ``store`` links ``@u`` into it — so searching ``@s`` second reaches the
   operator's own key through that link, and the tier keeps its promise to
   be readable from any same-uid process.
+
+  That leg lasts as long as the session keyring the writer had.
+  ``pam_keyinit`` revokes a session keyring when its login session ends,
+  so a long-lived process — a TUI still running after the login that
+  started it closed — searches a revoked ``@s``.  That is a miss, and a
+  silent one (see ``_MISS_ERRNOS``); the chain moves to the next tier.
+  A deployment that needs the cache to outlive a login wants a durable
+  tier (systemd-creds, ``passphrase_command``) rather than this one.
 - *Explicit ``keyctl_setperm``.*  A fresh ``user`` key defaults to
   ``possessor=all, uid=view`` — the uid can *see* the key but not read
   or search it.  systemd gets away without a setperm because its readers
@@ -387,6 +395,18 @@ def unavailable_reason() -> str | None:
 
 # ── Key lookup and library binding (private) ────────────────────────
 
+#: Search results that answer "no usable key here", as opposed to "the
+#: lookup did not complete".  A revoked or expired key can never yield a
+#: passphrase again, so every caller wants exactly the answer it would
+#: get for a key that was never stored.  Two things follow.  ``forget``
+#: reports success, because its contract is the end state — nothing
+#: cached for this vault — and a dead key satisfies it.  And nobody
+#: warns: a retry cannot change either verdict, so a line on every
+#: launch would tell the operator about something they cannot act on.
+#: The session-keyring leg made this reachable — it walks keys the
+#: user-keyring leg never saw, a dead one among them.
+_MISS_ERRNOS: Final = frozenset({errno.ENOKEY, errno.EKEYEXPIRED, errno.EKEYREVOKED})
+
 
 def _find_cached_key(lib: ctypes.CDLL, description: bytes) -> int | None:
     """Serial of the key under *description*, or ``None`` when genuinely absent.
@@ -400,16 +420,17 @@ def _find_cached_key(lib: ctypes.CDLL, description: bytes) -> int | None:
     recurses into nested keyrings, so one search of ``@s`` covers both
     the session keyring's own keys and the linked ``@u``.
 
-    Only ``ENOKEY`` — no key under this description — is a miss.  Any
-    other failure (a revoked or expired key, a permission fault) is a
-    lookup the caller must not read as "absent": a ``forget`` that did so
-    would report the passphrase cleared while it may still be cached.  A
-    keyring that faults does not veto the next one, though — the key is
-    present if *any* leg finds it, and the fault is raised only when none
-    did.
+    A miss is any answer that means *no usable key here*: absent
+    (``ENOKEY``), revoked, or expired (see ``_MISS_ERRNOS``).  Every
+    other failure — a permission fault, most of all — is a lookup that
+    did not complete, and the caller must not read it as "absent": a
+    ``forget`` that did so would report the passphrase cleared while it
+    may still be cached.  A keyring that faults does not veto the next
+    one, though — the key is present if *any* leg finds it, and the
+    fault is raised only when none did.
 
     Returns:
-        The key's serial number, or None when no such key exists.
+        The key's serial number, or None when no usable key exists.
 
     Raises:
         OSError: Every keyring search failed, at least one of them for a
@@ -423,7 +444,7 @@ def _find_cached_key(lib: ctypes.CDLL, description: bytes) -> int | None:
         if serial != -1:
             return serial
         err = ctypes.get_errno()
-        if err != errno.ENOKEY and fault is None:
+        if err not in _MISS_ERRNOS and fault is None:
             fault = err
     if fault is None:
         return None

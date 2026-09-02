@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.util
+import errno
 
 import pytest
 
@@ -356,6 +357,52 @@ def test_is_bridged_is_false_without_the_facility(monkeypatch: pytest.MonkeyPatc
 
     monkeypatch.setattr(kernel_keyring, "_load_library", _raise)
     assert kernel_keyring.is_bridged(MOCK_DB_PATH) is False
+
+
+def test_a_revoked_key_is_a_miss_and_says_nothing(
+    monkeypatch: pytest.MonkeyPatch, fake_lib: FakeKeyutils, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A dead key is the same answer as no key, and not worth a word.
+
+    The session-keyring leg walks keys the user-keyring leg never saw, and
+    a revoked one among them used to raise — so an operator whose vault
+    runs on a different tier entirely got two lines about the keyring on
+    every single container start, about a key that can never be read
+    again and that no action of theirs would change.
+    """
+
+    def _revoked(_ring: int, _ktype: bytes, _desc: bytes, _dest: int) -> int:
+        ctypes.set_errno(errno.EKEYREVOKED)
+        return -1
+
+    monkeypatch.setattr(fake_lib, "keyctl_search", _revoked)
+
+    with caplog.at_level("WARNING"):
+        assert kernel_keyring.load(MOCK_DB_PATH) is None
+        assert kernel_keyring.is_cached(MOCK_DB_PATH) is False
+        # Its contract is the end state, and a key that yields nothing meets it.
+        assert kernel_keyring.forget(MOCK_DB_PATH) is True
+
+    assert caplog.text == ""
+
+
+def test_a_permission_fault_is_still_reported(
+    monkeypatch: pytest.MonkeyPatch, fake_lib: FakeKeyutils, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The other half of the rule: a lookup that did not complete is not an answer."""
+
+    def _denied(_ring: int, _ktype: bytes, _desc: bytes, _dest: int) -> int:
+        ctypes.set_errno(errno.EACCES)
+        return -1
+
+    monkeypatch.setattr(fake_lib, "keyctl_search", _denied)
+
+    with caplog.at_level("WARNING"):
+        assert kernel_keyring.load(MOCK_DB_PATH) is None
+        # A cache that may still be there must never be reported as cleared.
+        assert kernel_keyring.forget(MOCK_DB_PATH) is False
+
+    assert "Permission denied" in caplog.text
 
 
 def test_store_warns_when_the_session_link_fails(
