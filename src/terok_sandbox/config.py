@@ -267,8 +267,11 @@ class SandboxConfig:
     Default-factory reads ``vault.ssh_signer_port`` from config.yml.
     """
 
-    shield_profiles: tuple[str, ...] = ("dev-standard",)
-    """Shield egress firewall profile names."""
+    shield_profiles: tuple[str, ...] = ()
+    """Shield egress firewall profile names.
+
+    Shield applies no profile unless one is named here.
+    """
 
     shield_audit: bool = field(default_factory=_default_shield_audit)
     """Whether shield audit logging is enabled.

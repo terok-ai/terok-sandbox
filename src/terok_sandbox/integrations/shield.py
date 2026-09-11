@@ -63,6 +63,7 @@ from terok_shield.prereqs import (  # noqa: F401 — re-exported with concrete t
     check_firewall_binaries,
     check_krun_binaries,
 )
+from terok_shield.profiles import UnknownProfileError
 from terok_shield.run import NftNotFoundError, ShieldNeedsSetup  # noqa: F401
 from terok_shield.state import (
     BUNDLE_VERSION as BUNDLE_VERSION,  # noqa: F401 — re-exported
@@ -210,7 +211,8 @@ class ShieldManager:
         ``disable_firewall_no_protection`` override is active.
 
         Raises [`SystemExit`][SystemExit] with setup instructions when
-        the podman environment requires one-time hook installation.
+        the podman environment requires one-time hook installation, and
+        with the available profiles when a named profile does not exist.
         """
         if self.disabled:
             warnings.warn(_DISABLED_WARNING, stacklevel=2)
@@ -223,7 +225,7 @@ class ShieldManager:
                 project_allow=project_allow,
                 override=override,
             )
-        except ShieldNeedsSetup as exc:
+        except (ShieldNeedsSetup, UnknownProfileError) as exc:
             raise SystemExit(str(exc)) from None
 
     def refresh(

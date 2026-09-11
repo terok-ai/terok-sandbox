@@ -311,8 +311,8 @@ def compose(
 
     from .integrations.shield import ShieldManager
 
-    # Profile override flows through cfg so shield's internal builder
-    # (which reads ``cfg.shield_profiles``) picks it up without a new
+    # Named profiles flow through cfg so shield's internal builder
+    # (which reads ``cfg.shield_profiles``) picks them up without a new
     # parameter on every layer.  ``__post_init__`` re-runs and skips
     # port re-allocation because every port is already concrete.
     if profiles:

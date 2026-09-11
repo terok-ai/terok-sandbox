@@ -80,7 +80,7 @@ def _handle_prepare(
         no_broker: Disable the vault token broker (default: on).
         scope: Credential scope.  Required for gate/broker/ssh; omit for
             a shield-only run.
-        profiles: Override shield profiles for this container.
+        profiles: Shield profiles to apply to this container.
         output_json: Emit a JSON array instead of a shell-quoted string.
         cfg: Optional [`SandboxConfig`][terok_sandbox.SandboxConfig] override.
     """
@@ -156,6 +156,42 @@ def _handle_cleanup(container: str, *, cfg: SandboxConfig | None = None) -> None
         print(f"No sandbox state found for {container}; nothing to clean up.")
 
 
+#: The arguments ``prepare`` and ``run`` share: both verbs wire the same
+#: sandbox services into a user-owned container.
+_WIRING_ARGS: tuple[ArgDef, ...] = (
+    ArgDef(name="container", help="Container name (becomes --name)"),
+    ArgDef(
+        name="--no-shield",
+        action="store_true",
+        help="Disable egress firewall (default: on)",
+        dest="no_shield",
+    ),
+    ArgDef(
+        name="--no-gate",
+        action="store_true",
+        help="Disable git gate (default: on; requires --scope)",
+        dest="no_gate",
+    ),
+    ArgDef(
+        name="--no-broker",
+        action="store_true",
+        help="Disable vault token broker (default: on; requires --scope)",
+        dest="no_broker",
+    ),
+    ArgDef(
+        name="--scope",
+        help="Credential scope; enables vault SSH agent and is required by gate/broker",
+    ),
+    ArgDef(
+        name="--profiles",
+        type=_csv_list,
+        help=(
+            "Shield profiles to apply to this container"
+            " (comma-separated, e.g. 'dev-standard,dev-python')"
+        ),
+    ),
+)
+
 LAUNCH_COMMANDS: tuple[CommandDef, ...] = (
     CommandDef(
         name="prepare",
@@ -163,34 +199,7 @@ LAUNCH_COMMANDS: tuple[CommandDef, ...] = (
         handler=LazyHandler("terok_sandbox.commands.launch:_handle_prepare"),
         epilog=_BRIDGES_EPILOG,
         args=(
-            ArgDef(name="container", help="Container name (becomes --name)"),
-            ArgDef(
-                name="--no-shield",
-                action="store_true",
-                help="Disable egress firewall (default: on)",
-                dest="no_shield",
-            ),
-            ArgDef(
-                name="--no-gate",
-                action="store_true",
-                help="Disable git gate (default: on; requires --scope)",
-                dest="no_gate",
-            ),
-            ArgDef(
-                name="--no-broker",
-                action="store_true",
-                help="Disable vault token broker (default: on; requires --scope)",
-                dest="no_broker",
-            ),
-            ArgDef(
-                name="--scope",
-                help="Credential scope; enables vault SSH agent and is required by gate/broker",
-            ),
-            ArgDef(
-                name="--profiles",
-                type=_csv_list,
-                help="Override shield profiles for this container (comma-separated, e.g. 'dev,pypi')",
-            ),
+            *_WIRING_ARGS,
             ArgDef(
                 name="--json",
                 action="store_true",
@@ -204,36 +213,7 @@ LAUNCH_COMMANDS: tuple[CommandDef, ...] = (
         help="Launch a sandboxed user-owned container (exec into podman run)",
         handler=LazyHandler("terok_sandbox.commands.launch:_handle_run"),
         epilog=_BRIDGES_EPILOG,
-        args=(
-            ArgDef(name="container", help="Container name (becomes --name)"),
-            ArgDef(
-                name="--no-shield",
-                action="store_true",
-                help="Disable egress firewall (default: on)",
-                dest="no_shield",
-            ),
-            ArgDef(
-                name="--no-gate",
-                action="store_true",
-                help="Disable git gate (default: on; requires --scope)",
-                dest="no_gate",
-            ),
-            ArgDef(
-                name="--no-broker",
-                action="store_true",
-                help="Disable vault token broker (default: on; requires --scope)",
-                dest="no_broker",
-            ),
-            ArgDef(
-                name="--scope",
-                help="Credential scope; enables vault SSH agent and is required by gate/broker",
-            ),
-            ArgDef(
-                name="--profiles",
-                type=_csv_list,
-                help="Override shield profiles for this container (comma-separated, e.g. 'dev,pypi')",
-            ),
-        ),
+        args=_WIRING_ARGS,
     ),
     CommandDef(
         name="cleanup",

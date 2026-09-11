@@ -30,7 +30,7 @@ terok-sandbox cleanup  <container>
 --no-gate                    disable the git gate                    default on
 --no-broker                  disable the vault token broker          default on
 --scope SCOPE                credential scope; enables SSH wiring    no default
---profiles A,B               shield profile override (comma-separated)
+--profiles A,B               shield profiles (comma-separated)       none
 --json                       (prepare only) emit JSON array          off
 ```
 

@@ -152,9 +152,9 @@ class RawCredentialsSection(BaseModel):
     passphrase: str | None = Field(
         default=None,
         description=(
-            "REMOVED — the plaintext config tier no longer exists.  The"
-            " validator below rejects any set value with migration"
-            " directions; the field itself stays so the error names the"
+            "Rejected when set: sandbox reads no plaintext passphrase from"
+            " config.  The validator below refuses any value with migration"
+            " directions; the field exists so the error names the"
             " replacement instead of pydantic's generic extra-key refusal."
         ),
     )
@@ -243,9 +243,6 @@ class RawShieldSection(BaseModel):
 
     disable_firewall_no_protection: bool = Field(
         default=False, description="**Dangerous**: disable egress firewall entirely"
-    )
-    profiles: dict[str, Any] | None = Field(
-        default=None, description="Named shield profiles for per-project firewall rules"
     )
     audit: bool = Field(default=True, description="Enable shield audit logging")
     dnsmasq_path: Path | None = Field(
@@ -584,10 +581,9 @@ class SandboxConfigView(BaseModel):
 
     - [`terok_executor.config_schema.ExecutorConfigView`][terok_executor.config_schema.ExecutorConfigView]
       inherits and adds the ``image:`` section.
-    - terok's ``RawGlobalConfig`` inherits and adds the remaining
-      five terok-owned sections, then flips to ``extra="forbid"`` —
-      the topmost layer knows every section, so a typo at the top
-      level is caught there.
+    - terok's ``RawGlobalConfig`` inherits and adds the terok-owned
+      sections, then flips to ``extra="forbid"`` — the topmost layer
+      knows every section, so a typo at the top level is caught there.
     """
 
     model_config = ConfigDict(extra="allow")

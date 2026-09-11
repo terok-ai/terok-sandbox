@@ -2167,7 +2167,6 @@ class TestResponseHeaderRelay:
 
 
 @pytest.mark.needs_loopback  # binds an aiohttp loopback server; krun TSI refuses it
-@pytest.mark.asyncio
 class TestUpstreamHandshakeRejection:
     """An upstream that refuses the websocket upgrade must say so through the broker."""
 

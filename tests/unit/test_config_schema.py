@@ -81,6 +81,12 @@ def test_shield_section_rejects_unknown_on_task_restart() -> None:
         RawShieldSection.model_validate({"on_task_restart": "restart"})
 
 
+def test_shield_section_rejects_profiles_key() -> None:
+    """The ``shield:`` section names no profiles; ``SandboxConfig.shield_profiles`` does."""
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        RawShieldSection.model_validate({"profiles": {"dev-standard": {}}})
+
+
 def test_ssh_section_use_personal_defaults_to_none() -> None:
     """``None`` (not False) is the default so layered configs can distinguish unset."""
     section = RawSSHSection.model_validate({})
