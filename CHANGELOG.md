@@ -1,4 +1,20 @@
 # Changelog
+## v0.5.0 — Past Prologue
+
+## What's Changed
+* fix: stoppable task containers — --init pid1 + state-watching stop() in https://github.com/terok-ai/terok-sandbox/pull/454
+* feat(vault): programmatic passphrase-tier provisioning API for TUI frontends in https://github.com/terok-ai/terok-sandbox/pull/456
+* feat(gpu): per-device grants + vendor-scoped raw DRM mounts in https://github.com/terok-ai/terok-sandbox/pull/463
+* fix(gpu): by-path binds must use --mount — PCI addresses break -v parsing in https://github.com/terok-ai/terok-sandbox/pull/464
+* feat(gate): agent-op backups + push marker via sandbox-owned hooks in https://github.com/terok-ai/terok-sandbox/pull/483
+* feat(vault): replace session-file tier with a kernel-keyring cache in https://github.com/terok-ai/terok-sandbox/pull/489
+* refactor!: rename the shield kill-switch to 'disabled' and the DOWN flag to 'disengaged' in https://github.com/terok-ai/terok-sandbox/pull/521
+* feat: user-friendly hints for AppArmor and SELinux in https://github.com/terok-ai/terok-sandbox/pull/537
+* feat: forward credential metadata as OAuth headers in https://github.com/terok-ai/terok-sandbox/pull/548
+
+
+**Full Changelog**: https://github.com/terok-ai/terok-sandbox/compare/v0.4.1...v0.5.0
+
 ## v0.4.1 — You Exist Here
 
 * Resilient clone-cache refresh, https://github.com/terok-ai/terok-sandbox/pull/430
