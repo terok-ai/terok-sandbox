@@ -10,7 +10,7 @@ exit (rc 0) we stop; on non-zero exit we retry with exponential
 backoff capped at five attempts.
 
 Stdlib-only by design (matches the OCI hook ballast): runs under the
-operator's system ``/usr/bin/python3`` rather than inside any
+setup-bound Python interpreter rather than relying on the launch
 virtualenv.  The absolute path to the ``terok-sandbox`` entry point
 is baked into ``_SANDBOX_BIN_ARGV`` at install time by
 [`install_supervisor_hooks`][terok_sandbox.supervisor.install.install_supervisor_hooks].

@@ -28,11 +28,12 @@ change itself, and can diff it against the host afterwards.
 from __future__ import annotations
 
 import shlex
-import shutil
 import subprocess  # nosec B404 — runs the bundled, audited installer via sudo
 import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+
+from terok_util import find_host_tool, require_no_downgrade
 
 from ._util._apparmor import (
     AppArmorStatus,
@@ -108,6 +109,10 @@ def handle_setup_component(
             f"unknown setup component {component!r}" if component else "--show needs a component"
         )
         raise SystemExit(f"{named}: {setup_invocation()} <{'|'.join(SETUP_COMPONENTS)}>")
+    if not show_only:
+        from .setup import check_setup
+
+        require_no_downgrade(check_setup(cfg))
     return _run_component(comp, show_only=show_only)
 
 
@@ -184,7 +189,7 @@ def _sudo_run(script_args: tuple[str, ...]) -> int:
     ``sudo`` fails with a plain sentence naming the alternative — the
     printed command still works from a root shell.
     """
-    sudo = shutil.which("sudo")
+    sudo = find_host_tool("sudo")
     if sudo is None:
         raise SystemExit("sudo not found on PATH. Run the command above as root instead.")
     return subprocess.run([sudo, "bash", *script_args], check=False).returncode  # nosec B603

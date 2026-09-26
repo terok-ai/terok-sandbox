@@ -37,7 +37,6 @@ import contextlib
 import json
 import os
 import subprocess  # nosec B404 — re-invokes our own installed OCI hook
-import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -50,6 +49,7 @@ from .supervisor.install import (
     _PIDS_DIR_NAME,
     _TRIGGER_ANNOTATION,
     _WRAPPER_NAME,
+    _descriptor_name,
 )
 
 _LOGS_DIR_NAME = "logs"
@@ -266,6 +266,14 @@ def respawn_supervisor(
     sidecar = root / _SIDECAR_DIR_NAME / f"{container_name}.json"
     if not (hook.is_file() and sidecar.is_file()):
         return supervisor_liveness(container_id, state_dir=root)
+    try:
+        descriptor = json.loads((hook.parent / _descriptor_name("createRuntime")).read_text())
+        installed_hook = descriptor["hook"]
+        argv = [installed_hook["path"], *installed_hook["args"][1:]]
+        if not all(isinstance(arg, str) for arg in argv):
+            raise ValueError("Invalid installed hook arguments")
+    except (OSError, ValueError, KeyError, TypeError):
+        return supervisor_liveness(container_id, state_dir=root)
 
     state: dict[str, object] = {
         "id": container_id,
@@ -275,7 +283,7 @@ def respawn_supervisor(
         state["pid"] = container_pid
     with contextlib.suppress(OSError, subprocess.SubprocessError):
         subprocess.run(  # nosec B603 — fixed argv, our own installed hook script
-            [sys.executable, str(hook), "createRuntime"],
+            argv,
             input=json.dumps(state),
             text=True,
             timeout=_RESPAWN_TIMEOUT_S,

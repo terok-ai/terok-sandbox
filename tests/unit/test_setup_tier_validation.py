@@ -11,8 +11,6 @@ to back out cleanly.
 
 from __future__ import annotations
 
-from unittest.mock import patch
-
 import pytest
 
 from terok_sandbox.commands.sandbox import _handle_sandbox_setup, _validate_passphrase_tier
@@ -107,7 +105,7 @@ class TestSetupRejectsBeforeMutation:
         # escape hatch.
         monkeypatch.setattr("terok_sandbox._setup.run_legacy_install_cleanup_phase", lambda: True)
         monkeypatch.setattr("terok_sandbox._setup.run_shield_install_phase", lambda **_kw: True)
-        monkeypatch.setattr("terok_sandbox._setup.run_supervisor_install_phase", lambda: True)
+        monkeypatch.setattr("terok_sandbox._setup.run_supervisor_install_phase", lambda **_kw: True)
         monkeypatch.setattr(
             "terok_sandbox._setup.run_prereq_report",
             lambda _cfg: (_FakeResult(), _FakeResult()),
@@ -120,9 +118,12 @@ class TestSetupRejectsBeforeMutation:
             "terok_sandbox._setup.print_apparmor_install_hint",
             lambda _result: None,
         )
-        # write_stamp is imported lazily inside the handler; patch its
-        # source module so the import resolves to a no-op.
-        monkeypatch.setattr("terok_sandbox.setup_stamp.write_stamp", lambda: "fake-stamp")
+        monkeypatch.setattr("terok_sandbox.setup.check_setup", lambda *_a, **_kw: ())
+        monkeypatch.setattr("terok_sandbox.setup.check_host_tools", lambda: ())
+        monkeypatch.setattr("terok_sandbox.setup.check_artifacts", lambda *_a, **_kw: ())
+        monkeypatch.setattr(
+            "terok_sandbox.integrations.shield.ShieldHooks.check_setup", lambda **_kw: ()
+        )
 
         # Boobytrap the credentials phase.  ``--no-vault`` MUST short-
         # circuit it entirely; if it fires it means the gate didn't hold
@@ -136,5 +137,4 @@ class TestSetupRejectsBeforeMutation:
         )
 
         # Should not raise — the bogus tier is ignored under --no-vault.
-        with patch("terok_sandbox.config.SandboxConfig"):
-            _handle_sandbox_setup(passphrase_tier="bogus", no_vault=True)
+        _handle_sandbox_setup(passphrase_tier="bogus", no_vault=True)

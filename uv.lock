@@ -2390,17 +2390,13 @@ wheels = [
 
 [[package]]
 name = "terok-clearance"
-version = "0.8.0"
-source = { registry = "https://pypi.org/simple" }
+version = "0.8.1.dev236+g9ab670c65"
+source = { git = "https://github.com/sliwowitz/terok-clearance?rev=fix%2Fnixos-path-setup#9ab670c65a0f9295fce37e46b0878aaa4ff6b031" }
 dependencies = [
     { name = "asyncvarlink" },
     { name = "dbus-fast" },
     { name = "pyyaml" },
     { name = "terok-util" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/04/c0/4f3e8aee8de390ff0e651fdf8940fe2fccb930c1303fd2d3638c0a9de482/terok_clearance-0.8.0.tar.gz", hash = "sha256:6af96198f49b8daf32765a64033cc43ffe452e7cb7b18c02a259f34ed95b6462", size = 216210, upload-time = "2026-09-11T08:51:34.575Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/86/ef/be3579b2d72ce5ac8f4246609f26c85b1b4c37a3be96c3c2c4eb5f12850e/terok_clearance-0.8.0-py3-none-any.whl", hash = "sha256:d54c65a3824d5adb4644e94bf936589926abe7063df4c97f4e96ca8e42aec3f3", size = 76693, upload-time = "2026-09-11T08:51:33.339Z" },
 ]
 
 [[package]]
@@ -2463,9 +2459,9 @@ requires-dist = [
     { name = "pydantic", specifier = "~=2.13" },
     { name = "ruamel-yaml", specifier = "==0.19.1" },
     { name = "sqlcipher3", specifier = "==0.6.2" },
-    { name = "terok-clearance", specifier = ">=0.8.0,<0.9.0" },
-    { name = "terok-shield", specifier = ">=0.8.0,<0.9.0" },
-    { name = "terok-util", specifier = ">=0.3.1,<0.4.0" },
+    { name = "terok-clearance", git = "https://github.com/sliwowitz/terok-clearance?rev=fix%2Fnixos-path-setup" },
+    { name = "terok-shield", git = "https://github.com/sliwowitz/terok-shield?rev=fix%2Fnixos-path-setup" },
+    { name = "terok-util", git = "https://github.com/sliwowitz/terok-util?rev=fix%2Fnixos-path-setup" },
 ]
 
 [package.metadata.requires-dev]
@@ -2499,30 +2495,23 @@ test = [
 
 [[package]]
 name = "terok-shield"
-version = "0.8.0"
-source = { registry = "https://pypi.org/simple" }
+version = "0.9.0.dev380+gbfdef64f5"
+source = { git = "https://github.com/sliwowitz/terok-shield?rev=fix%2Fnixos-path-setup#bfdef64f5ad81fb24aefc37ea3c7fbe3775a6dc9" }
 dependencies = [
     { name = "pydantic" },
     { name = "pyyaml" },
     { name = "terok-util" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/3d/5b/cbf9d24dce38bf142c7ca8efb4818ae07f65a0f3b4fe0d5e74b6ed14b954/terok_shield-0.8.0.tar.gz", hash = "sha256:1a8c3ab450f67d5cf3ee67bb8d8489d674d830fdb15e2a99f02c4b646744c766", size = 464375, upload-time = "2026-09-11T08:59:30.261Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/8b/b9/926c8cb71dc9f0186a7a13ef3bcea7cc6f19c9a03a6263d211028bb3cc1a/terok_shield-0.8.0-py3-none-any.whl", hash = "sha256:73d4102a5ea9e30e140cb298fb64dd6ac3b6af70706bdbefbb1dc966eefe50ca", size = 173743, upload-time = "2026-09-11T08:59:28.574Z" },
-]
 
 [[package]]
 name = "terok-util"
-version = "0.3.1"
-source = { registry = "https://pypi.org/simple" }
+version = "0.4.0.dev120+gc969834ac"
+source = { git = "https://github.com/sliwowitz/terok-util?rev=fix%2Fnixos-path-setup#c969834ac9f7c848a5e01f67177267a07383639b" }
 dependencies = [
     { name = "jinja2" },
+    { name = "packaging" },
     { name = "platformdirs" },
     { name = "ruamel-yaml" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/29/00/ed3fa723b046b04a3549b7e239a0d67382df830205cccdc66094da7a8473/terok_util-0.3.1.tar.gz", hash = "sha256:75e6eaffa9afc59ad6c23600283540ffd9dd116eda66734254e93e4e9b7f7f86", size = 253434, upload-time = "2026-09-11T08:44:15.269Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/c1/56/ac8f7a76cd7abe4178ebcd236c325b92fb6f0401dcd7162211dc752fd039/terok_util-0.3.1-py3-none-any.whl", hash = "sha256:eeabc6359f33781c4aecdf86917a4f583bec5c3b8d2ed24fa17fa3a57b3c6847", size = 114249, upload-time = "2026-09-11T08:44:13.72Z" },
 ]
 
 [[package]]

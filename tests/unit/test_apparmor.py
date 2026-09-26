@@ -44,7 +44,7 @@ def _arrange(
     enabled.write_text("Y\n" if apparmor else "N\n")
     monkeypatch.setattr(_apparmor, "_APPARMOR_ENABLED", enabled)
     monkeypatch.setattr(
-        _apparmor.shutil, "which", lambda _n: "/usr/sbin/dnsmasq" if dnsmasq else None
+        _apparmor, "find_host_tool", lambda _n: "/usr/sbin/dnsmasq" if dnsmasq else None
     )
     prof = tmp_path / "etc" / "apparmor.d" / "dnsmasq"
     if profile:

@@ -34,9 +34,9 @@ dynamic = ["version"]
 # Dependency pins follow the policy in AGENTS.md ("Dependency Pinning &
 # pyproject.toml Hygiene").  Keep the dependency list comment-free.
 dependencies = [
-    "terok-util>=0.3.1,<0.4.0",
-    "terok-shield>=0.8.0,<0.9.0",
-    "terok-clearance>=0.8.0,<0.9.0",
+    "terok-util @ git+https://github.com/sliwowitz/terok-util@fix/nixos-path-setup",
+    "terok-shield @ git+https://github.com/sliwowitz/terok-shield@fix/nixos-path-setup",
+    "terok-clearance @ git+https://github.com/sliwowitz/terok-clearance@fix/nixos-path-setup",
     "platformdirs~=4.11",
     "aiohttp~=3.14.3",
     "cryptography~=50.0",
@@ -102,7 +102,7 @@ allow-direct-references = true
 
 [tool.hatch.version]
 source = "vcs"
-fallback-version = "0.5.1a2"
+fallback-version = "0.6.0.dev0"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/terok_sandbox"]

@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import ctypes
 import errno
-import shutil
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
@@ -38,6 +37,8 @@ from functools import lru_cache
 from importlib.resources import files as _resource_files
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from terok_util import find_host_tool
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -164,7 +165,7 @@ def missing_policy_tools() -> list[str]:
     missing tools.  Names are returned in invocation order so callers
     can surface the first one a user would hit.
     """
-    return [t for t in ("checkmodule", "semodule_package", "semodule") if not shutil.which(t)]
+    return [t for t in ("checkmodule", "semodule_package", "semodule") if not find_host_tool(t)]
 
 
 # ---------- Policy installation ----------

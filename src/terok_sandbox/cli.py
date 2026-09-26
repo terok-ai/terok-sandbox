@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: 2025 Jiri Vyskocil
+# SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
 """CLI entry point for terok-sandbox.
@@ -60,7 +61,7 @@ def main(argv: list[str] | None = None) -> None:
     """Entry point for the ``terok-sandbox`` command."""
     import sys
 
-    from terok_util import configure
+    from terok_util import SetupRequiredError, configure
 
     # One-time unified logging: routes every getLogger(__name__) to journald
     # (when present) or stderr — the non-supervisor CLI paths had no handler.
@@ -103,7 +104,10 @@ def main(argv: list[str] | None = None) -> None:
         args.podman_args = run_trailing
 
     if hasattr(args, "_cmd"):
-        CommandTree.dispatch(args)
+        try:
+            CommandTree.dispatch(args)
+        except SetupRequiredError as exc:
+            raise SystemExit(str(exc)) from None
     elif hasattr(args, "_group_help"):
         args._group_help.print_help()
     else:

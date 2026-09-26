@@ -76,7 +76,7 @@ _PROC_DIR = Path("/proc")
 
 #: The pinned part of the spawn env a user unit receives — the rest of
 #: the unit's environment is the user manager's own, never the hook's.
-_UNIT_ENV = ("XDG_RUNTIME_DIR", "HOME", "DBUS_SESSION_BUS_ADDRESS")
+_UNIT_ENV = ("PATH", "XDG_RUNTIME_DIR", "HOME", "DBUS_SESSION_BUS_ADDRESS")
 
 #: How the user manager hardens the unit.  ``KeyringMode=inherit`` is the
 #: whole point of the placement: the unit reads the operator's user
@@ -262,7 +262,7 @@ def _spawn_supervisor(
         return
 
     env = _spawn_env(host_uid)
-    wrapper_argv = ["/usr/bin/python3", str(wrapper_path), container_id, str(sidecar_path)]
+    wrapper_argv = [sys.executable, "-I", str(wrapper_path), container_id, str(sidecar_path)]
     if container_pid is not None:
         wrapper_argv.append(str(container_pid))
 
@@ -316,15 +316,19 @@ def _spawn_unit(
 
     The unit collects itself when it ends, appends its output to the same
     per-container log the daemon placement writes, is hardened by
-    ``_UNIT_PROPERTIES``, and carries only the pinned trio of
+    ``_UNIT_PROPERTIES``, and carries the effective host PATH and session identity in
     ``_UNIT_ENV`` — the manager's own environment is the rest, never the
     runtime's hook env.  Returns the unit's main PID; ``None`` when the
     manager refused, so the caller falls back to a daemon; ``0`` when the
     unit started but its process is already gone — nothing to record and
     nothing to fall back to, the wrapper's own exit is in the log.
     """
+    systemd_run = _supervisor_state.find_host_tool("systemd-run")
+    systemctl = _supervisor_state.find_host_tool("systemctl")
+    if systemd_run is None or systemctl is None:
+        return None
     argv = [
-        "systemd-run",
+        systemd_run,
         "--user",
         "--quiet",
         "--collect",
@@ -346,7 +350,7 @@ def _spawn_unit(
             )
             return None
         shown = subprocess.run(  # noqa: S603  # nosec B603 B607
-            ["systemctl", "--user", "show", "--property=MainPID", "--value", unit],
+            [systemctl, "--user", "show", "--property=MainPID", "--value", unit],
             capture_output=True,
             text=True,
             check=False,

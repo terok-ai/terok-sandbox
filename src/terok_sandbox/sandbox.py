@@ -23,7 +23,7 @@ from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
-from terok_util import podman_userns_args
+from terok_util import podman_userns_args, require_setup
 
 from .config import SandboxConfig
 from .runtime import ContainerRuntime, PodmanRuntime
@@ -33,6 +33,7 @@ from .runtime.podman import (
     redact_env_args,
     unshielded_network_args,
 )
+from .setup import check_setup
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -772,6 +773,7 @@ class Sandbox:
         after a successful start.  Raises [`GpuConfigError`][terok_sandbox.GpuConfigError] when the
         launch fails due to NVIDIA CDI misconfiguration.
         """
+        require_setup(check_setup(self._cfg, live=True))
         if spec.sealed:
             self.create(spec, hooks=hooks)
             # ``live`` volumes are bind-mounted (handled by _build_cmd);
@@ -814,6 +816,7 @@ class Sandbox:
         ``podman create``.  The container can then receive injected files
         via [`copy_to`][terok_sandbox.sandbox.Sandbox.copy_to] before being started with [`start`][terok_sandbox.sandbox.Sandbox.start].
         """
+        require_setup(check_setup(self._cfg, live=True))
         cmd = self._build_cmd(spec, verb="create")
         print("$", shlex.join(redact_env_args(cmd)))
 
@@ -840,6 +843,7 @@ class Sandbox:
 
         Fires *hooks.post_start* after a successful start.
         """
+        require_setup(check_setup(self._cfg, live=True))
         self._cfg.ensure_container_runtime_dir(container_name)
         handle = self._runtime.container(container_name)
         self._warn_if_outdated(container_name, handle)

@@ -169,7 +169,18 @@ class TestRespawnSupervisor:
     @staticmethod
     def _install_hook_and_sidecar(tmp_path: Path) -> None:
         (tmp_path / "hooks").mkdir(parents=True, exist_ok=True)
-        (tmp_path / "hooks" / "supervisor_hook.py").write_text("# hook")
+        hook = tmp_path / "hooks" / "supervisor_hook.py"
+        hook.write_text("# hook")
+        (hook.parent / "terok-sandbox-supervisor-createRuntime.json").write_text(
+            json.dumps(
+                {
+                    "hook": {
+                        "path": sys.executable,
+                        "args": [sys.executable, "-I", str(hook), "createRuntime"],
+                    }
+                }
+            )
+        )
         (tmp_path / "sidecar").mkdir(parents=True, exist_ok=True)
         (tmp_path / "sidecar" / f"{_CNAME}.json").write_text("{}")
 
@@ -188,8 +199,9 @@ class TestRespawnSupervisor:
 
         argv = captured["argv"]
         assert argv[0] == sys.executable
-        assert argv[1] == str(tmp_path / "hooks" / "supervisor_hook.py")
-        assert argv[2] == "createRuntime"
+        assert argv[1] == "-I"
+        assert argv[2] == str(tmp_path / "hooks" / "supervisor_hook.py")
+        assert argv[3] == "createRuntime"
         state = json.loads(captured["input"])
         assert state["id"] == _CID
         assert state["annotations"]["terok.sandbox.sidecar"] == str(
@@ -254,3 +266,19 @@ class TestRespawnSupervisor:
         result = respawn_supervisor(_CID, _CNAME, state_dir=tmp_path)
         assert result.alive is True
         assert result.pid == pid
+
+
+def test_respawn_preserves_installed_bootstrap(tmp_path, monkeypatch):
+    """A repair refires the installation binding, never whichever Python calls it."""
+    TestRespawnSupervisor._install_hook_and_sidecar(tmp_path)
+    descriptor_path = tmp_path / "hooks" / "terok-sandbox-supervisor-createRuntime.json"
+    descriptor = json.loads(descriptor_path.read_text())
+    bootstrap = str(tmp_path / "installed-python")
+    descriptor["hook"]["path"] = bootstrap
+    descriptor["hook"]["args"][0] = bootstrap
+    descriptor_path.write_text(json.dumps(descriptor))
+    monkeypatch.setattr(diag, "_RESPAWN_SETTLE_S", 0.0)
+    calls = []
+    monkeypatch.setattr(diag.subprocess, "run", lambda argv, **_: calls.append(argv))
+    respawn_supervisor(_CID, _CNAME, state_dir=tmp_path)
+    assert calls[0][0] == bootstrap

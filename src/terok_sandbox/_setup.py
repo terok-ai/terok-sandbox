@@ -26,9 +26,10 @@ every public entry point goes through `commands._handle_sandbox_setup`.
 from __future__ import annotations
 
 import contextlib
-import shutil
 from collections.abc import Callable, Iterable
 from pathlib import Path
+
+from terok_util import find_host_tool
 
 from ._stage import stage_line as _stage_line
 from ._util import _systemctl
@@ -46,8 +47,10 @@ from .config import SandboxConfig
 from .gate.server import GIT_HTTP_BACKEND_HINT, git_http_backend
 from .integrations.shield import BinaryCheck
 from .operator_cli import setup_invocation
+from .paths import namespace_state_dir
 
 _HOST_BINARIES: tuple[str, ...] = ("podman", "git", "ssh-keygen")
+_LEGACY_SETUP_STAMP = "setup.stamp"
 
 
 # ── Prereq reporting (host binaries, firewall binaries, SELinux) ─────
@@ -77,7 +80,7 @@ def run_prereq_report(cfg: SandboxConfig) -> tuple[SelinuxCheckResult, AppArmorC
 def _report_host_binaries() -> None:
     for name in _HOST_BINARIES:
         with _stage_line(name) as s:
-            path = shutil.which(name)
+            path = find_host_tool(name)
             if path:
                 s.ok(path)
             else:
@@ -243,7 +246,7 @@ def _report_apparmor() -> AppArmorCheckResult:
 # ── Service install phases ────────────────────────────────────────────
 
 
-def run_supervisor_install_phase() -> bool:
+def run_supervisor_install_phase(*, root: Path | None = None) -> bool:
     """Install the OCI supervisor hook + wrapper under ``state_root()``.
 
     Lays down (with ``state_root()`` resolved from ``paths.root`` —
@@ -269,7 +272,7 @@ def run_supervisor_install_phase() -> bool:
 
     with _stage_line("Supervisor hooks") as s:
         try:
-            install_supervisor_hooks()
+            install_supervisor_hooks(root=root)
         except Exception as exc:  # noqa: BLE001 — aggregator uniformity
             s.fail(str(exc))
             return False
@@ -277,7 +280,7 @@ def run_supervisor_install_phase() -> bool:
         return True
 
 
-def run_supervisor_uninstall_phase() -> bool:
+def run_supervisor_uninstall_phase(*, root: Path | None = None) -> bool:
     """Remove every file [`run_supervisor_install_phase`][terok_sandbox._setup.run_supervisor_install_phase] would write.
 
     Idempotent — missing files are tolerated.  Leaves any per-
@@ -290,7 +293,7 @@ def run_supervisor_uninstall_phase() -> bool:
 
     with _stage_line("Supervisor hooks") as s:
         try:
-            uninstall_supervisor_hooks()
+            uninstall_supervisor_hooks(root=root)
         except Exception as exc:  # noqa: BLE001
             s.fail(str(exc))
             return False
@@ -378,10 +381,8 @@ def run_legacy_install_cleanup_phase() -> bool:
       (``$XDG_RUNTIME_DIR/terok-shield-events.sock``) from the
       single-hub-socket era.
 
-    Operators upgrading from a pre-supervisor install lose access to old
-    tasks (per the hard rule: no state preservation across the
-    refactor); the cleanup is purely about removing the *host-side*
-    machinery that would fight a fresh setup for sockets / unit names.
+    Only obsolete host-side installation artifacts are removed. Task state,
+    credentials, and operator configuration are preserved.
     """
     with _stage_line("Legacy install cleanup") as s:
         _disable_legacy_units(_LEGACY_SYSTEMD_UNITS)
@@ -391,6 +392,8 @@ def run_legacy_install_cleanup_phase() -> bool:
         _unlink_legacy_runtime_sockets()
         _unlink_legacy_xdg_data_files()
         _unlink_legacy_shield_global_hooks()
+        with contextlib.suppress(OSError):
+            (namespace_state_dir() / _LEGACY_SETUP_STAMP).unlink(missing_ok=True)
         s.ok("swept (legacy units + sockets, if any)")
         return True
 

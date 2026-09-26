@@ -279,7 +279,7 @@ class TestLiveContainerIds:
             {"Id": _STOPPED, "State": "exited"},
             {"Id": "d" * 64, "State": "dead"},
         ]
-        monkeypatch.setattr(janitor.shutil, "which", lambda _n: "/usr/bin/podman")
+        monkeypatch.setattr(janitor, "find_host_tool", lambda _n: "/usr/bin/podman")
 
         class _Res:
             stdout = json.dumps(rows)
@@ -291,12 +291,12 @@ class TestLiveContainerIds:
 
     def test_missing_podman_is_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """No podman on PATH → ``None`` (unknown), never an empty set."""
-        monkeypatch.setattr(janitor.shutil, "which", lambda _n: None)
+        monkeypatch.setattr(janitor, "find_host_tool", lambda _n: None)
         assert janitor._live_container_ids() is None
 
     def test_subprocess_error_is_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A podman invocation that errors/times out → ``None`` (unknown)."""
-        monkeypatch.setattr(janitor.shutil, "which", lambda _n: "/usr/bin/podman")
+        monkeypatch.setattr(janitor, "find_host_tool", lambda _n: "/usr/bin/podman")
 
         def _boom(*_a: object, **_k: object) -> None:
             raise janitor.subprocess.TimeoutExpired(cmd="podman", timeout=10)
@@ -306,7 +306,7 @@ class TestLiveContainerIds:
 
     def test_unparsable_json_is_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Non-JSON stdout → ``None`` rather than a bogus empty set."""
-        monkeypatch.setattr(janitor.shutil, "which", lambda _n: "/usr/bin/podman")
+        monkeypatch.setattr(janitor, "find_host_tool", lambda _n: "/usr/bin/podman")
 
         class _Res:
             stdout = "not json"

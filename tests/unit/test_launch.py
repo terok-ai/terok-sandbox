@@ -919,7 +919,7 @@ class TestHandlers:
                 "terok_sandbox.integrations.shield.ShieldManager.pre_start",
                 return_value=["--annotation=x"],
             ),
-            patch("terok_sandbox.launch.shutil.which", return_value="/usr/bin/podman"),
+            patch("terok_sandbox.launch.find_host_tool", return_value="/usr/bin/podman"),
             patch("terok_sandbox.launch.Path.resolve", return_value=Path("/usr/bin/podman")),
             patch("terok_sandbox.launch.Path.is_file", return_value=True),
             patch("terok_sandbox.launch.os.access", return_value=True),
@@ -947,14 +947,14 @@ class TestExecPodman:
             exec_podman(["--name", "myc"], [])
 
     def test_find_podman_missing_raises(self) -> None:
-        with patch("terok_sandbox.launch.shutil.which", return_value=None):
+        with patch("terok_sandbox.launch.find_host_tool", return_value=None):
             with pytest.raises(SystemExit, match="podman binary not found"):
                 _find_podman()
 
     def test_exec_podman_rejects_collisions_before_execv(self) -> None:
         """Collision check fires before os.execv — execv never reached."""
         with (
-            patch("terok_sandbox.launch.shutil.which", return_value="/usr/bin/podman"),
+            patch("terok_sandbox.launch.find_host_tool", return_value="/usr/bin/podman"),
             patch("terok_sandbox.launch.os.execv") as execv,
             pytest.raises(SystemExit, match="--name"),
         ):
@@ -1247,7 +1247,7 @@ class TestEdgeCases:
         with (
             patch("terok_sandbox.config.SandboxConfig", return_value=fake_cfg),
             patch("terok_sandbox.integrations.shield.ShieldManager.pre_start", return_value=[]),
-            patch("terok_sandbox.launch.shutil.which", return_value="/usr/bin/podman"),
+            patch("terok_sandbox.launch.find_host_tool", return_value="/usr/bin/podman"),
             patch("terok_sandbox.launch.Path.resolve", return_value=Path("/usr/bin/podman")),
             patch("terok_sandbox.launch.Path.is_file", return_value=True),
             patch("terok_sandbox.launch.os.access", return_value=True),
@@ -1428,20 +1428,20 @@ class TestResolveContainerId:
 
         result = MagicMock(returncode=0, stdout="abc123def456\n")
         with (
-            patch("terok_sandbox.launch.shutil.which", return_value="/usr/bin/podman"),
+            patch("terok_sandbox.launch.find_host_tool", return_value="/usr/bin/podman"),
             patch("terok_sandbox.launch.subprocess.run", return_value=result),
         ):
             assert _resolve_container_id("myc") == "abc123def456"
 
     def test_returns_none_when_podman_missing(self) -> None:
         """No podman on PATH ⇒ nothing to resolve."""
-        with patch("terok_sandbox.launch.shutil.which", return_value=None):
+        with patch("terok_sandbox.launch.find_host_tool", return_value=None):
             assert _resolve_container_id("myc") is None
 
     def test_returns_none_on_subprocess_error(self) -> None:
         """A subprocess OSError/timeout collapses to ``None``."""
         with (
-            patch("terok_sandbox.launch.shutil.which", return_value="/usr/bin/podman"),
+            patch("terok_sandbox.launch.find_host_tool", return_value="/usr/bin/podman"),
             patch("terok_sandbox.launch.subprocess.run", side_effect=OSError("boom")),
         ):
             assert _resolve_container_id("myc") is None
@@ -1452,7 +1452,7 @@ class TestResolveContainerId:
 
         result = MagicMock(returncode=125, stdout="")
         with (
-            patch("terok_sandbox.launch.shutil.which", return_value="/usr/bin/podman"),
+            patch("terok_sandbox.launch.find_host_tool", return_value="/usr/bin/podman"),
             patch("terok_sandbox.launch.subprocess.run", return_value=result),
         ):
             assert _resolve_container_id("myc") is None
@@ -1463,7 +1463,18 @@ class TestResolveContainerId:
 
         result = MagicMock(returncode=0, stdout="  \n")
         with (
-            patch("terok_sandbox.launch.shutil.which", return_value="/usr/bin/podman"),
+            patch("terok_sandbox.launch.find_host_tool", return_value="/usr/bin/podman"),
             patch("terok_sandbox.launch.subprocess.run", return_value=result),
         ):
             assert _resolve_container_id("myc") is None
+
+
+def test_podman_lookup_preserves_operator_symlink(tmp_path, monkeypatch):
+    """A Nix/profile wrapper keeps the spelling the launching shell selected."""
+    binary = tmp_path / "podman-real"
+    binary.write_text("#!/bin/sh\nexit 0\n")
+    binary.chmod(0o755)
+    link = tmp_path / "podman"
+    link.symlink_to(binary)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    assert _find_podman() == str(link)

@@ -62,12 +62,15 @@ path = "terok_sandbox.port_registry"
 layer = "foundation"
 depends_on = ["terok_sandbox.paths"]
 
-# Setup-stamp primitive — JSON marker + version comparison; reads tracked
-# package versions via importlib.metadata, writes under namespace_state_dir.
+# Sandbox-owned readiness composed downward.
 [[modules]]
-path = "terok_sandbox.setup_stamp"
-layer = "foundation"
-depends_on = ["terok_sandbox.paths"]
+path = "terok_sandbox.setup"
+layer = "surface"
+depends_on = [
+    "terok_sandbox.config",
+    "terok_sandbox.integrations.shield",
+    "terok_sandbox.supervisor",
+]
 
 # Stage-line renderer — colour palette + column width.  Zero internal
 # deps; imported by _setup and by downstream frontends via the package
@@ -353,6 +356,7 @@ depends_on = [
 path = "terok_sandbox.sandbox"
 layer = "surface"
 depends_on = [
+    "terok_sandbox.setup",
     "terok_sandbox.integrations.shield",
 ]
 
@@ -363,6 +367,7 @@ depends_on = [
 path = "terok_sandbox.commands"
 layer = "surface"
 depends_on = [
+    "terok_sandbox.setup",
     "terok_sandbox.commands.credentials",
     "terok_sandbox.commands.doctor",
     "terok_sandbox.commands.gate",
@@ -392,6 +397,7 @@ depends_on = []
 path = "terok_sandbox.commands.sandbox"
 layer = "surface"
 depends_on = [
+    "terok_sandbox.setup",
     "terok_sandbox._setup",
     "terok_sandbox._setup_manual",
     "terok_sandbox.commands.credentials",
@@ -526,6 +532,7 @@ depends_on = []
 path = "terok_sandbox.launch"
 layer = "surface"
 depends_on = [
+    "terok_sandbox.setup",
     "terok_sandbox.sandbox",
     "terok_sandbox.integrations.shield",
 ]
@@ -550,7 +557,7 @@ depends_on = [
 [[modules]]
 path = "terok_sandbox._setup_manual"
 layer = "surface"
-depends_on = []
+depends_on = ["terok_sandbox.setup"]
 
 # Foundation-level constants shared by the surface layer (orchestrators
 # that raise them) and the package init (re-exports them as public

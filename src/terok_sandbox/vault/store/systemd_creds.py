@@ -62,12 +62,13 @@ import functools
 import json
 import os
 import re
-import shutil
 import socket
 import subprocess  # nosec: B404 — sealed credential lifecycle requires the systemd-creds CLI
 import tempfile
 from pathlib import Path
 from typing import Literal
+
+from terok_util import find_host_tool
 
 # ── Vocabulary ──────────────────────────────────────────────────────
 
@@ -449,8 +450,13 @@ def has_tpm2() -> bool:
 # ── Version detection ───────────────────────────────────────────────
 
 
-@functools.cache
 def _systemd_creds_version() -> int | None:
+    """Probe the executable selected by the current PATH."""
+    return _version_for_executable(_systemd_creds_exe())
+
+
+@functools.cache
+def _version_for_executable(exe: str | None) -> int | None:
     """Return the major version of the installed ``systemd-creds``, or ``None``.
 
     Parses the first integer out of ``systemd-creds --version``.
@@ -465,7 +471,6 @@ def _systemd_creds_version() -> int | None:
     ``_isolate_systemd_creds_version_cache`` autouse fixture in
     ``conftest.py``.
     """
-    exe = _systemd_creds_exe()
     if exe is None:
         return None
     try:
@@ -484,21 +489,9 @@ def _systemd_creds_version() -> int | None:
     return int(match.group(1))
 
 
-@functools.cache
 def _systemd_creds_exe() -> str | None:
-    """Return the absolute path of ``systemd-creds``, or ``None`` if absent.
-
-    Resolved once via ``shutil.which`` and reused for every subprocess
-    call; this pins us to the binary that was on ``PATH`` at first
-    look, defending against later ``PATH``-shuffling that would
-    otherwise allow a same-UID attacker to substitute the binary
-    between calls.
-
-    Cached for the process lifetime — ``PATH`` resolution is stable
-    while the process runs.  Tests clear the cache via the
-    ``_isolate_systemd_creds_version_cache`` conftest fixture.
-    """
-    return shutil.which(_BINARY)
+    """Find ``systemd-creds`` afresh in the current host PATH."""
+    return find_host_tool(_BINARY)
 
 
 def _require_exe() -> str:

@@ -26,7 +26,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from terok_util import podman_userns_args
+from terok_util import find_host_tool, podman_userns_args, require_setup
 
 from .config import SandboxConfig
 from .doctor import CheckVerdict, DoctorCheck
@@ -41,6 +41,7 @@ from .podman_args import (
     reject_managed_volumes,
 )
 from .sandbox import Sharing, VolumeSpec
+from .setup import check_setup
 
 # Loopback TCP port the in-container vault HTTP bridge listens on in
 # socket-transport mode.  Constant by design — every layer (this module,
@@ -304,10 +305,15 @@ def compose(
     fail-closed property; nudging the caller toward a useful invocation
     is the job of the CLI layer.
 
-    Raises ``SystemExit`` if shield setup is required (propagated from
+    Raises a typed setup error before changing per-container state (propagated from
     [`ShieldManager.pre_start`][terok_sandbox.integrations.shield.ShieldManager.pre_start]).
     """
     _validate_container_name(container)
+    require_setup(
+        check_setup(
+            dataclasses.replace(cfg, shield_disabled=cfg.shield_disabled or not shield), live=True
+        )
+    )
 
     from .integrations.shield import ShieldManager
 
@@ -711,7 +717,7 @@ def _podman_container_names() -> frozenset[str] | None:
     Mirrors `_resolve_container_id`'s soft-fail stance on a missing /
     broken podman.
     """
-    podman = shutil.which("podman")
+    podman = find_host_tool("podman")
     if podman is None:
         return None
     try:
@@ -755,17 +761,15 @@ def exec_podman(sandbox_args: list[str], podman_args: list[str]) -> None:
     podman = _find_podman()
     argv = [podman, "run", *sandbox_args, *podman_args]
     # ``argv`` is fully constructed in-process and uses an absolute path
-    # to podman, so shell interpretation and PATH spoofing do not apply.
+    # to the operator-selected podman; no shell interpretation is involved.
     os.execv(podman, argv)  # nosec B606
 
 
 def _find_podman() -> str:
     """Locate the podman binary."""
-    found = shutil.which("podman")
+    found = find_host_tool("podman")
     if found:
-        resolved = Path(found).resolve()
-        if resolved.is_file() and os.access(resolved, os.X_OK):
-            return str(resolved)
+        return found
     raise SystemExit("podman binary not found. Install Podman to use 'terok-sandbox run'.")
 
 
@@ -872,7 +876,7 @@ def _resolve_container_id(container: str) -> str | None:
     tear down" because the OCI poststop hook has already fired by the
     time the container disappears from podman's catalogue.
     """
-    podman = shutil.which("podman")
+    podman = find_host_tool("podman")
     if podman is None:
         return None
     try:
