@@ -33,7 +33,13 @@ def _load_hook_module() -> object:
         Path(__file__).resolve().parents[2] / "src" / "terok_sandbox" / "resources" / "hooks"
     )
     module_name = "terok_sandbox.resources.hooks.supervisor_hook"
-    for name in (module_name, "_supervisor_state"):
+    ballast_spec = importlib.util.spec_from_file_location(
+        "terok_sandbox.resources.hooks._test_state", hooks_dir / "_supervisor_state.py"
+    )
+    ballast = importlib.util.module_from_spec(ballast_spec)
+    ballast_spec.loader.exec_module(ballast)
+    sys.modules["_supervisor_state"] = ballast
+    for name in (module_name,):
         sys.modules.pop(name, None)
     sys.path.insert(0, str(hooks_dir))
     try:
@@ -46,6 +52,7 @@ def _load_hook_module() -> object:
         # supervisor: the daemon path is the default, and the unit-path
         # tests say so explicitly.
         mod._supervisor_state.user_manager_reachable = lambda _dir: False
+        mod._supervisor_state.find_host_tool = lambda name: "/usr/bin/" + name
         return mod
     finally:
         sys.path.remove(str(hooks_dir))
@@ -247,13 +254,11 @@ class TestHookSpawn:
         with patch.object(mod.subprocess, "Popen", return_value=fake_proc) as popen:
             mod.main()
 
-        # Argv: /usr/bin/python3 <wrapper> <container_id> <sidecar_path>
+        # Argv: setup-bound Python -I <wrapper> <container_id> <sidecar_path>
         popen.assert_called_once()
         (argv,), _kwargs = popen.call_args
-        assert argv[1] == str(wrapper)
-        assert argv[2] == container_id
-        assert argv[3] == str(sidecar_path)
-        assert len(argv) == 4  # no OCI pid in this state → no 5th positional
+        assert argv[:3] == [sys.executable, "-I", str(wrapper)]
+        assert argv[3:] == [container_id, str(sidecar_path)]
 
         # PID file under <root>/pids
         pid_file = hook_root / "pids" / f"supervisor-{container_id}.pid"
@@ -300,15 +305,16 @@ class TestHookSpawn:
         popen.assert_not_called()
         stale_stop, systemd_run, show = calls
         assert stale_stop[3:] == ["stop", mod._supervisor_state.unit_name(container_id)]
-        assert systemd_run[:3] == ["systemd-run", "--user", "--quiet"]
+        assert systemd_run[:3] == ["/usr/bin/systemd-run", "--user", "--quiet"]
         assert f"--unit={mod._supervisor_state.unit_name(container_id)}" in systemd_run
         assert systemd_run[-3:] == [str(wrapper), container_id, str(sidecar_path)]
         assert any(arg.startswith("--setenv=XDG_RUNTIME_DIR=") for arg in systemd_run)
+        assert f"--setenv=PATH={os.environ['PATH']}" in systemd_run
         # The keyring the unit reads is the operator's; a private one would hide it.
         assert "--property=KeyringMode=inherit" in systemd_run
         assert "--property=NoNewPrivileges=yes" in systemd_run
         assert not any("PrivateUsers" in arg or "ProtectSystem" in arg for arg in systemd_run)
-        assert show[:4] == ["systemctl", "--user", "show", "--property=MainPID"]
+        assert show[:4] == ["/usr/bin/systemctl", "--user", "show", "--property=MainPID"]
         pid_file = hook_root / "pids" / f"supervisor-{container_id}.pid"
         assert pid_file.read_text().strip() == "4242"
         diary = (hook_root / "logs" / "hook.log").read_text()
@@ -427,8 +433,8 @@ class TestHookSpawn:
             mod.main()
 
         (argv,), _kwargs = popen.call_args
-        assert argv[3] == str(sidecar_path)
-        assert argv[4] == "1504136"  # container init host-PID, for the direct watch
+        assert argv[4] == str(sidecar_path)
+        assert argv[5] == "1504136"  # container init host-PID, for the direct watch
 
     def test_ownership_check_uses_in_namespace_uid_not_outer(
         self, hook_root: Path, monkeypatch: pytest.MonkeyPatch

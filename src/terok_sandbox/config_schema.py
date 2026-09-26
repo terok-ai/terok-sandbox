@@ -250,7 +250,7 @@ class RawShieldSection(BaseModel):
     audit: bool = Field(default=True, description="Enable shield audit logging")
     dnsmasq_path: Path | None = Field(
         default=None,
-        description="dnsmasq binary to run; found on PATH and in the sbin directories when unset",
+        description="dnsmasq binary to run; found on the host PATH when unset",
     )
     down_on_task_run: bool = True
     on_task_restart: Literal["retain", "up"] = "retain"

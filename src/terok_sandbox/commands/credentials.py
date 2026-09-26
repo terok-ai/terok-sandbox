@@ -351,6 +351,7 @@ def _handle_credentials_encrypt_db(
     import warnings
 
     from ..config import SandboxConfig
+    from ..vault.store.db import CredentialDB
     from ..vault.store.encryption import encrypt_in_place, is_plaintext_sqlite
 
     if cfg is None:
@@ -379,7 +380,8 @@ def _handle_credentials_encrypt_db(
         _maybe_acknowledge_recovery(cfg, echo_to_stdout=echo_passphrase)
 
     if not db_path.exists():
-        print(f"  no DB at {db_path}; will be created encrypted on first use.")
+        CredentialDB(db_path, passphrase=passphrase).close()
+        print(f"  created encrypted credentials database at {db_path}.")
         return
 
     # Snapshot the plaintext DB before touching anything — a failed
@@ -778,7 +780,7 @@ def _run_credentials_setup_phase(
     echo_passphrase: bool = False,
     passphrase_tier: str | None = None,
 ) -> bool:
-    """Migrate the credentials DB to SQLCipher; no-op on already-encrypted or absent.
+    """Provision an encrypted credentials DB; preserve an already-encrypted database.
 
     Each per-container supervisor opens the DB read-mostly for the
     lifetime of one container, so the migration writer contends for the

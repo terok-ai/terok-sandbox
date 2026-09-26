@@ -7,7 +7,7 @@ Composes the supervisor OCI hooks + shield hooks + gate install phases
 plus the credentials-DB encryption phase into one idempotent ``setup``
 verb and the symmetric teardown verb.  Each phase runs its own
 idempotent install cycle so a re-run after a pipx upgrade picks up the
-new code.  A one-shot legacy cleanup phase runs first to sweep systemd
+new code.  A legacy cleanup phase sweeps systemd
 units / sockets installed by pre-supervisor versions.
 
 Higher-level frontends (``terok setup``, ``terok-executor setup``) reuse
@@ -19,7 +19,7 @@ from __future__ import annotations
 import dataclasses
 from typing import TYPE_CHECKING
 
-from terok_util import LazyHandler
+from terok_util import LazyHandler, require_no_downgrade, require_setup
 
 from ._types import ArgDef, CommandDef
 
@@ -44,16 +44,12 @@ def _handle_sandbox_setup(
     per-component installer runs instead — see
     [`handle_setup_component`][terok_sandbox._setup_manual.handle_setup_component].
 
-    Runs the legacy-install cleanup phase first to sweep systemd units
-    and sockets installed by pre-supervisor versions (including the
-    retired host gate units), then a prereq report (host binaries,
-    firewall binaries, SELinux — report-only, never blocks).  Each
-    service phase does its own idempotent install cycle.  Exits non-zero
-    if any mandatory phase fails.
+    Preflights downgrades before writes, installs the lower-owned Shield
+    hooks, then refreshes sandbox artifacts and removes obsolete machinery.
+    Exits non-zero if any required setup is incomplete.
 
-    On success, writes ``setup.stamp`` with the currently-installed
-    package versions — the TUI's startup probe reads it to decide
-    whether to nudge the user toward setup.
+    Certifies only sandbox-owned setup after verifying required artifacts.
+    Dependency receipts remain owned by their packages.
 
     The git gate lives in each container's supervisor, so there is no
     host-side gate install phase.
@@ -89,7 +85,8 @@ def _handle_sandbox_setup(
         run_supervisor_install_phase,
     )
     from ..config import SandboxConfig, credentials_use_keyring
-    from ..setup_stamp import write_stamp
+    from ..integrations.shield import ShieldHooks
+    from ..setup import check_artifacts, check_host_tools, check_setup, setup_receipt
     from .credentials import _run_credentials_setup_phase
 
     if cfg is None:
@@ -130,17 +127,19 @@ def _handle_sandbox_setup(
     if passphrase_tier is not None and not no_vault:
         _validate_passphrase_tier(passphrase_tier)
 
+    require_no_downgrade(check_setup(cfg))
+    require_setup(check_host_tools())
+    receipt = setup_receipt(cfg)
+
     selinux_result, apparmor_result = run_prereq_report(cfg)
     print()
     print("Services:")
 
-    failed = False
-    # Sweep pre-supervisor systemd units / sockets before any new install
-    # phase runs.  Idempotent + soft-fail throughout, so a clean host or
-    # a re-run on an already-upgraded host pays only a few syscalls.
-    failed |= not run_legacy_install_cleanup_phase()
-    if not no_shield:
-        failed |= not run_shield_install_phase()
+    if not no_shield and not cfg.shield_disabled and not run_shield_install_phase():
+        raise SystemExit(1)
+    # Child setup succeeds before invalidating or changing our own artifacts.
+    receipt.clear()
+    failed = not run_legacy_install_cleanup_phase()
     # Credentials DB migration runs *before* the per-container vault
     # will need it.  After the credentials phase we refresh the
     # credential fields on ``cfg`` so any downstream phase sees the tier
@@ -162,11 +161,8 @@ def _handle_sandbox_setup(
     # ``Legacy install cleanup`` phase that ran above.
     # Supervisor hooks land last so a half-installed prereq doesn't leave
     # a fire-able OCI hook pointing at a non-existent ``terok-sandbox``
-    # binary.  The phase soft-fails when the entry point can't be
-    # resolved (operator forgot to activate their venv) — that's a
-    # deferable error that doesn't justify ``raise SystemExit`` from a
-    # setup re-run.
-    failed |= not run_supervisor_install_phase()
+    # binary.  An unresolved companion leaves setup incomplete.
+    failed |= not run_supervisor_install_phase(root=cfg.state_dir)
 
     # Re-surface the SELinux install command at the bottom of output
     # so it isn't scrolled away by service install banners.  Sandbox#854.
@@ -186,8 +182,10 @@ def _handle_sandbox_setup(
         # phase failure and offer the specific remediation.
         raise SystemExit(EXIT_MANUAL_STEP_NEEDED)
 
-    stamp = write_stamp()
-    print(f"→ setup stamp written: {stamp}")
+    children = () if cfg.shield_disabled else ShieldHooks.check_setup(live=True)
+    require_setup((*children, *check_artifacts(cfg, live=True)))
+    receipt.write()
+    print(f"→ setup receipt written: {receipt.path}")
 
     # Trailing recovery-key reminder — fires only when the marker is
     # absent, so re-runs on an already-acked host stay quiet.  The
@@ -250,18 +248,19 @@ def _handle_sandbox_uninstall(
         run_shield_uninstall_phase,
         run_supervisor_uninstall_phase,
     )
-    from ..setup_stamp import clear_stamp
+    from ..config import SandboxConfig
+    from ..setup import check_setup, setup_receipt
 
-    # ``cfg`` is accepted for handler-dispatch uniformity but unused: the
-    # teardown phases discover their own paths and take no config.
-    del cfg
+    cfg = cfg or SandboxConfig()
+    require_no_downgrade(check_setup(cfg))
+    setup_receipt(cfg).clear()
 
     print("Services:")
 
     failed = False
     # Supervisor hooks come down first so a slow uninstall on lower
     # layers can't surprise-fire a still-installed OCI hook.
-    failed |= not run_supervisor_uninstall_phase()
+    failed |= not run_supervisor_uninstall_phase(root=cfg.state_dir)
     if not no_shield:
         failed |= not run_shield_uninstall_phase()
     # Legacy-install sweep also runs at uninstall so a host that's
@@ -269,8 +268,6 @@ def _handle_sandbox_uninstall(
     # behind for a future operator to puzzle over.
     failed |= not run_legacy_install_cleanup_phase()
 
-    if clear_stamp():
-        print("→ setup stamp removed")
     if failed:
         raise SystemExit(1)
 

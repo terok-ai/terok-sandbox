@@ -32,20 +32,20 @@ class TestUserManagerReachable:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _plant_manager_socket(tmp_path)
-        monkeypatch.setattr(state.shutil, "which", lambda _name: "/usr/bin/systemd-run")
+        monkeypatch.setattr(state, "find_host_tool", lambda _name: "/usr/bin/systemd-run")
         assert _REACHABLE(tmp_path) is True
 
     def test_no_socket_is_not_reachable(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(state.shutil, "which", lambda _name: "/usr/bin/systemd-run")
+        monkeypatch.setattr(state, "find_host_tool", lambda _name: "/usr/bin/systemd-run")
         assert _REACHABLE(tmp_path) is False
 
     def test_a_socket_without_the_tool_is_not_reachable(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _plant_manager_socket(tmp_path)
-        monkeypatch.setattr(state.shutil, "which", lambda _name: None)
+        monkeypatch.setattr(state, "find_host_tool", lambda _name: None)
         assert _REACHABLE(tmp_path) is False
 
 
@@ -72,12 +72,13 @@ class TestManagerVerbs:
             return SimpleNamespace(returncode=0 if "is-active" in argv else 5)
 
         monkeypatch.setattr(state.subprocess, "run", fake_run)
+        monkeypatch.setattr(state, "find_host_tool", lambda _: "/usr/bin/systemctl")
         return seen
 
     def test_unit_active_asks_is_active(self, calls: list[list[str]]) -> None:
         assert state.unit_active("terok-supervisor-abc.service") is True
         assert calls == [
-            ["systemctl", "--user", "--quiet", "is-active", "terok-supervisor-abc.service"]
+            ["/usr/bin/systemctl", "--user", "--quiet", "is-active", "terok-supervisor-abc.service"]
         ]
 
     def test_stop_and_kill_send_their_verbs(self, calls: list[list[str]]) -> None:

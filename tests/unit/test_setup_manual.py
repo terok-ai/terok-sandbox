@@ -325,3 +325,31 @@ class TestComponents:
         assert comp.source == policy_source_path().read_text()
         assert "module terok_socket" in comp.source
         assert "#" in comp.source, "the rationale comments are part of what the operator reviews"
+
+
+@pytest.mark.parametrize("owner", ["terok-sandbox", "terok-shield"])
+@pytest.mark.parametrize("component", ["selinux", "apparmor"])
+def test_manual_install_refuses_dependency_closure_downgrades(owner, component, monkeypatch):
+    """Every public mutation route checks the full closure before an installer runs."""
+    from terok_util import SetupCheck, SetupDowngradeError, SetupStatus
+
+    monkeypatch.setattr(_setup_manual, "_selinux_component", lambda _: _NEEDED)
+    monkeypatch.setattr(_setup_manual, "_apparmor_component", lambda: _NEEDED)
+    check = mock.Mock(return_value=(SetupCheck(owner, "receipt", SetupStatus.DOWNGRADE),))
+    monkeypatch.setattr("terok_sandbox.setup.check_setup", check)
+    run = mock.Mock()
+    monkeypatch.setattr(_setup_manual, "_run_component", run)
+    with pytest.raises(SetupDowngradeError):
+        handle_setup_component(component)
+    run.assert_not_called()
+
+
+@pytest.mark.parametrize("component", ["selinux", "apparmor"])
+def test_show_rules_remains_read_only_after_downgrade(component, monkeypatch):
+    """Printing bundled rules doesn't need permission to overwrite installed setup."""
+    monkeypatch.setattr(_setup_manual, "_selinux_component", lambda _: _NEEDED)
+    monkeypatch.setattr(_setup_manual, "_apparmor_component", lambda: _NEEDED)
+    check = mock.Mock(side_effect=AssertionError("read-only display checked setup"))
+    monkeypatch.setattr("terok_sandbox.setup.check_setup", check)
+    assert handle_setup_component(component, show_only=True) == 0
+    check.assert_not_called()

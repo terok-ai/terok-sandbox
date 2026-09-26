@@ -91,25 +91,17 @@ def _prime_podman_version_probe() -> None:
 
 @pytest.fixture(autouse=True)
 def _pin_systemctl_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pin ``_SYSTEMCTL_PATH`` to a known absolute path for every unit test.
+    """Keep systemctl discovery independent of the unit-test host."""
+    monkeypatch.setattr(
+        "terok_sandbox._util._systemctl.find_host_tool", lambda _: "/usr/bin/systemctl"
+    )
 
-    The ``_systemctl`` helper resolves ``systemctl`` once at module import
-    via ``shutil.which`` — a hardening choice that prevents a hostile
-    ``PATH`` from redirecting probes mid-run, but a hazard for tests.
-    On CI hosts (no systemctl) the resolved path is ``None``, which
-    short-circuits ``_systemctl.query`` to a synthetic ``127`` *before*
-    ``subprocess.run`` is reached, silently bypassing the per-test
-    ``@mock.patch("subprocess.run")`` decorators that gate-server,
-    vault-lifecycle, shield-make, and setup-aggregator tests rely on.
 
-    Tests that intentionally exercise the "no systemctl" branch keep
-    using ``without_systemctl_path`` from ``test_systemctl_helper.py``;
-    that fixture re-pins to ``None`` after this autouse runs, so opt-in
-    cases still work.
-    """
-    from terok_sandbox._util import _systemctl
-
-    monkeypatch.setattr(_systemctl, "_SYSTEMCTL_PATH", "/usr/bin/systemctl")
+@pytest.fixture(autouse=True)
+def _installed_setup_for_lifecycle(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Lifecycle unit tests model an installed host; setup tests exercise real checks."""
+    monkeypatch.setattr("terok_sandbox.sandbox.check_setup", lambda *_a, **_kw: ())
+    monkeypatch.setattr("terok_sandbox.launch.check_setup", lambda *_a, **_kw: ())
 
 
 @pytest.fixture(autouse=True)
@@ -138,19 +130,14 @@ def _isolate_port_registry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
 def _isolate_systemd_creds_version_cache() -> Iterator[None]:
     """Clear the ``systemd_creds`` ``@cache``s between tests.
 
-    The production caches are process-lifetime correct (systemd doesn't
-    re-version mid-process and ``PATH`` resolution is stable for the
-    run), but tests stub ``subprocess.run`` / ``shutil.which`` with
-    different return values per case; leaking the first test's probe
-    result into the next is a guaranteed false-pass.
+    Version probes are cached by selected executable. Tests may assign
+    different versions to the same fake executable, so isolate those probes.
     """
     from terok_sandbox.vault.store import systemd_creds as _sc
 
-    _sc._systemd_creds_version.cache_clear()
-    _sc._systemd_creds_exe.cache_clear()
+    _sc._version_for_executable.cache_clear()
     yield
-    _sc._systemd_creds_version.cache_clear()
-    _sc._systemd_creds_exe.cache_clear()
+    _sc._version_for_executable.cache_clear()
 
 
 @pytest.fixture(autouse=True)

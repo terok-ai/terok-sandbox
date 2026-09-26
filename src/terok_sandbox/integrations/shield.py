@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: 2025 Jiri Vyskocil
+# SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
 """Adapter for terok-shield egress firewall.
@@ -52,6 +53,7 @@ from terok_shield.container import (
 # submodule for a concrete callable type.
 from terok_shield.hooks.install import (
     ensure_user_hooks_dir_configured,  # noqa: F401 — re-exported with concrete type
+    user_hooks_dir_configured,  # noqa: F401 — public readiness predicate
 )
 
 # Several symbols are exposed via the top-level ``terok_shield.__getattr__``
@@ -63,11 +65,12 @@ from terok_shield.prereqs import (  # noqa: F401 — re-exported with concrete t
     check_firewall_binaries,
     check_krun_binaries,
 )
-from terok_shield.run import NftNotFoundError, ShieldNeedsSetup  # noqa: F401
+from terok_shield.run import NftNotFoundError  # noqa: F401
 from terok_shield.state import (
     BUNDLE_VERSION as BUNDLE_VERSION,  # noqa: F401 — re-exported
     recorded_dns_tier,  # concrete type; the top-level lazy re-export is ``object``
 )
+from terok_util import SetupCheck
 
 from ..config import SandboxConfig
 
@@ -215,16 +218,13 @@ class ShieldManager:
         if self.disabled:
             warnings.warn(_DISABLED_WARNING, stacklevel=2)
             return []
-        try:
-            return self.shield.pre_start(
-                container,
-                security_deny=security_deny,
-                provider_allow=provider_allow,
-                project_allow=project_allow,
-                override=override,
-            )
-        except ShieldNeedsSetup as exc:
-            raise SystemExit(str(exc)) from None
+        return self.shield.pre_start(
+            container,
+            security_deny=security_deny,
+            provider_allow=provider_allow,
+            project_allow=project_allow,
+            override=override,
+        )
 
     def refresh(
         self,
@@ -380,6 +380,11 @@ class ShieldHooks:
     so the sandbox setup aggregator can swap it out in tests without
     poking around terok-shield internals.
     """
+
+    @staticmethod
+    def check_setup(*, live: bool = False) -> tuple[SetupCheck, ...]:
+        """Delegate readiness to Shield, which owns its installation."""
+        return HooksInstaller().check_setup(live=live)
 
     @staticmethod
     def install() -> None:

@@ -210,13 +210,17 @@ class TestMissingPolicyTools:
 
     def test_none_missing(self) -> None:
         """Empty list when every tool is on PATH."""
-        with unittest.mock.patch("shutil.which", return_value="/usr/bin/any"):
+        with unittest.mock.patch(
+            "terok_sandbox._util._selinux.find_host_tool", return_value="/usr/bin/any"
+        ):
             assert missing_policy_tools() == []
 
     def test_reports_absent_tools_in_order(self) -> None:
         """Tools are listed in the order install_policy would call them."""
         present = {"semodule": "/usr/sbin/semodule"}
-        with unittest.mock.patch("shutil.which", side_effect=present.get):
+        with unittest.mock.patch(
+            "terok_sandbox._util._selinux.find_host_tool", side_effect=present.get
+        ):
             assert missing_policy_tools() == ["checkmodule", "semodule_package"]
 
 
@@ -390,7 +394,9 @@ class TestCheckStatus:
         with (
             unittest.mock.patch("terok_sandbox._util._selinux._ENFORCE_PATH", enforce),
             unittest.mock.patch("ctypes.CDLL", return_value=lib),
-            unittest.mock.patch("shutil.which", side_effect=which_map.get),
+            unittest.mock.patch(
+                "terok_sandbox._util._selinux.find_host_tool", side_effect=which_map.get
+            ),
         ):
             result = check_status(services_mode="socket")
         assert result.status is SelinuxStatus.POLICY_MISSING
@@ -409,7 +415,9 @@ class TestCheckStatus:
         with (
             unittest.mock.patch("terok_sandbox._util._selinux._ENFORCE_PATH", enforce),
             unittest.mock.patch("ctypes.CDLL", side_effect=OSError("missing")),
-            unittest.mock.patch("shutil.which", return_value="/usr/bin/x"),
+            unittest.mock.patch(
+                "terok_sandbox._util._selinux.find_host_tool", return_value="/usr/bin/x"
+            ),
         ):
             result = check_status(services_mode="socket")
         assert result.status is SelinuxStatus.POLICY_MISSING
@@ -439,7 +447,9 @@ class TestCheckStatus:
             unittest.mock.patch("terok_sandbox._util._selinux._ENFORCE_PATH", enforce),
             unittest.mock.patch("ctypes.CDLL", return_value=lib),
             unittest.mock.patch("ctypes.get_errno", return_value=errno.EACCES),
-            unittest.mock.patch("shutil.which", side_effect=which_map.get),
+            unittest.mock.patch(
+                "terok_sandbox._util._selinux.find_host_tool", side_effect=which_map.get
+            ),
         ):
             result = check_status(services_mode="socket")
         assert result.status is SelinuxStatus.POLICY_OUTDATED

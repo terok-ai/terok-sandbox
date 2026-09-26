@@ -35,15 +35,14 @@ import json
 import os
 import shutil
 import signal
+import subprocess  # nosec B404 — isolated installation-bound Python probe
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    pass
+from terok_util import SetupCheck, SetupStatus, find_host_tool, host_path, host_tools_source
 
 from .._util import _proc
-from ..integrations.shield import ensure_user_hooks_dir_configured
+from ..integrations.shield import ensure_user_hooks_dir_configured, user_hooks_dir_configured
 from ..paths import state_root
 from ..resources.hooks import _supervisor_state
 
@@ -51,6 +50,7 @@ _HOOK_STAGES = ("createRuntime", "poststop")
 _HOOK_SCRIPT_NAME = "supervisor_hook.py"
 _BALLAST_NAME = "_supervisor_state.py"
 _WRAPPER_NAME = "supervisor_wrapper.py"
+_HOST_TOOLS_NAME = "_host_tools.py"
 
 
 def _descriptor_name(stage: str) -> str:
@@ -72,7 +72,7 @@ _WRAPPER_BIN_PLACEHOLDER = '["__TEROK_SANDBOX_BIN__"]'
 _TRIGGER_ANNOTATION = "terok.sandbox.sidecar"
 
 
-def install_supervisor_hooks(*, hooks_dir: Path | None = None) -> None:
+def install_supervisor_hooks(*, hooks_dir: Path | None = None, root: Path | None = None) -> None:
     """Lay down hook scripts, wrapper, and the OCI descriptor.
 
     *hooks_dir* — override for tests; defaults to
@@ -85,7 +85,8 @@ def install_supervisor_hooks(*, hooks_dir: Path | None = None) -> None:
     descriptor JSON gets re-rendered each time so a moved install
     location is picked up on the next ``terok-sandbox setup``.
     """
-    install_root = state_root()
+    install_root = root or state_root()
+    sandbox_argv = _resolve_sandbox_argv()
     hooks_install_dir = install_root / "hooks"
     hooks_install_dir.mkdir(parents=True, exist_ok=True)
 
@@ -93,9 +94,12 @@ def install_supervisor_hooks(*, hooks_dir: Path | None = None) -> None:
     pkg_hooks = pkg_resources / "hooks"
 
     _copy_executable(pkg_hooks / _HOOK_SCRIPT_NAME, hooks_install_dir / _HOOK_SCRIPT_NAME)
-    _copy_executable(pkg_hooks / _BALLAST_NAME, hooks_install_dir / _BALLAST_NAME)
+    ballast = (pkg_hooks / _BALLAST_NAME).read_text(encoding="utf-8")
+    (hooks_install_dir / _BALLAST_NAME).write_text(
+        ballast.replace('"__SETUP_PATH__"', json.dumps(host_path())), encoding="utf-8"
+    )
 
-    sandbox_argv = _resolve_sandbox_argv()
+    (hooks_install_dir / _HOST_TOOLS_NAME).write_text(host_tools_source(), encoding="utf-8")
     _render_wrapper(
         src=pkg_resources / _WRAPPER_NAME,
         dst=install_root / _WRAPPER_NAME,
@@ -116,7 +120,44 @@ def install_supervisor_hooks(*, hooks_dir: Path | None = None) -> None:
     ensure_user_hooks_dir_configured(descriptor_dir)
 
 
-def uninstall_supervisor_hooks(*, hooks_dir: Path | None = None) -> None:
+def check_supervisor_hooks(
+    *, root: Path | None = None, live: bool = False
+) -> tuple[SetupCheck, ...]:
+    """Check installed hooks, their bootstrap binding, and application companion."""
+    root = root or state_root()
+    hooks = root / "hooks"
+    try:
+        if not user_hooks_dir_configured(hooks):
+            raise ValueError("Supervisor hooks directory is not registered; run setup")
+        for name in (_HOOK_SCRIPT_NAME, _BALLAST_NAME, _HOST_TOOLS_NAME):
+            if not (hooks / name).is_file():
+                raise ValueError(f"Missing supervisor artifact: {hooks / name}")
+        for stage in _HOOK_STAGES:
+            actual = json.loads((hooks / _descriptor_name(stage)).read_text(encoding="utf-8"))
+            expected = json.loads(_render_hook_descriptor(hooks / _HOOK_SCRIPT_NAME, stage=stage))
+            if actual != expected:
+                raise ValueError("Supervisor interpreter binding changed; run setup")
+        source = Path(__file__).resolve().parent.parent / "resources" / _WRAPPER_NAME
+        expected_wrapper = source.read_text(encoding="utf-8").replace(
+            _WRAPPER_BIN_PLACEHOLDER, json.dumps(_resolve_sandbox_argv())
+        )
+        if (root / _WRAPPER_NAME).read_text(encoding="utf-8") != expected_wrapper:
+            raise ValueError("Supervisor application binding changed; run setup")
+        if not Path(sys.executable).is_file() or not os.access(sys.executable, os.X_OK):
+            raise ValueError("Supervisor bootstrap Python missing; run setup")
+        if live:
+            subprocess.run(  # nosec B603 — current interpreter, fixed isolated probe
+                [sys.executable, "-I", "-S", "-c", "pass"],
+                check=True,
+                capture_output=True,
+                timeout=5,
+            )
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+        return (SetupCheck("terok-sandbox", "supervisor", SetupStatus.STALE, str(exc)),)
+    return (SetupCheck("terok-sandbox", "supervisor", SetupStatus.READY),)
+
+
+def uninstall_supervisor_hooks(*, hooks_dir: Path | None = None, root: Path | None = None) -> None:
     """Remove every file [`install_supervisor_hooks`][terok_sandbox.supervisor.install.install_supervisor_hooks] writes.
 
     Idempotent — missing files are tolerated.  Does **not** touch
@@ -124,10 +165,11 @@ def uninstall_supervisor_hooks(*, hooks_dir: Path | None = None) -> None:
     state root) — those are sweep-able with a separate operator
     command if needed.
     """
-    install_root = state_root()
+    install_root = root or state_root()
     paths = [
         Path("hooks") / _HOOK_SCRIPT_NAME,
         Path("hooks") / _BALLAST_NAME,
+        Path("hooks") / _HOST_TOOLS_NAME,
         Path(_WRAPPER_NAME),
     ]
     paths.extend(Path("hooks") / _descriptor_name(stage) for stage in _HOOK_STAGES)
@@ -260,7 +302,7 @@ def _resolve_sandbox_argv() -> list[str]:
 
     Resolution order:
 
-    1. ``shutil.which("terok-sandbox")`` — covers system installs
+    1. ``find_host_tool("terok-sandbox")`` — covers system installs
        (``apt``/``dnf``/system-Python pip) where the entry point lands
        on ``$PATH``.
     2. ``sys.executable``'s sibling bin directory — covers pipx and
@@ -274,7 +316,7 @@ def _resolve_sandbox_argv() -> list[str]:
     against a missing binary would silently fail every spawn at
     runtime, which is much harder to debug than a setup-time error.
     """
-    direct = shutil.which("terok-sandbox")
+    direct = find_host_tool("terok-sandbox")
     if direct:
         return [direct]
     sibling = Path(sys.executable).parent / "terok-sandbox"
@@ -315,8 +357,8 @@ def _render_hook_descriptor(entrypoint: Path, *, stage: str) -> str:
     hook = {
         "version": "1.0.0",
         "hook": {
-            "path": str(entrypoint),
-            "args": ["supervisor_hook", stage],
+            "path": sys.executable,
+            "args": [sys.executable, "-I", str(entrypoint), stage],
         },
         "when": {"annotations": {_TRIGGER_ANNOTATION: ".+"}},
         "stages": [stage],

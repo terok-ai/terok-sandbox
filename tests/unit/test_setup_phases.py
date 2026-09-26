@@ -66,7 +66,7 @@ class TestPrereqReport:
         capsys: pytest.CaptureFixture[str],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        monkeypatch.setattr("terok_sandbox._setup.shutil.which", lambda name: f"/usr/bin/{name}")
+        monkeypatch.setattr("terok_sandbox._setup.find_host_tool", lambda name: f"/usr/bin/{name}")
         with (
             patch("terok_sandbox.integrations.shield.check_firewall_binaries", return_value=()),
             patch(
@@ -119,7 +119,7 @@ class TestPrereqReport:
         capsys: pytest.CaptureFixture[str],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        monkeypatch.setattr("terok_sandbox._setup.shutil.which", lambda _n: None)
+        monkeypatch.setattr("terok_sandbox._setup.find_host_tool", lambda _n: None)
         with (
             patch("terok_sandbox.integrations.shield.check_firewall_binaries", return_value=()),
             patch(
@@ -143,7 +143,7 @@ class TestPrereqReport:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Missing catatonit warns about degraded stops — setup still proceeds."""
-        monkeypatch.setattr("terok_sandbox._setup.shutil.which", lambda _n: None)
+        monkeypatch.setattr("terok_sandbox._setup.find_host_tool", lambda _n: None)
         with (
             patch("terok_sandbox.integrations.shield.check_firewall_binaries", return_value=()),
             patch("terok_sandbox.runtime.podman.find_init_binary", return_value=None),
@@ -163,7 +163,7 @@ class TestPrereqReport:
         capsys: pytest.CaptureFixture[str],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        monkeypatch.setattr("terok_sandbox._setup.shutil.which", lambda _n: None)
+        monkeypatch.setattr("terok_sandbox._setup.find_host_tool", lambda _n: None)
         fake_check = MagicMock(path="/usr/sbin/nft", purpose="ruleset enforcement", ok=True)
         fake_check.name = "nft"  # ``name=`` is a MagicMock constructor kwarg, not an attr
         with (
@@ -187,7 +187,7 @@ class TestPrereqReport:
         capsys: pytest.CaptureFixture[str],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        monkeypatch.setattr("terok_sandbox._setup.shutil.which", lambda _n: None)
+        monkeypatch.setattr("terok_sandbox._setup.find_host_tool", lambda _n: None)
         with (
             patch("terok_sandbox.integrations.shield.check_firewall_binaries", return_value=()),
             patch(
@@ -205,7 +205,7 @@ class TestPrereqReport:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Hosts where SELinux isn't enforcing shouldn't see a policy stage line."""
-        monkeypatch.setattr("terok_sandbox._setup.shutil.which", lambda _n: None)
+        monkeypatch.setattr("terok_sandbox._setup.find_host_tool", lambda _n: None)
         with (
             patch("terok_sandbox.integrations.shield.check_firewall_binaries", return_value=()),
             patch(
@@ -233,7 +233,7 @@ class TestPrereqReport:
         detail_fragment: str,
     ) -> None:
         """Problem statuses route to MISSING with a pointer-to-fix in the detail."""
-        monkeypatch.setattr("terok_sandbox._setup.shutil.which", lambda _n: None)
+        monkeypatch.setattr("terok_sandbox._setup.find_host_tool", lambda _n: None)
         with (
             patch("terok_sandbox.integrations.shield.check_firewall_binaries", return_value=()),
             patch(
@@ -254,7 +254,7 @@ class TestPrereqReport:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A firewall binary with ``ok=False`` surfaces its ``purpose`` as the MISSING detail."""
-        monkeypatch.setattr("terok_sandbox._setup.shutil.which", lambda name: f"/usr/bin/{name}")
+        monkeypatch.setattr("terok_sandbox._setup.find_host_tool", lambda name: f"/usr/bin/{name}")
         bad_check = MagicMock(path="", purpose="DNS resolver", ok=False)
         bad_check.name = "dnsmasq"  # ``name=`` is a MagicMock kwarg, not an attr
         with (
@@ -283,7 +283,7 @@ class TestPrereqReport:
         of users who never touch the krun runtime.
         """
         bare_cfg.experimental = False
-        monkeypatch.setattr("terok_sandbox._setup.shutil.which", lambda _n: None)
+        monkeypatch.setattr("terok_sandbox._setup.find_host_tool", lambda _n: None)
         with (
             patch("terok_sandbox.integrations.shield.check_firewall_binaries", return_value=()),
             patch("terok_sandbox.integrations.shield.check_krun_binaries") as krun_probe,
@@ -304,7 +304,7 @@ class TestPrereqReport:
     ) -> None:
         """``experimental: true`` in the config flips the krun probe on."""
         bare_cfg.experimental = True
-        monkeypatch.setattr("terok_sandbox._setup.shutil.which", lambda _n: None)
+        monkeypatch.setattr("terok_sandbox._setup.find_host_tool", lambda _n: None)
         ip_check = MagicMock(path="/sbin/ip", purpose="krun in-netns IP", ok=True)
         ip_check.name = "ip"
         with (
@@ -512,7 +512,7 @@ class TestSupervisorInstallPhase:
     def test_install_reports_ok(self, capsys: pytest.CaptureFixture[str]) -> None:
         with patch("terok_sandbox.supervisor.install.install_supervisor_hooks") as install:
             assert run_supervisor_install_phase() is True
-            install.assert_called_once_with()
+            install.assert_called_once_with(root=None)
         out = capsys.readouterr().out
         assert "Supervisor hooks" in out
         assert "OCI hook" in out
@@ -528,7 +528,7 @@ class TestSupervisorInstallPhase:
     def test_uninstall_reports_ok(self, capsys: pytest.CaptureFixture[str]) -> None:
         with patch("terok_sandbox.supervisor.install.uninstall_supervisor_hooks") as uninstall:
             assert run_supervisor_uninstall_phase() is True
-            uninstall.assert_called_once_with()
+            uninstall.assert_called_once_with(root=None)
         assert "removed" in capsys.readouterr().out
 
     def test_uninstall_failure_reports_fail(self, capsys: pytest.CaptureFixture[str]) -> None:
@@ -806,3 +806,18 @@ class TestSelinuxOutdatedReporting:
         out = capsys.readouterr().out
         assert "terok-sandbox setup apparmor" in out
         assert "sudo bash" not in out
+
+
+def test_legacy_cleanup_removes_only_aggregate_receipt(tmp_path, monkeypatch):
+    """Upgrading discards the obsolete stamp without altering user/task state."""
+    from terok_sandbox import _setup
+
+    stamp = tmp_path / "setup.stamp"
+    stamp.write_text("old aggregate")
+    keep = tmp_path / "credentials.db"
+    keep.write_text("preserved")
+    monkeypatch.setattr(_setup, "namespace_state_dir", lambda: tmp_path)
+    with patch.object(_setup._systemctl, "run_best_effort"):
+        assert _setup.run_legacy_install_cleanup_phase()
+    assert not stamp.exists()
+    assert keep.read_text() == "preserved"

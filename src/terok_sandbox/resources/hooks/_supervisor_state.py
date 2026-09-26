@@ -9,13 +9,13 @@ in the installed hooks directory.  The role script adds
 import …`` resolves to this file at runtime.
 
 Annotation-driven design: this module owns only the host-side
-helpers (UID resolution, ``$PATH`` hardening, PID introspection,
+helpers (UID resolution, host tool lookup, PID introspection,
 logging).  All terok-specific paths come from the sidecar
 JSON that the OCI annotation pins; no ``$XDG_*`` resolution lives
 here.
 
 Stdlib-only by design: OCI runtimes execute the hook with
-``/usr/bin/python3`` outside any virtualenv, so an import of
+an installation-bound Python in isolation, so an import of
 ``terok_sandbox`` would fail.  Mirrors the same constraint shield's
 ``_oci_state.py`` carries — the design rationale lives there.
 """
@@ -24,15 +24,18 @@ from __future__ import annotations
 
 import contextlib
 import os
-import shutil
 import subprocess  # nosec B404 — the user manager's verbs, fixed argv
 import sys
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-#: Trusted ``$PATH`` for hook subprocess execution — same allowlist
-#: shield's ``_oci_state.py`` pins, kept in sync deliberately.
-_TRUSTED_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+if TYPE_CHECKING or __package__:
+    from terok_util import find_host_tool, host_path
+else:
+    from _host_tools import find_host_tool, host_path
+
+_SETUP_PATH = "__SETUP_PATH__"
 
 #: Prefix of the transient user unit that hosts one container's supervisor.
 _UNIT_PREFIX = "terok-supervisor-"
@@ -82,14 +85,12 @@ def outer_host_uid() -> int:
 
 
 def bootstrap_env(host_uid: int) -> None:
-    """Pin ``$PATH`` and wipe linker-hijack vectors before any subprocess work.
+    """Preserve the launch PATH; older runtimes may need setup's fallback.
 
-    Same hardening shield's hook applies.  Pinning ``$PATH`` to a
-    trusted constant and unsetting the dynamic-linker knobs defeats
-    a malicious OCI-runtime env that might otherwise hijack child
-    execs.
+    Linker/Python injection knobs remain excluded independently of tool lookup.
     """
-    os.environ["PATH"] = _TRUSTED_PATH
+    os.environ.setdefault("PATH", _SETUP_PATH)
+    os.environ["PATH"] = host_path()
     for var in ("LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "PYTHONPATH", "PYTHONHOME"):
         os.environ.pop(var, None)
     if not os.environ.get("XDG_RUNTIME_DIR"):
@@ -114,10 +115,10 @@ def user_manager_reachable(runtime_dir: Path) -> bool:
     where the user keyring is the operator's, or as a daemon inside the
     container runtime's user namespace, where the hook itself runs.  The
     manager's private socket is the evidence; ``systemd-run`` on the
-    trusted PATH is what asks it.
+    host PATH is what asks it.
     """
     private = runtime_dir / "systemd" / "private"
-    return private.is_socket() and shutil.which("systemd-run") is not None
+    return private.is_socket() and find_host_tool("systemd-run") is not None
 
 
 def unit_name(container_id: str) -> str:
@@ -147,9 +148,12 @@ def kill_units(pattern: str) -> None:
 
 def _systemctl(*args: str) -> int:
     """Run one quiet ``systemctl --user`` verb; its exit status is the answer."""
+    binary = find_host_tool("systemctl")
+    if binary is None:
+        return 1
     try:
-        return subprocess.run(  # nosec B603 B607 — fixed verbs on the trusted PATH
-            ["systemctl", "--user", "--quiet", *args], check=False
+        return subprocess.run(  # nosec B603 — resolved host tool, fixed verbs
+            [binary, "--user", "--quiet", *args], check=False
         ).returncode
     except OSError:
         return 1

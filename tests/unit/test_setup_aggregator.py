@@ -46,6 +46,10 @@ def install_spies():
         AppArmorCheckResult(AppArmorStatus.NOT_APPLICABLE),
     )
     with (
+        patch("terok_sandbox.setup.check_setup", return_value=()),
+        patch("terok_sandbox.setup.check_host_tools", return_value=()),
+        patch("terok_sandbox.setup.check_artifacts", return_value=()),
+        patch("terok_sandbox.integrations.shield.ShieldHooks.check_setup", return_value=()),
         patch(
             "terok_sandbox._setup.run_prereq_report",
             return_value=_no_concern,
@@ -140,7 +144,7 @@ class TestSandboxSetup:
         install_spies["credentials"].side_effect = lambda *_a, **_kw: (
             order.append("credentials") or True
         )
-        install_spies["supervisor"].side_effect = lambda: order.append("supervisor") or True
+        install_spies["supervisor"].side_effect = lambda **_kw: order.append("supervisor") or True
 
         _handle_sandbox_setup()
 
@@ -149,8 +153,8 @@ class TestSandboxSetup:
         # hook should only fire once the rest of the stack is ready).
         assert order == [
             "prereq",
-            "legacy",
             "shield",
+            "legacy",
             "credentials",
             "supervisor",
         ]
@@ -237,14 +241,14 @@ class TestSandboxUninstall:
     def test_default_uninstalls_all_phases(self, uninstall_spies) -> None:
         cfg = SandboxConfig()
         _handle_sandbox_uninstall(cfg=cfg)
-        uninstall_spies["supervisor_uninstall"].assert_called_once_with()
+        uninstall_spies["supervisor_uninstall"].assert_called_once_with(root=cfg.state_dir)
         uninstall_spies["shield_uninstall"].assert_called_once_with()
         uninstall_spies["legacy_cleanup"].assert_called_once_with()
 
     def test_phases_run_in_reverse_install_order(self, uninstall_spies) -> None:
         """Supervisor first (its hook would outlive the rest), legacy cleanup last."""
         order: list[str] = []
-        uninstall_spies["supervisor_uninstall"].side_effect = lambda: (
+        uninstall_spies["supervisor_uninstall"].side_effect = lambda **_kw: (
             order.append("supervisor") or True
         )
         uninstall_spies["shield_uninstall"].side_effect = lambda: order.append("shield") or True

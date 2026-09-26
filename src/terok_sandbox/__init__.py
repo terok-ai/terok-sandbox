@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: 2025 Jiri Vyskocil
+# SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
 """terok-sandbox: hardened Podman container runner with gate and shield integration.
@@ -187,12 +188,8 @@ _LAZY: dict[str, str] = {
     "Sharing": "sandbox:Sharing",
     "ShieldSetupError": "sandbox:ShieldSetupError",
     "VolumeSpec": "sandbox:VolumeSpec",
-    # Setup stamp / aggregator
-    "SetupVerdict": "setup_stamp:SetupVerdict",
-    "installed_versions": "setup_stamp:installed_versions",
-    "needs_setup": "setup_stamp:needs_setup",
-    "read_stamp": "setup_stamp:read_stamp",
-    "stamp_path": "setup_stamp:stamp_path",
+    # Owned setup readiness
+    "check_setup": "setup:check_setup",
     # Vault markers + SSH + credential store
     "CODEX_SHARED_OAUTH_MARKER": "vault.daemon:CODEX_SHARED_OAUTH_MARKER",
     "PHANTOM_CREDENTIALS_MARKER": "vault.daemon:PHANTOM_CREDENTIALS_MARKER",
@@ -378,13 +375,7 @@ if TYPE_CHECKING:
         Sharing,
         VolumeSpec,
     )
-    from .setup_stamp import (
-        SetupVerdict,
-        installed_versions,
-        needs_setup,
-        read_stamp,
-        stamp_path,
-    )
+    from .setup import check_setup
     from .supervision import (
         ServiceEndpoint,
         SupervisionStatus,
@@ -430,13 +421,9 @@ __all__ = [
     "SandboxConfigView",
     "ServicesMode",
     "gate_use_personal_ssh_default",
-    # Setup stamp / aggregator
-    "SetupVerdict",
-    "installed_versions",
-    "needs_setup",
-    "read_stamp",
+    # Owned setup readiness
+    "check_setup",
     "sandbox_uninstall",
-    "stamp_path",
     # Lifecycle managers
     "PASSTHROUGH_DENIED_FLAGS",
     "PerContainerResources",

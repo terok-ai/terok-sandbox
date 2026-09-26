@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: 2025 Jiri Vyskocil
+# SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
 """Tests for the terok-shield adapter (``terok_sandbox.integrations.shield``)."""
@@ -420,14 +421,14 @@ def test_check_environment_disabled_returns_synthetic_result() -> None:
     assert any("disable_firewall_no_protection" in issue for issue in result.issues)
 
 
-def test_pre_start_converts_shield_needs_setup_to_system_exit() -> None:
-    """``ShieldNeedsSetup`` is converted into a diagnostic SystemExit."""
+def test_pre_start_preserves_typed_setup_failure() -> None:
+    """Typed setup errors survive the adapter for pre-stop handling."""
     mock_shield = make_mock_shield()
     mock_shield.pre_start.side_effect = ShieldNeedsSetup("hooks not installed")
     manager = ShieldManager(MOCK_TASK_DIR)
     with (
         patch.object(ShieldManager, "shield", new=mock_shield),
-        pytest.raises(SystemExit, match="hooks not installed"),
+        pytest.raises(ShieldNeedsSetup, match="hooks not installed"),
     ):
         manager.pre_start("ctr")
 
@@ -473,10 +474,17 @@ def test_watch_session_delegates_to_run_watch(mock_run_watch: MagicMock) -> None
 # ── Round-trip ──────────────────────────────────────────────────────────
 
 
-def test_install_then_uninstall_round_trip(tmp_path: Path) -> None:
+def test_install_then_uninstall_round_trip(tmp_path: Path, monkeypatch) -> None:
     """``HooksInstaller(target_dir).install() + .uninstall()`` leaves no residue."""
     from terok_shield import HooksInstaller
 
+    tools = tmp_path / "bin"
+    tools.mkdir()
+    for name in ("podman", "nft", "nsenter"):
+        binary = tools / name
+        binary.write_text("#!/bin/sh\nexit 0\n")
+        binary.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tools))
     target_dir = tmp_path / "hooks"
     installer = HooksInstaller(target_dir=target_dir)
     installer.install()

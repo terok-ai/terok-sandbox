@@ -14,6 +14,8 @@ removes them.
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -95,9 +97,9 @@ def test_install_descriptor_targets_installed_entrypoint(install_env: dict[str, 
     for stage in ("createRuntime", "poststop"):
         descriptor = install_env["hooks_dir"] / f"terok-sandbox-supervisor-{stage}.json"
         payload = json.loads(descriptor.read_text())
-        assert payload["hook"]["path"] == str(expected_entrypoint)
+        assert payload["hook"]["path"] == sys.executable
         assert payload["stages"] == [stage]
-        assert payload["hook"]["args"] == ["supervisor_hook", stage]
+        assert payload["hook"]["args"] == [sys.executable, "-I", str(expected_entrypoint), stage]
         # The trigger annotation gates the hook fire-list and also
         # carries the sidecar path the hook reads.
         assert payload["when"]["annotations"] == {"terok.sandbox.sidecar": ".+"}
@@ -107,7 +109,7 @@ def test_install_raises_when_binary_missing(
     install_env: dict[str, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Missing terok-sandbox entry point is a hard error (operator must reinstall)."""
-    monkeypatch.setattr("terok_sandbox.supervisor.install.shutil.which", lambda _name: None)
+    monkeypatch.setattr("terok_sandbox.supervisor.install.find_host_tool", lambda _name: None)
     monkeypatch.setattr("terok_sandbox.supervisor.install.sys.executable", "")
     with pytest.raises(RuntimeError, match="terok-sandbox entry point"):
         install_supervisor_hooks()
@@ -432,7 +434,7 @@ class TestResolveSandboxArgv:
     def test_prefers_path_resolution(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A ``terok-sandbox`` on ``$PATH`` wins outright."""
         monkeypatch.setattr(
-            "terok_sandbox.supervisor.install.shutil.which",
+            "terok_sandbox.supervisor.install.find_host_tool",
             lambda _name: "/usr/local/bin/terok-sandbox",
         )
         assert _resolve_sandbox_argv() == ["/usr/local/bin/terok-sandbox"]
@@ -450,8 +452,59 @@ class TestResolveSandboxArgv:
         sibling = bindir / "terok-sandbox"
         sibling.write_text("#!/bin/sh\n")
         sibling.chmod(0o755)
-        monkeypatch.setattr("terok_sandbox.supervisor.install.shutil.which", lambda _name: None)
+        monkeypatch.setattr("terok_sandbox.supervisor.install.find_host_tool", lambda _name: None)
         monkeypatch.setattr(
             "terok_sandbox.supervisor.install.sys.executable", str(bindir / "python")
         )
         assert _resolve_sandbox_argv() == [str(sibling)]
+
+
+@pytest.mark.parametrize("launch_path", [None, "", "launch"])
+def test_standalone_hook_keeps_launch_path_or_uses_absent_fallback(
+    install_env, tmp_path, monkeypatch, launch_path
+):
+    """Installed copies run with no site packages and never import terok-util."""
+    setup_bin, launch_bin = tmp_path / "setup-bin", tmp_path / "launch-bin"
+    for directory in (setup_bin, launch_bin):
+        directory.mkdir()
+        executable = directory / "nft"
+        executable.write_text("#!/bin/sh\nexit 0\n")
+        executable.chmod(0o755)
+    monkeypatch.setenv("PATH", str(setup_bin))
+    with patch(
+        "terok_sandbox.supervisor.install._resolve_sandbox_argv", return_value=[sys.executable]
+    ):
+        install_supervisor_hooks()
+    env = {} if launch_path is None else {"PATH": str(launch_bin) if launch_path else ""}
+    code = (
+        "import sys,os,json; sys.path.insert(0,sys.argv[1]); "
+        "import _supervisor_state as s; s.bootstrap_env(os.getuid()); "
+        "assert 'terok_util' not in sys.modules; "
+        "print(json.dumps([os.environ['PATH'],s.find_host_tool('nft')]))"
+    )
+    run = subprocess.run(
+        [sys.executable, "-I", "-S", "-c", code, str(install_env["hooks_dir"])],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    expected = str(setup_bin) if launch_path is None else str(launch_bin) if launch_path else ""
+    assert json.loads(run.stdout) == [expected, str(Path(expected) / "nft") if expected else None]
+    # No non-descriptor JSON is accidentally offered to Podman's hook scanner.
+    assert len(list(install_env["hooks_dir"].glob("*.json"))) == 2
+
+
+def test_installed_descriptor_runs_without_site_packages(install_env):
+    """Actual descriptor argv boots the standalone hook under isolated Python."""
+    with patch(
+        "terok_sandbox.supervisor.install._resolve_sandbox_argv", return_value=[sys.executable]
+    ):
+        install_supervisor_hooks()
+    descriptor = json.loads(
+        (install_env["hooks_dir"] / "terok-sandbox-supervisor-poststop.json").read_text()
+    )
+    argv = descriptor["hook"]["args"]
+    argv.insert(2, "-S")
+    run = subprocess.run(argv, env={"PATH": ""}, input="{}", text=True, capture_output=True)
+    assert run.returncode == 0, run.stderr

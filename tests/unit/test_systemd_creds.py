@@ -44,7 +44,10 @@ class TestAvailability:
             _FakeVarlinkSocket(),
         )
         with (
-            patch("shutil.which", return_value="/usr/bin/systemd-creds"),
+            patch(
+                "terok_sandbox.vault.store.systemd_creds.find_host_tool",
+                return_value="/usr/bin/systemd-creds",
+            ),
             patch("subprocess.run", return_value=_version_output(259)),
         ):
             assert systemd_creds.is_available() is True
@@ -65,7 +68,10 @@ class TestAvailability:
             _FakeVarlinkSocket(present=False),
         )
         with (
-            patch("shutil.which", return_value="/usr/bin/systemd-creds"),
+            patch(
+                "terok_sandbox.vault.store.systemd_creds.find_host_tool",
+                return_value="/usr/bin/systemd-creds",
+            ),
             patch("subprocess.run", return_value=_version_output(259)),
         ):
             assert systemd_creds.is_available() is False
@@ -73,18 +79,24 @@ class TestAvailability:
     def test_is_available_false_when_systemd_too_old(self) -> None:
         """systemd < 257 lacks the non-root --user decrypt path — tier is unusable."""
         with (
-            patch("shutil.which", return_value="/usr/bin/systemd-creds"),
+            patch(
+                "terok_sandbox.vault.store.systemd_creds.find_host_tool",
+                return_value="/usr/bin/systemd-creds",
+            ),
             patch("subprocess.run", return_value=_version_output(256)),
         ):
             assert systemd_creds.is_available() is False
 
     def test_is_available_when_missing(self) -> None:
-        with patch("shutil.which", return_value=None):
+        with patch("terok_sandbox.vault.store.systemd_creds.find_host_tool", return_value=None):
             assert systemd_creds.is_available() is False
 
     def test_is_available_when_version_probe_fails(self) -> None:
         with (
-            patch("shutil.which", return_value="/usr/bin/systemd-creds"),
+            patch(
+                "terok_sandbox.vault.store.systemd_creds.find_host_tool",
+                return_value="/usr/bin/systemd-creds",
+            ),
             patch(
                 "subprocess.run",
                 side_effect=subprocess.CalledProcessError(returncode=1, cmd=["systemd-creds"]),
@@ -95,7 +107,10 @@ class TestAvailability:
     def test_is_available_when_version_output_has_no_integer(self) -> None:
         """Garbage output (no version number) is treated as unavailable, not crash."""
         with (
-            patch("shutil.which", return_value="/usr/bin/systemd-creds"),
+            patch(
+                "terok_sandbox.vault.store.systemd_creds.find_host_tool",
+                return_value="/usr/bin/systemd-creds",
+            ),
             patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="garbage\n")),
         ):
             assert systemd_creds.is_available() is False
@@ -107,14 +122,17 @@ class TestAvailability:
             _FakeVarlinkSocket(),
         )
         with (
-            patch("shutil.which", return_value="/usr/bin/systemd-creds"),
+            patch(
+                "terok_sandbox.vault.store.systemd_creds.find_host_tool",
+                return_value="/usr/bin/systemd-creds",
+            ),
             patch("subprocess.run", return_value=_version_output(259)),
         ):
             assert systemd_creds.unavailable_reason() is None
             assert systemd_creds.is_available() is True
 
     def test_unavailable_reason_names_missing_binary(self) -> None:
-        with patch("shutil.which", return_value=None):
+        with patch("terok_sandbox.vault.store.systemd_creds.find_host_tool", return_value=None):
             reason = systemd_creds.unavailable_reason()
         assert reason is not None
         assert "not found on PATH" in reason
@@ -122,7 +140,10 @@ class TestAvailability:
     def test_unavailable_reason_names_old_systemd(self) -> None:
         """The Ubuntu 24.04 case: systemd 255 lacks the non-root --user path."""
         with (
-            patch("shutil.which", return_value="/usr/bin/systemd-creds"),
+            patch(
+                "terok_sandbox.vault.store.systemd_creds.find_host_tool",
+                return_value="/usr/bin/systemd-creds",
+            ),
             patch("subprocess.run", return_value=_version_output(255)),
         ):
             reason = systemd_creds.unavailable_reason()
@@ -139,7 +160,10 @@ class TestAvailability:
             _FakeVarlinkSocket(present=False),
         )
         with (
-            patch("shutil.which", return_value="/usr/bin/systemd-creds"),
+            patch(
+                "terok_sandbox.vault.store.systemd_creds.find_host_tool",
+                return_value="/usr/bin/systemd-creds",
+            ),
             patch("subprocess.run", return_value=_version_output(259)),
         ):
             reason = systemd_creds.unavailable_reason()
@@ -149,7 +173,7 @@ class TestAvailability:
     def test_has_tpm2_short_circuits_when_unavailable(self) -> None:
         """``is_available`` False → no TPM probe; no extra subprocess spawned."""
         with (
-            patch("shutil.which", return_value=None),
+            patch("terok_sandbox.vault.store.systemd_creds.find_host_tool", return_value=None),
             patch("subprocess.run") as run,
         ):
             assert systemd_creds.has_tpm2() is False
@@ -161,7 +185,10 @@ class TestAvailability:
             _FakeVarlinkSocket(),
         )
         with (
-            patch("shutil.which", return_value="/usr/bin/systemd-creds"),
+            patch(
+                "terok_sandbox.vault.store.systemd_creds.find_host_tool",
+                return_value="/usr/bin/systemd-creds",
+            ),
             patch(
                 "subprocess.run",
                 side_effect=[
@@ -174,7 +201,10 @@ class TestAvailability:
 
     def test_has_tpm2_when_command_fails(self) -> None:
         with (
-            patch("shutil.which", return_value="/usr/bin/systemd-creds"),
+            patch(
+                "terok_sandbox.vault.store.systemd_creds.find_host_tool",
+                return_value="/usr/bin/systemd-creds",
+            ),
             patch(
                 "subprocess.run",
                 side_effect=[_version_output(259), MagicMock(returncode=1)],
@@ -184,7 +214,10 @@ class TestAvailability:
 
     def test_has_tpm2_swallows_timeout(self) -> None:
         with (
-            patch("shutil.which", return_value="/usr/bin/systemd-creds"),
+            patch(
+                "terok_sandbox.vault.store.systemd_creds.find_host_tool",
+                return_value="/usr/bin/systemd-creds",
+            ),
             patch(
                 "subprocess.run",
                 side_effect=[
@@ -397,7 +430,10 @@ class TestUnseal:
     ) -> None:
         cred = tmp_path / "v.cred"
         cred.write_bytes(b"sealed-blob")
-        monkeypatch.setattr("shutil.which", lambda _name: _SYSTEMD_CREDS_EXE)
+        monkeypatch.setattr(
+            "terok_sandbox.vault.store.systemd_creds.find_host_tool",
+            lambda _name: _SYSTEMD_CREDS_EXE,
+        )
         result = MagicMock(returncode=0, stdout="my-passphrase\n")
         with patch("subprocess.run", return_value=result) as run:
             assert systemd_creds.unseal(cred) == "my-passphrase"
@@ -415,7 +451,7 @@ class TestUnseal:
         cred = tmp_path / "v.cred"
         cred.write_bytes(b"sealed-blob")
         with (
-            patch("shutil.which", return_value=None),
+            patch("terok_sandbox.vault.store.systemd_creds.find_host_tool", return_value=None),
             patch("subprocess.run") as run,
         ):
             assert systemd_creds.unseal(cred) is None
@@ -640,7 +676,9 @@ def _have_systemd_creds(monkeypatch: pytest.MonkeyPatch) -> None:
     binary path and the socket; the version stays under the test's own
     control via ``subprocess.run`` mocking.
     """
-    monkeypatch.setattr("shutil.which", lambda _name: _SYSTEMD_CREDS_EXE)
+    monkeypatch.setattr(
+        "terok_sandbox.vault.store.systemd_creds.find_host_tool", lambda _name: _SYSTEMD_CREDS_EXE
+    )
     monkeypatch.setattr(
         "terok_sandbox.vault.store.systemd_creds._VARLINK_SOCKET",
         _FakeVarlinkSocket(),

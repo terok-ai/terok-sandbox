@@ -20,15 +20,15 @@ _FAKE_SYSTEMCTL = "/usr/bin/systemctl"
 
 @pytest.fixture
 def with_systemctl_path(monkeypatch: pytest.MonkeyPatch) -> str:
-    """Pin ``_SYSTEMCTL_PATH`` to a known absolute path for the duration of the test."""
-    monkeypatch.setattr(_systemctl, "_SYSTEMCTL_PATH", _FAKE_SYSTEMCTL)
+    """Stub discovery with a known absolute path for the duration of the test."""
+    monkeypatch.setattr(_systemctl, "find_host_tool", lambda _: _FAKE_SYSTEMCTL)
     return _FAKE_SYSTEMCTL
 
 
 @pytest.fixture
 def without_systemctl_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pin ``_SYSTEMCTL_PATH`` to ``None`` to simulate a host with no systemctl."""
-    monkeypatch.setattr(_systemctl, "_SYSTEMCTL_PATH", None)
+    """Stub discovery with ``None`` to simulate a host with no systemctl."""
+    monkeypatch.setattr(_systemctl, "find_host_tool", lambda _: None)
 
 
 class TestRun:
@@ -181,3 +181,22 @@ class TestFormatCaptured:
         """Both streams empty → no trailing ``"; …"`` suffix."""
         assert _systemctl._format_captured(None, None) == ""
         assert _systemctl._format_captured(b"", b"") == ""
+
+
+def test_systemctl_selection_follows_current_path(tmp_path, monkeypatch):
+    """No import-time executable choice survives a change to the caller's PATH."""
+    from terok_util import find_host_tool
+
+    monkeypatch.setattr(_systemctl, "find_host_tool", find_host_tool)
+    with patch.object(
+        _systemctl.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)
+    ) as run:
+        for label in ("first", "second"):
+            directory = tmp_path / label
+            directory.mkdir()
+            binary = directory / "systemctl"
+            binary.write_text("#!/bin/sh\nexit 0\n")
+            binary.chmod(0o755)
+            monkeypatch.setenv("PATH", str(directory))
+            _systemctl.query("is-active", "unit")
+            assert run.call_args.args[0][0] == str(binary)

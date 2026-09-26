@@ -78,7 +78,7 @@ from terok_sandbox import (
     write_sidecar,
     remove_container_state,
     sandbox_uninstall,
-    needs_setup,
+    check_setup,
 )
 ```
 

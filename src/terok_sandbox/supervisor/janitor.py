@@ -33,13 +33,14 @@ from __future__ import annotations
 import contextlib
 import json
 import os
-import shutil
 import signal
 import subprocess  # nosec B404
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
+
+from terok_util import find_host_tool
 
 if TYPE_CHECKING:
     from ..doctor import DoctorCheck
@@ -174,7 +175,7 @@ def _live_container_ids() -> frozenset[str] | None:
     ``None`` (podman missing, erroring, or unparsable) means liveness is
     unknown and must stay distinguishable from an empty live set.
     """
-    podman = shutil.which("podman")
+    podman = find_host_tool("podman")
     if podman is None:
         return None
     try:

@@ -1,4 +1,10 @@
 # Changelog
+
+## v0.6.0 — Unreleased
+
+- Own sandbox setup readiness and compose Shield checks downward. Rerun setup after upgrading; downgrades are unsupported.
+- Use the launching host PATH for tools and setup-bound standalone Python hooks, including on NixOS.
+
 ## v0.5.0 — Past Prologue
 
 ## What's Changed

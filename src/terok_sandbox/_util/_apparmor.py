@@ -22,12 +22,13 @@ with ``sudo bash`` (no compilation, just ``apparmor_parser -r``).
 
 from __future__ import annotations
 
-import shutil
 from dataclasses import dataclass
 from enum import Enum
 from functools import lru_cache
 from importlib.resources import files as _resource_files
 from pathlib import Path
+
+from terok_util import find_host_tool
 
 # Kernel sysfs node: "Y" when AppArmor is enabled.
 _APPARMOR_ENABLED = Path("/sys/module/apparmor/parameters/enabled")
@@ -124,7 +125,7 @@ def check_status() -> AppArmorCheckResult:
     marker but not the current revision), and ``OK`` at the current
     revision; anything else is ``NOT_APPLICABLE``.
     """
-    if not is_apparmor_enabled() or shutil.which("dnsmasq") is None:
+    if not is_apparmor_enabled() or find_host_tool("dnsmasq") is None:
         return AppArmorCheckResult(AppArmorStatus.NOT_APPLICABLE)
     profile = dnsmasq_profile()
     if profile is None:
