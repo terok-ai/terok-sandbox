@@ -206,14 +206,14 @@ class TestOwnership:
 
         from terok_sandbox import SandboxConfig
 
-        # Pin the chain to a deterministic test passphrase via the keyring
+        # Pin the chain to a deterministic test passphrase via the desktop keyring
         # tier so we don't depend on any session-file / sealed-cred state
         # on the developer host.
         monkeypatch.setattr(
-            "terok_sandbox.vault.store.encryption.load_passphrase_from_keyring",
+            "terok_sandbox.vault.store.encryption.load_passphrase_from_desktop_keyring",
             lambda **_kw: "test",
         )
-        cfg = SandboxConfig(credentials_use_keyring=True)
+        cfg = SandboxConfig(credentials_use_desktop_keyring=True)
         db_path = tmp_path / "owned.db"
         with SSHManager.open_for_config(scope="proj", cfg=cfg, db_path=db_path) as m:
             m.init()  # proves the DB is usable inside the block

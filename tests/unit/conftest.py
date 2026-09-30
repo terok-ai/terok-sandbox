@@ -46,9 +46,9 @@ def _isolate_user_paths(
     through to the operator's real ``~/.config/terok/config.yml`` and
     XDG state dirs — silently passing on a clean machine and mutating
     those files on a populated one.  The known reproducer was
-    ``TestVaultToKeyring::test_default_cfg_branch``, where a leaked
+    ``TestVaultToDesktopKeyring::test_default_cfg_branch``, where a leaked
     passphrase in the real config file flipped the test's expected
-    SystemExit into a successful write of ``use_keyring: true`` to the
+    SystemExit into a successful write of ``use_desktop_keyring: true`` to the
     operator's config.
 
     Uses ``tmp_path_factory`` rather than ``tmp_path`` so the fake home
@@ -155,12 +155,12 @@ def _isolate_systemd_creds_version_cache() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
-def _isolate_credential_keyring(monkeypatch: pytest.MonkeyPatch) -> None:
+def _isolate_credential_passphrase_sources(monkeypatch: pytest.MonkeyPatch) -> None:
     """Stub the resolution chain so tests get a deterministic ``"test"`` passphrase.
 
     The real kernel keyring is uid-global and may hold a stale cache
     from a prior run (and is seccomp-blocked in some CI containers), so
-    we blank the kernel-keyring tier as well as the OS-keyring tier; the
+    we blank the kernel-keyring tier as well as the desktop-keyring tier; the
     tests that exercise the kernel-keyring tier explicitly restore its
     functions via a local monkeypatch.
     """
@@ -170,7 +170,7 @@ def _isolate_credential_keyring(monkeypatch: pytest.MonkeyPatch) -> None:
     from terok_sandbox.resources.hooks import _supervisor_state
 
     # The suite's host: a user manager answers, so the supervisor is a
-    # user unit and the keyring is the cache backing — the world most
+    # user unit and the kernel keyring is the cache backing — the world most
     # tests were written in.  The test host itself has no manager, and
     # the placement tests toggle this fact explicitly.
     monkeypatch.setattr(_supervisor_state, "user_manager_reachable", lambda _dir: True)
@@ -179,7 +179,7 @@ def _isolate_credential_keyring(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(_kk, "forget", lambda _db=None: True)
     monkeypatch.setattr(_kk, "is_cached", lambda _db=None: False)
     monkeypatch.setattr(_kk, "unavailable_reason", lambda: None)
-    monkeypatch.setattr(_enc, "load_passphrase_from_keyring", lambda **_kw: "test")
-    monkeypatch.setattr(_enc, "store_passphrase_in_keyring", lambda _pw: True)
-    monkeypatch.setattr(_enc, "forget_passphrase_in_keyring", lambda: None)
-    monkeypatch.setattr(_config, "credentials_use_keyring", lambda: True)
+    monkeypatch.setattr(_enc, "load_passphrase_from_desktop_keyring", lambda **_kw: "test")
+    monkeypatch.setattr(_enc, "store_passphrase_in_desktop_keyring", lambda _pw: True)
+    monkeypatch.setattr(_enc, "forget_passphrase_in_desktop_keyring", lambda: None)
+    monkeypatch.setattr(_config, "credentials_use_desktop_keyring", lambda: True)

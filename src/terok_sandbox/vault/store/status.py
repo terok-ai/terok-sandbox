@@ -65,7 +65,7 @@ def active_durable_source(cfg: SandboxConfig) -> PassphraseTier | None:
     """Name the durable tier that already resolves the vault, or ``None``.
 
     Probes the chain for a reboot-surviving tier (presence only — no
-    unseal, no command exec).  The volatile kernel-keyring cache is
+    unseal, no command exec).  The volatile session cache is
     ``durable=False`` and so never counts here.  The single source of
     truth for the no-cache guard, shared by the passphrase-cache writer
     and the CLI's skip-the-prompt early-out: if a durable tier is
@@ -74,7 +74,7 @@ def active_durable_source(cfg: SandboxConfig) -> PassphraseTier | None:
     for tier in _encryption.probe_passphrase_chain(
         credentials_db=cfg.db_path,
         systemd_creds_file=cfg.vault_systemd_creds_file,
-        use_keyring=cfg.credentials_use_keyring,
+        use_desktop_keyring=cfg.credentials_use_desktop_keyring,
         passphrase_command=cfg.credentials_passphrase_command,
     ):
         if tier.present and tier.source in DURABLE_TIERS:
@@ -160,11 +160,11 @@ def _build_warnings(recovery: RecoveryStatus) -> tuple[VaultWarning, ...]:
             VaultWarning(
                 VaultWarningKind.RECOVERY_VOLATILE,
                 "error",
-                "recovery key UNSAVED, vault dies at logout",
-                "the only copy of the vault passphrase is the kernel-keyring cache,"
-                " which is cleared at logout and never survives a reboot — save it"
-                " off-host now or the vault becomes unrecoverable the next time this"
-                " login session ends",
+                "recovery key UNSAVED, only a temporary cache",
+                "the only available copy of the vault passphrase is the temporary cache"
+                " (kernel keyring or tmpfs session file). It never survives a reboot"
+                " and may disappear earlier — save it off-host now or cache loss"
+                " makes the vault unrecoverable",
             )
         )
     elif not recovery.acknowledged and recovery.source is not None:
@@ -235,7 +235,7 @@ class VaultStatus:
         chain = _encryption.probe_passphrase_chain(
             credentials_db=cfg.db_path,
             systemd_creds_file=cfg.vault_systemd_creds_file,
-            use_keyring=cfg.credentials_use_keyring,
+            use_desktop_keyring=cfg.credentials_use_desktop_keyring,
             passphrase_command=cfg.credentials_passphrase_command,
         )
         active_index = next((i for i, tier in enumerate(chain) if tier.present), None)
@@ -322,7 +322,7 @@ def _classify_db_access(
     except WrongPassphraseError:
         return _DbAccess(
             lock_reason=(
-                f"the passphrase via {recovery.source} does not open the DB"
+                f"the passphrase via {PassphraseTier(recovery.source).display_name} does not open the DB"
                 " — wrong key, or a DB from another install"
             )
         )

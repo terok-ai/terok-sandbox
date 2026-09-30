@@ -5,14 +5,14 @@
 
 The unlock/lock pair drives the volatile-cache slot of the SQLCipher
 passphrase resolution chain: ``unlock`` caches a passphrase in the
-kernel keyring; ``lock`` removes it.  Everything else lives under
+session cache (kernel keyring or tmpfs session file); ``lock`` removes it. Everything else lives under
 ``vault passphrase``:
 
 - ``vault passphrase seal`` promotes the current passphrase into a
   machine-bound ``systemd-creds`` credential.
-- ``vault passphrase to-keyring`` moves it from whichever tier holds it
-  now into the OS keyring (the recommended upgrade path off the
-  volatile kernel-keyring cache).
+- ``vault passphrase to-desktop-keyring`` moves it from whichever tier holds it
+  now into the desktop keyring (the recommended upgrade path off the
+  volatile session cache).
 - ``vault passphrase reveal`` resolves and prints the current
   passphrase (to ``/dev/tty`` by default, or stdout with
   ``--allow-redirect``) and offers to mark the recovery key as saved.
@@ -23,7 +23,7 @@ kernel keyring; ``lock`` removes it.  Everything else lives under
   [`change_passphrase`][terok_sandbox.commands.vault.change_passphrase]
   is the prompt-free core the TUI shares.
 ``vault lock`` clears every stored copy of the passphrase — the
-kernel-keyring cache, the OS keyring, and the sealed systemd-creds
+session cache, the desktop keyring, and the sealed systemd-creds
 credential — so the vault becomes irrecoverable without an off-host
 copy.  The machine-bound tiers are an automatic-unlock convenience on
 top of a passphrase the operator is expected to have saved; locking
@@ -42,7 +42,7 @@ one — per the no-state-preservation rule).
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from terok_util import LazyHandler, sanitize_tty
@@ -91,9 +91,9 @@ class SessionProvisionResult:
 def provision_session_passphrase(
     cfg: SandboxConfig, passphrase: str, *, force: bool = False
 ) -> SessionProvisionResult:
-    """Validate *passphrase* against the DB, then cache it in the kernel keyring.
+    """Validate *passphrase* against the DB, then cache it in the session cache.
 
-    The single writer of the volatile kernel-keyring unlock cache — the
+    The single writer of the volatile session cache — the
     CLI ``vault unlock`` and terok's TUI unlock modal both funnel through
     here, so the no-cache and validation guards apply to every caller by
     construction; neither can store a value the DB rejects, nor cache one
@@ -103,7 +103,7 @@ def provision_session_passphrase(
 
     1. **No-cache.** The cache only earns its keep when no durable tier
        already unlocks the vault non-interactively.  When a durable tier
-       (systemd-creds / keyring) resolves and *force* is false, nothing
+       (systemd-creds / desktop keyring) resolves and *force* is false, nothing
        is written and the result reports ``written=False`` + the durable
        tier.  *force* (re-key / deliberate override) skips this guard.
     2. **Validation.** When the DB exists (and isn't a legacy plaintext
@@ -113,8 +113,8 @@ def provision_session_passphrase(
        just to check would create it as a side effect) — the value
        becomes its key on first use.
 
-    Raises [`RuntimeError`][RuntimeError] if the kernel keyring is
-    unavailable on this host (no ``libkeyutils``, ``CONFIG_KEYS`` off) —
+    Raises [`RuntimeError`][RuntimeError] if neither the kernel keyring
+    nor the tmpfs session file can cache the passphrase on this host —
     a genuine "can't cache here", distinct from the ``written=False``
     no-cache refusal.
     """
@@ -138,13 +138,13 @@ def provision_session_passphrase(
         raise RuntimeError(
             "the session cache is unavailable here"
             f" ({session_cache.unavailable_reason() or 'store failed'});"
-            " seal a durable tier instead (vault passphrase seal / to-keyring)"
+            " seal a durable tier instead (vault passphrase seal / to-desktop-keyring)"
         )
     return SessionProvisionResult(written=True, validated=validated)
 
 
 def _handle_vault_unlock(*, cfg: SandboxConfig | None = None, force: bool = False) -> None:
-    """Cache the credentials-DB passphrase in the kernel keyring.
+    """Cache the credentials-DB passphrase in the session cache.
 
     Both guards live in
     [`provision_session_passphrase`][terok_sandbox.commands.vault.provision_session_passphrase]
@@ -164,7 +164,7 @@ def _handle_vault_unlock(*, cfg: SandboxConfig | None = None, force: bool = Fals
     # value we'd discard.
     if not force and (durable := active_durable_source(cfg)) is not None:
         print(
-            f"vault already auto-unlocks via {durable}; not caching a passphrase"
+            f"vault already auto-unlocks via {durable.display_name}; not caching a passphrase"
             " (a durable tier already resolves it). Re-run with --force to override."
         )
         return
@@ -181,7 +181,9 @@ def _handle_vault_unlock(*, cfg: SandboxConfig | None = None, force: bool = Fals
     except PlaintextDBFoundError as exc:
         raise SystemExit(str(exc)) from exc
 
-    print("→ cached passphrase in the kernel keyring (RAM-only, cleared at logout)")
+    from ..vault.store import session_cache
+
+    print(f"→ passphrase {session_cache.backing_detail(cached=True)} (lost on reboot)")
     if result.validated:
         print("  verified: the value opens the credentials DB")
     else:
@@ -204,7 +206,7 @@ def _forget_config_tier_updates(cfg: SandboxConfig) -> dict[str, object | None]:
 def purge_passphrase_tiers(cfg: SandboxConfig) -> None:
     """Remove every stored copy of the credentials-DB passphrase.
 
-    Clears the kernel-keyring cache, the OS keyring entry, the
+    Clears both session-cache backings, the desktop keyring entry, the
     sealed systemd-creds credential, and the
     ``credentials.passphrase_command`` wiring in ``config.yml`` — then
     drops the recovery-acknowledged marker, since it's meaningless once
@@ -219,7 +221,7 @@ def purge_passphrase_tiers(cfg: SandboxConfig) -> None:
     """
     from ..vault.store import session_cache
     from ..vault.store.encryption import (
-        forget_passphrase_in_keyring,
+        forget_passphrase_in_desktop_keyring,
     )
 
     # Call forget() directly and branch on its result: it distinguishes
@@ -233,28 +235,25 @@ def purge_passphrase_tiers(cfg: SandboxConfig) -> None:
             "failed to clear the session cache; future processes may still auto-unlock from it"
         )
 
-    if cfg.credentials_use_keyring:
-        if (keyring_reason := forget_passphrase_in_keyring()) is None:
-            print("→ keyring entry cleared or absent")
+    if cfg.credentials_use_desktop_keyring:
+        if (desktop_keyring_reason := forget_passphrase_in_desktop_keyring()) is None:
+            print("→ desktop keyring entry cleared or absent")
         else:
             raise SystemExit(
-                f"failed to clear the keyring entry ({keyring_reason});"
-                " future supervisors may still auto-unlock from keyring —"
+                f"failed to clear the desktop keyring entry ({desktop_keyring_reason});"
+                " future supervisors may still auto-unlock from desktop keyring —"
                 " resolve it and run `vault lock` again"
             )
 
     config_updates = _forget_config_tier_updates(cfg)
     if config_updates:
-        from .. import config as _config
         from .._yaml import update_section as _yaml_update_section
         from ..paths import config_file_paths
 
-        user_config = next((p for label, p in config_file_paths() if label == "user"), None)
-        if user_config is not None and user_config.exists():
-            _yaml_update_section(user_config, "credentials", config_updates)
-            _config._credentials_section.cache_clear()
-            for key in config_updates:
-                print(f"→ cleared credentials.{key} from config.yml")
+        _, config_path = config_file_paths()[-1]
+        _yaml_update_section(config_path, "credentials", config_updates)
+        for key in config_updates:
+            print(f"→ cleared credentials.{key} from config.yml")
 
     sealed_cred = cfg.vault_systemd_creds_file
     if sealed_cred.exists():
@@ -286,8 +285,8 @@ def _confirm_lock_when_unacknowledged(cfg: SandboxConfig, *, force: bool) -> Non
         return
 
     print(
-        "Locking clears EVERY stored copy of the vault passphrase (kernel-keyring"
-        " cache, keyring, sealed systemd-creds credential, config.yml).  You have"
+        "Locking clears EVERY stored copy of the vault passphrase (session cache,"
+        " desktop keyring, sealed systemd-creds credential, helper wiring).  You have"
         " not confirmed an off-host copy, so the vault would become UNRECOVERABLE."
     )
     response = _read_from_controlling_tty("Type SAVED to confirm you have it stored elsewhere: ")
@@ -303,10 +302,10 @@ def _handle_vault_lock(*, cfg: SandboxConfig | None = None, force: bool = False)
 
     "Locked" means what an operator expects — the next open needs the
     passphrase again.  Against a machine-bound tier (systemd-creds /
-    keyring) there is no honest half-measure: a soft-lock that leaves the
+    desktop keyring) there is no honest half-measure: a soft-lock that leaves the
     sealed key in place still auto-unlocks on any access (the
     BitLocker-Suspend trap), so locking removes the stored copies
-    outright.  The systemd-creds / keyring tiers are an *automatic-unlock
+    outright.  The systemd-creds / desktop-keyring tiers are an *automatic-unlock
     convenience* layered on top of a passphrase you are expected to have
     saved — locking peels them away.
 
@@ -335,7 +334,7 @@ def _require_recovery_acknowledged(cfg: SandboxConfig, *, tier: str) -> None:
     """Refuse to enable a machine-bound auto-unlock tier until recovery is acknowledged.
 
     Escrow-before-enable, the BitLocker / FileVault model: a
-    systemd-creds or keyring tier auto-unlocks the vault on *this*
+    systemd-creds or desktop-keyring tier auto-unlocks the vault on *this*
     machine / account, so an off-host copy of the passphrase is the
     operator's only recovery if the hardware or account is lost.  Block
     the upgrade until they've confirmed they saved it.
@@ -357,7 +356,7 @@ def handle_vault_seal(*, cfg: SandboxConfig | None = None, key: str = "auto") ->
     """Seal the credentials-DB passphrase into a systemd-creds credential.
 
     Adds the systemd-creds tier to the resolution chain: machine-bound
-    (TPM2 + host key, or either alone), survives reboot, no OS
+    (TPM2 + host key, or either alone), survives reboot, no desktop
     keyring required.  After sealing, every new supervisor resolves the
     passphrase via ``systemd-creds decrypt`` on start — no operator
     interaction needed at boot, no plaintext-on-disk.
@@ -401,9 +400,9 @@ def handle_vault_seal(*, cfg: SandboxConfig | None = None, key: str = "auto") ->
     print(f"→ sealed passphrase to {cfg.vault_systemd_creds_file} (--with-key={key_mode})")
 
     # The passphrase now lives in the durable sealed credential, which
-    # outranks the volatile kernel-keyring cache in the chain — so the
+    # outranks the volatile session cache in the chain — so the
     # cache is superfluous residue.  Drop it so the chain resolves from
-    # the tier the operator just established (same cleanup ``to-keyring``
+    # the tier the operator just established (same cleanup ``to-desktop-keyring``
     # does).
     from ..vault.store import session_cache
 
@@ -419,23 +418,27 @@ def handle_vault_seal(*, cfg: SandboxConfig | None = None, key: str = "auto") ->
     )
 
 
-def handle_vault_to_keyring(*, cfg: SandboxConfig | None = None) -> None:
-    """Move the current passphrase from its current tier into the OS keyring.
+def handle_vault_to_desktop_keyring(*, cfg: SandboxConfig | None = None) -> None:
+    """Move a validated passphrase into the desktop keyring without losing its source.
 
     Resolves the passphrase via the chain (or prompts as a last resort),
-    writes it to the keyring, flips ``credentials.use_keyring`` to true
+    writes it to the desktop keyring, flips ``credentials.use_desktop_keyring`` to true
     in ``config.yml``, clears any plaintext ``credentials.passphrase`` /
     ``credentials.passphrase_command`` wiring, and removes the
-    kernel-keyring cache and sealed systemd-creds copies.
+    session-cache and sealed systemd-creds copies.
 
-    The validate-before-destroy ordering is deliberate: if the keyring
-    write fails, the source tier is still intact.
+    Both desktop-keyring readback and persisted configuration must succeed
+    before temporary or sealed copies are removed.  A failure may leave an
+    additional desktop copy or changed helper wiring; external helper secrets
+    are never deleted.
     """
     from .. import config as _config
     from .._yaml import update_section as _yaml_update_section
+    from ..paths import config_file_paths
+    from ..vault.store.db import CredentialDB, PlaintextDBFoundError
     from ..vault.store.encryption import (
         WrongPassphraseError,
-        store_passphrase_in_keyring,
+        store_passphrase_in_desktop_keyring,
     )
 
     cfg = _resolve_cfg(cfg)
@@ -443,49 +446,69 @@ def handle_vault_to_keyring(*, cfg: SandboxConfig | None = None) -> None:
     try:
         passphrase, source = cfg.resolve_passphrase_with_source(prompt_on_tty=True)
     except WrongPassphraseError as exc:
-        raise SystemExit(f"cannot move to keyring: {exc}") from exc
+        raise SystemExit(f"cannot move to desktop keyring: {exc}") from exc
 
-    if not passphrase:
+    if not passphrase or source is None:
         raise SystemExit("no current passphrase resolvable; run `terok-sandbox vault unlock` first")
-    if source == "keyring":
-        print("→ passphrase is already in the keyring; nothing to do")
+    if cfg.db_path.exists():
+        try:
+            CredentialDB(cfg.db_path, passphrase=passphrase).close()
+        except (WrongPassphraseError, PlaintextDBFoundError) as exc:
+            raise SystemExit(
+                "cannot move to desktop keyring: the current passphrase does not open"
+                " the encrypted vault; source copies were kept"
+            ) from exc
+    if source is PassphraseTier.DESKTOP_KEYRING:
+        print("→ passphrase is already in the desktop keyring; nothing to do")
         return
-    _require_recovery_acknowledged(cfg, tier="keyring")
+    _require_recovery_acknowledged(cfg, tier="desktop keyring")
 
-    if not store_passphrase_in_keyring(passphrase):
-        raise SystemExit("OS keyring is unreachable or denied; aborting (nothing was changed)")
-    print(f"→ stored passphrase in keyring (was: {source})")
+    if not store_passphrase_in_desktop_keyring(passphrase):
+        raise SystemExit(
+            "could not store and verify the passphrase in the desktop keyring;"
+            " source copies were kept"
+        )
 
-    # Switch the config's tier wiring atomically: flip use_keyring on,
+    # Switch the config's tier wiring atomically: flip use_desktop_keyring on,
     # drop the plaintext + helper fallbacks so the chain can't re-resolve
     # via a stale lower tier.
-    from ..paths import config_file_paths
-
-    user_config = next((p for label, p in config_file_paths() if label == "user"), None)
-    if user_config is not None:
-        # nosec: B105 — clearing config keys to None, not hardcoding secrets
-        updates = {  # nosec: B105
-            "use_keyring": True,
-            "passphrase": None,  # nosec: B105
-            "passphrase_command": None,  # nosec: B105
-        }
-        _yaml_update_section(user_config, "credentials", updates)
-        _config._credentials_section.cache_clear()
-        print(f"→ updated {user_config} (use_keyring: true, plaintext fields cleared)")
+    _, config_path = config_file_paths()[-1]
+    updates = {
+        "use_desktop_keyring": True,
+        "passphrase": None,  # nosec: B105 — removing a legacy config key
+        "passphrase_command": None,  # nosec: B105 — removing the helper wiring
+    }
+    try:
+        _yaml_update_section(config_path, "credentials", updates)
+        if not _config.credentials_use_desktop_keyring():
+            raise RuntimeError("desktop keyring is still disabled")
+    except Exception as exc:  # noqa: BLE001 — config errors must not expose secret YAML values
+        raise SystemExit(
+            "desktop keyring copy verified, but could not enable it in configuration"
+            f" ({type(exc).__name__}); temporary and sealed copies were not removed."
+            " Check credentials configuration before retrying"
+        ) from None
 
     # Remove the old tier's copies.  Sealed systemd-creds outranks
-    # keyring on the resolution order, so it must go; the volatile
-    # kernel-keyring cache is cleared too so nothing stale lingers.
+    # desktop keyring in the resolution order, so it must go; the volatile
+    # session cache is cleared too so nothing stale lingers.
     from ..vault.store import session_cache
 
+    if cfg.vault_systemd_creds_file.exists():
+        try:
+            cfg.vault_systemd_creds_file.unlink()
+        except OSError as exc:
+            raise SystemExit(
+                "desktop keyring copy verified and enabled, but could not remove the sealed"
+                f" source ({type(exc).__name__}); session cache was kept"
+            ) from None
     if not session_cache.forget(cfg.db_path):
         print(
-            "⚠ could not clear the kernel-keyring cache;"
-            " it may still auto-unlock the vault — run `vault lock` to clear it"
+            "⚠ could not clear the session cache (kernel keyring or session file);"
+            " the extra copy may still auto-unlock the vault"
         )
-    if cfg.vault_systemd_creds_file.exists():
-        cfg.vault_systemd_creds_file.unlink()
-        print(f"→ removed {sanitize_tty(str(cfg.vault_systemd_creds_file))}")
+    print(f"→ stored and verified passphrase in desktop keyring (was: {source.display_name})")
+    print(f"→ enabled desktop keyring in {sanitize_tty(str(config_path))}")
 
 
 def _handle_vault_passphrase_reveal(
@@ -526,6 +549,7 @@ def _handle_vault_passphrase_reveal(
     if not passphrase:
         raise SystemExit("no current passphrase resolvable; run `terok-sandbox vault unlock` first")
 
+    source_name = source.display_name if source is not None else "unknown"
     if allow_redirect:
         # Pipe-friendly: stdout carries *only* the passphrase string
         # + trailing newline, suitable for ``| pass insert -e ...``
@@ -536,7 +560,7 @@ def _handle_vault_passphrase_reveal(
         # of the secret (audit finding #1 on PR #325).
         print(passphrase)
         safe_banner = (
-            f"\nVault passphrase ({source}) printed to stdout.\n"
+            f"\nVault passphrase ({source_name}) printed to stdout.\n"
             "  Recovery key — save it off-host"
             " (1Password emergency kit, paper safe, sealed envelope).\n"
         )
@@ -548,7 +572,7 @@ def _handle_vault_passphrase_reveal(
                 " can't capture it; pass --allow-redirect to print to stdout)"
             )
         _write_to_controlling_tty(
-            f"\nVault passphrase ({source}): {passphrase}\n"
+            f"\nVault passphrase ({source_name}): {passphrase}\n"
             "  Recovery key — save it off-host"
             " (1Password emergency kit, paper safe, sealed envelope).\n"
         )
@@ -631,7 +655,7 @@ class PassphraseChangeResult:
     owns re-running the acknowledgement flow.
     """
 
-    passphrase: str
+    passphrase: str = field(repr=False)
     """The new passphrase — mint or caller-supplied."""
 
     generated: bool
@@ -684,7 +708,7 @@ def change_passphrase(
     3. Only then fan the new value out to every tier that currently
        holds material, in resolution order, collecting per-tier
        outcomes instead of raising: a tier that can't take the new
-       value (keyring denied, systemd-creds host regressed) is purged
+       value (desktop keyring denied, systemd-creds host regressed) is purged
        where possible so no tier keeps resolving the *old* passphrase,
        and reported either way.  Once at least one tier holds the new
        value the escrow is deleted; if every rewrite failed it stays,
@@ -769,7 +793,7 @@ def change_passphrase(
         for row in probe_passphrase_chain(
             credentials_db=cfg.db_path,
             systemd_creds_file=cfg.vault_systemd_creds_file,
-            use_keyring=cfg.credentials_use_keyring,
+            use_desktop_keyring=cfg.credentials_use_desktop_keyring,
             passphrase_command=cfg.credentials_passphrase_command,
         )
         if row.present
@@ -778,7 +802,7 @@ def change_passphrase(
         # Locked vault changed via an explicitly-supplied *old*: nothing
         # holds material yet, so land the new value where `vault unlock`
         # would — otherwise the change succeeds and nobody can open the DB.
-        present = [PassphraseTier.KERNEL_KEYRING]
+        present = [PassphraseTier.SESSION_CACHE]
     rewrites = tuple(_rewrite_tier(cfg, tier, new) for tier in present)
 
     # The confirmed-saved copy (if any) is now the wrong passphrase —
@@ -812,14 +836,14 @@ def _rewrite_tier(cfg: SandboxConfig, tier: PassphraseTier, passphrase: str) -> 
     """
     from ..vault.store import session_cache, systemd_creds as _systemd_creds
     from ..vault.store.encryption import (
-        forget_passphrase_in_keyring,
-        store_passphrase_in_keyring,
+        forget_passphrase_in_desktop_keyring,
+        store_passphrase_in_desktop_keyring,
     )
 
     try:
-        if tier is PassphraseTier.KERNEL_KEYRING:
+        if tier is PassphraseTier.SESSION_CACHE:
             if session_cache.store(passphrase, cfg.db_path):
-                return TierRewrite(tier, ok=True, detail="kernel-keyring cache rewritten")
+                return TierRewrite(tier, ok=True, detail="session cache rewritten")
             cleared = session_cache.forget(cfg.db_path)
             stale = "stale cache cleared" if cleared else "stale cache may remain"
             return TierRewrite(
@@ -846,24 +870,24 @@ def _rewrite_tier(cfg: SandboxConfig, tier: PassphraseTier, passphrase: str) -> 
             return TierRewrite(
                 tier, ok=True, detail="credential re-sealed under the new passphrase"
             )
-        if tier is PassphraseTier.KEYRING:
-            if store_passphrase_in_keyring(passphrase):
-                return TierRewrite(tier, ok=True, detail="keyring entry rewritten")
-            if forget_passphrase_in_keyring() is None:
+        if tier is PassphraseTier.DESKTOP_KEYRING:
+            if store_passphrase_in_desktop_keyring(passphrase):
+                return TierRewrite(tier, ok=True, detail="desktop keyring entry rewritten")
+            if forget_passphrase_in_desktop_keyring() is None:
                 return TierRewrite(
-                    tier, ok=False, detail="keyring write failed — stale entry removed"
+                    tier, ok=False, detail="desktop keyring write/readback failed — entry removed"
                 )
             return TierRewrite(
                 tier,
                 ok=False,
                 detail=(
-                    "keyring write failed and the stale entry could not be removed —"
-                    " it still holds the OLD passphrase and will fail to open the vault"
+                    "desktop keyring write/readback failed and the entry could not be removed —"
+                    " it may still hold the OLD passphrase and fail to open the vault"
                 ),
             )
         return TierRewrite(tier, ok=False, detail="tier cannot be rewritten programmatically")
     except Exception as exc:  # noqa: BLE001 — the DB is already rekeyed; report every tier
-        return TierRewrite(tier, ok=False, detail=str(exc))
+        return TierRewrite(tier, ok=False, detail=f"tier rewrite failed ({type(exc).__name__})")
 
 
 def _collect_current_passphrase(cfg: SandboxConfig) -> str:
@@ -975,7 +999,7 @@ def _handle_vault_passphrase_change(*, cfg: SandboxConfig | None = None) -> None
         print(f"→ re-encrypted {cfg.db_path} under the new passphrase")
     for rewrite in result.rewrites:
         marker = "→" if rewrite.ok else "✗"
-        print(f"{marker} {rewrite.tier}: {sanitize_tty(rewrite.detail)}")
+        print(f"{marker} {rewrite.tier.display_name}: {sanitize_tty(rewrite.detail)}")
     print(
         "  already-running tasks may still hold the old passphrase — restart them"
         " to pick up the new one; new tasks use it automatically"
@@ -1062,7 +1086,8 @@ def _status_header(status: VaultStatus) -> str:
         return "UNPROVISIONED — no credentials DB and no stored passphrase yet"
     if status.lock_reason is not None:
         return f"LOCKED — {sanitize_tty(status.lock_reason)}"
-    return f"unlocked — passphrase via {status.source}"
+    source = status.source.display_name if status.source is not None else "unknown"
+    return f"unlocked — passphrase via {source}"
 
 
 def _chain_row_marker(row: ChainRow) -> str:
@@ -1109,7 +1134,9 @@ def _print_vault_status(status: VaultStatus) -> None:
     print(f"  DB:  {sanitize_tty(str(status.db_path))}{db_note}")
     print("  Passphrase resolution chain:")
     for row in status.chain:
-        print(f"    {row.tier:<19} {_chain_row_marker(row):<9} {sanitize_tty(row.detail)}")
+        print(
+            f"    {row.tier.display_name:<19} {_chain_row_marker(row):<9} {sanitize_tty(row.detail)}"
+        )
     if status.state is VaultState.UNPROVISIONED:
         print("  run setup (or the TUI) to provision a vault passphrase")
     elif status.state is VaultState.LOCKED:
@@ -1280,9 +1307,9 @@ _PASSPHRASE_GROUP = CommandDef(
             ),
         ),
         CommandDef(
-            name="to-keyring",
-            help="Move the current passphrase from its current tier into the OS keyring",
-            handler=LazyHandler("terok_sandbox.commands.vault:handle_vault_to_keyring"),
+            name="to-desktop-keyring",
+            help="Move the current passphrase from its current tier into the desktop keyring",
+            handler=LazyHandler("terok_sandbox.commands.vault:handle_vault_to_desktop_keyring"),
         ),
         CommandDef(
             name="reveal",
@@ -1352,7 +1379,7 @@ VAULT_COMMANDS: tuple[CommandDef, ...] = (
             ),
             CommandDef(
                 name="unlock",
-                help="Cache the credentials-DB passphrase for this session (kernel keyring)",
+                help="Cache the credentials-DB passphrase temporarily (kernel keyring or session file)",
                 handler=LazyHandler("terok_sandbox.commands.vault:_handle_vault_unlock"),
                 args=(
                     ArgDef(

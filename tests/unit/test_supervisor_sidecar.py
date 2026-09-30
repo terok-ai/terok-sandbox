@@ -65,25 +65,25 @@ class TestLoadSidecar:
             "runtime_dir": "/run/user/1000/terok/sandbox",
             "routes_path": "/home/dev/.terok/vault/routes.json",
             "vault_systemd_creds_file": "/home/dev/.terok/vault/vault.passphrase.cred",
-            "credentials_use_keyring": False,
+            "credentials_use_desktop_keyring": False,
             "credentials_passphrase_command": "pass show terok/vault",
         }
         cfg = load_sidecar(_write_sidecar(tmp_path, payload))
         assert cfg is not None
         assert cfg.routes_path == Path(str(payload["routes_path"]))
         assert cfg.vault_systemd_creds_file == Path(str(payload["vault_systemd_creds_file"]))
-        assert cfg.credentials_use_keyring is False
+        assert cfg.credentials_use_desktop_keyring is False
         assert cfg.credentials_passphrase_command == "pass show terok/vault"
 
     def test_security_booleans_reject_strings(self, tmp_path: Path) -> None:
-        """JSON strings cannot truthily opt into debugger or keyring access."""
+        """JSON strings cannot truthily opt into debugger or desktop keyring access."""
         base = {
             "container_name": "demo",
             "ipc_mode": "socket",
             "db_path": "/home/dev/.terok/vault.db",
             "runtime_dir": "/run/user/1000/terok/sandbox",
         }
-        for field in ("allow_debugger", "credentials_use_keyring"):
+        for field in ("allow_debugger", "credentials_use_desktop_keyring"):
             assert load_sidecar(_write_sidecar(tmp_path, {**base, field: "false"})) is None
 
     def test_invalid_field_logs_do_not_expose_values(

@@ -81,7 +81,7 @@ _LAZY: dict[str, str] = {
     "change_passphrase": "commands:change_passphrase",  # nosec: B105 — export-map import paths, never secrets
     "credentials_provisioned": "commands:credentials_provisioned",
     "handle_vault_seal": "commands:handle_vault_seal",
-    "handle_vault_to_keyring": "commands:handle_vault_to_keyring",
+    "handle_vault_to_desktop_keyring": "commands:handle_vault_to_desktop_keyring",
     "plan_provisioning": "commands:plan_provisioning",
     "provision_passphrase_tier": "commands:provision_passphrase_tier",  # nosec: B105 — export-map import paths, never secrets
     "provision_session_passphrase": "commands:provision_session_passphrase",
@@ -201,7 +201,7 @@ _LAZY: dict[str, str] = {
     "SSHKeyRow": "vault.store.db:SSHKeyRow",
     "NoPassphraseError": "vault.store.encryption:NoPassphraseError",
     "WrongPassphraseError": "vault.store.encryption:WrongPassphraseError",
-    "keyring_backend_available": "vault.store.encryption:keyring_backend_available",
+    "desktop_keyring_backend_available": "vault.store.encryption:desktop_keyring_backend_available",
     "RecoveryStatus": "vault.store.recovery:RecoveryStatus",
     "ChainRow": "vault.store.status:ChainRow",
     "VaultState": "vault.store.status:VaultState",
@@ -278,7 +278,7 @@ if TYPE_CHECKING:
         change_passphrase,
         credentials_provisioned,
         handle_vault_seal,
-        handle_vault_to_keyring,
+        handle_vault_to_desktop_keyring,
         plan_provisioning,
         provision_passphrase_tier,
         purge_passphrase_tiers,
@@ -389,7 +389,7 @@ if TYPE_CHECKING:
     from .vault.store.encryption import (
         NoPassphraseError,
         WrongPassphraseError,
-        keyring_backend_available,
+        desktop_keyring_backend_available,
     )
     from .vault.store.recovery import RecoveryStatus
     from .vault.store.status import (
@@ -506,13 +506,13 @@ __all__ = [
     "WrongPassphraseError",
     "change_passphrase",
     "credentials_provisioned",
-    "keyring_backend_available",
+    "desktop_keyring_backend_available",
     "plan_provisioning",
     "provision_passphrase_tier",
     "systemd_creds_available",
     "systemd_creds_has_tpm2",
     "handle_vault_seal",
-    "handle_vault_to_keyring",
+    "handle_vault_to_desktop_keyring",
     "purge_passphrase_tiers",
     # SSH
     "SSHInitResult",

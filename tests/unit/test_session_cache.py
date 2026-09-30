@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""The volatile session cache and the non-blocking OS-keyring read.
+"""The volatile session cache and the non-blocking desktop-keyring read.
 
-Locks the two guarantees the TUI-freeze fix introduced: an OS-keyring
+Locks the two guarantees the TUI-freeze fix introduced: an desktop-keyring
 read can never block its caller (locked collections are skipped, wedged
 backends time out), and the cache tier degrades to a tmpfs session file
 on hosts where the kernel key facility is unusable.
@@ -17,6 +17,7 @@ import time
 import types
 from pathlib import Path
 
+import keyring
 import pytest
 
 from terok_sandbox._util._placement import SupervisorPlacement
@@ -31,21 +32,22 @@ _DB = "credentials.db"
 
 #: The real read, captured at import — the autouse conftest fixture stubs
 #: the module attribute for every test, and this class tests the real thing.
-_REAL_LOAD = encryption.load_passphrase_from_keyring
+_REAL_LOAD = encryption.load_passphrase_from_desktop_keyring
 
 
-# ── Non-blocking OS-keyring read ────────────────────────────────────
+# ── Non-blocking desktop-keyring read ────────────────────────────────────
 
 
-class TestKeyringReadNeverBlocks:
-    """`load_passphrase_from_keyring` must return, whatever the backend does."""
+class TestDesktopKeyringReadNeverBlocks:
+    """`load_passphrase_from_desktop_keyring` must return, whatever the backend does."""
 
-    def test_blocked_read_is_skipped_without_touching_the_backend(
+    def test_blocked_interactive_read_is_skipped_without_touching_the_backend(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A read the probe marks blocked returns None and never imports keyring."""
+        """An interactive read the probe marks blocked never reaches the backend."""
+        monkeypatch.setenv("DISPLAY", ":0")
         monkeypatch.setattr(
-            encryption, "os_keyring_read_blocked", lambda **_kw: "OS keyring locked"
+            encryption, "desktop_keyring_read_blocked", lambda **_kw: "desktop keyring locked"
         )
         forbidden = types.ModuleType("keyring")
 
@@ -55,14 +57,14 @@ class TestKeyringReadNeverBlocks:
         forbidden.get_password = _explode  # type: ignore[attr-defined]
         monkeypatch.setitem(sys.modules, "keyring", forbidden)
 
-        assert _REAL_LOAD() is None
+        assert _REAL_LOAD(allow_prompt=True) is None
 
     def test_wedged_backend_times_out_instead_of_freezing(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A backend that never answers costs the timeout, not the process."""
-        monkeypatch.setattr(encryption, "os_keyring_read_blocked", lambda **_kw: None)
-        monkeypatch.setattr(encryption, "_KEYRING_READ_TIMEOUT_S", 0.2)
+        monkeypatch.setattr(encryption, "desktop_keyring_read_blocked", lambda **_kw: None)
+        monkeypatch.setattr(encryption, "_DESKTOP_KEYRING_READ_TIMEOUT_S", 0.2)
         release = threading.Event()
         stuck = types.ModuleType("keyring")
 
@@ -71,7 +73,7 @@ class TestKeyringReadNeverBlocks:
             return None
 
         stuck.get_password = _hang  # type: ignore[attr-defined]
-        monkeypatch.setitem(sys.modules, "keyring", stuck)
+        monkeypatch.setattr(keyring, "get_keyring", lambda: stuck)
 
         try:
             started = time.monotonic()
@@ -82,8 +84,8 @@ class TestKeyringReadNeverBlocks:
 
     def test_repeated_timeouts_do_not_stack_workers(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A wedged backend occupies the single worker; later reads never reach it."""
-        monkeypatch.setattr(encryption, "os_keyring_read_blocked", lambda **_kw: None)
-        monkeypatch.setattr(encryption, "_KEYRING_READ_TIMEOUT_S", 0.2)
+        monkeypatch.setattr(encryption, "desktop_keyring_read_blocked", lambda **_kw: None)
+        monkeypatch.setattr(encryption, "_DESKTOP_KEYRING_READ_TIMEOUT_S", 0.2)
         release = threading.Event()
         backend_calls: list[int] = []
         stuck = types.ModuleType("keyring")
@@ -94,7 +96,7 @@ class TestKeyringReadNeverBlocks:
             return None
 
         stuck.get_password = _hang  # type: ignore[attr-defined]
-        monkeypatch.setitem(sys.modules, "keyring", stuck)
+        monkeypatch.setattr(keyring, "get_keyring", lambda: stuck)
 
         try:
             assert _REAL_LOAD() is None  # times out; the call occupies the worker
@@ -105,10 +107,10 @@ class TestKeyringReadNeverBlocks:
 
     def test_healthy_backend_answers_normally(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The guards are transparent to a backend that just answers."""
-        monkeypatch.setattr(encryption, "os_keyring_read_blocked", lambda **_kw: None)
+        monkeypatch.setattr(encryption, "desktop_keyring_read_blocked", lambda **_kw: None)
         healthy = types.ModuleType("keyring")
         healthy.get_password = lambda *_args: "the-passphrase"  # type: ignore[attr-defined]
-        monkeypatch.setitem(sys.modules, "keyring", healthy)
+        monkeypatch.setattr(keyring, "get_keyring", lambda: healthy)
 
         assert _REAL_LOAD() == "the-passphrase"
 
@@ -171,7 +173,7 @@ class TestSessionCacheFacade:
         monkeypatch.setattr(kernel_keyring, "unavailable_reason", lambda: "no libkeyutils")
         assert session_cache.store("pw", _DB)
         assert session_cache.load(_DB) == "pw"
-        assert session_file.is_cached(_DB)  # it landed in the file, not the keyring
+        assert session_file.is_cached(_DB)  # it landed in the file, not the kernel keyring
 
     def test_forget_clears_both_backings(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """`vault lock` must not leave a cache in the backing this boot doesn't prefer."""
@@ -184,10 +186,10 @@ class TestSessionCacheFacade:
         assert forgotten == ["kernel"]
         assert not session_file.is_cached(_DB)
 
-    def test_a_user_unit_supervisor_reads_the_keyring(
+    def test_a_user_unit_supervisor_reads_the_kernel_keyring(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Where the supervisor is a user unit, the operator's keyring is its cache."""
+        """Where the supervisor is a user unit, the operator's kernel keyring is its cache."""
         stored: list[str] = []
         monkeypatch.setattr(
             session_cache, "supervisor_placement", lambda: SupervisorPlacement.USER_UNIT
@@ -203,7 +205,7 @@ class TestSessionCacheFacade:
     def test_a_namespace_daemon_gets_the_session_file(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Inside the container namespace the keyring is a stranger; a path is a path."""
+        """Inside the container namespace the kernel keyring is a stranger; a path is a path."""
         monkeypatch.setattr(
             session_cache, "supervisor_placement", lambda: SupervisorPlacement.NAMESPACE_DAEMON
         )
@@ -238,25 +240,25 @@ class TestSessionCacheFacade:
         assert "no libkeyutils" in detail
 
 
-class TestKeyringWorkerRetirement:
-    """The OS-keyring read leaves a worker thread; a child retires it before Landlock."""
+class TestDesktopKeyringWorkerRetirement:
+    """The desktop-keyring read leaves a worker thread; a child retires it before Landlock."""
 
     @pytest.fixture(autouse=True)
     def _fresh_worker(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Start from no worker and no wedge, whatever an earlier test left behind."""
-        monkeypatch.setattr(encryption, "_keyring_executor", None)
-        monkeypatch.setattr(encryption, "_keyring_worker_wedged", False)
+        monkeypatch.setattr(encryption, "_desktop_keyring_executor", None)
+        monkeypatch.setattr(encryption, "_desktop_keyring_worker_wedged", False)
 
     def test_a_finished_read_leaves_no_thread_behind(self) -> None:
         before = set(threading.enumerate())
         assert encryption._call_with_timeout(lambda: "pw", 1.0) == "pw"
         spawned = set(threading.enumerate()) - before
         assert spawned
-        encryption.retire_keyring_worker()
+        encryption.retire_desktop_keyring_worker()
         assert not any(thread.is_alive() for thread in spawned)
         # A later read starts a fresh worker; retirement is not a one-way door.
         assert encryption._call_with_timeout(lambda: "again", 1.0) == "again"
-        encryption.retire_keyring_worker()
+        encryption.retire_desktop_keyring_worker()
 
     def test_a_wedged_worker_is_abandoned_not_joined(self) -> None:
         """Joining a stuck read would hang the child; the thread stays and Landlock says so."""
@@ -265,13 +267,13 @@ class TestKeyringWorkerRetirement:
         with pytest.raises(TimeoutError):
             encryption._call_with_timeout(lambda: release.wait(5) and "late", 0.05)
         spawned = set(threading.enumerate()) - before
-        encryption.retire_keyring_worker()  # returns at once
+        encryption.retire_desktop_keyring_worker()  # returns at once
         assert any(thread.is_alive() for thread in spawned)
         release.set()
         # The wedge belonged to that worker: the next one is joined again.
         assert encryption._call_with_timeout(lambda: "fresh", 1.0) == "fresh"
-        assert encryption._keyring_worker_wedged is False
-        encryption.retire_keyring_worker()
+        assert encryption._desktop_keyring_worker_wedged is False
+        encryption.retire_desktop_keyring_worker()
 
 
 class TestLockedCollectionPromptPolicy:
@@ -294,14 +296,14 @@ class TestLockedCollectionPromptPolicy:
         connection = types.SimpleNamespace(close=lambda: None)
         collection = types.SimpleNamespace(is_locked=lambda: True)
         fake.dbus_init = lambda: connection  # type: ignore[attr-defined]
-        fake.get_default_collection = lambda _c: collection  # type: ignore[attr-defined]
+        fake.Collection = lambda _c: collection  # type: ignore[attr-defined]
         monkeypatch.setitem(sys.modules, "secretstorage", fake)
 
     def test_background_read_skips_the_locked_collection(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("DISPLAY", ":0")  # a desktop alone does not permit a prompt
-        assert encryption.os_keyring_read_blocked() is not None
+        assert encryption.desktop_keyring_read_blocked() is not None
 
     def test_interactive_read_on_a_desktop_may_prompt(
         self, monkeypatch: pytest.MonkeyPatch
@@ -309,9 +311,9 @@ class TestLockedCollectionPromptPolicy:
         import keyring
 
         monkeypatch.setenv("DISPLAY", ":0")
-        assert encryption.os_keyring_read_blocked(allow_prompt=True) is None
+        assert encryption.desktop_keyring_read_blocked(allow_prompt=True) is None
         # The read reaches the backend — the prompt is the backend's business.
-        monkeypatch.setattr(keyring, "get_password", lambda *_a: "unlocked-by-dialog")
+        monkeypatch.setattr(keyring.get_keyring(), "get_password", lambda *_a: "unlocked-by-dialog")
         assert _REAL_LOAD(allow_prompt=True) == "unlocked-by-dialog"
 
     def test_interactive_read_without_a_display_skips(
@@ -319,5 +321,5 @@ class TestLockedCollectionPromptPolicy:
     ) -> None:
         monkeypatch.delenv("DISPLAY", raising=False)
         monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
-        assert encryption.os_keyring_read_blocked(allow_prompt=True) is not None
+        assert encryption.desktop_keyring_read_blocked(allow_prompt=True) is not None
         assert _REAL_LOAD(allow_prompt=True) is None

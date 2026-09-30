@@ -36,5 +36,5 @@ class TestSetupInvocation:
         monkeypatch.setenv(SETUP_INVOCATION_ENV, "terok setup")
         rendered = _NON_TTY_TIER_HINT.format(setup=setup_invocation())
         assert rendered.startswith("terok setup: running non-interactively")
-        assert "--passphrase-tier keyring" in rendered
+        assert "--passphrase-tier desktop-keyring" in rendered
         assert "re-run `terok setup`" in rendered
