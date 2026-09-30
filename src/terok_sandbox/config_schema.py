@@ -249,6 +249,10 @@ class RawShieldSection(BaseModel):
         default=None,
         description="dnsmasq binary to run; found on the host PATH when unset",
     )
+    bypass_duration: str = Field(
+        default="5m",
+        description="How long the timed allow-all window stays open when no duration is named",
+    )
     down_on_task_run: bool = True
     on_task_restart: Literal["retain", "up"] = "retain"
 

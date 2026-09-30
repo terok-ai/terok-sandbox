@@ -145,6 +145,16 @@ def _default_shield_dnsmasq_path() -> Path | None:
     return shield_dnsmasq_path()
 
 
+def shield_bypass_duration() -> str:
+    """Resolve the ``shield.bypass_duration`` setting through the schema."""
+    return _shield_section().bypass_duration
+
+
+def _default_shield_bypass_duration() -> str:
+    """Default-factory indirection so tests can patch ``shield_bypass_duration``."""
+    return shield_bypass_duration()
+
+
 def experimental_enabled() -> bool:
     """Resolve the top-level ``experimental:`` opt-in from the layered config.
 
@@ -287,6 +297,12 @@ class SandboxConfig:
 
     Default-factory reads ``shield.dnsmasq_path`` from the layered
     config.yml.  Set for a dnsmasq built outside the distro package.
+    """
+    shield_bypass_duration: str = field(default_factory=_default_shield_bypass_duration)
+    """How long the timed allow-all window stays open when a caller names no duration.
+
+    Default-factory reads ``shield.bypass_duration`` from the layered
+    config.yml.  An nft timeout: a count and one unit (``30s``, ``5m``, ``2h``).
     """
 
     shield_disabled: bool = False

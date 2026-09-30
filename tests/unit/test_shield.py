@@ -494,3 +494,75 @@ def test_install_then_uninstall_round_trip(tmp_path: Path, monkeypatch) -> None:
     # The directory itself is left in place (other tools may share it);
     # only our files are gone.
     assert list(target_dir.iterdir()) == []
+
+
+# ── the timed allow-all window ───────────────────────────────────────────
+
+
+def test_bypass_delegates_and_returns_the_duration_granted() -> None:
+    """``bypass`` passes the duration through and reports what shield granted."""
+    mock_shield = make_mock_shield()
+    mock_shield.bypass.return_value = "5m"
+    manager = ShieldManager(MOCK_TASK_DIR, SandboxConfig())
+    with patch.object(ShieldManager, "shield", new=mock_shield):
+        assert manager.bypass("ctr", "5m") == "5m"
+    mock_shield.bypass.assert_called_once_with("ctr", "5m")
+
+
+def test_bypass_with_no_duration_lets_shield_apply_its_configured_one() -> None:
+    """Sandbox does not second-guess the default — shield owns it."""
+    mock_shield = make_mock_shield()
+    manager = ShieldManager(MOCK_TASK_DIR, SandboxConfig())
+    with patch.object(ShieldManager, "shield", new=mock_shield):
+        manager.bypass("ctr")
+    mock_shield.bypass.assert_called_once_with("ctr", None)
+
+
+def test_bypass_off_closes_the_window() -> None:
+    """``bypass_off`` hands the close straight through to shield."""
+    mock_shield = make_mock_shield()
+    manager = ShieldManager(MOCK_TASK_DIR, SandboxConfig())
+    with patch.object(ShieldManager, "shield", new=mock_shield):
+        manager.bypass_off("ctr")
+    mock_shield.bypass_off.assert_called_once_with("ctr")
+
+
+def test_disabled_bypass_refuses_rather_than_pretending() -> None:
+    """With the kill-switch set there is no window to open, and saying so beats a no-op."""
+    manager = ShieldManager(MOCK_TASK_DIR, SandboxConfig(shield_disabled=True))
+    with pytest.raises(RuntimeError, match="shield is disabled"):
+        manager.bypass("ctr")
+
+
+def test_disabled_bypass_off_is_a_noop() -> None:
+    """Closing a window that cannot exist is harmless, so it stays quiet."""
+    mock_shield = make_mock_shield()
+    manager = ShieldManager(MOCK_TASK_DIR, SandboxConfig(shield_disabled=True))
+    with patch.object(ShieldManager, "shield", new=mock_shield):
+        manager.bypass_off("ctr")
+    mock_shield.bypass_off.assert_not_called()
+
+
+def test_disabled_bypass_remaining_still_queries_the_real_shield() -> None:
+    """A container started before the kill-switch can still have a window open."""
+    mock_shield = make_mock_shield()
+    mock_shield.bypass_remaining.return_value = "2m10s"
+    manager = ShieldManager(MOCK_TASK_DIR, SandboxConfig(shield_disabled=True))
+    with patch.object(ShieldManager, "shield", new=mock_shield):
+        assert manager.bypass_remaining("ctr") == "2m10s"
+
+
+def test_bypass_duration_reaches_the_shield_config() -> None:
+    """``shield.bypass_duration`` is threaded into ShieldConfig, not re-read by shield."""
+    manager = ShieldManager(MOCK_TASK_DIR, SandboxConfig(shield_bypass_duration="45s"))
+    assert manager.shield.config.bypass_duration == "45s"
+
+
+def test_harvest_reads_the_audit_log_even_with_the_kill_switch_set() -> None:
+    """The log records what happened; a disabled shield does not unwrite it."""
+    mock_shield = make_mock_shield()
+    mock_shield.harvest.return_value = []
+    manager = ShieldManager(MOCK_TASK_DIR, SandboxConfig(shield_disabled=True))
+    with patch.object(ShieldManager, "shield", new=mock_shield):
+        assert manager.harvest() == []
+    mock_shield.harvest.assert_called_once_with()

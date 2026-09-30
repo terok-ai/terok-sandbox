@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING
 from terok_shield import (
     DnsTier,  # noqa: F401 — re-exported
     EnvironmentCheck,  # noqa: F401 — re-exported
+    HarvestEntry,  # noqa: F401 — re-exported
     HooksInstaller,
     Shield,
     ShieldConfig,
@@ -185,6 +186,7 @@ class ShieldManager:
             profiles_dir=resolved.shield_profiles_dir,
             runtime=self._runtime,
             dnsmasq_path=resolved.shield_dnsmasq_path,
+            bypass_duration=resolved.shield_bypass_duration,
         )
         return Shield(config)
 
@@ -283,6 +285,32 @@ class ShieldManager:
             return
         self.shield.down(container, container_id, disengaged=disengaged)
 
+    def bypass(self, container: str, duration: str | None = None) -> str:
+        """Open the timed allow-all window and return the duration granted.
+
+        *duration* is an nft timeout; ``None`` takes shield's configured
+        `bypass_duration`.  The window lives in the kernel and closes itself, so
+        the kill-switch has nothing to reverse here — a disabled shield has no
+        window to open, and says so by refusing.
+        """
+        if self.disabled:
+            raise RuntimeError("shield is disabled — there is no window to open")
+        return self.shield.bypass(container, duration)
+
+    def bypass_off(self, container: str) -> None:
+        """Close the timed allow-all window before its timeout runs out."""
+        if self.disabled:
+            return
+        self.shield.bypass_off(container)
+
+    def bypass_remaining(self, container: str) -> str | None:
+        """Time left on the window, or ``None`` when none is open.
+
+        Read from the live ruleset even with the kill-switch set: a container
+        started before it was enabled can still have a window open.
+        """
+        return self.shield.bypass_remaining(container)
+
     # ── Always-on operations ────────────────────────────
 
     def quarantine(self, container: str) -> None:
@@ -291,6 +319,15 @@ class ShieldManager:
         Ignores ``shield_disabled`` because panic overrides the kill-switch.
         """
         self.shield.quarantine(container)
+
+    def harvest(self) -> list[HarvestEntry]:
+        """Summarise what this container reached for, from its audit log.
+
+        Reads even with the kill-switch set: the log is a record of what
+        happened, and a container started before the switch was thrown has one
+        worth reading.
+        """
+        return self.shield.harvest()
 
     def state(self, container: str) -> ShieldState:
         """Return the live shield state for a running container.
