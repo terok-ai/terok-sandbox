@@ -34,6 +34,7 @@ from .runtime.podman import (
     redact_env_args,
     unshielded_network_args,
 )
+from .runtime.seccomp import aslr_control_args
 from .setup import check_setup
 
 if TYPE_CHECKING:
@@ -700,6 +701,11 @@ class Sandbox:
 
         if not spec.unrestricted:
             cmd += ["--security-opt", "no-new-privileges"]
+
+        if self._cfg.aslr_control:
+            if spec.runtime == "krun":
+                raise SystemExit("run.aslr_control is not supported with run.runtime: krun")
+            cmd += aslr_control_args(self.task_state_dir(spec.container_name))
 
         if self._cfg.shield_disabled:
             print("\n!! SHIELD DISABLED — egress firewall off (shield_disabled is set) !!\n")

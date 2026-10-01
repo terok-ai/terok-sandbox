@@ -158,6 +158,31 @@ _CONTAINER_REMOVE_TIMEOUT = 120
 _IMAGES_FORMAT = "{{.Repository}}\t{{.Tag}}\t{{.ID}}\t{{.Size}}\t{{.Created}}"
 
 
+def default_seccomp_profile() -> Path:
+    """Find the host's configured Podman seccomp profile; never guess a fallback.
+
+    A missing profile cannot safely be replaced with a bundled default: that
+    could discard host-specific restrictions. Fail before launching instead.
+    """
+    try:
+        result = subprocess.run(  # nosec B603 B607 — fixed argv, executable resolved from trusted host paths
+            ["podman", "info", "--format", "{{.Host.Security.SeccompProfilePath}}"],
+            executable=require_host_tool("podman"),
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=_PROBE_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise SystemExit(
+            f"run.aslr_control: cannot discover Podman's seccomp profile: {exc}"
+        ) from exc
+    path = Path(result.stdout.strip())
+    if not path.is_absolute() or not path.is_file():
+        raise SystemExit("run.aslr_control requires a readable host Podman seccomp profile")
+    return path
+
+
 # ── Size parsing (used by PodmanContainer.rw_size batch path) ─────────────
 
 _SIZE_RE = re.compile(r"([\d.]+)\s*([a-zA-Z]+)")

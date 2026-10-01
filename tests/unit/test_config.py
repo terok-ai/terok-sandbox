@@ -14,6 +14,23 @@ import pytest
 from terok_sandbox.config import SandboxConfig
 
 
+@pytest.mark.parametrize("value", [False, True])
+def test_aslr_control_reads_global_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: bool
+) -> None:
+    """Standalone sandbox and embedded callers inherit the global opt-in."""
+    path = tmp_path / "config.yml"
+    path.write_text(f"run:\n  aslr_control: {str(value).lower()}\n")
+    monkeypatch.setenv("TEROK_CONFIG_FILE", str(path))
+    assert SandboxConfig().aslr_control is value
+    assert SandboxConfig(aslr_control=not value).aslr_control is not value
+
+
+def test_aslr_control_defaults_off() -> None:
+    """Missing configuration leaves the host's seccomp policy untouched."""
+    assert SandboxConfig().aslr_control is False
+
+
 class TestSocketModeSkipsPortResolution:
     """``services.mode: socket`` must bypass the TCP port registry entirely."""
 
