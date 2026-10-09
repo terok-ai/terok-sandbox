@@ -230,6 +230,26 @@ class TestExtractPhantomToken:
         req = self._make_request(authorization="token ghp_abc")
         assert _extract_phantom_token(req) == "ghp_abc"
 
+    def test_bearer_with_trailing_space_no_token(self) -> None:
+        """Return None for 'Bearer ' (prefix + space, no token)."""
+        req = self._make_request(authorization="Bearer ")
+        assert _extract_phantom_token(req) is None
+
+    def test_bearer_with_multiple_spaces_no_token(self) -> None:
+        """Return None for 'Bearer    ' (prefix + multiple spaces, no token)."""
+        req = self._make_request(authorization="Bearer    ")
+        assert _extract_phantom_token(req) is None
+
+    def test_bearer_only_prefix(self) -> None:
+        """Return the raw value when there is no space (e.g. 'Bearer')."""
+        req = self._make_request(authorization="Bearer")
+        assert _extract_phantom_token(req) == "Bearer"
+
+    def test_empty_authorization_header(self) -> None:
+        """Return None for an empty Authorization header value."""
+        req = self._make_request(authorization="")
+        assert _extract_phantom_token(req) is None
+
 
 # ── Token DB ─────────────────────────────────────────────────────────────
 
