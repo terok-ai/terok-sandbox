@@ -1092,7 +1092,7 @@ def test_open_db_threads_through_sandbox_config(tmp_path: Path) -> None:
     from terok_sandbox.commands.ssh import _open_db
     from terok_sandbox.config import SandboxConfig
 
-    # All resolver tiers explicitly set: the keyring tier resolves the
+    # All resolver tiers explicitly set: the desktop keyring tier resolves the
     # conftest stub's deterministic ``"test"`` passphrase, and the other
     # tiers are pinned off so the host's layered config can't slip a
     # different value in ahead of it.
@@ -1102,7 +1102,7 @@ def test_open_db_threads_through_sandbox_config(tmp_path: Path) -> None:
         config_dir=tmp_path / "cfg",
         vault_dir=tmp_path / "vault",
         services_mode="socket",
-        credentials_use_keyring=True,
+        credentials_use_desktop_keyring=True,
         credentials_passphrase_command=None,
     )
     cfg.vault_dir.mkdir(parents=True, exist_ok=True)

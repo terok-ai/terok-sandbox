@@ -113,7 +113,7 @@ class TestCommandRegistry:
         passphrase = _RESOLVED.find_at(("vault", "passphrase"))
         names = {c.name for c in passphrase.children}
         # ``destroy`` folded into ``vault lock`` (lock now clears every tier).
-        assert {"seal", "to-keyring", "reveal", "acknowledge", "change"} == names
+        assert {"seal", "to-desktop-keyring", "reveal", "acknowledge", "change"} == names
 
 
 # ---------------------------------------------------------------------------
@@ -123,6 +123,13 @@ class TestCommandRegistry:
 
 class TestCLIBasics:
     """Verify basic CLI behaviour."""
+
+    def test_ambiguous_desktop_transfer_command_is_rejected(self) -> None:
+        """Only the explicit desktop-keyring command is accepted, without an old alias."""
+        _out, err, code = _run_cli("vault", "passphrase", "to-keyring")
+        assert code == 2
+        assert "invalid choice" in err
+        assert "to-desktop-keyring" in err
 
     def test_no_command_shows_help(self) -> None:
         out, err, rc = _run_cli()

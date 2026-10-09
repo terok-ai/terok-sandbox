@@ -73,15 +73,15 @@ def _kernel_keyring_cache(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(_kk, "unavailable_reason", lambda: None)
 
 
-def _cfg(tmp_path: Path, *, use_keyring: bool = False) -> SandboxConfig:
-    """Sandbox config rooted under *tmp_path*, keyring tier off unless asked."""
+def _cfg(tmp_path: Path, *, use_desktop_keyring: bool = False) -> SandboxConfig:
+    """Sandbox config rooted under *tmp_path*, desktop keyring tier off unless asked."""
     return SandboxConfig(
         state_dir=tmp_path / "state",
         runtime_dir=tmp_path / "rt",
         config_dir=tmp_path / "cfg",
         vault_dir=tmp_path / "vault",
         services_mode="socket",
-        credentials_use_keyring=use_keyring,
+        credentials_use_desktop_keyring=use_desktop_keyring,
     )
 
 
@@ -121,22 +121,22 @@ class TestTierRegistry:
         """The subsets encode the design decisions the modules rely on."""
         expected_durable = {
             PassphraseTier.SYSTEMD_CREDS,
-            PassphraseTier.KEYRING,
+            PassphraseTier.DESKTOP_KEYRING,
             PassphraseTier.PASSPHRASE_COMMAND,
         }
         expected_provisionable = {
             PassphraseTier.SYSTEMD_CREDS,
-            PassphraseTier.KEYRING,
-            PassphraseTier.KERNEL_KEYRING,
+            PassphraseTier.DESKTOP_KEYRING,
+            PassphraseTier.SESSION_CACHE,
         }
         assert expected_durable == DURABLE_TIERS
         assert expected_provisionable == PROVISIONABLE_TIERS
-        assert CHOOSER_TIERS == (PassphraseTier.KEYRING, PassphraseTier.KERNEL_KEYRING)
+        assert CHOOSER_TIERS == (PassphraseTier.DESKTOP_KEYRING, PassphraseTier.SESSION_CACHE)
 
     def test_members_are_their_string_values(self) -> None:
         """StrEnum contract — status JSON and CLI args need plain strings."""
-        assert PassphraseTier.KERNEL_KEYRING == "kernel-keyring"
-        assert f"{PassphraseTier.KEYRING}" == "keyring"
+        assert PassphraseTier.SESSION_CACHE == "session-cache"
+        assert f"{PassphraseTier.DESKTOP_KEYRING}" == "desktop-keyring"
 
     def test_probe_order_matches_declaration_order(self, tmp_path: Path) -> None:
         """The enum's declaration order is the resolution-chain order."""
@@ -146,7 +146,7 @@ class TestTierRegistry:
             for row in probe_passphrase_chain(
                 credentials_db=cfg.db_path,
                 systemd_creds_file=cfg.vault_systemd_creds_file,
-                use_keyring=False,
+                use_desktop_keyring=False,
                 passphrase_command=None,
             )
         ]
@@ -320,7 +320,7 @@ class TestChangePassphrase:
         result = change_passphrase(cfg, new=NEW)
 
         assert result.rekeyed and not result.generated and result.passphrase == NEW
-        assert [(r.tier, r.ok) for r in result.rewrites] == [(PassphraseTier.KERNEL_KEYRING, True)]
+        assert [(r.tier, r.ok) for r in result.rewrites] == [(PassphraseTier.SESSION_CACHE, True)]
         assert _KERNEL_CACHE["pw"] == NEW
         assert _opens_with(cfg, NEW) and not _opens_with(cfg, OLD)
         # The confirmed-saved marker referred to the old passphrase.
@@ -360,7 +360,7 @@ class TestChangePassphrase:
 
         result = change_passphrase(cfg, old=OLD, new=NEW)
 
-        assert [(r.tier, r.ok) for r in result.rewrites] == [(PassphraseTier.KERNEL_KEYRING, True)]
+        assert [(r.tier, r.ok) for r in result.rewrites] == [(PassphraseTier.SESSION_CACHE, True)]
         assert _KERNEL_CACHE["pw"] == NEW
 
     def test_tier_only_change_without_a_db(self, tmp_path: Path) -> None:
@@ -373,22 +373,22 @@ class TestChangePassphrase:
         assert not result.rekeyed
         assert _KERNEL_CACHE["pw"] == NEW
 
-    def test_keyring_write_failure_is_reported_not_raised(
+    def test_desktop_keyring_write_failure_is_reported_not_raised(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """After the rekey a failing tier is purged + reported, never aborted on."""
-        cfg = _cfg(tmp_path, use_keyring=True)
+        cfg = _cfg(tmp_path, use_desktop_keyring=True)
         _seed_db(cfg, OLD)
-        monkeypatch.setattr(encryption, "load_passphrase_from_keyring", lambda **_kw: OLD)
-        monkeypatch.setattr(encryption, "store_passphrase_in_keyring", lambda _v: False)
-        monkeypatch.setattr(encryption, "forget_passphrase_in_keyring", lambda: None)
+        monkeypatch.setattr(encryption, "load_passphrase_from_desktop_keyring", lambda **_kw: OLD)
+        monkeypatch.setattr(encryption, "store_passphrase_in_desktop_keyring", lambda _v: False)
+        monkeypatch.setattr(encryption, "forget_passphrase_in_desktop_keyring", lambda: None)
 
         result = change_passphrase(cfg, new=NEW)
 
         assert _opens_with(cfg, NEW)
         (problem,) = result.problems
-        assert problem.tier is PassphraseTier.KEYRING
-        assert "stale entry removed" in problem.detail
+        assert problem.tier is PassphraseTier.DESKTOP_KEYRING
+        assert "entry removed" in problem.detail
 
     def test_refuses_while_passphrase_command_is_configured(self, tmp_path: Path) -> None:
         """The external store's copy can't be rewritten from here — fail up front."""
@@ -398,7 +398,7 @@ class TestChangePassphrase:
             config_dir=tmp_path / "cfg",
             vault_dir=tmp_path / "vault",
             services_mode="socket",
-            credentials_use_keyring=False,
+            credentials_use_desktop_keyring=False,
             credentials_passphrase_command="pass show terok/vault",
         )
 
@@ -430,11 +430,11 @@ class TestChangePassphrase:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """If no tier took the new value, the pending file is its only on-host copy."""
-        cfg = _cfg(tmp_path, use_keyring=True)
+        cfg = _cfg(tmp_path, use_desktop_keyring=True)
         _seed_db(cfg, OLD)
-        monkeypatch.setattr(encryption, "load_passphrase_from_keyring", lambda **_kw: OLD)
-        monkeypatch.setattr(encryption, "store_passphrase_in_keyring", lambda _v: False)
-        monkeypatch.setattr(encryption, "forget_passphrase_in_keyring", lambda: False)
+        monkeypatch.setattr(encryption, "load_passphrase_from_desktop_keyring", lambda **_kw: OLD)
+        monkeypatch.setattr(encryption, "store_passphrase_in_desktop_keyring", lambda _v: False)
+        monkeypatch.setattr(encryption, "forget_passphrase_in_desktop_keyring", lambda: False)
 
         result = change_passphrase(cfg, new=NEW)
 
@@ -517,9 +517,9 @@ class TestRewriteTier:
         """A cacheable host lands the new value on the volatile tier."""
         cfg = _cfg(tmp_path)
 
-        rewrite = _rewrite_tier(cfg, PassphraseTier.KERNEL_KEYRING, NEW)
+        rewrite = _rewrite_tier(cfg, PassphraseTier.SESSION_CACHE, NEW)
 
-        assert rewrite.ok and rewrite.detail == "kernel-keyring cache rewritten"
+        assert rewrite.ok and rewrite.detail == "session cache rewritten"
         assert _KERNEL_CACHE["pw"] == NEW
 
     def test_kernel_keyring_rewrite_failure_purges_stale_cache(
@@ -530,23 +530,25 @@ class TestRewriteTier:
         _write_kernel_keyring_cache(cfg, OLD)
         monkeypatch.setattr(_kk, "store", lambda _pw, _db=None: False)
 
-        rewrite = _rewrite_tier(cfg, PassphraseTier.KERNEL_KEYRING, NEW)
+        rewrite = _rewrite_tier(cfg, PassphraseTier.SESSION_CACHE, NEW)
 
         assert not rewrite.ok
         assert "cannot cache" in rewrite.detail and "stale cache cleared" in rewrite.detail
         assert _KERNEL_CACHE["pw"] is None  # forget() ran
 
-    def test_keyring_rewrite_success(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """A keyring backend that takes the write reports a plain success."""
-        cfg = _cfg(tmp_path, use_keyring=True)
+    def test_desktop_keyring_rewrite_success(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A desktop keyring backend that takes the write reports a plain success."""
+        cfg = _cfg(tmp_path, use_desktop_keyring=True)
         stored: list[str] = []
         monkeypatch.setattr(
-            encryption, "store_passphrase_in_keyring", lambda pw: stored.append(pw) or True
+            encryption, "store_passphrase_in_desktop_keyring", lambda pw: stored.append(pw) or True
         )
 
-        rewrite = _rewrite_tier(cfg, PassphraseTier.KEYRING, NEW)
+        rewrite = _rewrite_tier(cfg, PassphraseTier.DESKTOP_KEYRING, NEW)
 
-        assert rewrite.ok and rewrite.detail == "keyring entry rewritten"
+        assert rewrite.ok and rewrite.detail == "desktop keyring entry rewritten"
         assert stored == [NEW]
 
     def test_unwritable_tier_is_reported(self, tmp_path: Path) -> None:
@@ -566,13 +568,14 @@ class TestRewriteTier:
         monkeypatch.setattr(systemd_creds, "is_available", lambda: True)
 
         def _boom(*_a: object, **_kw: object) -> None:
-            raise OSError("disk full")
+            raise OSError(NEW)
 
         monkeypatch.setattr(systemd_creds, "seal", _boom)
 
         rewrite = _rewrite_tier(cfg, PassphraseTier.SYSTEMD_CREDS, NEW)
 
-        assert not rewrite.ok and rewrite.detail == "disk full"
+        assert not rewrite.ok and rewrite.detail == "tier rewrite failed (OSError)"
+        assert NEW not in repr(rewrite)
 
 
 class TestCollectCurrentPassphrase:
@@ -719,7 +722,7 @@ class TestChangeHandlerPiped:
         assert _opens_with(cfg, NEW)
         out = capsys.readouterr().out
         assert "re-encrypted" in out
-        assert "kernel-keyring cache rewritten" in out
+        assert "session cache rewritten" in out
 
     def test_tier_only_change_prints_no_rekey_line(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -733,25 +736,25 @@ class TestChangeHandlerPiped:
 
         out = capsys.readouterr().out
         assert "re-encrypted" not in out
-        assert "kernel-keyring cache rewritten" in out
+        assert "session cache rewritten" in out
         assert _KERNEL_CACHE["pw"] == NEW
 
     def test_failed_tier_rewrites_exit_nonzero(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """The fail-loud contract: a tier left without the new value cannot scroll past."""
-        cfg = _cfg(tmp_path, use_keyring=True)
+        cfg = _cfg(tmp_path, use_desktop_keyring=True)
         _seed_db(cfg, OLD)
-        monkeypatch.setattr(encryption, "load_passphrase_from_keyring", lambda **_kw: OLD)
-        monkeypatch.setattr(encryption, "store_passphrase_in_keyring", lambda _v: False)
-        monkeypatch.setattr(encryption, "forget_passphrase_in_keyring", lambda: False)
+        monkeypatch.setattr(encryption, "load_passphrase_from_desktop_keyring", lambda **_kw: OLD)
+        monkeypatch.setattr(encryption, "store_passphrase_in_desktop_keyring", lambda _v: False)
+        monkeypatch.setattr(encryption, "forget_passphrase_in_desktop_keyring", lambda: False)
         monkeypatch.setattr(sys, "stdin", io.StringIO(NEW + "\n"))
 
         with pytest.raises(SystemExit, match="could not be rewritten"):
             _handle_vault_passphrase_change(cfg=cfg)
 
         out = capsys.readouterr().out
-        assert "✗ keyring" in out
+        assert "✗ desktop keyring" in out
         # The change itself succeeded — only the tier fan-out is incomplete.
         assert _opens_with(cfg, NEW)
 
@@ -831,8 +834,8 @@ class TestPlanProvisioning:
         monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
         plan = plan_provisioning(_cfg(tmp_path))
 
-        assert PassphraseTier.KERNEL_KEYRING in plan.choices
-        assert PassphraseTier.KERNEL_KEYRING not in plan.unavailable
+        assert PassphraseTier.SESSION_CACHE in plan.choices
+        assert PassphraseTier.SESSION_CACHE not in plan.unavailable
 
     def test_cache_tier_marked_unavailable_when_both_backings_are_gone(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -845,9 +848,9 @@ class TestPlanProvisioning:
         monkeypatch.setattr(session_file, "unavailable_reason", lambda: "no runtime dir")
         plan = plan_provisioning(_cfg(tmp_path))
 
-        assert PassphraseTier.KERNEL_KEYRING in plan.choices
+        assert PassphraseTier.SESSION_CACHE in plan.choices
         assert (
-            plan.unavailable[PassphraseTier.KERNEL_KEYRING]
+            plan.unavailable[PassphraseTier.SESSION_CACHE]
             == "kernel keyring unusable here: no libkeyutils; no runtime dir"
         )
 
@@ -861,18 +864,18 @@ class TestPlanProvisioning:
 
         assert plan.auto_tier is PassphraseTier.SYSTEMD_CREDS
 
-    def test_keyring_choice_survives_a_missing_user_config(
+    def test_desktop_keyring_choice_survives_a_missing_user_config(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """No user-scope config file → the mode persist is a silent no-op, not a crash."""
+        """A system-only configuration still persists the chosen desktop tier."""
         from terok_sandbox.commands import credentials as credentials_mod
 
         monkeypatch.setattr(
             "terok_sandbox.paths.config_file_paths",
             lambda: [("system", tmp_path / "system.yml")],
         )
-        credentials_mod._persist_mode_choice(PassphraseTier.KEYRING)  # must not raise
-        assert not (tmp_path / "system.yml").exists()
+        credentials_mod._persist_mode_choice(PassphraseTier.DESKTOP_KEYRING)  # must not raise
+        assert "use_desktop_keyring: true" in (tmp_path / "system.yml").read_text()
 
     def test_existing_tier_short_circuits(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -888,10 +891,10 @@ class TestPlanProvisioning:
         assert plan.choices == ()
 
     def test_default_config_is_built_lazily(self) -> None:
-        """``cfg=None`` builds a default config — isolated HOME, stubbed keyring tier."""
+        """``cfg=None`` builds a default config — isolated HOME, stubbed desktop keyring tier."""
         plan = plan_provisioning()
 
-        # The conftest keyring stub resolves "test", so the default
+        # The conftest desktop keyring stub resolves "test", so the default
         # config counts as provisioned; the point here is that the
         # cfg=None path built a real SandboxConfig and ran the probe.
         assert plan.provisioned

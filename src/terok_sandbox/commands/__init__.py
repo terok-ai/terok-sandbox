@@ -199,7 +199,7 @@ _LAZY: dict[str, str] = {
     "_handle_vault_unlock": "vault:_handle_vault_unlock",
     "change_passphrase": "vault:change_passphrase",  # nosec: B105 — export-map import paths, never secrets
     "handle_vault_seal": "vault:handle_vault_seal",
-    "handle_vault_to_keyring": "vault:handle_vault_to_keyring",
+    "handle_vault_to_desktop_keyring": "vault:handle_vault_to_desktop_keyring",
     "provision_session_passphrase": "vault:provision_session_passphrase",
     "purge_passphrase_tiers": "vault:purge_passphrase_tiers",
 }
@@ -245,7 +245,7 @@ if TYPE_CHECKING:
         TierRewrite,
         change_passphrase,
         handle_vault_seal,
-        handle_vault_to_keyring,
+        handle_vault_to_desktop_keyring,
         provision_session_passphrase,
         purge_passphrase_tiers,
     )
@@ -280,7 +280,7 @@ __all__ = [
     "TierRewrite",
     "change_passphrase",
     "handle_vault_seal",
-    "handle_vault_to_keyring",
+    "handle_vault_to_desktop_keyring",
     "plan_provisioning",
     "provision_session_passphrase",
     "purge_passphrase_tiers",

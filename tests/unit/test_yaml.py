@@ -20,10 +20,10 @@ class TestUpdateSection:
     def test_creates_file_when_missing(self, tmp_path: Path) -> None:
         """A missing config file is created with the section populated."""
         path = tmp_path / "config.yml"
-        update_section(path, "credentials", {"use_keyring": True})
+        update_section(path, "credentials", {"use_desktop_keyring": True})
         text = path.read_text()
         assert "credentials:" in text
-        assert "use_keyring: true" in text
+        assert "use_desktop_keyring: true" in text
 
     def test_merges_into_existing_section(self, tmp_path: Path) -> None:
         """Existing keys outside ``updates`` are preserved verbatim."""
@@ -34,19 +34,19 @@ class TestUpdateSection:
             "  passphrase: secret  # inline\n"
             "  unrelated: keep-me\n"
         )
-        update_section(path, "credentials", {"use_keyring": True})
+        update_section(path, "credentials", {"use_desktop_keyring": True})
         text = path.read_text()
         assert "# top-level comment" in text  # round-trip preserves the leading comment
         assert "unrelated: keep-me" in text
-        assert "use_keyring: true" in text
+        assert "use_desktop_keyring: true" in text
 
     def test_replaces_non_dict_section(self, tmp_path: Path) -> None:
         """A stale scalar at ``data[section]`` is replaced, not ``update``-d."""
         path = tmp_path / "config.yml"
         path.write_text("credentials: legacy-string\n")
-        update_section(path, "credentials", {"use_keyring": True})
+        update_section(path, "credentials", {"use_desktop_keyring": True})
         text = path.read_text()
-        assert "use_keyring: true" in text
+        assert "use_desktop_keyring: true" in text
         assert "legacy-string" not in text
 
     def test_rejects_non_dict_root(self, tmp_path: Path) -> None:
@@ -59,7 +59,7 @@ class TestUpdateSection:
         original = "- list-not-mapping\n"
         path.write_text(original)
         with pytest.raises(ValueError, match="config.yml.*expected a mapping"):
-            update_section(path, "credentials", {"use_keyring": True})
+            update_section(path, "credentials", {"use_desktop_keyring": True})
         # File on disk is untouched — the bad input is still there for the
         # operator to inspect, not silently replaced with a fresh ``{}``.
         assert path.read_text() == original

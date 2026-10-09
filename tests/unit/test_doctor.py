@@ -259,7 +259,7 @@ class TestVaultUnlockedCheck:
         """The cache tier answering here is healthy; the children read the same backing."""
         from terok_sandbox.vault.store.tiers import PassphraseTier
 
-        self._chain(monkeypatch, "found-it", PassphraseTier.KERNEL_KEYRING)
+        self._chain(monkeypatch, "found-it", PassphraseTier.SESSION_CACHE)
 
         assert _make_vault_unlocked_check().evaluate(0, "", "").severity == "ok"
 

@@ -75,8 +75,8 @@ class SidecarConfig:
 
     ``None`` derives ``vault.passphrase.cred`` beside ``db_path``.
     """
-    credentials_use_keyring: bool = False
-    """Whether the pre-confinement passphrase walk may consult the OS keyring."""
+    credentials_use_desktop_keyring: bool = False
+    """Whether the pre-confinement passphrase walk may consult the desktop keyring."""
     credentials_passphrase_command: str | None = None
     """Optional helper the child executes before installing Landlock."""
     scope_id: str | None = None
@@ -270,7 +270,7 @@ def _build_config(raw: dict, sidecar_path: Path) -> SidecarConfig:
         vault_systemd_creds_file=_optional_absolute_path(
             raw, "vault_systemd_creds_file", sidecar_path
         ),
-        credentials_use_keyring=_optional_bool(raw, "credentials_use_keyring"),
+        credentials_use_desktop_keyring=_optional_bool(raw, "credentials_use_desktop_keyring"),
         credentials_passphrase_command=_optional_string(raw, "credentials_passphrase_command"),
         scope_id=str(raw["scope_id"]) if raw.get("scope_id") else None,
         project_id=str(raw.get("project_id") or ""),

@@ -34,22 +34,22 @@ _PASSPHRASE = "correct-horse-battery-staple"
 
 
 @pytest.fixture(autouse=True)
-def _keyring_holds_passphrase(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Land ``_PASSPHRASE`` on the keyring tier for every test in this module.
+def _desktop_keyring_holds_passphrase(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Land ``_PASSPHRASE`` on the desktop keyring tier for every test in this module.
 
-    Layers on top of the conftest chain stub (which pins the keyring
+    Layers on top of the conftest chain stub (which pins the desktop keyring
     read to a generic ``"test"``) so the reveal assertions can check
     for a distinctive cleartext in each output channel.
     """
     import terok_sandbox.vault.store.encryption as _enc
 
-    monkeypatch.setattr(_enc, "load_passphrase_from_keyring", lambda **_kw: _PASSPHRASE)
+    monkeypatch.setattr(_enc, "load_passphrase_from_desktop_keyring", lambda **_kw: _PASSPHRASE)
 
 
 def _cfg(tmp_path: Path, *, unlocked: bool = True) -> SandboxConfig:
-    """Sandbox config with the keyring-tier passphrase wired in.
+    """Sandbox config with the desktop-keyring-tier passphrase wired in.
 
-    *unlocked* switches the keyring tier on or off; with it off no tier
+    *unlocked* switches the desktop keyring tier on or off; with it off no tier
     resolves, which is the locked-vault shape the exit-path tests need.
     """
     return SandboxConfig(
@@ -58,7 +58,7 @@ def _cfg(tmp_path: Path, *, unlocked: bool = True) -> SandboxConfig:
         config_dir=tmp_path / "cfg",
         vault_dir=tmp_path / "vault",
         services_mode="socket",
-        credentials_use_keyring=unlocked,
+        credentials_use_desktop_keyring=unlocked,
     )
 
 

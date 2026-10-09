@@ -21,14 +21,14 @@ from terok_sandbox.commands import _handle_credentials_encrypt_db
 
 
 def _cfg(tmp_path: Path) -> SandboxConfig:
-    """Sandbox config with the keyring tier turned off (avoid host keyring leakage)."""
+    """Sandbox config with the desktop keyring tier turned off (avoid host desktop keyring leakage)."""
     return SandboxConfig(
         state_dir=tmp_path / "state",
         runtime_dir=tmp_path / "rt",
         config_dir=tmp_path / "cfg",
         vault_dir=tmp_path / "vault",
         services_mode="socket",
-        credentials_use_keyring=False,
+        credentials_use_desktop_keyring=False,
     )
 
 
@@ -52,7 +52,7 @@ class TestExplicitTier:
     def test_kernel_keyring_tier_uses_existing_cache(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """An explicit ``kernel-keyring`` tier picks up an existing cached value silently."""
+        """An explicit ``session-cache`` tier picks up an existing cached value silently."""
         monkeypatch.setattr("terok_sandbox.vault.store.systemd_creds.is_available", lambda: False)
         # Back the kernel-keyring tier with an in-memory cache already
         # holding a value, undoing conftest's autouse blank.
@@ -64,7 +64,7 @@ class TestExplicitTier:
         cfg = _cfg(tmp_path)
         # No DB → handler short-circuits after provisioning; no ack
         # required because the value pre-existed (not auto-generated).
-        _handle_credentials_encrypt_db(cfg=cfg, passphrase_tier="kernel-keyring")
+        _handle_credentials_encrypt_db(cfg=cfg, passphrase_tier="session-cache")
         assert cache["pw"] == "preset-passphrase"
         assert not cfg.vault_recovery_marker_file.exists()
 

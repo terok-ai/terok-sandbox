@@ -67,8 +67,8 @@ def _handle_sandbox_setup(
             terminal and a no-TTY run drops it silently.  Off by
             default so a routine ``setup > install.log`` can't leak it.
         passphrase_tier: Force the credentials-DB passphrase storage
-            tier.  One of ``systemd-creds``, ``keyring``,
-            ``kernel-keyring``.  Default ``None`` runs the auto-detect / chooser
+            tier.  One of ``systemd-creds``, ``desktop-keyring``,
+            ``session-cache``.  Default ``None`` runs the auto-detect / chooser
             chain — on a non-TTY without systemd-creds that now fails
             closed, so headless bootstraps must pass this explicitly.
         cfg: Optional [`SandboxConfig`][terok_sandbox.config.SandboxConfig]
@@ -84,7 +84,7 @@ def _handle_sandbox_setup(
         run_shield_install_phase,
         run_supervisor_install_phase,
     )
-    from ..config import SandboxConfig, credentials_use_keyring
+    from ..config import SandboxConfig, credentials_use_desktop_keyring
     from ..integrations.shield import ShieldHooks
     from ..setup import check_artifacts, check_host_tools, check_setup, setup_receipt
     from .credentials import _run_credentials_setup_phase
@@ -153,7 +153,7 @@ def _handle_sandbox_setup(
             )
             cfg = dataclasses.replace(
                 cfg,
-                credentials_use_keyring=credentials_use_keyring(),
+                credentials_use_desktop_keyring=credentials_use_desktop_keyring(),
             )
         # The git gate lives in each container's supervisor — no host-side
         # install phase.  Clearance has nothing to install on the host — every
@@ -314,7 +314,7 @@ SETUP_COMMANDS: tuple[CommandDef, ...] = (
                 default=None,
                 help=(
                     "Force credentials-DB passphrase storage to a specific tier"
-                    " (systemd-creds | keyring | kernel-keyring) instead of"
+                    " (systemd-creds | desktop-keyring | session-cache) instead of"
                     " the auto-detect / chooser chain.  Required on a non-TTY host"
                     " without systemd-creds — the silent volatile fallback was"
                     " removed in v0.0.100 because it minted a passphrase the"

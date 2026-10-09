@@ -158,11 +158,11 @@ class RawCredentialsSection(BaseModel):
             " replacement instead of pydantic's generic extra-key refusal."
         ),
     )
-    use_keyring: bool = Field(
+    use_desktop_keyring: bool = Field(
         default=True,
         description=(
-            "The OS keyring tier of the passphrase resolution chain."
-            "  On by default — an empty keyring simply doesn't resolve;"
+            "The desktop keyring tier of the passphrase resolution chain."
+            "  On by default — an empty desktop keyring simply doesn't resolve;"
             " set ``false`` to keep the chain away from Secret Service"
             " entirely (its ACLs are per-collection, not per-item)."
         ),
@@ -172,7 +172,7 @@ class RawCredentialsSection(BaseModel):
         description=(
             "Operator-supplied shell command (e.g. ``pass show terok-sandbox/vault-passphrase``)"
             " that prints the SQLCipher passphrase on stdout.  Tokenised with"
-            " ``shlex.split``; resolver tier slots below the OS keyring."
+            " ``shlex.split``; resolver tier slots below the desktop keyring."
             "  Canonical headless option for hosts without systemd ≥ 257 —"
             " covers a plain secret file (``cat /path/to/file``), ``pass``,"
             " ``bw``, ``op``, HashiCorp ``vault``, and the cloud"

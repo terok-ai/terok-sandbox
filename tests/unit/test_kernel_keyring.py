@@ -8,7 +8,7 @@ profile (``ENOSYS``) inside the CI/dev container, so these tests drive
 the module against an **in-memory fake of ``libkeyutils``** — swapped in
 via ``_load_library`` — which exercises the store/load/forget/probe
 logic and every error branch deterministically on any host.  A single
-opt-in round-trip against the *real* keyring is ``skipif``-gated on the
+opt-in round-trip against the *real* kernel keyring is ``skipif``-gated on the
 facility actually being available, so it validates the live ctypes
 signatures on an unconfined host (a bare-metal CI runner) while staying
 inert in the seccomp sandbox.
@@ -31,7 +31,7 @@ from tests.constants import MOCK_BASE
 #: so a plain ``MOCK_BASE`` constant (never the operator's real DB) is enough.
 MOCK_DB_PATH = MOCK_BASE / "kernel-keyring" / "credentials.db"
 
-# Captured at import, before the package-level autouse ``_isolate_credential_keyring``
+# Captured at import, before the package-level autouse ``_isolate_credential_passphrase_sources``
 # fixture swaps these for deterministic stubs.  This module tests the real
 # implementations (against a fake library), so an autouse fixture below restores
 # them for every test here.
@@ -63,11 +63,11 @@ class FakeKeyutils:
     through ``ctypes`` so the module's ``os.strerror(ctypes.get_errno())``
     diagnostics render as they would against the real library.
 
-    Keyrings are modelled by *identity* rather than by spec, because the
+    Kernel keyrings are modelled by *identity* rather than by spec, because the
     two differ exactly where this tier is hard: a ring spec resolves
-    per-namespace, so ``@u`` names one keyring for the operator and
+    per-namespace, so ``@u`` names one kernel keyring for the operator and
     another for a process inside podman's rootless namespace, while
-    ``@s`` names the same keyring for both.
+    ``@s`` names the same kernel keyring for both.
     [`enter_user_namespace`][tests.unit.test_kernel_keyring.FakeKeyutils.enter_user_namespace]
     reproduces that crossing.  Searches follow links between rings, as
     ``keyctl_search`` does.
@@ -76,7 +76,7 @@ class FakeKeyutils:
     def __init__(
         self,
         *,
-        get_keyring_id: int = 100,
+        get_kernel_keyring_id: int = 100,
         add_key_errno: int | None = None,
         setperm_ok: bool = True,
         search_errno: int | None = None,
@@ -85,7 +85,7 @@ class FakeKeyutils:
         self._keys: dict[bytes, tuple[int, bytes]] = {}
         self._by_serial: dict[int, bytes] = {}
         self._next_serial = 1000
-        self._get_keyring_id = get_keyring_id
+        self._get_kernel_keyring_id = get_kernel_keyring_id
         self._add_key_errno = add_key_errno
         self._setperm_ok = setperm_ok
         self._search_errno = search_errno
@@ -99,10 +99,10 @@ class FakeKeyutils:
         self._nested: dict[int, set[int]] = {r: set() for r in self._rings.values()}
 
     def enter_user_namespace(self) -> None:
-        """Re-resolve ``@u`` to a fresh empty keyring, leaving ``@s`` as it was.
+        """Re-resolve ``@u`` to a fresh empty kernel keyring, leaving ``@s`` as it was.
 
         What a rootless supervisor child sees: its own per-namespace user
-        keyring, and the session keyring it inherited untouched.
+        kernel keyring, and the kernel session keyring it inherited untouched.
         """
         ring = self._new_ring()
         self._rings[_UID_RING] = ring
@@ -110,15 +110,15 @@ class FakeKeyutils:
         self._nested[ring] = set()
 
     def _new_ring(self) -> int:
-        """Return a fresh keyring identity."""
+        """Return a fresh kernel keyring identity."""
         ring = self._next_ring
         self._next_ring += 1
         return ring
 
     def keyctl_get_keyring_ID(self, _ring: int, _create: int) -> int:  # noqa: N802
-        if self._get_keyring_id < 0:
+        if self._get_kernel_keyring_id < 0:
             ctypes.set_errno(38)  # ENOSYS
-        return self._get_keyring_id
+        return self._get_kernel_keyring_id
 
     def add_key(self, _ktype: bytes, desc: bytes, payload: bytes, plen: int, ring: int) -> int:
         if self._add_key_errno is not None:
@@ -141,7 +141,7 @@ class FakeKeyutils:
         return self._keys[desc][0]
 
     def _reaches(self, ring: int, desc: bytes, seen: frozenset[int] = frozenset()) -> bool:
-        """Is *desc* in *ring* or in any keyring linked into it?"""
+        """Is *desc* in *ring* or in any kernel keyring linked into it?"""
         if desc in self._holds[ring]:
             return True
         return any(
@@ -196,7 +196,9 @@ def test_unavailable_reason_none_when_facility_present(fake_lib: FakeKeyutils) -
 
 
 def test_unavailable_reason_reports_enosys(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(kernel_keyring, "_load_library", lambda: FakeKeyutils(get_keyring_id=-1))
+    monkeypatch.setattr(
+        kernel_keyring, "_load_library", lambda: FakeKeyutils(get_kernel_keyring_id=-1)
+    )
     reason = kernel_keyring.unavailable_reason()
     assert reason is not None
     assert "CONFIG_KEYS" in reason
@@ -296,11 +298,11 @@ def test_store_returns_false_when_library_unavailable(monkeypatch: pytest.Monkey
 
 
 def test_load_from_another_user_namespace_is_a_miss(fake_lib: FakeKeyutils) -> None:
-    """The cache is the operator's user keyring, and only the operator's namespace has it.
+    """The cache is the operator's kernel user keyring, and only the operator's namespace has it.
 
     A reader inside podman's rootless namespace resolves ``@u`` to its own
     empty keyring.  That reader is never this tier's customer: a
-    supervisor runs where the keyring is the operator's, or the cache
+    supervisor runs where the kernel keyring is the operator's, or the cache
     tier is the session file instead (``session_cache`` chooses).
     """
     kernel_keyring.store("s3cret", MOCK_DB_PATH)
@@ -454,7 +456,7 @@ def test_unavailable_reason_reports_non_enosys_errno(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(kernel_keyring, "_load_library", lambda: lib)
     reason = kernel_keyring.unavailable_reason()
     assert reason is not None
-    assert "user keyring unreachable" in reason
+    assert "kernel keyring (@u) unreachable" in reason
 
 
 def test_load_library_reports_unloadable(monkeypatch: pytest.MonkeyPatch) -> None:

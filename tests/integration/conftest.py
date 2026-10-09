@@ -45,9 +45,9 @@ def db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     # Blank the upper tiers so the chain falls through to keyring.
     monkeypatch.setattr(_kk, "load", lambda _db=None: None)
     monkeypatch.setattr(_sc, "unseal", lambda _path: None)
-    # Pin keyring to the test passphrase (``**_kw`` absorbs ``allow_prompt``).
-    monkeypatch.setattr(_enc, "load_passphrase_from_keyring", lambda **_kw: "test")
-    monkeypatch.setattr(_config, "credentials_use_keyring", lambda: True)
+    # Pin desktop keyring to the test passphrase (``**_kw`` absorbs ``allow_prompt``).
+    monkeypatch.setattr(_enc, "load_passphrase_from_desktop_keyring", lambda **_kw: "test")
+    monkeypatch.setattr(_config, "credentials_use_desktop_keyring", lambda: True)
 
     database = CredentialDB(tmp_path / "proxy" / "credentials.db", passphrase="test")
     yield database
