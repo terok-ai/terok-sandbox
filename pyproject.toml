@@ -43,7 +43,7 @@ dependencies = [
     "jinja2~=3.1",
     "pydantic~=2.13",
     "packaging~=26.3",
-    "sqlcipher3==0.6.2",
+    "sqlcipher3==0.6.3",
     "keyring~=25.7",
     "ruamel.yaml==0.19.1",
     "prompt-toolkit~=3.0",
