@@ -323,7 +323,8 @@ def _extract_phantom_token(request: web.Request) -> str | None:
             continue
         # Strip "Bearer ", "token ", etc. prefixes
         if " " in value:
-            return value.split(None, 1)[1]
+            parts = value.split(None, 1)
+            return parts[1] if len(parts) > 1 else None
         return value
     return None
 
