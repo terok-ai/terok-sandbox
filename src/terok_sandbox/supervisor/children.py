@@ -386,7 +386,7 @@ def run_child(service: str, container_id: str, sidecar_path: Path) -> int:
         #
         # This is path isolation, not a same-UID kernel-keyring boundary:
         # vault and signer still resolve the shared vault key through the
-        # existing keyring policy.  Process memory has the separate
+        # existing desktop-keyring and session-cache policies. Process memory has the separate
         # ``harden_self`` floor above.
         fs = confine_filesystem(
             (*_SYSTEM_READABLE_ROOTS, *_readable_paths(service, cfg)),
@@ -415,7 +415,7 @@ def _resolve_service_passphrase(service: str, cfg: SidecarConfig) -> str | None:
         NoPassphraseError,
         probe_passphrase_chain,
         resolve_passphrase_with_source,
-        retire_keyring_worker,
+        retire_desktop_keyring_worker,
     )
 
     creds_file = _systemd_creds_path(cfg)
@@ -423,13 +423,13 @@ def _resolve_service_passphrase(service: str, cfg: SidecarConfig) -> str | None:
         passphrase, source = resolve_passphrase_with_source(
             credentials_db=cfg.db_path,
             systemd_creds_file=creds_file,
-            use_keyring=cfg.credentials_use_keyring,
+            use_desktop_keyring=cfg.credentials_use_desktop_keyring,
             passphrase_command=cfg.credentials_passphrase_command,
         )
     finally:
-        # The OS-keyring tier reads on a worker thread; the Landlock
+        # The desktop-keyring tier reads on a worker thread; the Landlock
         # confinement that follows needs this process single-threaded.
-        retire_keyring_worker()
+        retire_desktop_keyring_worker()
     if passphrase is None:
         # The error names every tier as this child saw it: which one was
         # supposed to answer is the whole question when reading the log.
@@ -438,7 +438,7 @@ def _resolve_service_passphrase(service: str, cfg: SidecarConfig) -> str | None:
             for row in probe_passphrase_chain(
                 credentials_db=cfg.db_path,
                 systemd_creds_file=creds_file,
-                use_keyring=cfg.credentials_use_keyring,
+                use_desktop_keyring=cfg.credentials_use_desktop_keyring,
                 passphrase_command=cfg.credentials_passphrase_command,
             )
         )

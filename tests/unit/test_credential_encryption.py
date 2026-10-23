@@ -20,17 +20,17 @@ from terok_sandbox.vault.store.db import (
 )
 from terok_sandbox.vault.store.encryption import (
     encrypt_in_place,
-    forget_passphrase_in_keyring,
+    forget_passphrase_in_desktop_keyring,
     generate_passphrase,
     is_plaintext_sqlite,
     load_passphrase_from_command,
-    load_passphrase_from_keyring,
+    load_passphrase_from_desktop_keyring,
     open_sqlcipher,
     open_sqlcipher_via_chain,
     prompt_passphrase,
     resolve_passphrase,
     resolve_passphrase_with_source,
-    store_passphrase_in_keyring,
+    store_passphrase_in_desktop_keyring,
 )
 from terok_sandbox.vault.store.tiers import CHOOSER_TIERS, PassphraseTier
 from tests.constants import MOCK_BASE
@@ -173,7 +173,7 @@ def _patch_dev_tty(
 def _make_cfg(
     tmp_path: Path,
     *,
-    use_keyring: bool = False,
+    use_desktop_keyring: bool = False,
     passphrase_command: str | None = None,
 ):
     """Return a SandboxConfig rooted under tmp_path with deterministic credential knobs."""
@@ -185,7 +185,7 @@ def _make_cfg(
         config_dir=tmp_path / "cfg",
         vault_dir=tmp_path / "vault",
         services_mode="socket",
-        credentials_use_keyring=use_keyring,
+        credentials_use_desktop_keyring=use_desktop_keyring,
         credentials_passphrase_command=passphrase_command,
     )
 
@@ -228,45 +228,50 @@ class TestPlaintextProbe:
 
 
 class TestResolvePassphrase:
-    """Walk the chain: systemd-creds → keyring → kernel-keyring → passphrase_command → prompt."""
+    """Walk the chain: systemd-creds → desktop keyring → kernel-keyring → passphrase_command → prompt."""
 
     def test_kernel_keyring_tier_resolves(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The kernel-keyring cache resolves when no durable tier above it holds anything."""
         from terok_sandbox.vault.store import encryption as enc
 
-        monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda **_kw: None)
+        monkeypatch.setattr(enc, "load_passphrase_from_desktop_keyring", lambda **_kw: None)
         _fake_kernel_keyring(monkeypatch, initial="from-kernel")
         assert resolve_passphrase(credentials_db=MOCK_DB_PATH) == "from-kernel"
 
-    def test_keyring_only_consulted_when_opted_in(
+    def test_desktop_keyring_only_consulted_when_opted_in(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """``use_keyring=False`` short-circuits the keyring tier entirely."""
+        """``use_desktop_keyring=False`` short-circuits the desktop keyring tier entirely."""
         from terok_sandbox.vault.store import encryption as enc
 
-        called = {"keyring": 0}
+        called = {"desktop-keyring": 0}
 
         def _boobytrap() -> str | None:
-            called["keyring"] += 1
+            called["desktop-keyring"] += 1
             return "from-keyring"
 
-        monkeypatch.setattr(enc, "load_passphrase_from_keyring", _boobytrap)
+        monkeypatch.setattr(enc, "load_passphrase_from_desktop_keyring", _boobytrap)
         monkeypatch.setattr(enc, "load_passphrase_from_command", lambda _cmd: "from-command")
         # The chain must keep walking past the skipped tier and hit the
         # helper command below it.
         result = resolve_passphrase(
-            credentials_db=MOCK_DB_PATH, use_keyring=False, passphrase_command="helper"
+            credentials_db=MOCK_DB_PATH, use_desktop_keyring=False, passphrase_command="helper"
         )
         assert result == "from-command"
-        assert called["keyring"] == 0
+        assert called["desktop-keyring"] == 0
 
-    def test_keyring_used_when_opted_in(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """``use_keyring=True`` consults the keyring (Linux Secret Service / Keychain)."""
+    def test_desktop_keyring_used_when_opted_in(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``use_desktop_keyring=True`` consults the desktop keyring (Linux Secret Service / Keychain)."""
         from terok_sandbox.vault.store import encryption as enc
 
-        monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda **_kw: "from-keyring")
-        assert resolve_passphrase(credentials_db=MOCK_DB_PATH, use_keyring=True) == "from-keyring"
+        monkeypatch.setattr(
+            enc, "load_passphrase_from_desktop_keyring", lambda **_kw: "from-keyring"
+        )
+        assert (
+            resolve_passphrase(credentials_db=MOCK_DB_PATH, use_desktop_keyring=True)
+            == "from-keyring"
+        )
 
     def test_returns_none_when_nothing_resolves(
         self,
@@ -275,7 +280,7 @@ class TestResolvePassphrase:
         """Every tier empty → caller's job to surface a clear setup error."""
         from terok_sandbox.vault.store import encryption as enc
 
-        monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda **_kw: None)
+        monkeypatch.setattr(enc, "load_passphrase_from_desktop_keyring", lambda **_kw: None)
         assert resolve_passphrase(credentials_db=MOCK_DB_PATH) is None
 
     def test_prompt_on_tty_fires_when_chain_is_empty(
@@ -285,7 +290,7 @@ class TestResolvePassphrase:
         """Last-resort prompt fires only with prompt_on_tty=True AND a TTY."""
         from terok_sandbox.vault.store import encryption as enc
 
-        monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda **_kw: None)
+        monkeypatch.setattr(enc, "load_passphrase_from_desktop_keyring", lambda **_kw: None)
         _scripted_tty_prompt(monkeypatch, "from-prompt")
         assert resolve_passphrase(credentials_db=MOCK_DB_PATH, prompt_on_tty=True) == "from-prompt"
 
@@ -293,7 +298,7 @@ class TestResolvePassphrase:
         """No TTY → prompt_on_tty has no effect; chain returns None as usual."""
         from terok_sandbox.vault.store import encryption as enc
 
-        monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda **_kw: None)
+        monkeypatch.setattr(enc, "load_passphrase_from_desktop_keyring", lambda **_kw: None)
         monkeypatch.setattr("sys.stdin.isatty", lambda: False)
         assert resolve_passphrase(credentials_db=MOCK_DB_PATH, prompt_on_tty=True) is None
 
@@ -301,7 +306,7 @@ class TestResolvePassphrase:
         """Default behaviour does not prompt even when a TTY is attached."""
         from terok_sandbox.vault.store import encryption as enc
 
-        monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda **_kw: None)
+        monkeypatch.setattr(enc, "load_passphrase_from_desktop_keyring", lambda **_kw: None)
         monkeypatch.setattr("sys.stdin.isatty", lambda: True)
         # No mock on prompt_toolkit — would block if called; assertion proves it isn't.
         assert resolve_passphrase(credentials_db=MOCK_DB_PATH) is None
@@ -313,24 +318,24 @@ class TestResolvePassphraseWithSource:
     def test_kernel_keyring_source(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from terok_sandbox.vault.store import encryption as enc
 
-        monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda **_kw: None)
+        monkeypatch.setattr(enc, "load_passphrase_from_desktop_keyring", lambda **_kw: None)
         _fake_kernel_keyring(monkeypatch, initial="kernel-pw")
         assert resolve_passphrase_with_source(credentials_db=MOCK_DB_PATH) == (
             "kernel-pw",
-            "kernel-keyring",
+            "session-cache",
         )
 
     def test_systemd_creds_source(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """systemd-creds tier sits above keyring in the chain."""
+        """systemd-creds tier sits above desktop keyring in the chain."""
         from terok_sandbox.vault.store import encryption as enc, systemd_creds as sc
 
-        monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda **_kw: "ring-pw")
+        monkeypatch.setattr(enc, "load_passphrase_from_desktop_keyring", lambda **_kw: "ring-pw")
         monkeypatch.setattr(sc, "unseal", lambda _p: "sealed-pw")
         cred = tmp_path / "v.cred"
         cred.write_bytes(b"sealed-blob")
-        # Both systemd-creds and keyring would succeed; systemd-creds wins because it sits above.
+        # Both systemd-creds and desktop keyring would succeed; systemd-creds wins because it sits above.
         assert resolve_passphrase_with_source(
-            credentials_db=MOCK_DB_PATH, systemd_creds_file=cred, use_keyring=True
+            credentials_db=MOCK_DB_PATH, systemd_creds_file=cred, use_desktop_keyring=True
         ) == (
             "sealed-pw",
             "systemd-creds",
@@ -341,19 +346,19 @@ class TestResolvePassphraseWithSource:
     ) -> None:
         """A locked / corrupt / wrong-machine credential raises rather than silently downgrading.
 
-        Falling through to keyring / config would change the security
-        posture (machine-bound → keyring or plaintext-on-disk) without
+        Falling through to desktop keyring / config would change the security
+        posture (machine-bound → desktop keyring or plaintext-on-disk) without
         the operator's knowledge — a classic auth-chain downgrade.
         """
         from terok_sandbox.vault.store import encryption as enc, systemd_creds as sc
 
-        monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda **_kw: "ring-pw")
+        monkeypatch.setattr(enc, "load_passphrase_from_desktop_keyring", lambda **_kw: "ring-pw")
         monkeypatch.setattr(sc, "unseal", lambda _p: None)
         cred = tmp_path / "v.cred"
         cred.write_bytes(b"sealed-blob")
         with pytest.raises(WrongPassphraseError, match="could not be unsealed"):
             resolve_passphrase_with_source(
-                credentials_db=MOCK_DB_PATH, systemd_creds_file=cred, use_keyring=True
+                credentials_db=MOCK_DB_PATH, systemd_creds_file=cred, use_desktop_keyring=True
             )
 
     def test_systemd_creds_absent_falls_through(
@@ -364,15 +369,15 @@ class TestResolvePassphraseWithSource:
 
         from terok_sandbox.vault.store import encryption as enc, systemd_creds as sc
 
-        monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda **_kw: "ring-pw")
+        monkeypatch.setattr(enc, "load_passphrase_from_desktop_keyring", lambda **_kw: "ring-pw")
         unseal = MagicMock()
         monkeypatch.setattr(sc, "unseal", unseal)
         absent = tmp_path / "never-created.cred"
         assert resolve_passphrase_with_source(
-            credentials_db=MOCK_DB_PATH, systemd_creds_file=absent, use_keyring=True
+            credentials_db=MOCK_DB_PATH, systemd_creds_file=absent, use_desktop_keyring=True
         ) == (
             "ring-pw",
-            "keyring",
+            "desktop-keyring",
         )
         unseal.assert_not_called()
 
@@ -384,7 +389,7 @@ class TestResolvePassphraseWithSource:
 
         from terok_sandbox.vault.store import encryption as enc, systemd_creds as sc
 
-        monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda **_kw: None)
+        monkeypatch.setattr(enc, "load_passphrase_from_desktop_keyring", lambda **_kw: None)
         _fake_kernel_keyring(monkeypatch, initial="kernel-pw")
         unseal = MagicMock(return_value="sealed-pw")
         monkeypatch.setattr(sc, "unseal", unseal)
@@ -395,48 +400,52 @@ class TestResolvePassphraseWithSource:
         )
         assert result == ("sealed-pw", "systemd-creds")
 
-    def test_keyring_source(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_desktop_keyring_source(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from terok_sandbox.vault.store import encryption as enc
 
-        monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda **_kw: "ring-pw")
-        assert resolve_passphrase_with_source(credentials_db=MOCK_DB_PATH, use_keyring=True) == (
+        monkeypatch.setattr(enc, "load_passphrase_from_desktop_keyring", lambda **_kw: "ring-pw")
+        assert resolve_passphrase_with_source(
+            credentials_db=MOCK_DB_PATH, use_desktop_keyring=True
+        ) == (
             "ring-pw",
-            "keyring",
+            "desktop-keyring",
         )
 
     def test_passphrase_command_source(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """A helper command sits between keyring and prompt in the chain."""
+        """A helper command sits between desktop keyring and prompt in the chain."""
         from terok_sandbox.vault.store import encryption as enc
 
-        monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda **_kw: None)
+        monkeypatch.setattr(enc, "load_passphrase_from_desktop_keyring", lambda **_kw: None)
         monkeypatch.setattr(enc, "load_passphrase_from_command", lambda _cmd: "helper-pw")
         result = resolve_passphrase_with_source(
             credentials_db=MOCK_DB_PATH, passphrase_command="helper"
         )
         assert result == ("helper-pw", "passphrase-command")
 
-    def test_keyring_pre_empts_passphrase_command(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Keyring outranks the helper — explicit OS-level storage wins over delegation."""
+    def test_desktop_keyring_pre_empts_passphrase_command(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Desktop keyring outranks the helper — explicit OS-level storage wins over delegation."""
         from unittest.mock import MagicMock
 
         from terok_sandbox.vault.store import encryption as enc
 
-        monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda **_kw: "ring-pw")
+        monkeypatch.setattr(enc, "load_passphrase_from_desktop_keyring", lambda **_kw: "ring-pw")
         spy = MagicMock()
         monkeypatch.setattr(enc, "load_passphrase_from_command", spy)
         result = resolve_passphrase_with_source(
             credentials_db=MOCK_DB_PATH,
-            use_keyring=True,
+            use_desktop_keyring=True,
             passphrase_command="helper-that-must-not-run",
         )
-        assert result == ("ring-pw", "keyring")
+        assert result == ("ring-pw", "desktop-keyring")
         spy.assert_not_called()
 
     def test_passphrase_command_broken_fails_closed(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A configured-but-empty helper raises rather than silently downgrading."""
         from terok_sandbox.vault.store import encryption as enc
 
-        monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda **_kw: None)
+        monkeypatch.setattr(enc, "load_passphrase_from_desktop_keyring", lambda **_kw: None)
         monkeypatch.setattr(enc, "load_passphrase_from_command", lambda _cmd: None)
         with pytest.raises(WrongPassphraseError, match="passphrase_command produced no passphrase"):
             resolve_passphrase_with_source(
@@ -447,7 +456,7 @@ class TestResolvePassphraseWithSource:
         """An unset / empty-string command is "tier not configured" — fall through cleanly."""
         from terok_sandbox.vault.store import encryption as enc
 
-        monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda **_kw: None)
+        monkeypatch.setattr(enc, "load_passphrase_from_desktop_keyring", lambda **_kw: None)
         assert resolve_passphrase_with_source(
             credentials_db=MOCK_DB_PATH, passphrase_command=""
         ) == (None, None)
@@ -455,7 +464,7 @@ class TestResolvePassphraseWithSource:
     def test_prompt_source(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from terok_sandbox.vault.store import encryption as enc
 
-        monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda **_kw: None)
+        monkeypatch.setattr(enc, "load_passphrase_from_desktop_keyring", lambda **_kw: None)
         _scripted_tty_prompt(monkeypatch, "tty-pw")
         assert resolve_passphrase_with_source(credentials_db=MOCK_DB_PATH, prompt_on_tty=True) == (
             "tty-pw",
@@ -466,7 +475,7 @@ class TestResolvePassphraseWithSource:
         """Every tier empty → (None, None) so VaultStatus.locked stays derivable."""
         from terok_sandbox.vault.store import encryption as enc
 
-        monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda **_kw: None)
+        monkeypatch.setattr(enc, "load_passphrase_from_desktop_keyring", lambda **_kw: None)
         assert resolve_passphrase_with_source(credentials_db=MOCK_DB_PATH) == (None, None)
 
 
@@ -491,7 +500,7 @@ class TestLoadPassphraseFromCommand:
         assert load_passphrase_from_command("   ") is None
 
     def test_non_zero_exit_returns_none(self, caplog: pytest.LogCaptureFixture) -> None:
-        """A failed helper logs the exit code + stderr at WARNING and returns ``None``."""
+        """A failed helper logs only the exit code at WARNING and returns ``None``."""
         with caplog.at_level("WARNING", logger="terok_sandbox.vault.store.encryption"):
             assert load_passphrase_from_command("false") is None
         assert "exited 1" in caplog.text
@@ -632,7 +641,7 @@ class TestCredentialDBEncryption:
         path = tmp_path / "wrap.db"
         from terok_sandbox.vault.store import encryption as enc
 
-        monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda **_kw: None)
+        monkeypatch.setattr(enc, "load_passphrase_from_desktop_keyring", lambda **_kw: None)
         _fake_kernel_keyring(monkeypatch, initial=_PASSPHRASE)
         db = open_credential_db(path)
         try:
@@ -648,7 +657,7 @@ class TestCredentialDBEncryption:
         """Nothing in any tier → diagnostic NoPassphraseError naming the DB path."""
         from terok_sandbox.vault.store import encryption as enc
 
-        monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda **_kw: None)
+        monkeypatch.setattr(enc, "load_passphrase_from_desktop_keyring", lambda **_kw: None)
         with pytest.raises(NoPassphraseError, match="no SQLCipher passphrase"):
             open_credential_db(tmp_path / "no-key.db")
 
@@ -660,7 +669,7 @@ class TestCredentialDBEncryption:
         """CLI wrapper with prompt_on_tty=True falls through to the interactive prompt."""
         from terok_sandbox.vault.store import encryption as enc
 
-        monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda **_kw: None)
+        monkeypatch.setattr(enc, "load_passphrase_from_desktop_keyring", lambda **_kw: None)
         _scripted_tty_prompt(monkeypatch, _PASSPHRASE)
         db = open_credential_db(tmp_path / "p.db", prompt_on_tty=True)
         try:
@@ -676,10 +685,10 @@ class TestCredentialDBEncryption:
         """The source-aware opener returns which tier of the chain hit."""
         from terok_sandbox.vault.store import encryption as enc
 
-        monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda **_kw: _PASSPHRASE)
-        db, source = open_credential_db_with_source(tmp_path / "src.db", use_keyring=True)
+        monkeypatch.setattr(enc, "load_passphrase_from_desktop_keyring", lambda **_kw: _PASSPHRASE)
+        db, source = open_credential_db_with_source(tmp_path / "src.db", use_desktop_keyring=True)
         try:
-            assert source == "keyring"
+            assert source == "desktop-keyring"
         finally:
             db.close()
 
@@ -691,7 +700,7 @@ class TestCredentialDBEncryption:
         """Empty chain → diagnostic NoPassphraseError, same shape as the non-source variant."""
         from terok_sandbox.vault.store import encryption as enc
 
-        monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda **_kw: None)
+        monkeypatch.setattr(enc, "load_passphrase_from_desktop_keyring", lambda **_kw: None)
         with pytest.raises(NoPassphraseError, match="no SQLCipher passphrase"):
             open_credential_db_with_source(tmp_path / "src.db")
 
@@ -707,7 +716,7 @@ class TestOpenSqlcipherViaChain:
         """Kernel-keyring cache holds the key → connection opens, no error raised."""
         from terok_sandbox.vault.store import encryption as enc
 
-        monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda **_kw: None)
+        monkeypatch.setattr(enc, "load_passphrase_from_desktop_keyring", lambda **_kw: None)
         _fake_kernel_keyring(monkeypatch, initial=_PASSPHRASE)
         path = tmp_path / "via.db"
         conn = open_sqlcipher_via_chain(path)
@@ -716,17 +725,17 @@ class TestOpenSqlcipherViaChain:
         finally:
             conn.close()
 
-    def test_opens_when_keyring_has_passphrase(
+    def test_opens_when_desktop_keyring_has_passphrase(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Keyring hit (with opt-in) → connection opens."""
+        """Desktop keyring hit (with opt-in) → connection opens."""
         from terok_sandbox.vault.store import encryption as enc
 
-        monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda **_kw: _PASSPHRASE)
+        monkeypatch.setattr(enc, "load_passphrase_from_desktop_keyring", lambda **_kw: _PASSPHRASE)
         path = tmp_path / "via.db"
-        conn = open_sqlcipher_via_chain(path, use_keyring=True)
+        conn = open_sqlcipher_via_chain(path, use_desktop_keyring=True)
         try:
             conn.execute("CREATE TABLE t (x INTEGER)")
         finally:
@@ -740,7 +749,7 @@ class TestOpenSqlcipherViaChain:
         """Empty chain → diagnostic NoPassphraseError naming the DB path."""
         from terok_sandbox.vault.store import encryption as enc
 
-        monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda **_kw: None)
+        monkeypatch.setattr(enc, "load_passphrase_from_desktop_keyring", lambda **_kw: None)
         with pytest.raises(NoPassphraseError, match="no SQLCipher passphrase"):
             open_sqlcipher_via_chain(tmp_path / "empty.db")
 
@@ -819,39 +828,44 @@ class TestPromptPassphrase:
         assert "no controlling TTY" in str(exc.value)
 
 
-class TestKeyringHelpers:
+class TestDesktopKeyringHelpers:
     """Storage-tier helpers fail closed on backend errors."""
 
     def test_store_returns_true_on_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """A working keyring backend persists the secret and reports ``True``."""
-        import sys
+        """A working desktop keyring backend persists the secret and reports ``True``."""
+        import keyring
 
         calls: dict[str, tuple[str, str, str]] = {}
 
         def _set_password(svc: str, user: str, pw: str) -> None:
             calls["args"] = (svc, user, pw)
 
-        fake = type("FakeKeyring", (), {"set_password": staticmethod(_set_password)})
-        monkeypatch.setitem(sys.modules, "keyring", fake)
-        assert store_passphrase_in_keyring("hunter2") is True
+        fake = type(
+            "FakeKeyring",
+            (),
+            {
+                "set_password": staticmethod(_set_password),
+                "get_password": staticmethod(lambda *_a: calls["args"][2]),
+            },
+        )()
+        monkeypatch.setattr(keyring, "get_keyring", lambda: fake)
+        assert store_passphrase_in_desktop_keyring("hunter2") is True
         assert calls["args"] == ("terok-sandbox", "credentials-db", "hunter2")
 
     def test_store_returns_false_when_backend_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """``False`` (not exception) so the caller can fall back to another tier."""
-        import sys
+        """``False`` (not exception) so the caller preserves the source tier."""
+        import keyring
 
         def _boom(*_a: object, **_kw: object) -> None:
             raise RuntimeError("denied")
 
         fake = type("FakeKeyring", (), {"set_password": staticmethod(_boom)})
-        monkeypatch.setitem(sys.modules, "keyring", fake)
-        assert store_passphrase_in_keyring("hunter2") is False
+        monkeypatch.setattr(keyring, "get_keyring", lambda: fake())
+        assert store_passphrase_in_desktop_keyring("hunter2") is False
 
     def test_forget_returns_none_on_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """``forget`` clears the keyring entry and reports it gone."""
-        import sys
-
-        import keyring.errors as _keyring_errors
+        """``forget`` clears the desktop keyring entry and reports it gone."""
+        import keyring
 
         from terok_sandbox.vault.store import encryption as _enc_module
 
@@ -860,49 +874,57 @@ class TestKeyringHelpers:
         def _delete_password(svc: str, user: str) -> None:
             deleted["args"] = (svc, user)
 
-        fake = type("FakeKeyring", (), {"delete_password": staticmethod(_delete_password)})
-        monkeypatch.setattr(_enc_module, "os_keyring_read_blocked", lambda **_kw: None)
-        monkeypatch.setitem(sys.modules, "keyring", fake)
-        monkeypatch.setitem(sys.modules, "keyring.errors", _keyring_errors)
-        assert forget_passphrase_in_keyring() is None
+        fake = type(
+            "FakeKeyring",
+            (),
+            {
+                "delete_password": staticmethod(_delete_password),
+                "get_password": staticmethod(lambda *_a: None),
+            },
+        )()
+        monkeypatch.setattr(_enc_module, "desktop_keyring_read_blocked", lambda **_kw: None)
+        monkeypatch.setattr(keyring, "get_keyring", lambda: fake)
+        assert forget_passphrase_in_desktop_keyring() is None
         assert deleted["args"] == ("terok-sandbox", "credentials-db")
 
     def test_forget_missing_entry_counts_as_gone(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A delete of an absent entry is the goal state, not a failure."""
-        import sys
-
-        import keyring.errors as _keyring_errors
+        import keyring
+        import keyring.errors as _desktop_keyring_errors
 
         from terok_sandbox.vault.store import encryption as _enc_module
 
         def _missing(*_a: object, **_kw: object) -> None:
-            raise _keyring_errors.PasswordDeleteError("no such entry")
+            raise _desktop_keyring_errors.PasswordDeleteError("no such entry")
 
-        fake = type("FakeKeyring", (), {"delete_password": staticmethod(_missing)})
-        monkeypatch.setattr(_enc_module, "os_keyring_read_blocked", lambda **_kw: None)
-        monkeypatch.setattr(_enc_module, "load_passphrase_from_keyring", lambda **_kw: None)
-        monkeypatch.setitem(sys.modules, "keyring", fake)
-        monkeypatch.setitem(sys.modules, "keyring.errors", _keyring_errors)
-        assert forget_passphrase_in_keyring() is None
+        fake = type(
+            "FakeKeyring",
+            (),
+            {
+                "delete_password": staticmethod(_missing),
+                "get_password": staticmethod(lambda *_a: None),
+            },
+        )()
+        monkeypatch.setattr(_enc_module, "desktop_keyring_read_blocked", lambda **_kw: None)
+        monkeypatch.setattr(keyring, "get_keyring", lambda: fake)
+        assert forget_passphrase_in_desktop_keyring() is None
 
-    def test_forget_locked_keyring_returns_the_reason(
+    def test_forget_locked_desktop_keyring_returns_the_reason(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A locked keyring cannot prove absence — the caller gets the reason."""
+        """A locked desktop keyring cannot prove absence — the caller gets the reason."""
         from terok_sandbox.vault.store import encryption as _enc_module
 
         monkeypatch.setattr(
-            _enc_module, "os_keyring_read_blocked", lambda **_kw: "OS keyring locked"
+            _enc_module, "desktop_keyring_read_blocked", lambda **_kw: "desktop keyring locked"
         )
-        assert forget_passphrase_in_keyring() == "OS keyring locked"
+        assert forget_passphrase_in_desktop_keyring() == "desktop keyring locked"
 
     def test_forget_returns_reason_when_backend_raises(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A denied delete surfaces its reason so callers can render it."""
-        import sys
-
-        import keyring.errors as _keyring_errors
+        import keyring
 
         from terok_sandbox.vault.store import encryption as _enc_module
 
@@ -910,10 +932,11 @@ class TestKeyringHelpers:
             raise RuntimeError("denied")
 
         fake = type("FakeKeyring", (), {"delete_password": staticmethod(_boom)})
-        monkeypatch.setattr(_enc_module, "os_keyring_read_blocked", lambda **_kw: None)
-        monkeypatch.setitem(sys.modules, "keyring", fake)
-        monkeypatch.setitem(sys.modules, "keyring.errors", _keyring_errors)
-        assert forget_passphrase_in_keyring() == "OS keyring unreachable (RuntimeError)"
+        monkeypatch.setattr(_enc_module, "desktop_keyring_read_blocked", lambda **_kw: None)
+        monkeypatch.setattr(keyring, "get_keyring", lambda: fake())
+        assert (
+            forget_passphrase_in_desktop_keyring() == "desktop keyring unreachable (RuntimeError)"
+        )
 
 
 class TestPromptPassphraseNonTTY:
@@ -1011,22 +1034,24 @@ class TestEmptyPassphraseGuards:
         with pytest.raises(ValueError, match="empty passphrase"):
             open_sqlcipher(tmp_path / "x.db", "")
 
-    def test_store_in_keyring_rejects_empty(self) -> None:
-        """``store_passphrase_in_keyring("")`` raises rather than persisting a blank."""
+    def test_store_in_desktop_keyring_rejects_empty(self) -> None:
+        """``store_passphrase_in_desktop_keyring("")`` raises rather than persisting a blank."""
         # Top-level import captured the real callable before the
         # autouse stub took hold, so calling it directly bypasses the
         # module-attribute patch.
         with pytest.raises(ValueError, match="empty"):
-            store_passphrase_in_keyring("")
+            store_passphrase_in_desktop_keyring("")
 
-    def test_resolve_treats_empty_keyring_as_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """A blank keyring entry must not shadow lower tiers in the chain."""
+    def test_resolve_treats_empty_desktop_keyring_as_missing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A blank desktop keyring entry must not shadow lower tiers in the chain."""
         from terok_sandbox.vault.store import encryption as enc
 
-        monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda **_kw: "")
+        monkeypatch.setattr(enc, "load_passphrase_from_desktop_keyring", lambda **_kw: "")
         monkeypatch.setattr(enc, "load_passphrase_from_command", lambda _cmd: "from-command")
         result = resolve_passphrase(
-            credentials_db=MOCK_DB_PATH, use_keyring=True, passphrase_command="helper"
+            credentials_db=MOCK_DB_PATH, use_desktop_keyring=True, passphrase_command="helper"
         )
         assert result == "from-command"
 
@@ -1063,8 +1088,8 @@ class TestProvisionPassphrase:
         # as ``vault unlock`` against a fresh DB.
         _patch_dev_tty(monkeypatch)
         _scripted_tty_prompt(monkeypatch, "")
-        pw, source, _ = _provision_passphrase(cfg, mode=PassphraseTier.KERNEL_KEYRING)
-        assert source == "kernel-keyring"
+        pw, source, _ = _provision_passphrase(cfg, mode=PassphraseTier.SESSION_CACHE)
+        assert source == "session-cache"
         assert cache["pw"] == pw
 
     def test_kernel_keyring_mode_reuses_cached_value(
@@ -1077,9 +1102,9 @@ class TestProvisionPassphrase:
 
         cfg = _make_cfg(tmp_path)
         _fake_kernel_keyring(monkeypatch, initial=_PASSPHRASE)
-        pw, source, _ = _provision_passphrase(cfg, mode=PassphraseTier.KERNEL_KEYRING)
+        pw, source, _ = _provision_passphrase(cfg, mode=PassphraseTier.SESSION_CACHE)
         assert pw == _PASSPHRASE
-        assert source == "kernel-keyring"
+        assert source == "session-cache"
 
     def test_kernel_keyring_mode_raises_when_store_fails(
         self,
@@ -1096,42 +1121,48 @@ class TestProvisionPassphrase:
         _pin_kernel_backing(monkeypatch)
         monkeypatch.setattr(_kk, "store", lambda _pw, _db=None: False)
         with pytest.raises(RuntimeError, match="session cache is unavailable"):
-            _provision_passphrase(cfg, mode=PassphraseTier.KERNEL_KEYRING)
+            _provision_passphrase(cfg, mode=PassphraseTier.SESSION_CACHE)
 
-    def test_keyring_mode_uses_existing_keyring_entry(
+    def test_desktop_keyring_mode_uses_existing_desktop_keyring_entry(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Keyring mode returns the stored entry verbatim."""
+        """Desktop keyring mode returns the stored entry verbatim."""
         from terok_sandbox.commands import _provision_passphrase
         from terok_sandbox.vault.store import encryption as enc
 
-        monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda **_kw: _PASSPHRASE)
-        pw, source, _ = _provision_passphrase(_make_cfg(tmp_path), mode=PassphraseTier.KEYRING)
+        monkeypatch.setattr(enc, "load_passphrase_from_desktop_keyring", lambda **_kw: _PASSPHRASE)
+        pw, source, _ = _provision_passphrase(
+            _make_cfg(tmp_path), mode=PassphraseTier.DESKTOP_KEYRING
+        )
         assert pw == _PASSPHRASE
-        assert source == "keyring"
+        assert source == "desktop-keyring"
 
-    def test_keyring_mode_generates_when_keyring_empty(
+    def test_desktop_keyring_mode_generates_when_desktop_keyring_empty(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Empty keyring + working backend → generate + store, source 'keyring'."""
+        """Empty desktop keyring + working backend → generate + store, source 'desktop-keyring'."""
         from terok_sandbox.commands import _provision_passphrase
         from terok_sandbox.vault.store import encryption as enc
 
         stored: dict[str, str] = {}
         _patch_dev_tty(monkeypatch)
-        monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda **_kw: None)
+        monkeypatch.setattr(enc, "load_passphrase_from_desktop_keyring", lambda **_kw: None)
         monkeypatch.setattr(
-            enc, "store_passphrase_in_keyring", lambda pw: stored.__setitem__("pw", pw) or True
+            enc,
+            "store_passphrase_in_desktop_keyring",
+            lambda pw: stored.__setitem__("pw", pw) or True,
         )
-        pw, source, _ = _provision_passphrase(_make_cfg(tmp_path), mode=PassphraseTier.KEYRING)
-        assert source == "keyring"
+        pw, source, _ = _provision_passphrase(
+            _make_cfg(tmp_path), mode=PassphraseTier.DESKTOP_KEYRING
+        )
+        assert source == "desktop-keyring"
         assert pw == stored["pw"]
 
-    def test_keyring_mode_raises_when_backend_denies(
+    def test_desktop_keyring_mode_raises_when_backend_denies(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
@@ -1140,10 +1171,10 @@ class TestProvisionPassphrase:
         from terok_sandbox.commands import _provision_passphrase
         from terok_sandbox.vault.store import encryption as enc
 
-        monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda **_kw: None)
-        monkeypatch.setattr(enc, "store_passphrase_in_keyring", lambda _pw: False)
+        monkeypatch.setattr(enc, "load_passphrase_from_desktop_keyring", lambda **_kw: None)
+        monkeypatch.setattr(enc, "store_passphrase_in_desktop_keyring", lambda _pw: False)
         with pytest.raises(RuntimeError, match="different storage mode"):
-            _provision_passphrase(_make_cfg(tmp_path), mode=PassphraseTier.KEYRING)
+            _provision_passphrase(_make_cfg(tmp_path), mode=PassphraseTier.DESKTOP_KEYRING)
 
     def test_unknown_mode_raises(self, tmp_path: Path) -> None:
         """An unrecognised mode is a programmer error, not a soft fall-through."""
@@ -1167,8 +1198,8 @@ class TestChooserAndEncryptHandler:
         cache = _fake_kernel_keyring(monkeypatch)
         _disable_systemd_creds(monkeypatch)
         _patch_dev_tty(monkeypatch)
-        # Pick ``[n]`` explicitly: the chooser default is now keyring, so
-        # an empty answer would take the keyring tier instead of kernel.
+        # Pick ``[n]`` explicitly: the chooser default is now desktop keyring, so
+        # an empty answer would take the desktop keyring tier instead of kernel.
         monkeypatch.setattr("sys.stdin.isatty", lambda: True)
         responses = iter(["n\n"])
         monkeypatch.setattr("sys.stdin.readline", lambda: next(responses))
@@ -1240,48 +1271,48 @@ class TestChooserAndEncryptHandler:
         assert cache["pw"] is None
 
 
-class TestUserCancelsKeyring:
-    """User clicks Cancel on the OS keyring dialog — must fall through cleanly.
+class TestUserCancelsDesktopKeyring:
+    """User clicks Cancel on the desktop keyring dialog — must fall through cleanly.
 
-    Pins the Signal-cascade-avoidance contract: a failed keyring access
+    Pins the Signal-cascade-avoidance contract: a failed desktop keyring access
     never deletes or corrupts the encrypted DB.  Signal Desktop's bug
     is to interpret 'denied' as 'corrupted, must wipe' — we MUST NOT
     do that, however indirectly.
     """
 
     def test_load_failure_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """A keyring backend raising on read surfaces as 'no entry' to the chain."""
+        """A desktop keyring backend raising on read surfaces as 'no entry' to the chain."""
         import sys
 
         def _denied(_svc: str, _user: str) -> str:
             raise RuntimeError("user cancelled")
 
-        # ``load_passphrase_from_keyring`` does ``import keyring`` per
+        # ``load_passphrase_from_desktop_keyring`` does ``import keyring`` per
         # call, so swapping the entry in ``sys.modules`` is enough — no
         # module reload needed.  The top-level import captured the real
         # callable before the autouse stub took hold, so calling it
         # directly bypasses the module-attribute patch.
         fake = type("FakeKeyring", (), {"get_password": staticmethod(_denied)})
         monkeypatch.setitem(sys.modules, "keyring", fake)
-        assert load_passphrase_from_keyring() is None
+        assert load_passphrase_from_desktop_keyring() is None
 
     def test_store_failure_falls_through(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A denied keyring write surfaces as `False`, never partial state."""
+        """A denied desktop-keyring write returns ``False`` so callers preserve the source."""
         from terok_sandbox.vault.store import encryption as enc
 
-        monkeypatch.setattr(enc, "store_passphrase_in_keyring", lambda _pw: False)
-        assert enc.store_passphrase_in_keyring("anything") is False
+        monkeypatch.setattr(enc, "store_passphrase_in_desktop_keyring", lambda _pw: False)
+        assert enc.store_passphrase_in_desktop_keyring("anything") is False
 
-    def test_failed_keyring_does_not_touch_db(
+    def test_failed_desktop_keyring_does_not_touch_db(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """The encrypted DB file is byte-identical after a denied keyring op."""
+        """The encrypted DB file is byte-identical after a denied desktop keyring op."""
         import sys
 
         path = tmp_path / "creds.db"
@@ -1293,7 +1324,7 @@ class TestUserCancelsKeyring:
 
         fake = type("FakeKeyring", (), {"get_password": staticmethod(_denied)})
         monkeypatch.setitem(sys.modules, "keyring", fake)
-        assert load_passphrase_from_keyring() is None
+        assert load_passphrase_from_desktop_keyring() is None
         assert path.read_bytes() == before_bytes
 
 
@@ -1488,29 +1519,31 @@ class TestAskPassphraseMode:
         from terok_sandbox.commands import _ask_passphrase_mode
 
         monkeypatch.setattr("sys.stdin.isatty", lambda: True)
-        for letter, expected in (("n", "kernel-keyring"), ("k", "keyring")):
+        for letter, expected in (("n", "session-cache"), ("k", "desktop-keyring")):
             monkeypatch.setattr("sys.stdin.readline", lambda _letter=letter: _letter + "\n")
             assert _ask_passphrase_mode() == expected
 
-    def test_empty_choice_defaults_to_keyring(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Pressing Enter at the chooser takes the recommended default (keyring)."""
+    def test_empty_choice_defaults_to_desktop_keyring(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pressing Enter at the chooser takes the recommended default (desktop keyring)."""
         from terok_sandbox.commands import _ask_passphrase_mode
 
         monkeypatch.setattr("sys.stdin.isatty", lambda: True)
         monkeypatch.setattr("sys.stdin.readline", lambda: "\n")
-        assert _ask_passphrase_mode() == "keyring"
+        assert _ask_passphrase_mode() == "desktop-keyring"
 
-    def test_chooser_prompt_lists_keyring_first_and_hints_systemd_creds(
+    def test_chooser_prompt_lists_desktop_keyring_first_and_hints_systemd_creds(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """Prompt names keyring as recommended and points operators at the systemd upgrade."""
+        """Prompt names desktop keyring as recommended and points operators at the systemd upgrade."""
         from terok_sandbox.commands import _ask_passphrase_mode
 
         monkeypatch.setattr("sys.stdin.isatty", lambda: True)
         monkeypatch.setattr("sys.stdin.readline", lambda: "\n")
         _ask_passphrase_mode()
         out = capsys.readouterr().out
-        assert "[k] keyring" in out
+        assert "[k] desktop keyring" in out
         assert "recommended" in out.lower()
         assert "systemd" in out and "≥ 257" in out
 
@@ -1523,11 +1556,11 @@ class TestAskPassphraseMode:
         monkeypatch.setattr("sys.stdin.isatty", lambda: True)
         monkeypatch.setattr("sys.stdin.readline", lambda: "n\n")
         result = _ask_passphrase_mode(
-            CHOOSER_TIERS, {PassphraseTier.KERNEL_KEYRING: "no libkeyutils"}
+            CHOOSER_TIERS, {PassphraseTier.SESSION_CACHE: "no libkeyutils"}
         )
         out = capsys.readouterr().out
         # Picking the unavailable tier's letter falls back to the default.
-        assert result == "keyring"
+        assert result == "desktop-keyring"
         # It's still listed — with its reason — just not with a live selector.
         assert "kernel keyring" in out
         assert "unavailable (no libkeyutils)" in out
@@ -1722,7 +1755,7 @@ class TestProvisionSessionPassphrase:
         import terok_sandbox.vault.store.kernel_keyring as _kk
         from terok_sandbox.commands import provision_session_passphrase
 
-        # No durable tier present (use_keyring=False, no sealed file) and no
+        # No durable tier present (use_desktop_keyring=False, no sealed file) and no
         # DB, so the no-cache guard passes and validation is skipped — the
         # write itself is what fails.
         cfg = _make_cfg(tmp_path)
@@ -1939,16 +1972,16 @@ class TestVaultUnlockLock:
         _ack_recovery(cfg)
         _handle_vault_lock(cfg=cfg)  # must not raise
 
-    def test_lock_clears_keyring_entry(
+    def test_lock_clears_desktop_keyring_entry(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """``lock`` removes the keyring entry when the keyring tier is enabled."""
+        """``lock`` removes the desktop keyring entry when the desktop keyring tier is enabled."""
 
         from terok_sandbox.commands import _handle_vault_lock
 
-        cfg = _make_cfg(tmp_path, use_keyring=True)
+        cfg = _make_cfg(tmp_path, use_desktop_keyring=True)
         _ack_recovery(cfg)
         forget_calls: dict[str, int] = {"n": 0}
 
@@ -1957,7 +1990,7 @@ class TestVaultUnlockLock:
             return None
 
         monkeypatch.setattr(
-            "terok_sandbox.vault.store.encryption.forget_passphrase_in_keyring", _forget
+            "terok_sandbox.vault.store.encryption.forget_passphrase_in_desktop_keyring", _forget
         )
 
         _handle_vault_lock(cfg=cfg)
@@ -1971,7 +2004,6 @@ class TestVaultUnlockLock:
     ) -> None:
         """``lock`` removes ``credentials.passphrase_command`` so the next start can't auto-resolve via the helper."""
 
-        from terok_sandbox import config as _config
         from terok_sandbox.commands import _handle_vault_lock
 
         cfg = _make_cfg(tmp_path, passphrase_command="pass show terok-sandbox/vault")
@@ -1983,7 +2015,6 @@ class TestVaultUnlockLock:
         monkeypatch.setattr(
             "terok_sandbox.paths.config_file_paths", lambda: [("user", user_config)]
         )
-        _config._credentials_section.cache_clear()
 
         _handle_vault_lock(cfg=cfg)
 
@@ -1991,26 +2022,26 @@ class TestVaultUnlockLock:
         # the recipe string itself must be gone so the next start can't auto-resolve.
         assert "pass show terok-sandbox/vault" not in user_config.read_text()
 
-    def test_lock_treats_absent_keyring_entry_as_idempotent(
+    def test_lock_treats_absent_desktop_keyring_entry_as_idempotent(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        """Locking a configured-but-empty keyring is success (not a hard failure)."""
+        """Locking a configured-but-empty desktop keyring is success (not a hard failure)."""
 
         from terok_sandbox.commands import _handle_vault_lock
 
-        cfg = _make_cfg(tmp_path, use_keyring=True)
+        cfg = _make_cfg(tmp_path, use_desktop_keyring=True)
         _ack_recovery(cfg)
         # The helper folds a missing entry to "gone" itself; the lock
         # flow just renders the outcome.
         monkeypatch.setattr(
-            "terok_sandbox.vault.store.encryption.forget_passphrase_in_keyring",
+            "terok_sandbox.vault.store.encryption.forget_passphrase_in_desktop_keyring",
             lambda: None,
         )
         monkeypatch.setattr(
-            "terok_sandbox.vault.store.encryption.load_passphrase_from_keyring",
+            "terok_sandbox.vault.store.encryption.load_passphrase_from_desktop_keyring",
             lambda **_kw: None,
         )
 
@@ -2018,7 +2049,7 @@ class TestVaultUnlockLock:
 
         assert "cleared or absent" in capsys.readouterr().out
 
-    def test_lock_raises_when_keyring_backend_rejects_delete(
+    def test_lock_raises_when_desktop_keyring_backend_rejects_delete(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
@@ -2027,19 +2058,19 @@ class TestVaultUnlockLock:
 
         from terok_sandbox.commands import _handle_vault_lock
 
-        cfg = _make_cfg(tmp_path, use_keyring=True)
+        cfg = _make_cfg(tmp_path, use_desktop_keyring=True)
         _ack_recovery(cfg)
         # The helper reports the rejection reason; the lock flow aborts.
         monkeypatch.setattr(
-            "terok_sandbox.vault.store.encryption.forget_passphrase_in_keyring",
+            "terok_sandbox.vault.store.encryption.forget_passphrase_in_desktop_keyring",
             lambda: "the backend rejected the delete",
         )
         monkeypatch.setattr(
-            "terok_sandbox.vault.store.encryption.load_passphrase_from_keyring",
+            "terok_sandbox.vault.store.encryption.load_passphrase_from_desktop_keyring",
             lambda **_kw: "still-there",
         )
 
-        with pytest.raises(SystemExit, match="failed to clear the keyring entry"):
+        with pytest.raises(SystemExit, match="failed to clear the desktop keyring entry"):
             _handle_vault_lock(cfg=cfg)
 
     def test_lock_removes_sealed_credential(
@@ -2090,7 +2121,7 @@ class TestVaultUnlockLock:
         """``cfg=None`` constructs a default config; ``--force`` carries it through the purge."""
         from terok_sandbox.commands import _handle_vault_lock
 
-        cfg = _make_cfg(tmp_path)  # use_keyring=False → purge skips every tier cleanly
+        cfg = _make_cfg(tmp_path)  # use_desktop_keyring=False → purge skips every tier cleanly
         monkeypatch.setattr("terok_sandbox.config.SandboxConfig", lambda: cfg)
         _handle_vault_lock(force=True)  # cfg omitted → default-construction branch
 
@@ -2101,7 +2132,7 @@ class TestVaultUnlockLock:
         import terok_sandbox.vault.store.kernel_keyring as _kk
         from terok_sandbox.commands.vault import purge_passphrase_tiers
 
-        cfg = _make_cfg(tmp_path)  # use_keyring=False → only the kernel-keyring branch runs
+        cfg = _make_cfg(tmp_path)  # use_desktop_keyring=False → only the kernel-keyring branch runs
         _pin_kernel_backing(monkeypatch)
         monkeypatch.setattr(_kk, "load", lambda _db=None: "x")
         monkeypatch.setattr(_kk, "forget", lambda _db=None: False)
@@ -2228,7 +2259,7 @@ class TestVaultSeal:
         cfg = _make_cfg(tmp_path)
         monkeypatch.setattr(sc, "is_available", lambda: True)
         monkeypatch.setattr(
-            "terok_sandbox.vault.store.encryption.load_passphrase_from_keyring",
+            "terok_sandbox.vault.store.encryption.load_passphrase_from_desktop_keyring",
             lambda **_kw: None,
         )
 
@@ -2245,7 +2276,7 @@ class TestVaultSeal:
         cfg = _make_cfg(tmp_path, passphrase_command="/bin/false")
         monkeypatch.setattr(sc, "is_available", lambda: True)
         monkeypatch.setattr(
-            "terok_sandbox.vault.store.encryption.load_passphrase_from_keyring",
+            "terok_sandbox.vault.store.encryption.load_passphrase_from_desktop_keyring",
             lambda **_kw: None,
         )
 
@@ -2273,7 +2304,7 @@ class TestVaultSeal:
         cfg = _make_cfg(tmp_path)
         monkeypatch.setattr(sc, "is_available", lambda: True)
         monkeypatch.setattr(
-            "terok_sandbox.vault.store.encryption.load_passphrase_from_keyring",
+            "terok_sandbox.vault.store.encryption.load_passphrase_from_desktop_keyring",
             lambda **_kw: None,
         )
         monkeypatch.setattr("sys.stdin.isatty", lambda: True)
@@ -2352,17 +2383,16 @@ class TestVaultSeal:
         assert cache["pw"] is None
 
 
-class TestVaultToKeyring:
-    """``terok-sandbox vault passphrase to-keyring`` — relocate the passphrase to the OS keyring."""
+class TestVaultToDesktopKeyring:
+    """``terok-sandbox vault passphrase to-desktop-keyring`` — relocate to the desktop keyring."""
 
-    def test_writes_to_keyring_and_flips_config(
+    def test_writes_to_desktop_keyring_and_flips_config(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A kernel-keyring passphrase moves into the OS keyring, config flips on, cache cleared."""
+        """A kernel-keyring passphrase moves into the desktop keyring, config flips on, cache cleared."""
         from unittest.mock import MagicMock
 
-        from terok_sandbox import config as _config
-        from terok_sandbox.commands import handle_vault_to_keyring
+        from terok_sandbox.commands import handle_vault_to_desktop_keyring
 
         cfg = _make_cfg(tmp_path)
         cache = _fake_kernel_keyring(monkeypatch, initial="current-pw")
@@ -2372,19 +2402,18 @@ class TestVaultToKeyring:
         monkeypatch.setattr(
             "terok_sandbox.paths.config_file_paths", lambda: [("user", user_config)]
         )
-        _config._credentials_section.cache_clear()
 
         store = MagicMock(return_value=True)
         monkeypatch.setattr(
-            "terok_sandbox.vault.store.encryption.store_passphrase_in_keyring", store
+            "terok_sandbox.vault.store.encryption.store_passphrase_in_desktop_keyring", store
         )
-        handle_vault_to_keyring(cfg=cfg)
+        handle_vault_to_desktop_keyring(cfg=cfg)
 
         store.assert_called_once_with("current-pw")
         assert cache["pw"] is None
-        assert "use_keyring: true" in user_config.read_text()
+        assert "use_desktop_keyring: true" in user_config.read_text()
 
-    def test_to_keyring_warns_when_kernel_keyring_cleanup_fails(
+    def test_to_desktop_keyring_warns_when_kernel_keyring_cleanup_fails(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
@@ -2393,8 +2422,7 @@ class TestVaultToKeyring:
         """A failed post-move cache clear warns, but the move itself still succeeds."""
         from unittest.mock import MagicMock
 
-        from terok_sandbox import config as _config
-        from terok_sandbox.commands import handle_vault_to_keyring
+        from terok_sandbox.commands import handle_vault_to_desktop_keyring
         from terok_sandbox.vault.store import kernel_keyring
 
         cfg = _make_cfg(tmp_path)
@@ -2405,31 +2433,29 @@ class TestVaultToKeyring:
         monkeypatch.setattr(
             "terok_sandbox.paths.config_file_paths", lambda: [("user", user_config)]
         )
-        _config._credentials_section.cache_clear()
         monkeypatch.setattr(
-            "terok_sandbox.vault.store.encryption.store_passphrase_in_keyring",
+            "terok_sandbox.vault.store.encryption.store_passphrase_in_desktop_keyring",
             MagicMock(return_value=True),
         )
         monkeypatch.setattr(kernel_keyring, "forget", lambda _db=None: False)
 
-        handle_vault_to_keyring(cfg=cfg)
+        handle_vault_to_desktop_keyring(cfg=cfg)
 
         assert "could not clear" in capsys.readouterr().out
-        assert "use_keyring: true" in user_config.read_text()
+        assert "use_desktop_keyring: true" in user_config.read_text()
 
     def test_removes_sealed_systemd_creds_file(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Moving to keyring clears the outranking sealed systemd-creds credential."""
+        """Moving to desktop keyring clears the outranking sealed systemd-creds credential."""
         from unittest.mock import MagicMock
 
-        from terok_sandbox import config as _config
-        from terok_sandbox.commands import handle_vault_to_keyring
+        from terok_sandbox.commands import handle_vault_to_desktop_keyring
 
         cfg = _make_cfg(tmp_path)
         _ack_recovery(cfg)
         # A sealed credential resolves the current passphrase (source =
-        # systemd-creds, not keyring), so the move proceeds and must
+        # systemd-creds, not desktop keyring), so the move proceeds and must
         # remove the stale sealed file afterwards.
         cfg.vault_systemd_creds_file.parent.mkdir(parents=True, exist_ok=True)
         cfg.vault_systemd_creds_file.write_bytes(b"sealed-blob")
@@ -2441,35 +2467,34 @@ class TestVaultToKeyring:
         monkeypatch.setattr(
             "terok_sandbox.paths.config_file_paths", lambda: [("user", user_config)]
         )
-        _config._credentials_section.cache_clear()
         monkeypatch.setattr(
-            "terok_sandbox.vault.store.encryption.store_passphrase_in_keyring",
+            "terok_sandbox.vault.store.encryption.store_passphrase_in_desktop_keyring",
             MagicMock(return_value=True),
         )
 
-        handle_vault_to_keyring(cfg=cfg)
+        handle_vault_to_desktop_keyring(cfg=cfg)
 
         assert not cfg.vault_systemd_creds_file.exists()
 
-    def test_noop_when_already_in_keyring(
+    def test_noop_when_already_in_desktop_keyring(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """If the chain already hits keyring, the verb is idempotent — no write, no restart."""
+        """If the chain already hits desktop keyring, the verb is idempotent — no write, no restart."""
         from unittest.mock import MagicMock
 
-        from terok_sandbox.commands import handle_vault_to_keyring
+        from terok_sandbox.commands import handle_vault_to_desktop_keyring
 
-        cfg = _make_cfg(tmp_path, use_keyring=True)
+        cfg = _make_cfg(tmp_path, use_desktop_keyring=True)
         monkeypatch.setattr(
-            "terok_sandbox.vault.store.encryption.load_passphrase_from_keyring",
+            "terok_sandbox.vault.store.encryption.load_passphrase_from_desktop_keyring",
             lambda **_kw: "current-pw",
         )
         store = MagicMock()
         monkeypatch.setattr(
-            "terok_sandbox.vault.store.encryption.store_passphrase_in_keyring", store
+            "terok_sandbox.vault.store.encryption.store_passphrase_in_desktop_keyring", store
         )
 
-        handle_vault_to_keyring(cfg=cfg)
+        handle_vault_to_desktop_keyring(cfg=cfg)
 
         store.assert_not_called()
 
@@ -2477,34 +2502,34 @@ class TestVaultToKeyring:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """No tier hits and no TTY → fail loudly rather than write nothing silently."""
-        from terok_sandbox.commands import handle_vault_to_keyring
+        from terok_sandbox.commands import handle_vault_to_desktop_keyring
 
-        # ``use_keyring=False`` blocks the autouse keyring stub from
+        # ``use_desktop_keyring=False`` blocks the autouse desktop keyring stub from
         # claiming the chain; file tier is already blanked by autouse.
         cfg = _make_cfg(tmp_path)
         monkeypatch.setattr("sys.stdin.isatty", lambda: False)
 
         with pytest.raises(SystemExit, match="no current passphrase"):
-            handle_vault_to_keyring(cfg=cfg)
+            handle_vault_to_desktop_keyring(cfg=cfg)
 
-    def test_aborts_when_keyring_write_fails(
+    def test_aborts_when_desktop_keyring_write_fails(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A keyring backend rejection leaves the source tier untouched."""
+        """A desktop keyring backend rejection leaves the source tier untouched."""
         from unittest.mock import MagicMock
 
-        from terok_sandbox.commands import handle_vault_to_keyring
+        from terok_sandbox.commands import handle_vault_to_desktop_keyring
 
         cfg = _make_cfg(tmp_path)
         cache = _fake_kernel_keyring(monkeypatch, initial="current-pw")
         _ack_recovery(cfg)
         monkeypatch.setattr(
-            "terok_sandbox.vault.store.encryption.store_passphrase_in_keyring",
+            "terok_sandbox.vault.store.encryption.store_passphrase_in_desktop_keyring",
             MagicMock(return_value=False),
         )
 
-        with pytest.raises(SystemExit, match="OS keyring is unreachable"):
-            handle_vault_to_keyring(cfg=cfg)
+        with pytest.raises(SystemExit, match="could not store and verify"):
+            handle_vault_to_desktop_keyring(cfg=cfg)
         # Source tier is preserved on failure — no half-done migration.
         assert cache["pw"] == "current-pw"
 
@@ -2514,7 +2539,7 @@ class TestVaultToKeyring:
         """A running daemon is stopped + restarted so it picks up the new tier on this boot."""
         from unittest.mock import MagicMock
 
-        from terok_sandbox.commands import handle_vault_to_keyring
+        from terok_sandbox.commands import handle_vault_to_desktop_keyring
 
         cfg = _make_cfg(tmp_path)
         _fake_kernel_keyring(monkeypatch, initial="current-pw")
@@ -2525,16 +2550,16 @@ class TestVaultToKeyring:
             "terok_sandbox.paths.config_file_paths", lambda: [("user", user_config)]
         )
         monkeypatch.setattr(
-            "terok_sandbox.vault.store.encryption.store_passphrase_in_keyring",
+            "terok_sandbox.vault.store.encryption.store_passphrase_in_desktop_keyring",
             MagicMock(return_value=True),
         )
-        handle_vault_to_keyring(cfg=cfg)
+        handle_vault_to_desktop_keyring(cfg=cfg)
 
     def test_propagates_wrong_passphrase_as_systemexit(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A fail-closed resolver error (e.g. broken sealed credential) surfaces as a CLI-friendly SystemExit."""
-        from terok_sandbox.commands import handle_vault_to_keyring
+        from terok_sandbox.commands import handle_vault_to_desktop_keyring
         from terok_sandbox.vault.store.encryption import WrongPassphraseError
 
         cfg = _make_cfg(tmp_path)
@@ -2546,66 +2571,64 @@ class TestVaultToKeyring:
             "terok_sandbox.vault.store.encryption.resolve_passphrase_with_source", _boom
         )
 
-        with pytest.raises(SystemExit, match="cannot move to keyring: sealed credential"):
-            handle_vault_to_keyring(cfg=cfg)
+        with pytest.raises(SystemExit, match="cannot move to desktop keyring: sealed credential"):
+            handle_vault_to_desktop_keyring(cfg=cfg)
 
     def test_default_cfg_branch(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """``cfg=None`` constructs a default ``SandboxConfig``; the no-passphrase exit path is reached."""
-        from terok_sandbox.commands import handle_vault_to_keyring
+        from terok_sandbox.commands import handle_vault_to_desktop_keyring
 
         # No passphrase resolvable + no TTY ⇒ deterministic SystemExit.
-        # The autouse fixtures stub the keyring tier to return "test"
-        # and ``credentials_use_keyring`` to True — undo both so the
+        # The autouse fixtures stub the desktop keyring tier to return "test"
+        # and ``credentials_use_desktop_keyring`` to True — undo both so the
         # chain genuinely yields nothing and we test the default-cfg
         # construction without falling through to a real config write.
         monkeypatch.setattr("sys.stdin.isatty", lambda: False)
-        monkeypatch.setattr("terok_sandbox.config.credentials_use_keyring", lambda: False)
+        monkeypatch.setattr("terok_sandbox.config.credentials_use_desktop_keyring", lambda: False)
         monkeypatch.setattr(
-            "terok_sandbox.vault.store.encryption.load_passphrase_from_keyring",
+            "terok_sandbox.vault.store.encryption.load_passphrase_from_desktop_keyring",
             lambda **_kw: None,
         )
 
         with pytest.raises(SystemExit, match="no current passphrase"):
-            handle_vault_to_keyring()
+            handle_vault_to_desktop_keyring()
 
-    def test_to_keyring_refuses_until_recovery_acknowledged(
+    def test_to_desktop_keyring_refuses_until_recovery_acknowledged(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Escrow-before-enable: moving to the keyring is blocked until recovery is acknowledged."""
+        """Escrow-before-enable: moving to the desktop keyring is blocked until recovery is acknowledged."""
         from unittest.mock import MagicMock
 
-        from terok_sandbox.commands import handle_vault_to_keyring
+        from terok_sandbox.commands import handle_vault_to_desktop_keyring
 
         cfg = _make_cfg(tmp_path)
         _fake_kernel_keyring(monkeypatch, initial="current-pw")  # passphrase resolvable…
         store = MagicMock(return_value=True)
         monkeypatch.setattr(
-            "terok_sandbox.vault.store.encryption.store_passphrase_in_keyring", store
+            "terok_sandbox.vault.store.encryption.store_passphrase_in_desktop_keyring", store
         )
-        # …but recovery is NOT acknowledged → refuse before any keyring write.
+        # …but recovery is NOT acknowledged → refuse before any desktop keyring write.
         with pytest.raises(SystemExit, match="recovery passphrase isn't marked as saved"):
-            handle_vault_to_keyring(cfg=cfg)
+            handle_vault_to_desktop_keyring(cfg=cfg)
         store.assert_not_called()
 
 
 class TestPersistModeChoice:
-    """Persisting the chooser's decision writes ``use_keyring`` and invalidates caches."""
+    """Persisting the chooser's decision writes and verifies ``use_desktop_keyring``."""
 
-    def test_keyring_mode_writes_use_keyring(
+    def test_desktop_keyring_mode_writes_use_desktop_keyring(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Switching to keyring tier flips ``use_keyring`` on, overriding an explicit ``false``."""
-        from terok_sandbox import config as _config
+        """Switching to desktop keyring tier flips ``use_desktop_keyring`` on, overriding an explicit ``false``."""
         from terok_sandbox.commands import _persist_mode_choice
 
         user_config = tmp_path / "config.yml"
-        user_config.write_text("credentials:\n  use_keyring: false\n")
+        user_config.write_text("credentials:\n  use_desktop_keyring: false\n")
         monkeypatch.setattr(
             "terok_sandbox.paths.config_file_paths", lambda: [("user", user_config)]
         )
-        _config._credentials_section.cache_clear()
-        _persist_mode_choice(PassphraseTier.KEYRING)
-        assert "use_keyring: true" in user_config.read_text()
+        _persist_mode_choice(PassphraseTier.DESKTOP_KEYRING)
+        assert "use_desktop_keyring: true" in user_config.read_text()
 
     def test_kernel_keyring_mode_is_noop(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2617,7 +2640,7 @@ class TestPersistModeChoice:
         monkeypatch.setattr(
             "terok_sandbox.paths.config_file_paths", lambda: [("user", user_config)]
         )
-        _persist_mode_choice(PassphraseTier.KERNEL_KEYRING)
+        _persist_mode_choice(PassphraseTier.SESSION_CACHE)
         assert not user_config.exists()
 
 
@@ -2629,7 +2652,7 @@ class TestCredentialsSetupPhase:
         from terok_sandbox.commands import _run_credentials_setup_phase
 
         cfg = _make_cfg(tmp_path)
-        # Drive the chooser path explicitly (default is keyring; tests on
+        # Drive the chooser path explicitly (default is desktop keyring; tests on
         # CI shouldn't depend on which tier the host actually has).
         _disable_systemd_creds(monkeypatch)
         _patch_dev_tty(monkeypatch)
@@ -2761,10 +2784,10 @@ class TestProvisionPassphraseTier:
     """``provision_passphrase_tier`` — the no-terminal provisioning API for TUI frontends."""
 
     @pytest.fixture(autouse=True)
-    def _empty_keyring(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Initial provisioning starts without the suite's default keyring passphrase."""
+    def _empty_desktop_keyring(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Initial provisioning starts without the suite's default desktop keyring passphrase."""
         monkeypatch.setattr(
-            "terok_sandbox.vault.store.encryption.load_passphrase_from_keyring",
+            "terok_sandbox.vault.store.encryption.load_passphrase_from_desktop_keyring",
             lambda **_kw: None,
         )
 
@@ -2794,7 +2817,7 @@ class TestProvisionPassphraseTier:
         cfg = _make_cfg(tmp_path)
         cache = _fake_kernel_keyring(monkeypatch)
         with pytest.raises(ValueError, match="empty passphrase"):
-            provision_passphrase_tier(cfg, tier="kernel-keyring", passphrase="")
+            provision_passphrase_tier(cfg, tier="session-cache", passphrase="")
         assert cache["pw"] is None
 
     def test_running_setup_prevents_passphrase_replacement(self, tmp_path, monkeypatch):
@@ -2809,7 +2832,7 @@ class TestProvisionPassphraseTier:
         cache = _fake_kernel_keyring(monkeypatch, initial=_PASSPHRASE)
         with ThreadPoolExecutor(max_workers=1) as pool:
             with setup_lock():
-                contender = pool.submit(provision_passphrase_tier, cfg, tier="kernel-keyring")
+                contender = pool.submit(provision_passphrase_tier, cfg, tier="session-cache")
                 with pytest.raises(SetupRequiredError):
                     contender.result(timeout=5)
         assert cache["pw"] == _PASSPHRASE
@@ -2823,9 +2846,9 @@ class TestProvisionPassphraseTier:
 
         cfg = _make_cfg(tmp_path)
         cache = _fake_kernel_keyring(monkeypatch)
-        result = provision_passphrase_tier(cfg, tier="kernel-keyring")
+        result = provision_passphrase_tier(cfg, tier="session-cache")
         assert result.generated is True
-        assert result.source == "kernel-keyring"
+        assert result.source == "session-cache"
         assert cache["pw"] == result.passphrase
         # A mint is ~256 bits of token_urlsafe, never something short.
         assert len(result.passphrase) > 20
@@ -2839,33 +2862,35 @@ class TestProvisionPassphraseTier:
 
         cfg = _make_cfg(tmp_path)
         cache = _fake_kernel_keyring(monkeypatch)
-        first = provision_passphrase_tier(cfg, tier="kernel-keyring")
+        first = provision_passphrase_tier(cfg, tier="session-cache")
         monkeypatch.setattr(
             "terok_sandbox.vault.store.encryption.generate_passphrase",
             lambda: pytest.fail("stale provisioning must not mint another passphrase"),
         )
         with pytest.raises(RuntimeError, match="already provisioned"):
-            provision_passphrase_tier(cfg, tier="kernel-keyring", passphrase=passphrase)
+            provision_passphrase_tier(cfg, tier="session-cache", passphrase=passphrase)
         assert cache["pw"] == first.passphrase
         assert not cfg.db_path.exists()
 
-    @pytest.mark.parametrize("tier", ["keyring", "kernel-keyring", "systemd-creds"])
-    def test_stale_keyring_opt_in_cannot_hide_initial_provisioning(
+    @pytest.mark.parametrize("tier", ["desktop-keyring", "session-cache", "systemd-creds"])
+    def test_stale_desktop_keyring_opt_in_cannot_hide_initial_provisioning(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tier: str
     ) -> None:
         """A pre-modal config snapshot cannot hide a key stored by another request."""
         from terok_sandbox.commands import provision_passphrase_tier
         from terok_sandbox.vault.store import encryption as enc
 
-        cfg = _make_cfg(tmp_path, use_keyring=False)
+        cfg = _make_cfg(tmp_path, use_desktop_keyring=False)
         cache = _fake_kernel_keyring(monkeypatch)
         stored: dict[str, str] = {}
-        monkeypatch.setattr(enc, "load_passphrase_from_keyring", lambda **_kw: stored.get("pw"))
         monkeypatch.setattr(
-            enc, "store_passphrase_in_keyring", lambda pw: stored.update(pw=pw) or True
+            enc, "load_passphrase_from_desktop_keyring", lambda **_kw: stored.get("pw")
         )
-        first = provision_passphrase_tier(cfg, tier="keyring")
-        assert cfg.credentials_use_keyring is False
+        monkeypatch.setattr(
+            enc, "store_passphrase_in_desktop_keyring", lambda pw: stored.update(pw=pw) or True
+        )
+        first = provision_passphrase_tier(cfg, tier="desktop-keyring")
+        assert cfg.credentials_use_desktop_keyring is False
 
         with pytest.raises(RuntimeError, match="already provisioned"):
             provision_passphrase_tier(cfg, tier=tier, passphrase="replacement-passphrase")
@@ -2888,7 +2913,7 @@ class TestProvisionPassphraseTier:
         )
         with pytest.raises(RuntimeError, match="already provisioned"):
             provision_passphrase_tier(
-                cfg, tier="kernel-keyring", passphrase="replacement-passphrase"
+                cfg, tier="session-cache", passphrase="replacement-passphrase"
             )
         assert cache["pw"] is None
         assert cfg.vault_systemd_creds_file.read_bytes() == b"sealed-key"
@@ -2901,7 +2926,7 @@ class TestProvisionPassphraseTier:
 
         cfg = _make_cfg(tmp_path)
         cache = _fake_kernel_keyring(monkeypatch)
-        result = provision_passphrase_tier(cfg, tier="kernel-keyring", passphrase=_PASSPHRASE)
+        result = provision_passphrase_tier(cfg, tier="session-cache", passphrase=_PASSPHRASE)
         assert result.generated is False
         assert cache["pw"] == _PASSPHRASE
 
@@ -2916,18 +2941,18 @@ class TestProvisionPassphraseTier:
         _pin_kernel_backing(monkeypatch)
         monkeypatch.setattr(_kk, "store", lambda _pw, _db=None: False)
         with pytest.raises(RuntimeError, match="session cache is unavailable"):
-            provision_passphrase_tier(cfg, tier="kernel-keyring")
+            provision_passphrase_tier(cfg, tier="session-cache")
 
-    def test_keyring_stores_and_persists_mode_choice(
+    def test_desktop_keyring_stores_and_persists_mode_choice(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Keyring tier stores the value and flips ``use_keyring`` in config.yml."""
+        """Desktop keyring tier stores the value and flips ``use_desktop_keyring`` in config.yml."""
         from terok_sandbox.commands import credentials as cred_cmds
         from terok_sandbox.commands.credentials import provision_passphrase_tier
 
         stored: dict[str, str] = {}
         monkeypatch.setattr(
-            "terok_sandbox.vault.store.encryption.store_passphrase_in_keyring",
+            "terok_sandbox.vault.store.encryption.store_passphrase_in_desktop_keyring",
             lambda pw: stored.update(pw=pw) or True,
         )
         persisted: dict[str, str] = {}
@@ -2936,24 +2961,24 @@ class TestProvisionPassphraseTier:
             "_persist_mode_choice",
             lambda mode: persisted.update(mode=mode),
         )
-        result = provision_passphrase_tier(_make_cfg(tmp_path), tier="keyring")
-        assert result.source == "keyring" and result.generated is True
+        result = provision_passphrase_tier(_make_cfg(tmp_path), tier="desktop-keyring")
+        assert result.source == "desktop-keyring" and result.generated is True
         assert stored["pw"] == result.passphrase
-        assert persisted["mode"] == "keyring"
+        assert persisted["mode"] == "desktop-keyring"
 
-    def test_keyring_unreachable_raises(
+    def test_desktop_keyring_unreachable_raises(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A dead Secret Service raises instead of silently losing the value."""
         from terok_sandbox.commands import provision_passphrase_tier
 
         monkeypatch.setattr(
-            "terok_sandbox.vault.store.encryption.store_passphrase_in_keyring",
+            "terok_sandbox.vault.store.encryption.store_passphrase_in_desktop_keyring",
             lambda _pw: False,
         )
         cfg = _make_cfg(tmp_path)
-        with pytest.raises(RuntimeError, match="keyring is unreachable"):
-            provision_passphrase_tier(cfg, tier="keyring")
+        with pytest.raises(RuntimeError, match="could not store and verify"):
+            provision_passphrase_tier(cfg, tier="desktop-keyring")
 
     def test_systemd_creds_unavailable_raises(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2994,7 +3019,7 @@ class TestProvisionPassphraseTier:
         cache = _fake_kernel_keyring(monkeypatch)
         self._make_encrypted_db(cfg)
         with pytest.raises(NoPassphraseError, match="already encrypted"):
-            provision_passphrase_tier(cfg, tier="kernel-keyring")
+            provision_passphrase_tier(cfg, tier="session-cache")
         assert cache["pw"] is None
 
     def test_encrypted_db_rejects_a_wrong_value(
@@ -3007,7 +3032,7 @@ class TestProvisionPassphraseTier:
         cache = _fake_kernel_keyring(monkeypatch)
         self._make_encrypted_db(cfg)
         with pytest.raises(WrongPassphraseError):
-            provision_passphrase_tier(cfg, tier="kernel-keyring", passphrase="wrong-guess")
+            provision_passphrase_tier(cfg, tier="session-cache", passphrase="wrong-guess")
         assert cache["pw"] is None
 
     @pytest.mark.parametrize("initial", [None, _PASSPHRASE])
@@ -3020,7 +3045,7 @@ class TestProvisionPassphraseTier:
         cfg = _make_cfg(tmp_path)
         cache = _fake_kernel_keyring(monkeypatch, initial=initial)
         self._make_encrypted_db(cfg)
-        result = provision_passphrase_tier(cfg, tier="kernel-keyring", passphrase=_PASSPHRASE)
+        result = provision_passphrase_tier(cfg, tier="session-cache", passphrase=_PASSPHRASE)
         assert result.generated is False
         assert cache["pw"] == _PASSPHRASE
 
@@ -3052,11 +3077,11 @@ class TestCredentialsProvisioned:
         # tier; restore a real store/load — this test *is about* that tier.
         _fake_kernel_keyring(monkeypatch)
         monkeypatch.setattr(
-            "terok_sandbox.vault.store.encryption.load_passphrase_from_keyring",
+            "terok_sandbox.vault.store.encryption.load_passphrase_from_desktop_keyring",
             lambda **_kw: None,
         )
         cfg = _make_cfg(tmp_path)
-        provision_passphrase_tier(cfg, tier="kernel-keyring")
+        provision_passphrase_tier(cfg, tier="session-cache")
         assert credentials_provisioned(cfg) is True
 
 
@@ -3076,11 +3101,11 @@ class TestSelectAndProvisionReusesExistingTier:
         # chain-isolation fixture.
         _fake_kernel_keyring(monkeypatch)
         monkeypatch.setattr(
-            "terok_sandbox.vault.store.encryption.load_passphrase_from_keyring",
+            "terok_sandbox.vault.store.encryption.load_passphrase_from_desktop_keyring",
             lambda **_kw: None,
         )
         cfg = _make_cfg(tmp_path)
-        provisioned = provision_passphrase_tier(cfg, tier="kernel-keyring")
+        provisioned = provision_passphrase_tier(cfg, tier="session-cache")
         _disable_systemd_creds(monkeypatch)
         monkeypatch.setattr("sys.stdin.isatty", lambda: False)  # chooser would SystemExit
         passphrase, source, auto_generated = _select_and_provision(
@@ -3088,7 +3113,7 @@ class TestSelectAndProvisionReusesExistingTier:
         )
         assert (passphrase, source, auto_generated) == (
             provisioned.passphrase,
-            "kernel-keyring",
+            "session-cache",
             False,
         )
 
@@ -3131,29 +3156,29 @@ class TestCredentialsSetupPhaseSystemExit:
         assert "exit code 3" in out
 
 
-class TestKeyringBackendAvailable:
-    """``keyring_backend_available`` — the chooser's should-we-offer-keyring probe."""
+class TestDesktopKeyringBackendAvailable:
+    """``desktop_keyring_backend_available`` — the chooser's should-we-offer-keyring probe."""
 
     def test_fail_backend_reports_unavailable(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from keyring.backends import fail
 
-        from terok_sandbox.vault.store.encryption import keyring_backend_available
+        from terok_sandbox.vault.store.encryption import desktop_keyring_backend_available
 
         monkeypatch.setattr("keyring.get_keyring", lambda: fail.Keyring())
-        assert keyring_backend_available() is False
+        assert desktop_keyring_backend_available() is False
 
     def test_null_backend_reports_unavailable(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from keyring.backends import null
 
-        from terok_sandbox.vault.store.encryption import keyring_backend_available
+        from terok_sandbox.vault.store.encryption import desktop_keyring_backend_available
 
         monkeypatch.setattr("keyring.get_keyring", lambda: null.Keyring())
-        assert keyring_backend_available() is False
+        assert desktop_keyring_backend_available() is False
 
     def test_real_backend_reports_available(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import keyring.backend
 
-        from terok_sandbox.vault.store.encryption import keyring_backend_available
+        from terok_sandbox.vault.store.encryption import desktop_keyring_backend_available
 
         class _InMemory(keyring.backend.KeyringBackend):
             priority = 1
@@ -3168,17 +3193,17 @@ class TestKeyringBackendAvailable:
                 return None
 
         monkeypatch.setattr("keyring.get_keyring", lambda: _InMemory())
-        assert keyring_backend_available() is True
+        assert desktop_keyring_backend_available() is True
 
     def test_import_failure_degrades_to_unavailable(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """No keyring package at all → probe answers False instead of raising."""
-        from terok_sandbox.vault.store.encryption import keyring_backend_available
+        from terok_sandbox.vault.store.encryption import desktop_keyring_backend_available
 
         def _boom() -> None:
             raise RuntimeError("no backend")
 
         monkeypatch.setattr("keyring.get_keyring", _boom)
-        assert keyring_backend_available() is False
+        assert desktop_keyring_backend_available() is False
 
 
 class TestProvisioningDefaultCfg:
@@ -3193,14 +3218,14 @@ class TestProvisioningDefaultCfg:
         from terok_sandbox.commands import provision_passphrase_tier
 
         monkeypatch.setattr(
-            "terok_sandbox.vault.store.encryption.load_passphrase_from_keyring",
+            "terok_sandbox.vault.store.encryption.load_passphrase_from_desktop_keyring",
             lambda **_kw: None,
         )
-        result = provision_passphrase_tier(tier="kernel-keyring")
-        assert result.source == "kernel-keyring" and result.generated is True
+        result = provision_passphrase_tier(tier="session-cache")
+        assert result.source == "session-cache" and result.generated is True
 
     def test_credentials_provisioned_defaults_cfg(self) -> None:
-        """Default cfg + the fixture's stub keyring ("test") → provisioned."""
+        """Default cfg + the fixture's stub desktop keyring ("test") → provisioned."""
         from terok_sandbox.commands import credentials_provisioned
 
         assert credentials_provisioned() is True

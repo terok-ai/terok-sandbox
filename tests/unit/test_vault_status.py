@@ -41,8 +41,8 @@ class TestProbePassphraseChain:
         chain = probe_passphrase_chain(credentials_db=MOCK_DB_PATH)
         assert [t.source for t in chain] == [
             "systemd-creds",
-            "keyring",
-            "kernel-keyring",
+            "desktop-keyring",
+            "session-cache",
             "passphrase-command",
         ]
         assert all(not t.present for t in chain)
@@ -50,17 +50,17 @@ class TestProbePassphraseChain:
     def test_kernel_keyring_present_when_cached(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(_kk, "is_cached", lambda _db=None: True)
         chain = probe_passphrase_chain(credentials_db=MOCK_DB_PATH)
-        assert chain[2].source == "kernel-keyring"
+        assert chain[2].source == "session-cache"
         assert chain[2].present is True
-        assert "cached in the user keyring" in chain[2].detail
+        assert "cached in the kernel keyring" in chain[2].detail
 
     def test_kernel_keyring_unusable_when_facility_missing(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A host without the keyring facility reports it as unusable, naming the reason."""
+        """A host without the kernel-keyring facility reports it as unusable, naming the reason."""
         monkeypatch.setattr(_kk, "unavailable_reason", lambda: "no libkeyutils")
         chain = probe_passphrase_chain(credentials_db=MOCK_DB_PATH)
-        assert chain[2].source == "kernel-keyring"
+        assert chain[2].source == "session-cache"
         assert "unusable here: no libkeyutils" in chain[2].detail
 
     def test_kernel_keyring_absent_when_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -128,19 +128,21 @@ class TestProbePassphraseChain:
         assert chain[0].present is True
         assert chain[0].detail == str(cred)
 
-    def test_keyring_only_probed_when_enabled(self) -> None:
-        with patch.object(encryption, "load_passphrase_from_keyring", return_value="k") as load:
-            on = probe_passphrase_chain(credentials_db=MOCK_DB_PATH, use_keyring=True)
+    def test_desktop_keyring_only_probed_when_enabled(self) -> None:
+        with patch.object(
+            encryption, "load_passphrase_from_desktop_keyring", return_value="k"
+        ) as load:
+            on = probe_passphrase_chain(credentials_db=MOCK_DB_PATH, use_desktop_keyring=True)
             assert on[1].present is True
-            off = probe_passphrase_chain(credentials_db=MOCK_DB_PATH, use_keyring=False)
+            off = probe_passphrase_chain(credentials_db=MOCK_DB_PATH, use_desktop_keyring=False)
             assert off[1].present is False
         # one lookup for the enabled probe, none for the disabled one
         assert load.call_count == 1
 
-    def test_keyring_empty_string_is_absent(self) -> None:
-        """An empty keyring value is the resolver's no-passphrase sentinel — treat as absent."""
-        with patch.object(encryption, "load_passphrase_from_keyring", return_value=""):
-            chain = probe_passphrase_chain(credentials_db=MOCK_DB_PATH, use_keyring=True)
+    def test_desktop_keyring_empty_string_is_absent(self) -> None:
+        """An empty desktop keyring value is the resolver's no-passphrase sentinel — treat as absent."""
+        with patch.object(encryption, "load_passphrase_from_desktop_keyring", return_value=""):
+            chain = probe_passphrase_chain(credentials_db=MOCK_DB_PATH, use_desktop_keyring=True)
         assert chain[1].present is False
 
     def test_passphrase_command_present_but_not_executed(self) -> None:
@@ -194,7 +196,7 @@ class TestClassifyDbAccess:
         must never be the write that defines the vault's encryption key.
         """
         cfg = MagicMock()
-        access = _classify_db_access(cfg, _recovery(source="keyring"), db_exists=False)
+        access = _classify_db_access(cfg, _recovery(source="desktop-keyring"), db_exists=False)
         assert access.lock_reason is None and access.db_error is None
         assert access.providers == ()
         assert access.ssh_keys == 0 and dict(access.credential_types or {}) == {}
@@ -206,9 +208,9 @@ class TestClassifyDbAccess:
 
         cfg = MagicMock()
         cfg.open_credential_db.side_effect = WrongPassphraseError("could not decrypt")
-        access = _classify_db_access(cfg, _recovery(source="keyring"), db_exists=True)
+        access = _classify_db_access(cfg, _recovery(source="desktop-keyring"), db_exists=True)
         assert access.lock_reason is not None
-        assert "via keyring does not open the DB" in access.lock_reason
+        assert "via desktop keyring does not open the DB" in access.lock_reason
         assert access.providers is None and access.db_error is None
 
     def test_open_no_passphrase_race_is_plain_lock(self) -> None:
@@ -217,7 +219,7 @@ class TestClassifyDbAccess:
 
         cfg = MagicMock()
         cfg.open_credential_db.side_effect = NoPassphraseError("tier gone")
-        access = _classify_db_access(cfg, _recovery(source="keyring"), db_exists=True)
+        access = _classify_db_access(cfg, _recovery(source="desktop-keyring"), db_exists=True)
         assert access.lock_reason == "no passphrase in any tier"
         assert access.providers is None and access.db_error is None
 
@@ -226,7 +228,7 @@ class TestClassifyDbAccess:
         cfg = MagicMock()
         cfg.open_credential_db.side_effect = SystemExit(3)
         with pytest.raises(SystemExit):
-            _classify_db_access(cfg, _recovery(source="keyring"), db_exists=True)
+            _classify_db_access(cfg, _recovery(source="desktop-keyring"), db_exists=True)
 
     def test_open_ok_lists_providers(self) -> None:
         db = MagicMock()
@@ -236,7 +238,7 @@ class TestClassifyDbAccess:
         db.count_ssh_keys.return_value = 3
         cfg = MagicMock()
         cfg.open_credential_db.return_value = db
-        access = _classify_db_access(cfg, _recovery(source="keyring"), db_exists=True)
+        access = _classify_db_access(cfg, _recovery(source="desktop-keyring"), db_exists=True)
         assert access.lock_reason is None and access.db_error is None
         assert access.providers == ("github", "openai")
         assert dict(access.credential_types or {}) == {
@@ -252,7 +254,7 @@ class TestClassifyDbAccess:
         db.list_credential_sets.side_effect = RuntimeError("corrupt page")
         cfg = MagicMock()
         cfg.open_credential_db.return_value = db
-        access = _classify_db_access(cfg, _recovery(source="keyring"), db_exists=True)
+        access = _classify_db_access(cfg, _recovery(source="desktop-keyring"), db_exists=True)
         assert access.lock_reason is None and access.providers is None
         assert access.db_error is not None and "corrupt page" in access.db_error
         db.close.assert_called_once()
@@ -261,7 +263,7 @@ class TestClassifyDbAccess:
 def _status_cfg(
     *,
     sealed: Path | None = None,
-    use_keyring: bool = False,
+    use_desktop_keyring: bool = False,
     passphrase_command: str | None = None,
     db: MagicMock | None = None,
     db_error: Exception | None = None,
@@ -276,7 +278,7 @@ def _status_cfg(
     """
     cfg = MagicMock()
     cfg.vault_systemd_creds_file = sealed or MOCK_BASE / "absent" / "sealed"
-    cfg.credentials_use_keyring = use_keyring
+    cfg.credentials_use_desktop_keyring = use_desktop_keyring
     cfg.credentials_passphrase_command = passphrase_command
     cfg.db_path = db_path or MOCK_DB_PATH
     cfg.vault_recovery_marker_file = marker or MOCK_BASE / "absent" / "marker"
@@ -349,9 +351,9 @@ class TestHandleVaultStatusText:
         cfg = _status_cfg(
             db_error=WrongPassphraseError("could not decrypt"), db_path=_existing_db(tmp_path)
         )
-        _run_status(cfg, source="kernel-keyring")
+        _run_status(cfg, source="session-cache")
         out = capsys.readouterr().out
-        assert "LOCKED — the passphrase via kernel-keyring does not open the DB" in out
+        assert "LOCKED — the passphrase via session cache does not open the DB" in out
 
     def test_locked_header_names_broken_tier(self, capsys: pytest.CaptureFixture[str]) -> None:
         """A fail-closed tier (broken seal) is surfaced verbatim, not as a plain lock."""
@@ -366,7 +368,7 @@ class TestHandleVaultStatusText:
     ) -> None:
         """A non-passphrase DB failure renders as ERROR with the message, not LOCKED."""
         cfg = _status_cfg(db_error=RuntimeError("schema drift"), db_path=_existing_db(tmp_path))
-        _run_status(cfg, source="keyring")
+        _run_status(cfg, source="desktop-keyring")
         out = capsys.readouterr().out
         assert "Vault: ERROR — schema drift" in out
         assert "LOCKED" not in out
@@ -424,18 +426,20 @@ class TestHandleVaultStatusText:
     ) -> None:
         """A resolving durable tier without an off-host copy gets the catalog warning."""
         cfg = _status_cfg(db_path=_existing_db(tmp_path))
-        _run_status(cfg, source="keyring", acknowledged=False)
+        _run_status(cfg, source="desktop-keyring", acknowledged=False)
         out = capsys.readouterr().out
         assert "warning: the vault passphrase is not confirmed saved off-host" in out
 
     def test_urgent_recovery_warning_for_volatile_only(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """Kernel-keyring-only + unacknowledged escalates to the logout-loss error."""
+        """Kernel-keyring-only + unacknowledged escalates to the cache-loss error."""
         cfg = _status_cfg(db_path=_existing_db(tmp_path))
-        _run_status(cfg, source="kernel-keyring", acknowledged=False)
+        _run_status(cfg, source="session-cache", acknowledged=False)
         out = capsys.readouterr().out
-        assert "error: the only copy of the vault passphrase is the kernel-keyring cache" in out
+        assert (
+            "error: the only available copy of the vault passphrase is the temporary cache" in out
+        )
         assert "not confirmed saved off-host" not in out  # the urgent variant replaces it
 
     def test_credentials_listed_when_open(
@@ -447,7 +451,7 @@ class TestHandleVaultStatusText:
         db.load_credential.side_effect = lambda _cs, provider: {"type": f"{provider}-type"}
         db.count_ssh_keys.return_value = 3
         cfg = _status_cfg(db=db, db_path=_existing_db(tmp_path))
-        _run_status(cfg, source="keyring", acknowledged=True)
+        _run_status(cfg, source="desktop-keyring", acknowledged=True)
         out = capsys.readouterr().out
         assert "Credentials: 2 stored (github (github-type), openai (openai-type))" in out
         assert "SSH keys:    3 stored" in out
@@ -464,7 +468,7 @@ class TestHandleVaultStatusJson:
             db_error=RuntimeError("x"),
             db_path=_existing_db(tmp_path),
         )
-        _run_status(cfg, acknowledged=True, as_json=True, source="kernel-keyring")
+        _run_status(cfg, acknowledged=True, as_json=True, source="session-cache")
         data = json.loads(capsys.readouterr().out)
         # The open failed for a non-passphrase reason — that's a DB error,
         # not a lock; the chain still reports what's on hand.
@@ -472,7 +476,7 @@ class TestHandleVaultStatusJson:
         assert data["locked"] is True  # anything non-unlocked counts as locked
         assert data["lock_reason"] is None
         assert data["db_error"] == "x"
-        assert data["passphrase_source"] == "kernel-keyring"
+        assert data["passphrase_source"] == "session-cache"
         assert data["recovery_acknowledged"] is True
         assert data["credentials"] is None  # DB wouldn't open
         assert [c["source"] for c in data["chain"]][0] == "systemd-creds"
@@ -506,11 +510,11 @@ class TestHandleVaultStatusJson:
         cfg = _status_cfg(
             db_error=WrongPassphraseError("could not decrypt"), db_path=_existing_db(tmp_path)
         )
-        _run_status(cfg, as_json=True, source="keyring")
+        _run_status(cfg, as_json=True, source="desktop-keyring")
         data = json.loads(capsys.readouterr().out)
         assert data["state"] == "locked"
         assert data["locked"] is True
-        assert "via keyring does not open the DB" in data["lock_reason"]
+        assert "via desktop keyring does not open the DB" in data["lock_reason"]
 
         # (c) a configured tier failed closed at resolve time
         _run_status(_status_cfg(), as_json=True, resolve_error="could not be unsealed")

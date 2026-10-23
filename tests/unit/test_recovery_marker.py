@@ -31,7 +31,7 @@ def _cfg(tmp_path: Path, *, unlocked: bool = True) -> SandboxConfig:
     """Sandbox config rooted under *tmp_path*.
 
     The marker is independent of the passphrase; the *unlocked* keyword
-    switches the keyring tier (which the conftest stub resolves to a
+    switches the desktop keyring tier (which the conftest stub resolves to a
     deterministic passphrase) on or off, so the locked-vault branch
     (where the rest of the chain would be inoperative anyway) can be
     exercised explicitly.
@@ -42,7 +42,7 @@ def _cfg(tmp_path: Path, *, unlocked: bool = True) -> SandboxConfig:
         config_dir=tmp_path / "cfg",
         vault_dir=tmp_path / "vault",
         services_mode="socket",
-        credentials_use_keyring=unlocked,
+        credentials_use_desktop_keyring=unlocked,
     )
 
 
@@ -147,12 +147,12 @@ class TestRecoveryStatus:
     """``RecoveryStatus.load`` bundles the marker + resolved source for every surface."""
 
     def test_acked_durable_tier_not_urgent(self, tmp_path: Path) -> None:
-        """Acknowledged + keyring tier → not urgent (durable, ack present)."""
+        """Acknowledged + desktop keyring tier → not urgent (durable, ack present)."""
         cfg = _cfg(tmp_path)
         RecoveryStatus.acknowledge(cfg)
         status = RecoveryStatus.load(cfg)
         assert status.acknowledged is True
-        assert status.source is PassphraseTier.KEYRING
+        assert status.source is PassphraseTier.DESKTOP_KEYRING
         assert status.volatile_only is False
         assert status.urgent is False
 
@@ -178,7 +178,7 @@ class TestRecoveryStatus:
         monkeypatch.setattr(
             enc,
             "resolve_passphrase_with_source",
-            lambda **_kw: ("p4ss", PassphraseTier.KERNEL_KEYRING),
+            lambda **_kw: ("p4ss", PassphraseTier.SESSION_CACHE),
         )
         status = RecoveryStatus.load(cfg)
         assert status.volatile_only is True
@@ -198,7 +198,7 @@ class TestRecoveryStatus:
         monkeypatch.setattr(
             enc,
             "resolve_passphrase_with_source",
-            lambda **_kw: ("p4ss", PassphraseTier.KERNEL_KEYRING),
+            lambda **_kw: ("p4ss", PassphraseTier.SESSION_CACHE),
         )
         assert RecoveryStatus.load(cfg).urgent is False
 
@@ -219,7 +219,7 @@ class TestRecoveryStatus:
         Pins the except branch in
         [`RecoveryStatus.load`][terok_sandbox.vault.store.recovery.RecoveryStatus.load]
         — a vault that fails to resolve (mismatched passphrase tier,
-        corrupt session file, denied keyring) should surface the same
+        corrupt session file, denied desktop keyring) should surface the same
         "source unknown" shape as a fresh locked install rather than
         propagating the resolver exception into every doctor / sickbay /
         pill caller.

@@ -45,7 +45,7 @@ def _load_cfg(
     """
     cfg = MagicMock()
     cfg.vault_systemd_creds_file = tmp_path / "no-sealed.cred"
-    cfg.credentials_use_keyring = False
+    cfg.credentials_use_desktop_keyring = False
     cfg.credentials_passphrase_command = None
     cfg.db_path = tmp_path / "vault" / "credentials.db"
     cfg.vault_recovery_marker_file = tmp_path / "no-marker"
@@ -72,11 +72,11 @@ class TestVaultStatusLoad:
     ) -> None:
         """A cached kernel-keyring key + no DB → UNLOCKED ("the key is ready"), still no DB open."""
         monkeypatch.setattr(_kk, "is_cached", lambda _db=None: True)
-        cfg = _load_cfg(tmp_path, resolved=("hunter2", PassphraseTier.KERNEL_KEYRING))
+        cfg = _load_cfg(tmp_path, resolved=("hunter2", PassphraseTier.SESSION_CACHE))
         status = VaultStatus.load(cfg)
         assert status.state is VaultState.UNLOCKED
         assert status.db_exists is False
-        assert status.source is PassphraseTier.KERNEL_KEYRING
+        assert status.source is PassphraseTier.SESSION_CACHE
         assert status.providers == ()  # nothing stored yet, but readable-by-key
         # The kernel-keyring row (index 2) is the active one.
         assert status.chain[2].active is True
@@ -109,19 +109,23 @@ class TestBuildWarnings:
     """The warning catalog authors each situation's wording exactly once."""
 
     def test_unacked_volatile_only_is_urgent(self) -> None:
-        """Kernel-keyring-only + unacknowledged → the logout-loss error, nothing softer."""
-        warnings = _build_warnings(_recovery(PassphraseTier.KERNEL_KEYRING))
+        """Kernel-keyring-only + unacknowledged → the cache-loss error, nothing softer."""
+        warnings = _build_warnings(_recovery(PassphraseTier.SESSION_CACHE))
         assert [w.kind for w in warnings] == [VaultWarningKind.RECOVERY_VOLATILE]
         (warning,) = warnings
         assert warning.severity == "error"
         assert (
-            "the only copy of the vault passphrase is the kernel-keyring cache" in warning.message
+            "the only available copy of the vault passphrase is the temporary cache"
+            in warning.message
         )
         assert "unrecoverable" in warning.message
+        assert "kernel keyring or tmpfs session file" in warning.message
+        assert "reboot" in warning.message
+        assert "logout" not in warning.message
 
     def test_unacked_durable_tier_is_unconfirmed(self) -> None:
         """A durable tier without an off-host copy gets the softer machine-bound warning."""
-        warnings = _build_warnings(_recovery(PassphraseTier.KEYRING))
+        warnings = _build_warnings(_recovery(PassphraseTier.DESKTOP_KEYRING))
         assert [w.kind for w in warnings] == [VaultWarningKind.RECOVERY_UNCONFIRMED]
         (warning,) = warnings
         assert warning.severity == "warning"
@@ -133,6 +137,6 @@ class TestBuildWarnings:
 
     def test_acknowledged_or_unresolved_emits_no_recovery_warning(self) -> None:
         """An acked vault (or one with nothing resolved) has nothing to nag about."""
-        assert _build_warnings(_recovery(PassphraseTier.KERNEL_KEYRING, acknowledged=True)) == ()
-        assert _build_warnings(_recovery(PassphraseTier.KEYRING, acknowledged=True)) == ()
+        assert _build_warnings(_recovery(PassphraseTier.SESSION_CACHE, acknowledged=True)) == ()
+        assert _build_warnings(_recovery(PassphraseTier.DESKTOP_KEYRING, acknowledged=True)) == ()
         assert _build_warnings(_recovery(None)) == ()

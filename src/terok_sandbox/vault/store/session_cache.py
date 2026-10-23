@@ -4,14 +4,14 @@
 """The volatile unlock cache — one tier, two backings.
 
 The cache tier of the passphrase chain holds the vault passphrase for
-the login session.  The cache has no timeout; ``vault lock`` clears it;
+reuse between processes.  The cache has no timeout; ``vault lock`` clears it;
 a reboot removes it.  Which backing holds it follows where this host
 runs the supervisor, the reader that has to find it
 ([`supervisor_placement`][terok_sandbox._util._placement.supervisor_placement]):
 a user-unit supervisor reads the operator's kernel keyring
 ([`kernel_keyring`][terok_sandbox.vault.store.kernel_keyring]), so that
 is the backing; a supervisor inside the container runtime's namespace
-sees an empty keyring there, so the tier is a tmpfs session file
+sees an empty kernel keyring there, so the tier is a tmpfs session file
 ([`session_file`][terok_sandbox.vault.store.session_file]), a path
 being a path in any namespace.  The file also stands in where the
 kernel facility itself is unusable.  The status surfaces name the
@@ -65,7 +65,7 @@ def is_cached(db_path: str | os.PathLike[str]) -> bool:
 def unavailable_reason() -> str | None:
     """Explain why no backing can hold the cache here, or ``None`` when one can.
 
-    A file backing that fails names why the keyring was not the choice
+    A file backing that fails names why the kernel keyring was not the choice
     first, so the operator reads both facts in one line.
     """
     backend = _backend()
@@ -85,22 +85,26 @@ def backing_detail(*, cached: bool) -> str:
     if (reason := unavailable_reason()) is not None:
         return f"unusable here: {reason}"
     if _backend() is _kernel_keyring:
-        return "cached in the user keyring" if cached else "no passphrase cached"
-    where = f"session file ({_file_reason()})"
+        return (
+            "cached in the kernel keyring (Linux kernel user keyring, @u)"
+            if cached
+            else "no passphrase cached"
+        )
+    where = f"tmpfs session file ({_file_reason()})"
     return f"cached in a {where}" if cached else f"no passphrase cached — {where}"
 
 
 def _backend() -> ModuleType:
     """The backing the supervisor this host would start can read."""
-    keyring_readable = (
+    kernel_keyring_readable = (
         supervisor_placement() is SupervisorPlacement.USER_UNIT
         and _kernel_keyring.unavailable_reason() is None
     )
-    return _kernel_keyring if keyring_readable else _session_file
+    return _kernel_keyring if kernel_keyring_readable else _session_file
 
 
 def _file_reason() -> str:
-    """Why the session file, not the keyring, is this host's backing."""
+    """Why the session file, not the kernel keyring, is this host's backing."""
     if supervisor_placement() is SupervisorPlacement.NAMESPACE_DAEMON:
         return "the supervisor runs in the container namespace, without a user manager"
     return f"kernel keyring unusable here: {_kernel_keyring.unavailable_reason()}"

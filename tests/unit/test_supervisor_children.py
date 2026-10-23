@@ -536,7 +536,7 @@ class TestServicePassphraseResolution:
     def test_vault_resolves_captured_policy(self, tmp_path: Path) -> None:
         cfg = _socket_cfg(
             tmp_path,
-            credentials_use_keyring=True,
+            credentials_use_desktop_keyring=True,
             credentials_passphrase_command="secret-helper",
         )
         with patch(
@@ -548,7 +548,7 @@ class TestServicePassphraseResolution:
         resolve.assert_called_once_with(
             credentials_db=cfg.db_path,
             systemd_creds_file=tmp_path / "vault.passphrase.cred",
-            use_keyring=True,
+            use_desktop_keyring=True,
             passphrase_command="secret-helper",
         )
 
@@ -1013,7 +1013,7 @@ class TestPolicyConfinesOnTheLiveKernel:
     real Landlock, then drives a stub ``vault`` runner that probes its lane.
     The service writes its own data but cannot read the runtime passphrase
     escrow or replace a sibling service's socket.  This deliberately proves
-    path isolation only: Linux keyring permissions remain a separate same-UID
+    path isolation only: Linux kernel-keyring permissions remain a separate same-UID
     boundary.  Runs on every matrix slot, so each distro's kernel exercises the
     confinement; a kernel without Landlock skips.
     """
@@ -1097,7 +1097,7 @@ class TestPolicyConfinesOnTheLiveKernel:
         helper_secret.write_text("headless-passphrase\n")
         config_file = operator_dir / "config.yml"
         config_file.write_text(
-            f"credentials:\n  use_keyring: false\n  passphrase_command: cat {helper_secret}\n"
+            f"credentials:\n  use_desktop_keyring: false\n  passphrase_command: cat {helper_secret}\n"
         )
 
         state_dir = tmp_path / "state"
@@ -1145,7 +1145,7 @@ class TestPolicyConfinesOnTheLiveKernel:
             async def probe(resolved, paths, stop):
                 checks = [
                     f"resolved={{int(resolved._resolved_passphrase == 'headless-passphrase')}}",
-                    f"keyring-off={{int(resolved.credentials_use_keyring is False)}}",
+                    f"desktop-keyring-off={{int(resolved.credentials_use_desktop_keyring is False)}}",
                 ]
                 for label, path in (
                     ("config", Path({str(config_file)!r})),
@@ -1175,7 +1175,7 @@ class TestPolicyConfinesOnTheLiveKernel:
         if lines and lines[0].startswith("unsupported:"):
             pytest.skip(f"kernel without Landlock: {lines[0]}")
         assert lines[0].startswith("landlock:1:"), result.stderr
-        assert lines[-1] == "resolved=1;keyring-off=1;config-denied;helper-denied"
+        assert lines[-1] == "resolved=1;desktop-keyring-off=1;config-denied;helper-denied"
 
     @pytest.mark.parametrize("custom_git", [False, True], ids=["system-git", "profile-git"])
     def test_gate_accepts_real_git_push_inside_scoped_policy(

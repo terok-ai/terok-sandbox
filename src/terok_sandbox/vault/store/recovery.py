@@ -4,8 +4,8 @@
 """Track operator-confirmed possession of the vault recovery passphrase.
 
 Whenever the sandbox mints a passphrase the operator never typed
-(auto-detected systemd-creds tier, fresh keyring entry, or the
-kernel-keyring cache), they need a written copy stashed off-host —
+(auto-detected systemd-creds tier, fresh desktop keyring entry, or the
+temporary session cache), they need a written copy stashed off-host —
 every keystore tier is bound to *this* machine, account, or boot, so
 a disk failure or TPM transplant strands the vault.
 
@@ -96,19 +96,16 @@ class RecoveryStatus:
     def volatile_only(self) -> bool:
         """``True`` iff the passphrase lives only in a volatile tier.
 
-        The kernel-keyring cache dies at logout (and never survives a
-        reboot) — and the writer only populates it when no durable tier
-        holds the passphrase, so a volatile resolved source means there
-        is no reboot-surviving copy anywhere.  Without an off-host copy
-        the vault becomes unrecoverable the moment the login session
-        ends; severity escalates accordingly on every surface that
-        renders this status.
+        The temporary cache (kernel keyring or tmpfs session file)
+        never survives a reboot and may disappear earlier. Without a
+        saved copy, losing this cache makes the vault unrecoverable;
+        severity escalates on every surface that renders this status.
         """
         return self.source is not None and not self.source.durable
 
     @property
     def urgent(self) -> bool:
-        """``True`` iff unacknowledged AND volatile-only (one logout away from loss)."""
+        """``True`` iff unacknowledged AND volatile-only (at risk of cache loss)."""
         return not self.acknowledged and self.volatile_only
 
     @classmethod
@@ -147,8 +144,8 @@ class RecoveryStatus:
     def is_acknowledged(cfg: SandboxConfig | None = None) -> bool:
         """Cheap marker-only check (no passphrase resolution).
 
-        The vault's resolver tiers (systemd-creds, keyring,
-        kernel-keyring) are all bound to *this* machine, account, or
+        The vault's storage tiers (systemd-creds, desktop keyring,
+        session cache) are all bound to *this* machine, account, or
         boot — a hardware failure or TPM transplant strands the vault
         without an off-host copy of the passphrase.  This check is
         what surfaces the "unconfirmed recovery key" warning in

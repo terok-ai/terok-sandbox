@@ -112,7 +112,7 @@ def user_manager_reachable(runtime_dir: Path) -> bool:
 
     The fact that decides where a container's supervisor runs: as a
     transient unit of that manager, in the operator's own namespaces
-    where the user keyring is the operator's, or as a daemon inside the
+    where the kernel user keyring is the operator's, or as a daemon inside the
     container runtime's user namespace, where the hook itself runs.  The
     manager's private socket is the evidence; ``systemd-run`` on the
     host PATH is what asks it.

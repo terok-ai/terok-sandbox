@@ -310,7 +310,7 @@ class TestHookSpawn:
         assert systemd_run[-3:] == [str(wrapper), container_id, str(sidecar_path)]
         assert any(arg.startswith("--setenv=XDG_RUNTIME_DIR=") for arg in systemd_run)
         assert f"--setenv=PATH={os.environ['PATH']}" in systemd_run
-        # The keyring the unit reads is the operator's; a private one would hide it.
+        # The kernel keyring the unit reads is the operator's; a private one would hide it.
         assert "--property=KeyringMode=inherit" in systemd_run
         assert "--property=NoNewPrivileges=yes" in systemd_run
         assert not any("PrivateUsers" in arg or "ProtectSystem" in arg for arg in systemd_run)

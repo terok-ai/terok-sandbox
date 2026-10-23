@@ -95,11 +95,11 @@ def plaintext_db_with_sidecars(plaintext_db: Path) -> Path:
 
 
 @pytest.fixture()
-def stubbed_keyring(monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, str]]:
-    """In-memory keyring backed by a shared dict — no D-Bus / Secret Service.
+def stubbed_desktop_keyring(monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, str]]:
+    """In-memory desktop keyring backed by a shared dict — no D-Bus / Secret Service.
 
     The dict is yielded so tests can pre-populate it (simulating a
-    keyring with a stale entry) and assert on it after the handler
+    desktop keyring with a stale entry) and assert on it after the handler
     runs.  Both load and store paths in ``credentials.encryption`` are
     redirected here.
     """
@@ -115,9 +115,13 @@ def stubbed_keyring(monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, str]]
     def _forget() -> bool:
         return store.pop("passphrase", None) is not None
 
-    monkeypatch.setattr("terok_sandbox.vault.store.encryption.load_passphrase_from_keyring", _load)
-    monkeypatch.setattr("terok_sandbox.vault.store.encryption.store_passphrase_in_keyring", _store)
     monkeypatch.setattr(
-        "terok_sandbox.vault.store.encryption.forget_passphrase_in_keyring", _forget
+        "terok_sandbox.vault.store.encryption.load_passphrase_from_desktop_keyring", _load
+    )
+    monkeypatch.setattr(
+        "terok_sandbox.vault.store.encryption.store_passphrase_in_desktop_keyring", _store
+    )
+    monkeypatch.setattr(
+        "terok_sandbox.vault.store.encryption.forget_passphrase_in_desktop_keyring", _forget
     )
     yield store

@@ -173,8 +173,8 @@ def _make_supervisor_children_check(container_id: str, container_name: str) -> D
 def _make_vault_unlocked_check() -> DoctorCheck:
     """Verify the passphrase resolves — and that the supervisor can resolve it too.
 
-    Host-side check: walks the resolution chain (systemd-creds → OS
-    keyring → kernel keyring → passphrase-command) and reports an
+    Host-side check: walks the resolution chain (systemd-creds → desktop
+    keyring → session cache → passphrase-command) and reports an
     actionable error when nothing yields.  The vault and signer children
     do not start without a passphrase, so this is the first check
     operators should see fail.
@@ -200,10 +200,10 @@ def _make_vault_unlocked_check() -> DoctorCheck:
             return CheckVerdict(
                 "error",
                 "vault is locked — no passphrase available."
-                " Run `terok-sandbox vault unlock` (kernel-keyring cache)"
+                " Run `terok-sandbox vault unlock` (temporary session cache)"
                 " or `terok-sandbox setup` to provision.",
             )
-        source = f" via {tier.value}" if tier is not None else ""
+        source = f" via {tier.display_name}" if tier is not None else ""
         return CheckVerdict("ok", f"credentials-DB passphrase available{source}")
 
     return DoctorCheck(
@@ -222,11 +222,10 @@ def make_recovery_acknowledged_check() -> DoctorCheck:
     """Warn when the operator hasn't confirmed they saved the recovery key.
 
     Two severity bands depending on the resolved tier when the marker
-    is absent — the kernel-keyring cache dies at logout, so "unconfirmed
-    AND volatile-only" is a genuine ``error`` (you are literally one
-    logout away from losing the vault), while every durable tier
-    (keyring, systemd-creds, config) is "only" a ``warn`` (machine-bound;
-    needs an off-host copy for disaster recovery).
+    is absent: "unconfirmed AND volatile-only" is an ``error`` because
+    the temporary cache is lost at reboot or earlier. Durable tiers
+    (desktop keyring, systemd-creds, passphrase-command) get a ``warn``:
+    an off-host copy is still needed for disaster recovery.
 
     Intentionally NOT bundled into
     [`sandbox_doctor_checks`][terok_sandbox.doctor.sandbox_doctor_checks]:
@@ -250,8 +249,9 @@ def make_recovery_acknowledged_check() -> DoctorCheck:
             return CheckVerdict(
                 "error",
                 "vault recovery key UNCONFIRMED and the passphrase lives ONLY"
-                " in the kernel-keyring cache — it will be wiped at logout"
-                " and your vault becomes UNRECOVERABLE then."
+                " in the temporary cache (kernel keyring or tmpfs session file)"
+                " — lost at reboot or earlier. Without a saved copy, cache loss"
+                " makes your vault UNRECOVERABLE."
                 f" Run {reveal} NOW and save the value off-host,"
                 f" or {ack} if you already captured it.",
             )
@@ -278,13 +278,13 @@ def make_recovery_acknowledged_check() -> DoctorCheck:
     )
 
 
-#: Public docs page explaining the per-container keyring leak → EDQUOT.
-_KEYRING_DOC_URL = "https://terok-ai.github.io/terok/kernel-keyring/"
+#: Public docs page explaining the per-container kernel-keyring leak → EDQUOT.
+_KERNEL_KEYRING_DOC_URL = "https://terok-ai.github.io/terok/kernel-keyring/"
 
 #: Warn once the per-uid kernel keyring's key-count *or* byte quota is at
 #: least this full.  A healthy host sits far below the edge, where a
 #: warning would only be noise.
-_KEYRING_QUOTA_WARN_AT = 0.95
+_KERNEL_KEYRING_QUOTA_WARN_AT = 0.95
 
 
 def _kernel_keyring_quota() -> tuple[int, int, int, int] | None:
@@ -316,12 +316,12 @@ def _kernel_keyring_quota() -> tuple[int, int, int, int] | None:
 def make_kernel_keyring_quota_check() -> DoctorCheck:
     """Warn when the per-uid kernel keyring is nearly full.
 
-    The OCI runtime creates a session keyring per container and does not
+    The OCI runtime creates a kernel session keyring per container and does not
     reliably reclaim it, so a host that cycles many agent containers
     drifts toward the per-uid key quota (200 keys by default) and then
     fails to launch new ones with a misleading "Disk quota exceeded".
     This surfaces the pressure a step before it bites — and only near
-    the edge (``_KEYRING_QUOTA_WARN_AT``), since a healthy host sits far
+    the edge (``_KERNEL_KEYRING_QUOTA_WARN_AT``), since a healthy host sits far
     below it and a warning there is noise.
 
     Host-level like
@@ -332,16 +332,16 @@ def make_kernel_keyring_quota_check() -> DoctorCheck:
     def _eval(_rc: int, _stdout: str, _stderr: str) -> CheckVerdict:
         quota = _kernel_keyring_quota()
         if quota is None:
-            return CheckVerdict("ok", "per-uid keyring quota not accounted on this host")
+            return CheckVerdict("ok", "per-uid kernel keyring quota not accounted on this host")
         keys_used, keys_max, bytes_used, bytes_max = quota
         key_frac = keys_used / keys_max if keys_max else 0.0
         byte_frac = bytes_used / bytes_max if bytes_max else 0.0
-        if max(key_frac, byte_frac) >= _KEYRING_QUOTA_WARN_AT:
+        if max(key_frac, byte_frac) >= _KERNEL_KEYRING_QUOTA_WARN_AT:
             return CheckVerdict(
                 "warn",
                 f"kernel keyring {round(max(key_frac, byte_frac) * 100)}% full"
-                f" ({keys_used}/{keys_max} keys) — leaked per-container keyrings can block"
-                f" new containers with 'Disk quota exceeded'; see {_KEYRING_DOC_URL}",
+                f" ({keys_used}/{keys_max} keys) — leaked per-container kernel keyrings can block"
+                f" new containers with 'Disk quota exceeded'; see {_KERNEL_KEYRING_DOC_URL}",
             )
         return CheckVerdict("ok", f"{keys_used}/{keys_max} keys used (per-uid quota)")
 
@@ -352,9 +352,9 @@ def make_kernel_keyring_quota_check() -> DoctorCheck:
         evaluate=_eval,
         host_side=True,
         fix_description=(
-            "Restart the host to reclaim leaked container keyrings, or set"
+            "Restart the host to reclaim leaked container kernel keyrings, or set"
             " `[containers] keyring = false` in containers.conf to stop the leak"
-            f" ({_KEYRING_DOC_URL})."
+            f" ({_KERNEL_KEYRING_DOC_URL})."
         ),
     )
 

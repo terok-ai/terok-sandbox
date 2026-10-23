@@ -449,7 +449,7 @@ class TestWriteSidecar:
         assert payload["gate_base_path"] == str(cfg.gate_base_path)
         assert payload["routes_path"] == str(cfg.routes_path)
         assert payload["vault_systemd_creds_file"] == str(cfg.vault_systemd_creds_file)
-        assert payload["credentials_use_keyring"] is cfg.credentials_use_keyring
+        assert payload["credentials_use_desktop_keyring"] is cfg.credentials_use_desktop_keyring
         assert payload["credentials_passphrase_command"] is cfg.credentials_passphrase_command
         # Socket mode carries no TCP ports.
         assert "tcp_port" not in payload

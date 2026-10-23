@@ -79,11 +79,11 @@ _PROC_DIR = Path("/proc")
 _UNIT_ENV = ("PATH", "XDG_RUNTIME_DIR", "HOME", "DBUS_SESSION_BUS_ADDRESS")
 
 #: How the user manager hardens the unit.  ``KeyringMode=inherit`` is the
-#: whole point of the placement: the unit reads the operator's user
-#: keyring, and any private keyring would hide it.  Every filesystem
+#: whole point of the placement: the unit reads the operator's kernel user keyring,
+#: and any private kernel keyring would hide it. Every filesystem
 #: sandbox (``ProtectSystem``, ``PrivateTmp``, …) is out for the same
 #: reason — a user service gets one only through ``PrivateUsers``, a
-#: fresh user namespace where that keyring is empty again — and
+#: fresh user namespace where that kernel keyring is empty again — and
 #: ``RestrictNamespaces`` is out because the verdict child enters the
 #: container's namespaces through podman.  What is left matches what
 #: the children already set on themselves, now for the parent too.

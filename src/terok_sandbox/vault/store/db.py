@@ -27,8 +27,7 @@ Schema declarations and forward migrations live in
 — this module is the data-access layer only.
 
 The on-disk file is always SQLCipher-encrypted; the passphrase
-resolution chain (keyring → ``credentials.passphrase`` config field)
-and the SQLCipher open helpers live in
+resolution chain and the SQLCipher open helpers live in
 [`terok_sandbox.vault.store.encryption`][terok_sandbox.vault.store.encryption].
 """
 
@@ -221,9 +220,9 @@ class PlaintextDBFoundError(RuntimeError):
 class CredentialDB:
     """SQLite-backed store for provider credentials, SSH keys, and phantom tokens.
 
-    The on-disk file is always SQLCipher-encrypted.  Callers either
-    supply *passphrase* explicitly or leave it ``None`` to walk the
-    runtime resolution chain (keyring → ``credentials.passphrase``).
+    The on-disk file is always SQLCipher-encrypted. Callers supply
+    *passphrase* explicitly, resolving it from the configured desktop
+    keyring or other passphrase tiers before constructing the store.
     A missing passphrase raises [`NoPassphraseError`][terok_sandbox.vault.store.db.NoPassphraseError];
     a stale plaintext file raises [`PlaintextDBFoundError`][terok_sandbox.vault.store.db.PlaintextDBFoundError]
     — both are diagnostic-only.  Operator-facing remediation (which CLI
@@ -818,7 +817,7 @@ def open_credential_db_with_source(
     db_path: Path,
     *,
     systemd_creds_file: Path | None = None,
-    use_keyring: bool = False,
+    use_desktop_keyring: bool = False,
     passphrase_command: str | None = None,
     prompt_on_tty: bool = False,
 ) -> tuple[CredentialDB, PassphraseTier]:
@@ -833,7 +832,7 @@ def open_credential_db_with_source(
     passphrase, source = resolve_passphrase_with_source(
         credentials_db=db_path,
         systemd_creds_file=systemd_creds_file,
-        use_keyring=use_keyring,
+        use_desktop_keyring=use_desktop_keyring,
         passphrase_command=passphrase_command,
         prompt_on_tty=prompt_on_tty,
     )
@@ -846,15 +845,15 @@ def open_credential_db(
     db_path: Path,
     *,
     systemd_creds_file: Path | None = None,
-    use_keyring: bool = False,
+    use_desktop_keyring: bool = False,
     passphrase_command: str | None = None,
     prompt_on_tty: bool = False,
 ) -> CredentialDB:
     """Open the credential DB, resolving the passphrase via the runtime chain.
 
     Walks: *systemd_creds_file* (sealed credential decrypted via
-    ``systemd-creds(1)``) → OS keyring (when *use_keyring*) → the kernel
-    keyring (volatile unlock cache) → *passphrase_command*
+    ``systemd-creds(1)``) → desktop keyring (when *use_desktop_keyring*) → the
+    session cache (kernel keyring or tmpfs file) → *passphrase_command*
     (operator-supplied helper, e.g. ``pass show …`` / ``op read …``) →
     (when *prompt_on_tty* and a TTY is attached) interactive prompt.
     CLI consumers pass ``prompt_on_tty=True``; daemons leave it
@@ -863,7 +862,7 @@ def open_credential_db(
     db, _source = open_credential_db_with_source(
         db_path,
         systemd_creds_file=systemd_creds_file,
-        use_keyring=use_keyring,
+        use_desktop_keyring=use_desktop_keyring,
         passphrase_command=passphrase_command,
         prompt_on_tty=prompt_on_tty,
     )

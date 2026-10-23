@@ -8,7 +8,7 @@ same predicate: a per-user systemd manager that answers.  With one, the
 supervisor is a transient user unit in the operator's own namespaces,
 and the kernel user keyring it reads is the operator's.  Without one, it
 is a daemon inside the container runtime's user namespace, where that
-keyring is an empty stranger and only a path can carry the passphrase
+kernel keyring is an empty stranger and only a path can carry the passphrase
 across.  The cache tier follows the placement for exactly that reason
 (see [`session_cache`][terok_sandbox.vault.store.session_cache]).
 """

@@ -30,40 +30,37 @@ passphrases):
   anyone, for any permission mask.  ``user`` is the only workable type
   (the same choice cryptsetup's readback path and eCryptfs are forced
   into).
-- *Anchor ``@u`` (the user keyring), not the persistent keyring.*  The
-  file this tier replaces lived under ``$XDG_RUNTIME_DIR``, which logind
-  wipes on final logout — so its effective lifetime already *was* the
-  user keyring's lifetime (per-uid, shared across every same-uid
-  terminal, torn down at logout).  ``@u`` is the semantic drop-in; the
-  persistent keyring would over-deliver (survive logout) and needs
-  ``keyctl_get_persistent`` machinery we deliberately avoid.
+- *Anchor ``@u`` (the kernel user keyring), not the kernel persistent keyring.*
+  The cache is shared across same-uid processes in the operator's user
+  namespace. Its lifetime depends on processes and references, not
+  logout alone; remaining references can keep it alive after logout.
+  It never survives a reboot. No kernel persistent-keyring retention is needed.
 - *Read it from the operator's own user namespace, nowhere else.*  A
-  user keyring is per user *namespace*: a process inside podman's
-  rootless namespace resolves ``@u`` to its own empty keyring, and the
+  kernel user keyring is per user *namespace*: a process inside podman's
+  rootless namespace resolves ``@u`` to its own empty kernel keyring, and the
   cache is invisible there however the permissions read.  So this tier
   serves a supervisor that runs as a user unit of the operator's
   systemd manager, in the operator's namespaces; a supervisor inside the
   container namespace gets the session-file backing instead
   ([`session_cache`][terok_sandbox.vault.store.session_cache] chooses,
-  by the same fact the OCI hook reads).  No bridge through the session
-  keyring: that reader would depend on which login cached the passphrase.
+  by the same fact the OCI hook reads). No bridge through the kernel
+  session keyring: that reader would depend on which login cached the passphrase.
 - *Explicit ``keyctl_setperm``.*  A fresh ``user`` key defaults to
   ``possessor=all, uid=view`` — the uid can *see* the key but not read
   or search it.  systemd gets away without a setperm because its readers
-  possess ``@u`` through a shared session keyring; our CLI in a
+  possess ``@u`` through a shared kernel session keyring; our CLI in a
   *different* terminal does not possess the supervisor's key, so it
   would fall to the uid class and be unable to find or read it.  We
   therefore open uid ``view|read|write|search|setattr`` and zero the
   group/other classes — no other user can read it, and any same-uid
   terminal can read, revoke, or update it.  Applying that mask needs
   the writer to *possess* the key, so ``store`` first links ``@u`` into
-  the session keyring (a headless supervisor / cron / CI has no
+  the kernel session keyring (a headless supervisor / cron / CI has no
   pam_keyinit possession otherwise, and the setperm would fail EACCES).
-- *No auto-expiry.*  The cache persists for the whole login session —
-  until an explicit ``vault lock`` (or a move to a durable tier), just
-  like the tmpfs file it replaces — rather than timing out mid-session.
-  The payload lives in unswappable kernel memory, so it never reaches
-  disk or swap regardless.
+- *No auto-expiry.*  The cache does not time out mid-session.
+  ``vault lock`` or a move to a durable tier explicitly clears it;
+  reboot or loss of references also removes it. The payload lives in
+  unswappable kernel memory, not a desktop keyring or a disk file.
 
 Linux-only: on any host without the kernel key facility
 (``CONFIG_KEYS`` off, no ``libkeyutils``, WSL1, non-Linux) every entry
@@ -103,7 +100,7 @@ KEY_TYPE: Final = b"user"
 KEY_DESCRIPTION_PREFIX: Final = b"terok-sandbox:vault-passphrase:"
 
 #: ``KEY_SPEC_USER_KEYRING`` from ``linux/keyctl.h`` — the special id
-#: that resolves to the caller's per-uid user keyring (``@u``).
+#: that resolves to the caller's per-uid kernel user keyring (``@u``).
 _KEY_SPEC_USER_KEYRING: Final = -4
 
 #: ``KEY_SPEC_SESSION_KEYRING`` (``@s``).  ``store`` links ``@u`` into it
@@ -163,12 +160,10 @@ def cache_digest(db_path: str | os.PathLike[str]) -> str:
 def store(passphrase: str, db_path: str | os.PathLike[str]) -> bool:
     """Cache *passphrase* for *db_path* so later processes can unlock that vault.
 
-    The cache is deliberately untimed: it lives for the login session and
-    is cleared only by an explicit ``vault lock`` or a move to a durable
-    tier, matching the tmpfs file this tier replaces.  Failure is soft —
-    a cache is never the sole home of the secret — so an unreachable
-    facility, an exhausted key quota or a refused permission change is
-    logged and reported rather than raised.
+    The cache has no timeout, but reboot or loss of references removes
+    it. An explicit ``vault lock`` or a move to a durable tier clears it
+    sooner. An unreachable facility, an exhausted key quota or a refused
+    permission change is logged and reported as a failed write.
 
     Returns:
         True when the passphrase is cached and readable by this uid.
@@ -190,7 +185,7 @@ def store(passphrase: str, db_path: str | os.PathLike[str]) -> bool:
 
     # Possession first: a fresh key grants the possessor everything but
     # the uid only ``view`` (0x3f010000), and on a host without a
-    # pam_keyinit-linked session keyring — a headless supervisor, cron,
+    # pam_keyinit-linked kernel session keyring — a headless supervisor, cron,
     # CI — this process does not possess ``@u``, so the keyctl_setperm
     # below (which needs ``setattr``) would fail EACCES.  Idempotent
     # where a login session already linked it.
@@ -295,7 +290,7 @@ def is_cached(db_path: str | os.PathLike[str]) -> bool:
     the payload, so reporting *on* the secret never materialises it.
 
     Returns:
-        True when this vault's key exists in the user keyring.
+        True when this vault's key exists in the kernel user keyring.
     """
     try:
         lib = _load_library()
@@ -327,7 +322,7 @@ def unavailable_reason() -> str | None:
         lib = _load_library()
     except _KeyutilsUnavailable as exc:
         return str(exc)
-    # keyctl_get_keyring_ID(@u, create=0): resolves the user keyring's
+    # keyctl_get_keyring_ID(@u, create=0): resolves the kernel user keyring's
     # real serial without creating anything.  ENOSYS ⇒ kernel built
     # without CONFIG_KEYS (or a syscall-translation layer like WSL1);
     # any other failure ⇒ the tier can't run here.
@@ -336,8 +331,8 @@ def unavailable_reason() -> str | None:
         return None
     err = ctypes.get_errno()
     if err == errno.ENOSYS:
-        return "kernel built without keyring support (CONFIG_KEYS)"
-    return f"user keyring unreachable ({os.strerror(err)})"
+        return "kernel keyring support unavailable (CONFIG_KEYS)"
+    return f"kernel keyring (@u) unreachable ({os.strerror(err)})"
 
 
 # ── Key lookup and library binding (private) ────────────────────────

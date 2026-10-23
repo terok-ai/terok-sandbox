@@ -10,7 +10,7 @@ works on the same machine — moving the encrypted blob to another host
 yields ``Failed to decrypt: Operation not supported``.
 
 The sandbox uses systemd-creds as the top tier of the SQLCipher
-passphrase resolution chain: machine-bound, no OS keyring required,
+passphrase resolution chain: machine-bound, no desktop keyring required,
 survives reboots, no plaintext-on-disk.
 
 **Why this works for a non-root user.** Both ``encrypt`` and

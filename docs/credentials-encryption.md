@@ -9,18 +9,22 @@ is no plaintext mode.
 Every per-container supervisor and CLI call walks the same chain
 top-to-bottom and stops at the first hit:
 
-1. **Session-unlock file** — `$XDG_RUNTIME_DIR/terok/sandbox/vault.passphrase`,
-   RAM-backed, cleared on reboot.  Written by `vault unlock`.
-2. **systemd-creds** — sealed credential at
+1. **systemd-creds** — sealed credential at
    `${XDG_DATA_HOME:-~/.local/share}/terok/vault/vault.passphrase.cred`
    (the same directory as the credentials DB).  Decrypted via
    `systemd-creds(1)`.  Machine-bound
-   (TPM2 or host key), survives reboot, no keyring needed.  Written
+   (TPM2 or host key), survives reboot, no desktop keyring needed.  Written
    by `vault passphrase seal`.  Requires systemd ≥ 257.
-3. **OS keyring** — `(service=terok-sandbox, username=credentials-db)`.
-   On by default (an empty keyring simply doesn't resolve); set
-   `credentials.use_keyring: false` in `config.yml` to keep the chain
-   away from Secret Service entirely.
+2. **Desktop keyring** — `(service=terok-sandbox, username=credentials-db)`.
+   On by default (an empty desktop keyring simply doesn't resolve); set
+   `credentials.use_desktop_keyring: false` in `config.yml` to keep the chain
+   away from Secret Service entirely. GNOME Keyring is one implementation;
+   "login" can name a desktop-keyring collection, not a separate storage tier.
+3. **Session cache** — the **kernel keyring** (Linux's per-UID kernel user
+   keyring, `@u`), with a tmpfs session-file fallback when the supervisor
+   cannot access it. Written by `vault unlock`. It never survives reboot
+   and can disappear earlier. Kernel-keyring lifetime depends on processes
+   and references: logout alone does not guarantee clearing it.
 4. **passphrase_command** — operator-supplied shell command set as
    `credentials.passphrase_command` in `config.yml`.  Same shape as
    `git config credential.helper`, ssh pinentry, or `BORG_PASSCOMMAND`
@@ -33,6 +37,25 @@ top-to-bottom and stops at the first hit:
    to a weaker tier would be an unannounced security downgrade.
 5. **Interactive prompt** — `*`-masked, TTY only.  CLI calls;
    non-interactive supervisors fail loud instead.
+
+The desktop keyring supplies the passphrase directly to the process opening
+SQLCipher; it does not need an additional kernel-keyring copy. Manual
+unlock uses the session cache to avoid retyping the passphrase in later
+processes. Both paths still bring secret material into process memory.
+The CLI/config tier IDs are `desktop-keyring` for the desktop keyring and
+`session-cache` for the temporary cache. The session-cache tier is not
+always backed by the kernel keyring: `vault status` identifies the actual
+backend as the kernel keyring or a tmpfs session file.
+
+!!! warning "Storage names have no compatibility aliases"
+    Rename the old desktop-keyring setting `credentials.use_keyring` to
+    `credentials.use_desktop_keyring` in existing configuration. The old
+    setting is rejected. Use `to-desktop-keyring` for the transfer command,
+    and `desktop-keyring` or `session-cache` for `--passphrase-tier`.
+    Recreate existing task containers to regenerate their sidecars with
+    the renamed `credentials_use_desktop_keyring` policy field.
+    Stored desktop-keyring entries and kernel-keyring cache identities
+    are unchanged; this rename does not require moving the passphrase.
 
 !!! note "The plaintext `credentials.passphrase` tier was removed"
     Configs that still set it are rejected with migration directions:
@@ -50,7 +73,7 @@ Without one, it is a daemon inside the container runtime's user namespace.
 The volatile cache tier follows the placement.
 A user-unit supervisor reads the operator's kernel keyring, so that is the
 backing.
-A namespace daemon sees an empty keyring there, so the backing is the session
+A namespace daemon sees an empty kernel keyring there, so the backing is the session
 file under `$XDG_RUNTIME_DIR`, a path being a path in any namespace.
 Without a runtime directory the cache tier refuses, and the supervisor's
 children need `credentials.passphrase_command` instead.
@@ -59,7 +82,7 @@ The user unit carries the hardening a user service can take without a user
 namespace: no new privileges, no realtime, no personality change, native
 system calls, a private umask.
 Filesystem sandboxing is deliberately absent: a user service gets it only
-through `PrivateUsers`, a fresh user namespace where the keyring is empty
+through `PrivateUsers`, a fresh user namespace where the kernel keyring is empty
 again.
 Units of a user manager stop at the last logout unless `loginctl
 enable-linger` is set, the rule rootless podman documents for the containers
@@ -76,8 +99,8 @@ exempt because its job requires Podman runtime state.
 
 This is a filesystem-path boundary, not a same-UID kernel-keyring boundary.
 Vault and signer both resolve the credentials passphrase through the
-configured keyring policy by design.  Operators who do not want that shared
-keyring trust can disable `credentials.use_keyring` and choose another tier.
+configured desktop-keyring policy by design. Operators who do not want that shared
+desktop-keyring trust can disable `credentials.use_desktop_keyring` and choose another tier.
 The launch sidecar snapshots that non-secret policy.  Each secret-holder
 resolves it after process hardening but before installing Landlock, so an
 operator-selected `passphrase_command` may use its normal files while the
@@ -121,37 +144,41 @@ trusted workstation, then `pass git push` to your sync remote and
 `pass git pull` on the data-center host — the encrypted store sits in
 the same repo your dotfiles already follow.
 
-Diagnostics from the helper land in the per-container supervisor logs
+Helper failure summaries land in the per-container supervisor logs
 (``<state_root>/logs/<container-id>.log``, state root defaulting to
 ``~/.local/share/terok/sandbox``); look for lines like
-``passphrase_command 'pass' exited 1: <stderr>``.  Each container's
-supervisor walks the passphrase chain when it spawns.
+``passphrase_command exited 1``. Command text, stdout, stderr, and raw
+exception messages are never logged: any of them could contain the
+passphrase. Each container's supervisor walks the passphrase chain when
+it spawns.
 
 ## Day-to-day
 
 ```bash
-terok-sandbox vault unlock   # validates the passphrase, writes the session-unlock tmpfs file
-terok-sandbox vault lock     # clears every stored copy — you'll need the passphrase to unlock
+terok-sandbox vault unlock   # validates and caches in kernel keyring or tmpfs session file
+terok-sandbox vault lock     # deletes saved passphrases; running services stay open
 ```
 
-`vault unlock` is normally run once per boot.  The typed value is
+`vault unlock` is needed again after the temporary cache disappears.  The typed value is
 **validated against the existing credentials DB first** — a wrong entry
 exits with an error and writes nothing, so a typo can't silently park a
-useless key on the highest-priority tier.  (With no DB yet there is
+useless key in the session cache.  (With no DB yet there is
 nothing to validate; the value becomes the encryption key on first
 use.)  The next supervisor to start picks the freshly-resolved
 passphrase up automatically.
 
-`unlock` also **refuses to shadow a durable tier**: on a host that
-already auto-unlocks from systemd-creds / keyring / config, the session
-file would only mask the durable key and then vanish on the next reboot,
-so the write is skipped (`vault status` would have shown it as a
-shadow).  Pass `--force` for a deliberate re-key or session override.
-If a redundant session copy already exists from an older release — the
-session file holding the *same* passphrase a durable tier resolves —
-`vault status` flags it as harmless residue (it clears on reboot), and
-`terok sickbay --fix` removes it; a session file with a *different*
-passphrase is treated as a deliberate override and kept.
+`unlock` skips creating a redundant cache when a durable tier already
+supplies the passphrase (systemd-creds, desktop keyring, or the configured
+helper). Pass `--force` only when deliberately refreshing the temporary
+cache. The cache sits below systemd-creds and the desktop keyring, so it
+does not override either of those sources.
+
+`vault lock` removes both temporary backings, the saved desktop-keyring
+entry, and the sealed systemd-creds credential. It disconnects
+`passphrase_command` without deleting the external secret that helper
+reads. **This is destructive passphrase removal, not desktop-keyring
+locking. Already-running services remain open; their access is not
+revoked.** Keep a recovery copy before using it.
 
 ## Picking a tier at setup
 
@@ -168,8 +195,8 @@ fallback):
 
 | Choice | When to pick it |
 |--------|-----------------|
-| `[k]` OS keyring *(default)*      | desktop with a working Secret Service / Keychain |
-| `[s]` session-unlock              | servers with no keyring; one `vault unlock` per boot |
+| `[k]` Desktop keyring *(default)* | desktop with a working Secret Service / Keychain |
+| `[n]` Session cache (kernel keyring or tmpfs session file) | no persistent store; re-enter after reboot or cache loss |
 
 (Headless hosts that want a file-based store skip the chooser and set
 `credentials.passphrase_command: cat /path/to/secret-file` instead —
@@ -203,7 +230,7 @@ Ground rules the verb enforces:
   value is escrowed to a RAM-backed, owner-only pending file *before*
   the DB is rekeyed and deleted once at least one tier holds it — so
   even a crash mid-change leaves the new key recoverable on the host.
-  A tier that can't take the new value (keyring denied, systemd-creds
+  A tier that can't take the new value (desktop keyring denied, systemd-creds
   host regressed) is **purged and reported** rather than left holding
   the old passphrase, and the verb exits non-zero so the failure can't
   scroll past.
@@ -222,15 +249,15 @@ Ground rules the verb enforces:
 
 The passphrase is one secret; the tier is just *where* it lives.
 
-### Upgrade to keyring or systemd-creds (first-class commands)
+### Upgrade to desktop keyring or systemd-creds (first-class commands)
 
-For the two most common upgrade paths — moving off the session-file
-or plaintext-config tiers onto the OS keyring or a machine-bound
-sealed credential — one verb does the whole swap:
+For the two most common upgrade paths — moving off the temporary
+cache onto the desktop keyring or a machine-bound sealed credential —
+one verb does the whole swap:
 
 ```bash
-# Move the passphrase from its current tier into the OS keyring.
-terok-sandbox vault passphrase to-keyring
+# Move the passphrase from its current tier into the desktop keyring.
+terok-sandbox vault passphrase to-desktop-keyring
 
 # Move it into a machine-bound systemd-creds credential.
 # (Land it as session first if not already auto-resolvable, then seal.
@@ -239,12 +266,13 @@ echo -n "<passphrase>" | terok-sandbox vault unlock
 terok-sandbox vault passphrase seal --key=auto
 ```
 
-`to-keyring` resolves the passphrase from whichever tier currently
-holds it, validates it, writes to the keyring, flips
-`credentials.use_keyring: true` in `config.yml`, drops any plaintext
-fallbacks, and removes the session/sealed copies.  No retrieve-then-reseed
-by hand — the next per-container supervisor to spawn resolves the
-passphrase fresh from the keyring.
+`to-desktop-keyring` resolves the passphrase from whichever tier currently
+holds it, validates it, writes to the desktop keyring, and verifies that
+the saved value can be read back without prompting before removing the
+source. It enables `credentials.use_desktop_keyring` in `config.yml`, disconnects
+`passphrase_command`, and removes the temporary/sealed copies. If the
+write or readback fails, the source is preserved. The running TUI and the
+next supervisor use the updated configuration.
 
 Both upgrade verbs refuse to enable a machine-bound auto-unlock tier
 until the recovery key is marked as saved — run
@@ -253,8 +281,7 @@ until the recovery key is marked as saved — run
 
 ### Manual three-step (for anything not on the upgrade path)
 
-For other transitions (keyring → systemd-creds, anything →
-`passphrase_command`, downgrades) the swap is still **retrieve →
+For other transitions (anything → `passphrase_command`, downgrades) the swap is still **retrieve →
 lock → reseed**:
 
 #### 1. Retrieve from the current tier
@@ -275,10 +302,9 @@ password manager, or a `mktemp`d file you delete after step 3.
 terok-sandbox vault lock
 ```
 
-Clears every tier in one go (session file *plus* keyring, sealed
-systemd-creds, and the `credentials.passphrase_command` wiring) and
-drops the recovery marker.  The
-underlying secret stays put in whichever store the helper points at
+Clears every tier in one go (kernel keyring and tmpfs session cache,
+desktop keyring, sealed systemd-creds, and the `credentials.passphrase_command`
+wiring) and drops the recovery marker. The underlying secret stays put in whichever store the helper points at
 (`pass`, 1Password, Vault, …) — only the resolver wiring is removed.
 Without this step, the next per-container supervisor to spawn would
 resolve the passphrase from a leftover tier, defeating the swap.  An
@@ -287,13 +313,13 @@ you just retrieved the value in step 1, so you have it.
 
 #### 3. Provision in the new tier
 
-The machine-bound targets (systemd-creds, keyring) refuse until the
+The machine-bound targets (systemd-creds, desktop keyring) refuse until the
 recovery key is re-acknowledged — the `lock` in step 2 dropped the
 marker — so run `terok-sandbox vault passphrase acknowledge` first
 for those two paths.
 
 ```bash
-# → session-file (default; ephemeral, cleared on reboot):
+# → temporary cache (kernel keyring or tmpfs; lost at reboot or earlier):
 echo -n "<passphrase>" | terok-sandbox vault unlock
 
 # → systemd-creds (machine-bound, persistent):
@@ -301,9 +327,9 @@ echo -n "<passphrase>" | terok-sandbox vault unlock   # land it as session first
 terok-sandbox vault passphrase acknowledge            # re-confirm the recovery key
 terok-sandbox vault passphrase seal --key=auto        # seal; drops the session copy
 
-# → OS keyring:
+# → desktop keyring:
 terok-sandbox vault passphrase acknowledge            # re-confirm the recovery key
-terok-sandbox vault passphrase to-keyring             # one verb, no chooser
+terok-sandbox vault passphrase to-desktop-keyring     # one verb, no chooser
 
 # → passphrase_command (headless; helper points at a file, pass / bw / op / cloud CLI):
 pass insert -m terok-sandbox/vault-passphrase         # or your helper's
@@ -319,7 +345,7 @@ reads `Vault: unlocked — passphrase via <new-tier>`.
 
 There is **no recovery key, no backdoor, no master key**.  The
 passphrase is the only thing that unlocks the credentials DB; if every
-tier loses it (you forget it, the keyring resets, the sealed
+tier loses it (you forget it, the desktop keyring resets, the sealed
 systemd-creds blob is gone with the host), the contents are
 irrecoverable.
 

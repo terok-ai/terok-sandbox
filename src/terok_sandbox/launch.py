@@ -562,7 +562,7 @@ def write_sidecar(
         "db_path": str(cfg.db_path),
         "routes_path": str(cfg.routes_path),
         "vault_systemd_creds_file": str(cfg.vault_systemd_creds_file),
-        "credentials_use_keyring": cfg.credentials_use_keyring,
+        "credentials_use_desktop_keyring": cfg.credentials_use_desktop_keyring,
         "credentials_passphrase_command": cfg.credentials_passphrase_command,
         "scope_id": scope_id or "",
         "project_id": project_id or "",
