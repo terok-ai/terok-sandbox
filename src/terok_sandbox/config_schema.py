@@ -431,6 +431,15 @@ class RawRunSection(BaseModel):
             "kernels ship 4, which disables unprivileged perf entirely)."
         ),
     )
+    aslr_control: bool = Field(
+        default=False,
+        description=(
+            "Allow processes to disable their own ASLR through narrowly filtered "
+            "personality calls, for ThreadSanitizer and debugging. Extends the "
+            "host Podman seccomp profile without changing other syscall rules. "
+            "Weakens exploit mitigation; opt in only for development containers."
+        ),
+    )
     podman_args: list[str] = Field(
         default_factory=list,
         description=(

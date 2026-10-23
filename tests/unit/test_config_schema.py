@@ -371,6 +371,14 @@ def test_run_section_perf_defaults_off() -> None:
     assert RawRunSection(perf=True).perf is True
 
 
+def test_run_section_aslr_control_defaults_off() -> None:
+    """The default grants no ASLR control; invalid booleans are rejected."""
+    assert RawRunSection().aslr_control is False
+    assert RawRunSection(aslr_control=True).aslr_control is True
+    with pytest.raises(ValidationError):
+        RawRunSection.model_validate({"aslr_control": "sometimes"})
+
+
 def test_run_section_podman_args_accepts_benign_flags() -> None:
     args = ["-e", "HTTPS_PROXY=http://host:8118", "--shm-size=2g"]
     assert RawRunSection(podman_args=args).podman_args == args

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import importlib
 import inspect
 import json
@@ -175,6 +176,20 @@ def _reap(pid: int) -> None:
 
 class TestCompose:
     """Verify ``compose`` emits the right podman args per flag combination."""
+
+    @pytest.mark.parametrize("enabled", [False, True])
+    def test_aslr_control(self, tmp_path: Path, enabled: bool) -> None:
+        """Standalone prepare/run honors the same opt-in as the facade."""
+        cfg = dataclasses.replace(_make_cfg(tmp_path), aslr_control=enabled)
+        security_args = ["--security-opt", f"seccomp={tmp_path / 'profile.json'}"]
+        with patch("terok_sandbox.launch.aslr_control_args", return_value=security_args) as profile:
+            args, _ = compose("myc", cfg=cfg, shield=False, gate=False, broker=False, scope=None)
+        if enabled:
+            profile.assert_called_once_with(run_state_dir(cfg, "myc"))
+            assert security_args[1] in args
+        else:
+            profile.assert_not_called()
+            assert not any(arg.startswith("seccomp=") for arg in args)
 
     def test_shield_only_when_scope_omitted(self, tmp_path: Path) -> None:
         """With no --scope, gate/broker/ssh skip silently; shield still applies."""

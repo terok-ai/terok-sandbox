@@ -40,6 +40,7 @@ from .podman_args import (
     reject_managed_flags,
     reject_managed_volumes,
 )
+from .runtime.seccomp import aslr_control_args
 from .sandbox import Sharing, VolumeSpec
 from .setup import check_setup
 
@@ -327,6 +328,8 @@ def compose(
     state_dir = run_state_dir(cfg, container)
     state_dir.mkdir(parents=True, exist_ok=True)
 
+    security_args = aslr_control_args(state_dir) if cfg.aslr_control else []
+
     # Resolve subsystem activation against the scope precondition.  Three
     # of the four subsystems are scope-bound; silently skipping them with
     # a stderr note when scope is missing keeps the default-on policy
@@ -354,7 +357,7 @@ def compose(
         ssh=effective_ssh,
     )
 
-    args: list[str] = []
+    args: list[str] = security_args
 
     # Per-container runtime resources (host-side socket dir + TCP ports).
     # Allocated up front so shield's nft loopback-port allowlist sees

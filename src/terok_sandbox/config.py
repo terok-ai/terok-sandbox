@@ -159,6 +159,13 @@ def experimental_enabled() -> bool:
     return False
 
 
+def _default_aslr_control() -> bool:
+    """Resolve the global ``run.aslr_control`` opt-in through its schema."""
+    from .config_schema import RawRunSection
+
+    return _validate_section(RawRunSection, "run").aslr_control
+
+
 def _default_experimental() -> bool:
     """Default-factory indirection so tests can patch ``experimental_enabled``."""
     return experimental_enabled()
@@ -347,6 +354,15 @@ class SandboxConfig:
     key in the layered ``config.yml`` at construct time; missing /
     typo'd values fall back to ``False``.  Direct
     ``SandboxConfig(experimental=…)`` always wins.
+    """
+
+    aslr_control: bool = field(default_factory=_default_aslr_control)
+    """Allow task processes to disable their ASLR for sanitizer/debugging runs.
+
+    Defaults to ``run.aslr_control`` in the layered global config. Orchestrators
+    pass the resolved project value explicitly to honor project overrides.
+    Only narrowly vetted personality arguments are granted; the remaining host
+    Podman seccomp policy stays intact. Disabled ASLR weakens exploit mitigation.
     """
 
     def with_resolved_ports(self) -> SandboxConfig:

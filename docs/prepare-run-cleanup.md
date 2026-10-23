@@ -41,6 +41,33 @@ services are scope-bound (the gate serves `<scope>.git`; the broker
 serves the scope's credentials); when `--scope` is omitted they are
 skipped with a note on stderr.
 
+## ASLR control for ThreadSanitizer
+
+Set `run.aslr_control: true` in the host's `config.yml` to allow processes
+to disable their ASLR for sanitizer/debugging runs. The default is `false`.
+Embedded callers can set `SandboxConfig(aslr_control=True)`; orchestrators
+with project settings pass the resolved project override in that config.
+Both `prepare`/`run` and `Sandbox.run`/`Sandbox.create` honor the setting.
+
+Sandbox reads the profile reported by
+`podman info --format '{{.Host.Security.SeccompProfilePath}}'`, copies it
+to the container's host-side state as `seccomp-aslr.json`, and adds exact
+`personality` argument grants: `0xffffffff` (query), and `ADDR_NO_RANDOMIZE`
+combined with `PER_LINUX` or `PER_LINUX32`, optionally `ADDR_COMPAT_LAYOUT`.
+No other syscall rule, capability condition, or architecture mapping changes.
+The source profile is not modified. Missing/unreadable profiles, profiles
+without `SCMP_ACT_ERRNO` as their default, and explicit personality denials
+fail launch rather than silently changing the host's policy.
+
+This grants permission, not a blanket ASLR disable. Disabling ASLR weakens
+exploit mitigation; use it for development tasks, not services. A host-side
+filter cannot grant syscalls inside a krun microVM; that runtime is not
+supported by this option. An outer sandbox can still deny the call.
+
+Recreate containers to change the policy; restarting an existing container
+retains its creation-time policy. Verify in a newly created container with
+`setarch --addr-no-randomize true`, then run an LLVM TSan-instrumented binary.
+
 ## Container-side contract
 
 Sandbox produces a short stream of podman flags and environment

@@ -42,6 +42,36 @@ def _make_spec(**overrides) -> RunSpec:
     return RunSpec(**defaults)
 
 
+@pytest.mark.parametrize("verb", ["run", "create"])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_aslr_control_wiring(tmp_path: Path, verb: str, enabled: bool) -> None:
+    """Both creation paths honor the opt-in without affecting capabilities or NNP."""
+    cfg = SandboxConfig(state_dir=tmp_path, aslr_control=enabled)
+    security_args = ["--security-opt", f"seccomp={tmp_path / 'profile.json'}"]
+    with (
+        patch("terok_sandbox.sandbox.aslr_control_args", return_value=security_args) as profile,
+        patch("terok_sandbox.sandbox.Sandbox.pre_start_args", return_value=[]),
+    ):
+        sandbox = Sandbox(cfg)
+        cmd = sandbox._build_cmd(_make_spec(unrestricted=False, caps=("perfmon",)), verb)
+    if enabled:
+        profile.assert_called_once_with(sandbox.task_state_dir("test-ctr"))
+        assert security_args[1] in cmd
+    else:
+        profile.assert_not_called()
+        assert not any(arg.startswith("seccomp=") for arg in cmd)
+    assert "no-new-privileges" in cmd
+    assert cmd[cmd.index("--cap-add") + 1] == "perfmon"
+
+
+def test_aslr_control_rejects_krun() -> None:
+    """A host filter cannot grant personality calls inside a microVM guest."""
+    with patch("terok_sandbox.sandbox.aslr_control_args") as profile:
+        with pytest.raises(SystemExit, match="not supported.*krun"):
+            Sandbox(SandboxConfig(aslr_control=True))._build_cmd(_make_spec(runtime="krun"))
+    profile.assert_not_called()
+
+
 class TestRunSpec:
     """Verify RunSpec dataclass."""
 
