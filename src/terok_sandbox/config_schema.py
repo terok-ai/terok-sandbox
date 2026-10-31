@@ -282,8 +282,12 @@ class RawShieldSection(BaseModel):
             f"  An unusable value warns and falls back to ``{_DEFAULT_BYPASS_DURATION}``"
         ),
     )
-    down_on_task_run: bool = True
-    on_task_restart: Literal["retain", "up"] = "retain"
+    down_on_task_run: bool = Field(
+        default=True, description="Take the shield down when a task container is created"
+    )
+    on_task_restart: Literal["retain", "up"] = Field(
+        default="retain", description="Shield policy on container restart: ``retain`` or ``up``"
+    )
 
     @field_validator("bypass_duration", mode="before")
     @classmethod
@@ -350,9 +354,13 @@ class RawServicesSection(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    mode: ServicesMode = "socket"
-    """Transport for host↔container IPC.  Default ``socket`` since 0.7.3;
-    set to ``tcp`` to opt out.  See ``docs/selinux.md``."""
+    mode: ServicesMode = Field(
+        default="socket",
+        description=(
+            "Transport for host↔container IPC.  Default ``socket``; "
+            "set to ``tcp`` to opt out.  See ``docs/selinux.md``"
+        ),
+    )
 
     clearance: ClearanceMode = Field(
         default=_DEFAULT_CLEARANCE,
@@ -409,9 +417,25 @@ class RawVaultSection(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    bypass_no_secret_protection: bool = False
-    port: int | None = Field(default=None, ge=1, le=65535)
-    ssh_signer_port: int | None = Field(default=None, ge=1, le=65535)
+    bypass_no_secret_protection: bool = Field(
+        default=False,
+        description=(
+            "**Dangerous**: mount real API keys and OAuth tokens in task containers "
+            "instead of going through the vault"
+        ),
+    )
+    port: int | None = Field(
+        default=None,
+        ge=1,
+        le=65535,
+        description="Token broker listen port; allocated automatically when unset",
+    )
+    ssh_signer_port: int | None = Field(
+        default=None,
+        ge=1,
+        le=65535,
+        description="SSH signer listen port; allocated automatically when unset",
+    )
 
 
 class RawGateServerSection(BaseModel):
@@ -434,8 +458,18 @@ class RawNetworkSection(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    port_range_start: int = Field(default=18700, ge=1024, le=65535)
-    port_range_end: int = Field(default=32700, ge=1024, le=65535)
+    port_range_start: int = Field(
+        default=18700,
+        ge=1024,
+        le=65535,
+        description="First port of the range that service and container ports come from",
+    )
+    port_range_end: int = Field(
+        default=32700,
+        ge=1024,
+        le=65535,
+        description="Last port of the range that service and container ports come from",
+    )
 
     @model_validator(mode="after")
     def _check_port_range(self) -> RawNetworkSection:
@@ -489,10 +523,19 @@ class RawHooksSection(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    pre_start: str | None = None
-    post_start: str | None = None
-    post_ready: str | None = None
-    post_stop: str | None = None
+    pre_start: str | None = Field(
+        default=None, description="Host shell command to run before the container exists"
+    )
+    post_start: str | None = Field(
+        default=None,
+        description="Host shell command to run after the container is created, maybe not ready",
+    )
+    post_ready: str | None = Field(
+        default=None, description="Host shell command to run after the container reports ready"
+    )
+    post_stop: str | None = Field(
+        default=None, description="Host shell command to run after the container has stopped"
+    )
 
 
 class RawRunSection(BaseModel):
