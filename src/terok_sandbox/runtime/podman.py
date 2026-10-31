@@ -41,6 +41,7 @@ from .protocol import (
     LogStream,
     PortReservation,
 )
+from .storage_diagnostics import storage_permission_hint
 
 _SENSITIVE_KEY_RE = re.compile(r"(?i)(KEY|TOKEN|SECRET|API|PASSWORD|PRIVATE)")
 _ALWAYS_REDACT_KEYS = frozenset({"CODE_REPO", "CLONE_FROM"})
@@ -462,6 +463,7 @@ class PodmanContainer:
             raise RuntimeError(
                 f"podman start {self.name!r} failed "
                 f"(rc={proc.returncode}): {(proc.stderr or '').strip() or '<no output>'}"
+                + storage_permission_hint(proc.stderr or "", self.name)
             )
 
     def stop(self, *, timeout: int = 10) -> None:

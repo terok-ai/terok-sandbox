@@ -35,6 +35,7 @@ from .runtime.podman import (
     unshielded_network_args,
 )
 from .runtime.seccomp import seccomp_args
+from .runtime.storage_diagnostics import storage_permission_hint
 from .setup import check_setup
 
 if TYPE_CHECKING:
@@ -836,6 +837,8 @@ class Sandbox:
             check_gpu_error(exc)
             stderr = (exc.stderr or b"").decode(errors="replace")
             msg = f"Container launch failed:\n{stderr.strip()}" if stderr else str(exc)
+            if "--name" in cmd:
+                msg += storage_permission_hint(stderr, cmd[cmd.index("--name") + 1])
             raise SystemExit(msg) from exc
 
     def run(self, spec: RunSpec, *, hooks: LifecycleHooks | None = None) -> None:
