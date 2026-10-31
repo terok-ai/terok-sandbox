@@ -578,6 +578,8 @@ def store_passphrase_in_desktop_keyring(passphrase: str) -> bool:
     ``True`` requires the same backend to return the exact value within
     the read timeout.  ``False`` does not prove that nothing was written:
     callers must preserve their source until verification succeeds.
+    Failure warnings name the operation and exception type, never backend
+    error text or passphrase values.
 
     Refuses to store an empty value — SQLCipher interprets it as
     "no encryption", and a later resolve hit on a blank desktop-keyring entry
@@ -585,33 +587,46 @@ def store_passphrase_in_desktop_keyring(passphrase: str) -> bool:
     """
     if not passphrase:
         raise ValueError("refusing to store an empty passphrase in the desktop keyring")
+    operation = "backend selection"
     try:
         import keyring  # noqa: PLC0415
 
         selected = keyring.get_keyring()
         for backend in _desktop_keyring_backends(selected):
+            operation = "backend selection"
             _reject_implicit_unlock_backend(backend)
+            operation = "write"
             try:
                 backend.set_password(DESKTOP_KEYRING_SERVICE, DESKTOP_KEYRING_USERNAME, passphrase)
             except NotImplementedError:
                 continue
+            operation = "readback"
             stored = _call_with_timeout(
                 partial(_read_desktop_keyring_backend, backend), _DESKTOP_KEYRING_READ_TIMEOUT_S
             )
             if stored is None or not secrets.compare_digest(
                 stored.encode("utf-8"), passphrase.encode("utf-8")
             ):
+                _logger.warning("Desktop keyring readback failed: no matching passphrase returned")
                 return False
             if selected is backend:
                 return True
+            operation = "resolver readback"
             resolved = _call_with_timeout(
                 lambda: _read_desktop_keyring_backend(selected), _DESKTOP_KEYRING_READ_TIMEOUT_S
             )
-            return resolved is not None and secrets.compare_digest(
+            verified = resolved is not None and secrets.compare_digest(
                 resolved.encode("utf-8"), passphrase.encode("utf-8")
             )
+            if not verified:
+                _logger.warning(
+                    "Desktop keyring resolver readback failed: no matching passphrase returned"
+                )
+            return verified
+        _logger.warning("Desktop keyring write failed: no writable backend")
         return False
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - backend failures must not expose secret error text
+        _logger.warning("Desktop keyring %s failed (%s)", operation, type(exc).__name__)
         return False
 
 

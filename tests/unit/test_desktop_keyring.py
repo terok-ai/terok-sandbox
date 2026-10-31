@@ -63,7 +63,7 @@ def secret_service(monkeypatch: pytest.MonkeyPatch) -> tuple[SecretService, Mock
 class TestVerifiedDesktopStore:
     """Writing alone is not a transfer success; the value must be retrievable."""
 
-    def test_exact_value_read_back(self, backend: Mock) -> None:
+    def test_exact_value_read_back(self, backend: Mock, caplog: pytest.LogCaptureFixture) -> None:
         assert store_passphrase_in_desktop_keyring(_PASSPHRASE)
         backend.set_password.assert_called_once_with(
             DESKTOP_KEYRING_SERVICE, DESKTOP_KEYRING_USERNAME, _PASSPHRASE
@@ -71,20 +71,52 @@ class TestVerifiedDesktopStore:
         backend.get_password.assert_called_once_with(
             DESKTOP_KEYRING_SERVICE, DESKTOP_KEYRING_USERNAME
         )
+        assert not caplog.records
 
     @pytest.mark.parametrize("retrieved", [None, "", "wrong-passphrase"])
-    def test_missing_or_wrong_readback_is_not_success(self, backend: Mock, retrieved: str | None):
+    def test_missing_or_wrong_readback_is_not_success(
+        self, backend: Mock, retrieved: str | None, caplog: pytest.LogCaptureFixture
+    ) -> None:
         backend.get_password.return_value = retrieved
         assert not store_passphrase_in_desktop_keyring(_PASSPHRASE)
         backend.delete_password.assert_not_called()
+        assert caplog.messages == [
+            "Desktop keyring readback failed: no matching passphrase returned"
+        ]
 
-    @pytest.mark.parametrize("operation", ["set_password", "get_password"])
+    @pytest.mark.parametrize(
+        ("operation", "stage"),
+        [
+            ("get_keyring", "backend selection"),
+            ("set_password", "write"),
+            ("get_password", "readback"),
+        ],
+    )
     def test_backend_error_does_not_expose_secret(
-        self, backend: Mock, operation: str, caplog: pytest.LogCaptureFixture
+        self,
+        backend: Mock,
+        operation: str,
+        stage: str,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
-        getattr(backend, operation).side_effect = RuntimeError(_PASSPHRASE)
+        failure = Mock(side_effect=RuntimeError(_PASSPHRASE))
+        monkeypatch.setattr(keyring if operation == "get_keyring" else backend, operation, failure)
         assert not store_passphrase_in_desktop_keyring(_PASSPHRASE)
+        assert caplog.messages == [f"Desktop keyring {stage} failed (RuntimeError)"]
         assert _PASSPHRASE not in caplog.text
+        [record] = caplog.records
+        assert record.args == (stage, "RuntimeError")
+        assert record.exc_info is None
+        assert record.stack_info is None
+
+    def test_readonly_backend_reports_no_writer(
+        self, backend: Mock, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        backend.set_password.side_effect = NotImplementedError(_PASSPHRASE)
+        assert not store_passphrase_in_desktop_keyring(_PASSPHRASE)
+        assert caplog.messages == ["Desktop keyring write failed: no writable backend"]
+        backend.get_password.assert_not_called()
 
     def test_noop_null_backend_is_not_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(keyring, "get_keyring", lambda: null.Keyring())
@@ -96,7 +128,7 @@ class TestVerifiedDesktopStore:
         backend.set_password.assert_not_called()
 
     def test_readback_timeout_preserves_failure(
-        self, backend: Mock, monkeypatch: pytest.MonkeyPatch
+        self, backend: Mock, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
         release = threading.Event()
         finished = threading.Event()
@@ -113,6 +145,7 @@ class TestVerifiedDesktopStore:
         try:
             assert not store_passphrase_in_desktop_keyring(_PASSPHRASE)
             backend.set_password.assert_called_once()
+            assert "Desktop keyring readback failed (TimeoutError)" in caplog.messages
         finally:
             release.set()
             assert finished.wait(2)
@@ -140,11 +173,33 @@ class TestVerifiedDesktopStore:
         writable.set_password.assert_called_once()
 
     def test_chainer_write_verifies_destination_and_resolution(
-        self, backend: Mock, monkeypatch: pytest.MonkeyPatch
+        self, backend: Mock, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
         _select_chain(monkeypatch, backend)
         assert store_passphrase_in_desktop_keyring(_PASSPHRASE)
         assert backend.get_password.call_count == 2
+        assert not caplog.records
+
+    @pytest.mark.parametrize("resolved", [None, "wrong-passphrase", RuntimeError(_PASSPHRASE)])
+    def test_failed_chain_readback_reports_only_the_reason(
+        self,
+        backend: Mock,
+        monkeypatch: pytest.MonkeyPatch,
+        resolved: str | None | RuntimeError,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        _select_chain(monkeypatch, backend)
+        backend.get_password.side_effect = [_PASSPHRASE, resolved]
+        assert not store_passphrase_in_desktop_keyring(_PASSPHRASE)
+        assert caplog.messages == [
+            "Desktop keyring resolver readback failed (RuntimeError)"
+            if isinstance(resolved, RuntimeError)
+            else "Desktop keyring resolver readback failed: no matching passphrase returned"
+        ]
+        assert _PASSPHRASE not in caplog.text
+        [record] = caplog.records
+        assert record.exc_info is None
+        assert record.stack_info is None
 
     def test_secret_service_readback_does_not_unlock(
         self, secret_service: tuple[SecretService, Mock, Mock], monkeypatch: pytest.MonkeyPatch
