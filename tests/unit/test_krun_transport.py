@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from terok_sandbox.runtime import ExecResult, KrunTransport
+from terok_sandbox.runtime import EXEC_OUTPUT_LIMIT, ExecResult, KrunTransport
 from terok_sandbox.runtime.krun_transport import (
     DEFAULT_GUEST_SSHD_PORT,
     TcpEndpoint,
@@ -144,40 +144,29 @@ class TestTcpSSHTransportArgv:
 
 
 class TestTcpSSHTransportExec:
-    """`exec` shells out and packages the result into an `ExecResult`."""
+    """`exec` quotes the remote command and captures its reply through the shared helper."""
 
     def test_exec_invokes_ssh_with_remote_command(self) -> None:
-        with patch("subprocess.run") as run:
-            run.return_value = subprocess.CompletedProcess(
-                args=[], returncode=0, stdout="hi\n", stderr=""
-            )
-            result = _make_transport(port=12345).exec(_StubContainer("ctr"), ["echo", "hi"])
-        argv = run.call_args[0][0]
+        with patch("terok_sandbox.runtime.krun_transport.run_captured") as capture:
+            capture.return_value = ExecResult(exit_code=0, stdout="hi\n", stderr="")
+            result = _make_transport(port=12345).exec(_StubContainer("ctr"), ["echo", "a;b"])
+        argv = capture.call_args.args[0]
         # `--` separates ssh flags from the (single) remote command string.
         # Argv semantics are preserved across sshd's shell-parsing by
         # shlex-quoting each token into one string; the transport
         # additionally wraps it in ``cd /workspace && exec`` so cwd
         # matches the image's WORKDIR (cf. crun's podman exec).
-        assert "--" in argv
         sep = argv.index("--")
-        assert argv[sep + 1 :] == ["cd /workspace && exec echo hi"]
-        assert result == ExecResult(exit_code=0, stdout="hi\n", stderr="")
+        assert argv[sep + 1 :] == ["cd /workspace && exec echo 'a;b'"]
+        assert capture.call_args.kwargs == {"timeout": None, "max_output_bytes": EXEC_OUTPUT_LIMIT}
+        assert result is capture.return_value
 
-    def test_exec_propagates_nonzero_exit_and_stderr(self) -> None:
-        with patch("subprocess.run") as run:
-            run.return_value = subprocess.CompletedProcess(
-                args=[], returncode=42, stdout="", stderr="boom\n"
+    def test_exec_propagates_timeout_and_budget(self) -> None:
+        with patch("terok_sandbox.runtime.krun_transport.run_captured") as capture:
+            _make_transport().exec(
+                _StubContainer("ctr"), ["true"], timeout=5.0, max_output_bytes=100
             )
-            result = _make_transport().exec(_StubContainer("ctr"), ["false"])
-        assert result == ExecResult(exit_code=42, stdout="", stderr="boom\n")
-
-    def test_exec_propagates_timeout(self) -> None:
-        with patch("subprocess.run") as run:
-            run.return_value = subprocess.CompletedProcess(
-                args=[], returncode=0, stdout="", stderr=""
-            )
-            _make_transport().exec(_StubContainer("ctr"), ["true"], timeout=5.0)
-        assert run.call_args.kwargs.get("timeout") == 5.0
+        assert capture.call_args.kwargs == {"timeout": 5.0, "max_output_bytes": 100}
 
     def test_exec_resolves_endpoint_per_container(self) -> None:
         """The endpoint resolver is called with the actual container handle."""
@@ -191,10 +180,7 @@ class TestTcpSSHTransportExec:
             identity_file=Path("/tmp/host.key"),  # noqa: S108
             endpoint_resolver=resolver,
         )
-        with patch("subprocess.run") as run:
-            run.return_value = subprocess.CompletedProcess(
-                args=[], returncode=0, stdout="", stderr=""
-            )
+        with patch("terok_sandbox.runtime.krun_transport.run_captured"):
             transport.exec(_StubContainer("task-abc"), ["true"])
         assert seen == ["task-abc"]
 
@@ -256,15 +242,9 @@ class TestTcpSSHTransportExecStdio:
         in-guest user's shell; the transport must quote each token so
         the API's argv contract holds across the shell boundary.
         """
-        with patch("subprocess.run") as run:
-            run.return_value = subprocess.CompletedProcess(
-                args=[], returncode=0, stdout="", stderr=""
-            )
-            _make_transport().exec(
-                _StubContainer("ctr"),
-                ["echo", "; rm -rf /"],
-            )
-        remote = run.call_args[0][0][-1]
+        with patch("terok_sandbox.runtime.krun_transport.run_captured") as capture:
+            _make_transport().exec(_StubContainer("ctr"), ["echo", "; rm -rf /"])
+        remote = capture.call_args.args[0][-1]
         # The injected metachar block survives only as a quoted literal —
         # the remote shell will see ``echo '; rm -rf /'`` and treat the
         # second token as the literal echoed string.

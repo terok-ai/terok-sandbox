@@ -47,19 +47,22 @@ def test_subprocess_uses_current_profile(
     """The same object follows PATH changes and cannot run a cwd lookalike."""
     runtime = PodmanRuntime()
     sandbox = Sandbox()
-    with patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, "", "")) as run:
+    with (
+        patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, "", "")) as run,
+        patch("terok_sandbox.runtime.podman.run_captured") as capture,
+    ):
         for profile in host_profiles:
             monkeypatch.setenv("PATH", f":.:relative:{profile}")
             if boundary == "runtime":
                 runtime.exec(runtime.container("ctr"), ["git", "status"])
-                tool = "podman"
+                call, tool = capture, "podman"
             elif boundary == "sandbox":
                 sandbox._exec_podman(["podman", "start", "ctr"])
-                tool = "podman"
+                call, tool = run, "podman"
             else:
                 _git(profile, "status")
-                tool = "git"
-            assert run.call_args.kwargs["executable"] == str(profile / tool)
+                call, tool = run, "git"
+            assert call.call_args.kwargs["executable"] == str(profile / tool)
 
 
 def test_login_argv_uses_current_profile(

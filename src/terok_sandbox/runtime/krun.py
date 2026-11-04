@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, BinaryIO, Protocol, runtime_checkable
 
 from .podman import PodmanContainer, PodmanRuntime
 from .protocol import (
+    EXEC_OUTPUT_LIMIT,
     Container,
     ContainerRemoveResult,
     ExecResult,
@@ -129,11 +130,14 @@ class KrunRuntime:
         cmd: list[str],
         *,
         timeout: float | None = None,
+        max_output_bytes: int = EXEC_OUTPUT_LIMIT,
     ) -> ExecResult:
         """Route to the transport — typically SSH-over-passt-TCP."""
         if not cmd:
             raise ValueError("exec argv must not be empty")
-        return self._transport.exec(container, cmd, timeout=timeout)
+        return self._transport.exec(
+            container, cmd, timeout=timeout, max_output_bytes=max_output_bytes
+        )
 
     def exec_stdio(
         self,
@@ -196,6 +200,7 @@ class KrunTransport(Protocol):
         cmd: list[str],
         *,
         timeout: float | None = None,
+        max_output_bytes: int = EXEC_OUTPUT_LIMIT,
     ) -> ExecResult:
         """Run *cmd* inside the guest backed by *container*; return its outcome."""
         ...
@@ -264,11 +269,12 @@ class FakeKrunTransport:
         cmd: list[str],
         *,
         timeout: float | None = None,
+        max_output_bytes: int = EXEC_OUTPUT_LIMIT,
     ) -> ExecResult:
         """Return a pre-registered result, or empty success."""
-        # ``timeout`` is part of the protocol shape; the fake doesn't
-        # block on anything, so there is nothing to time out on.
-        del timeout
+        # Both keyword arguments are part of the protocol shape; the fake
+        # neither blocks nor produces output, so neither applies.
+        del timeout, max_output_bytes
         key = (container.name, tuple(cmd))
         self.exec_calls.append(key)
         return self._results.get(key, ExecResult(exit_code=0, stdout="", stderr=""))

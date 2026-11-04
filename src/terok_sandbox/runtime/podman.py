@@ -30,10 +30,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, NoReturn
 
-from terok_util import require_host_tool
+from terok_util import require_host_tool, sanitize_log_text
 
 from .._util import log_debug, log_warning
+from ._capture import run_captured
 from .protocol import (
+    EXEC_OUTPUT_LIMIT,
     Container,
     ContainerInspection,
     ContainerRemoveResult,
@@ -1319,11 +1321,14 @@ class PodmanRuntime:
         cmd: list[str],
         *,
         timeout: float | None = None,
+        max_output_bytes: int = EXEC_OUTPUT_LIMIT,
     ) -> ExecResult:
         """Run *cmd* inside *container* via ``podman exec``.
 
-        Lets [`FileNotFoundError`][FileNotFoundError] (podman missing) and
-        [`subprocess.TimeoutExpired`][subprocess.TimeoutExpired] propagate unchanged.
+        Lets [`FileNotFoundError`][FileNotFoundError] (podman missing),
+        [`subprocess.TimeoutExpired`][subprocess.TimeoutExpired] and
+        [`ExecOutputLimitError`][terok_sandbox.runtime.protocol.ExecOutputLimitError]
+        propagate unchanged.
 
         Raises [`ValueError`][ValueError] if *cmd* is empty — podman exec with
         no argv is never a valid request and catching it here avoids a
@@ -1335,18 +1340,11 @@ class PodmanRuntime:
             f"PodmanRuntime.exec({container.name}, cmd[0]={cmd[0]!r}, "
             f"argc={len(cmd)}, timeout={timeout})"
         )
-        proc = subprocess.run(  # nosec B603 B607 - argv built from fixed verbs + caller-controlled scope/container names - binary PATH lookup is the cross-distro contract
+        return run_captured(
             ["podman", "exec", container.name, *cmd],
             executable=require_host_tool("podman"),
-            capture_output=True,
-            text=True,
             timeout=timeout,
-            check=False,
-        )
-        return ExecResult(
-            exit_code=proc.returncode,
-            stdout=proc.stdout or "",
-            stderr=proc.stderr or "",
+            max_output_bytes=max_output_bytes,
         )
 
     def exec_stdio(
@@ -1827,7 +1825,7 @@ def _stream_initial_logs(
                     raw_line, buf = buf.split(b"\n", 1)
                     line = raw_line.decode("utf-8", errors="replace").strip()
                     if line:
-                        print(line, file=sys.stdout, flush=True)
+                        print(sanitize_log_text(line, color=sys.stdout.isatty()), flush=True)
                         if ready_check(line):
                             holder[0] = True
                             return
@@ -1835,7 +1833,7 @@ def _stream_initial_logs(
             if buf:
                 line = buf.decode("utf-8", errors="replace").strip()
                 if line:
-                    print(line, file=sys.stdout, flush=True)
+                    print(sanitize_log_text(line, color=sys.stdout.isatty()), flush=True)
                     if ready_check(line):
                         holder[0] = True
         except Exception as exc:  # noqa: BLE001

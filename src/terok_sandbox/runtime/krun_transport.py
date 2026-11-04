@@ -64,8 +64,9 @@ from typing import BinaryIO
 
 from terok_util import require_host_tool
 
+from ._capture import run_captured
 from .podman import _start_stdio_pumps
-from .protocol import Container, ExecResult
+from .protocol import EXEC_OUTPUT_LIMIT, Container, ExecResult
 
 # ── Public defaults ─────────────────────────────────────────────────────────
 
@@ -166,29 +167,20 @@ class TcpSSHTransport:
         cmd: list[str],
         *,
         timeout: float | None = None,
+        max_output_bytes: int = EXEC_OUTPUT_LIMIT,
     ) -> ExecResult:
         """Run *cmd* in the guest and return its outcome.
 
         Each *cmd* token is ``shlex.quote``d into a single remote
         command string so the in-guest shell treats embedded
         metacharacters as literal data — argv semantics are preserved
-        across the inherently-shell-parsed ssh wire format.
+        across the inherently-shell-parsed ssh wire format.  The reply is
+        captured within *max_output_bytes*; see
+        [`ContainerRuntime.exec`][terok_sandbox.runtime.protocol.ContainerRuntime.exec].
         """
         endpoint = self._resolver(container)
-        remote_str = _remote_command(cmd)
-        argv = [*self._ssh_argv(endpoint), "--", remote_str]
-        proc = subprocess.run(  # nosec B603 - argv built from fixed verbs + caller-controlled scope/container names
-            argv,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
-        return ExecResult(
-            exit_code=proc.returncode,
-            stdout=proc.stdout or "",
-            stderr=proc.stderr or "",
-        )
+        argv = [*self._ssh_argv(endpoint), "--", _remote_command(cmd)]
+        return run_captured(argv, timeout=timeout, max_output_bytes=max_output_bytes)
 
     def exec_stdio(
         self,

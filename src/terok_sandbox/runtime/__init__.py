@@ -36,10 +36,12 @@ from .podman import (
     PodmanRuntime,
 )
 from .protocol import (
+    EXEC_OUTPUT_LIMIT,
     Container,
     ContainerInspection,
     ContainerRemoveResult,
     ContainerRuntime,
+    ExecOutputLimitError,
     ExecResult,
     Image,
     ImageInspection,
@@ -56,6 +58,8 @@ __all__ = [
     "ContainerRemoveResult",
     "ContainerRuntime",
     "RuntimeContainer",
+    "EXEC_OUTPUT_LIMIT",
+    "ExecOutputLimitError",
     "ExecResult",
     "Image",
     "ImageInspection",

@@ -19,6 +19,7 @@ from pathlib import Path  # noqa: TC003 - used in a Protocol argument type
 from typing import BinaryIO
 
 from .protocol import (
+    EXEC_OUTPUT_LIMIT,
     Container,
     ContainerInspection,
     ContainerRemoveResult,
@@ -444,8 +445,10 @@ class NullRuntime:
         cmd: list[str],
         *,
         timeout: float | None = None,
+        max_output_bytes: int = EXEC_OUTPUT_LIMIT,
     ) -> ExecResult:
         """Return a pre-registered result, or a default empty success."""
+        del timeout, max_output_bytes  # protocol shape; nothing to bound in a scripted reply
         key = (container.name, tuple(cmd))
         return self._exec_results.get(key, ExecResult(exit_code=0, stdout="", stderr=""))
 

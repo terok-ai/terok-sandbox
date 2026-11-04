@@ -6,6 +6,7 @@
 - Use the launching host PATH for tools and setup-bound standalone Python hooks, including on NixOS.
 - Serialize setup and uninstall with the other packages.
 - Refuse stale initial passphrase provisioning without replacing an existing key.
+- Capture every `exec` reply within a byte budget (16 MiB by default) and one deadline; overflow raises `ExecOutputLimitError` instead of returning partial output. Container log lines and doctor details are terminal-safe.
 
 ## v0.5.0 — Past Prologue
 

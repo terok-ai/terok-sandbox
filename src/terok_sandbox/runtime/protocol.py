@@ -52,6 +52,17 @@ class ImageInspection:
     labels: dict[str, str]
 
 
+EXEC_OUTPUT_LIMIT = 16 * 1024 * 1024
+"""Default byte budget for the combined stdout and stderr of
+[`ContainerRuntime.exec`][terok_sandbox.runtime.protocol.ContainerRuntime.exec].
+Generous for any reply a caller evaluates; small enough that a flood from
+inside a container cannot grow host memory without bound."""
+
+
+class ExecOutputLimitError(RuntimeError):
+    """An exec reply exceeded its byte budget; no partial output is returned."""
+
+
 @dataclass(frozen=True)
 class ExecResult:
     """Outcome of [`ContainerRuntime.exec`][terok_sandbox.runtime.protocol.ContainerRuntime.exec].
@@ -366,12 +377,20 @@ class ContainerRuntime(Protocol):
         cmd: list[str],
         *,
         timeout: float | None = None,
+        max_output_bytes: int = EXEC_OUTPUT_LIMIT,
     ) -> ExecResult:
         """Run *cmd* inside *container* and return its completion record.
 
         The operation that diverges most across backends: podman uses
         ``podman exec``; the krun backend uses SSH over a passt-forwarded
         TCP port.
+
+        Combined stdout and stderr are captured within *max_output_bytes*;
+        overflow raises
+        [`ExecOutputLimitError`][terok_sandbox.runtime.protocol.ExecOutputLimitError]
+        instead of returning partial output.  The command reads EOF on
+        stdin, and its output decodes as UTF-8 with replacement for
+        invalid bytes.
         """
         ...
 

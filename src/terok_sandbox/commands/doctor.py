@@ -9,7 +9,7 @@ import subprocess  # nosec B404 - doctor probes shell out via subprocess.run - d
 import sys
 from typing import TYPE_CHECKING
 
-from terok_util import LazyHandler, require_host_tool
+from terok_util import LazyHandler, require_host_tool, sanitize_tty
 
 from ._types import CommandDef
 
@@ -78,7 +78,7 @@ def _handle_doctor(*, cfg: SandboxConfig | None = None) -> None:
         else:
             verdict = check.evaluate(0, "", "")
         tag = markers.get(verdict.severity, verdict.severity)
-        print(f"  {check.label} .... {tag} ({verdict.detail})")
+        print(f"  {check.label} .... {tag} ({sanitize_tty(verdict.detail)})")
         if verdict.severity == "error" or worst == "error":
             worst = "error"
         elif verdict.severity == "warn" or worst == "warn":

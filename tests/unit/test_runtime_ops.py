@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from terok_sandbox import PodmanRuntime
+from terok_sandbox.runtime import EXEC_OUTPUT_LIMIT, ExecOutputLimitError, ExecResult
 from terok_sandbox.runtime.podman import (
     _DEFAULT_LOGIN_COMMAND,
     _START_TIMEOUT,
@@ -25,70 +26,48 @@ from tests.constants import MISSING_PODMAN_INIT, MOCK_BASE, MOCK_HOST_BIN
 
 
 class TestExec:
-    """PodmanRuntime.exec delegates to ``podman exec`` with correct args."""
+    """PodmanRuntime.exec runs ``podman exec`` through the shared bounded capture."""
 
-    @patch("terok_sandbox.runtime.podman.subprocess.run")
-    def test_calls_podman_exec(self, mock_run) -> None:
-        """Builds the expected argv and returns an [`ExecResult`][terok_sandbox.ExecResult]."""
-        mock_run.return_value = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout="ok\n", stderr=""
-        )
+    @patch("terok_sandbox.runtime.podman.run_captured")
+    def test_calls_podman_exec(self, capture) -> None:
+        """Builds the expected argv and returns the captured [`ExecResult`][terok_sandbox.ExecResult]."""
+        capture.return_value = ExecResult(exit_code=0, stdout="ok\n", stderr="")
         runtime = PodmanRuntime()
         result = runtime.exec(runtime.container("mycontainer"), ["cat", "/etc/hostname"])
 
-        mock_run.assert_called_once_with(
+        capture.assert_called_once_with(
             ["podman", "exec", "mycontainer", "cat", "/etc/hostname"],
             executable=str(MOCK_HOST_BIN / "podman"),
-            capture_output=True,
-            text=True,
             timeout=None,
-            check=False,
+            max_output_bytes=EXEC_OUTPUT_LIMIT,
         )
-        assert result.exit_code == 0
-        assert result.stdout == "ok\n"
-        assert result.ok
+        assert result is capture.return_value
 
-    @patch("terok_sandbox.runtime.podman.subprocess.run")
-    def test_custom_timeout(self, mock_run) -> None:
-        """*timeout* propagates to the subprocess call."""
-        mock_run.return_value = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout="", stderr=""
-        )
+    @patch("terok_sandbox.runtime.podman.run_captured")
+    def test_timeout_and_budget_propagate(self, capture) -> None:
+        """*timeout* and *max_output_bytes* reach the capture unchanged."""
         runtime = PodmanRuntime()
-        runtime.exec(runtime.container("c1"), ["true"], timeout=5)
+        runtime.exec(runtime.container("c1"), ["true"], timeout=5, max_output_bytes=100)
 
-        assert mock_run.call_args[1]["timeout"] == 5
+        assert capture.call_args.kwargs["timeout"] == 5
+        assert capture.call_args.kwargs["max_output_bytes"] == 100
 
-    @patch("terok_sandbox.runtime.podman.subprocess.run")
-    def test_nonzero_returncode_does_not_raise(self, mock_run) -> None:
-        """Non-zero exit codes surface in ``ExecResult`` rather than raising."""
-        mock_run.return_value = subprocess.CompletedProcess(
-            args=[], returncode=1, stdout="", stderr="fail"
-        )
+    @pytest.mark.parametrize(
+        "error",
+        [
+            FileNotFoundError("podman"),
+            subprocess.TimeoutExpired(cmd="podman", timeout=30),
+            ExecOutputLimitError("Command output exceeded 1 bytes"),
+        ],
+        ids=["missing-podman", "timeout", "overflow"],
+    )
+    @patch("terok_sandbox.runtime.podman.run_captured")
+    def test_capture_failures_propagate(self, capture, error) -> None:
+        """A missing binary, a deadline and an overflow surface unchanged to the caller."""
+        capture.side_effect = error
         runtime = PodmanRuntime()
-        result = runtime.exec(runtime.container("c1"), ["false"])
-
-        assert result.exit_code == 1
-        assert result.stderr == "fail"
-        assert not result.ok
-
-    @patch("terok_sandbox.runtime.podman.subprocess.run")
-    def test_filenotfounderror_propagates(self, mock_run) -> None:
-        """Missing podman binary propagates unchanged."""
-        mock_run.side_effect = FileNotFoundError("podman")
-
-        runtime = PodmanRuntime()
-        with pytest.raises(FileNotFoundError):
+        with pytest.raises(type(error)):
             runtime.exec(runtime.container("c1"), ["true"])
-
-    @patch("terok_sandbox.runtime.podman.subprocess.run")
-    def test_timeout_expired_propagates(self, mock_run) -> None:
-        """TimeoutExpired propagates unchanged."""
-        mock_run.side_effect = subprocess.TimeoutExpired(cmd="podman", timeout=30)
-
-        runtime = PodmanRuntime()
-        with pytest.raises(subprocess.TimeoutExpired):
-            runtime.exec(runtime.container("c1"), ["sleep", "99"], timeout=30)
 
 
 class TestLoginCommand:
