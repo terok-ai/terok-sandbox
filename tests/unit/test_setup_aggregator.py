@@ -125,6 +125,36 @@ class TestComponentGuards:
             _handle_sandbox_setup(show=True)
         install_spies["legacy"].assert_not_called()
 
+    @pytest.mark.parametrize("component", [None, "apparmor"])
+    @pytest.mark.parametrize("option", ["with_wayland", "with_wayland_direct"])
+    def test_wayland_flag_cannot_run_aggregate_or_apparmor_setup(
+        self, install_spies, component, option: str
+    ) -> None:
+        with pytest.raises(
+            SystemExit, match=f"--{option.replace('_', '-')} requires 'setup selinux'"
+        ):
+            _handle_sandbox_setup(component=component, **{option: True})
+        install_spies["legacy"].assert_not_called()
+
+    @pytest.mark.parametrize("filtered,direct", [(True, False), (False, True), (True, True)])
+    def test_wayland_selection_reaches_component_setup(
+        self, install_spies, filtered: bool, direct: bool
+    ) -> None:
+        with patch("terok_sandbox._setup_manual.handle_setup_component", return_value=0) as handler:
+            assert (
+                _handle_sandbox_setup(
+                    component="selinux",
+                    with_wayland=filtered,
+                    with_wayland_direct=direct,
+                    show=True,
+                )
+                == 0
+            )
+        assert handler.call_args.kwargs["with_wayland"] is filtered
+        assert handler.call_args.kwargs["with_wayland_direct"] is direct
+        assert handler.call_args.kwargs["show_only"] is True
+        install_spies["legacy"].assert_not_called()
+
 
 class TestSandboxSetup:
     """``sandbox setup`` orchestrates the install phases in fixed order."""

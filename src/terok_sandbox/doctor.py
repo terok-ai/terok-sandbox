@@ -119,12 +119,43 @@ def sandbox_doctor_checks(
     ]
     if container_id and container_name:
         checks.append(_make_supervisor_children_check(container_id, container_name))
+    if container_name and (wayland_check := _make_wayland_check(container_name)):
+        checks.append(wayland_check)
     if token_broker_port is not None:
         checks.append(_make_token_broker_check(token_broker_port))
     if ssh_signer_port is not None:
         checks.append(_make_ssh_signer_check(ssh_signer_port))
     checks.append(_make_shield_check(desired_shield_state))
     return checks
+
+
+def _make_wayland_check(container_name: str) -> DoctorCheck | None:
+    """Check optional desktop access from the container, including proxy upstream access."""
+    from .config import SandboxConfig
+    from .supervisor.sidecar import load_sidecar
+    from .wayland import WAYLAND_PROBE, WaylandMode
+
+    path = SandboxConfig().sidecar_path(container_name)
+    sidecar = load_sidecar(path) if path.exists() else None
+    if sidecar is None or sidecar.wayland.mode == WaylandMode.NONE:
+        return None
+    session = sidecar.wayland
+
+    def evaluate(rc: int, _stdout: str, stderr: str) -> CheckVerdict:
+        """Keep GUI failure separate from required supervisor services."""
+        if session.error:
+            return CheckVerdict("warn", f"Wayland ({session.mode}) unavailable: {session.error}")
+        if rc:
+            return CheckVerdict("warn", f"Wayland endpoint check failed: {stderr.strip()}")
+        return CheckVerdict("ok", f"Wayland ({session.mode}) endpoint is reachable")
+
+    return DoctorCheck(
+        category="bridge",
+        label=f"Wayland ({session.mode})",
+        probe_cmd=WAYLAND_PROBE,
+        evaluate=evaluate,
+        host_side=bool(session.error),
+    )
 
 
 def _make_supervisor_children_check(container_id: str, container_name: str) -> DoctorCheck:

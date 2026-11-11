@@ -1,0 +1,119 @@
+# SPDX-FileCopyrightText: 2026 Jiri Vyskocil
+# SPDX-License-Identifier: Apache-2.0
+
+module terok_wayland 1.1;
+
+# Optional confinement for the trusted Wayland supervisor child and its
+# unmodified wl-mitm subprocess. The launcher selects this domain before the
+# Python child exec; there is no binary relabel or automatic transition.
+# The child arms parent-death signals after this transition. Its same-domain
+# wl-mitm exec retains those signals and requires a narrower Landlock policy.
+#
+# The proxy's kernel socket SID is its process domain. Containers may connect
+# to that domain, never directly to the compositor's unconfined_t domain.
+# No TCP/UDP, D-Bus, ptrace or GPU-device-open permission is granted here.
+#
+# SELinux cannot distinguish the selected compositor from other unconfined_t
+# sockets with the same user_tmp_t inode label. These upstream permissions are
+# therefore not an exact-endpoint IPC sandbox after a proxy compromise.
+# Protocol filtering and the immutable proxy configuration remain necessary.
+#
+# Install: sudo bash install_policy.sh --with-wayland
+# Remove:  sudo semodule -r terok_wayland
+
+require {
+    attribute domain;
+    attribute file_type;
+    type unconfined_t, container_runtime_t, container_t, container_file_t;
+    type bin_t, home_bin_t, usr_t, lib_t, ld_so_t, ld_so_cache_t, etc_t;
+    type user_home_t, data_home_t, user_tmp_t, tmpfs_t, proc_t, null_device_t, security_t;
+    role unconfined_r, system_r;
+    class process { transition setexec fork sigchld signal sigkill signull getattr getsched setrlimit siginh rlimitinh };
+    class process2 { nnp_transition nosuid_transition };
+    class dir { create open read search getattr write setattr add_name remove_name };
+    class file { create entrypoint execute execute_no_trans read write append getattr open map };
+    class lnk_file { read getattr };
+    class sock_file { create unlink write getattr setattr };
+    class unix_stream_socket { create bind listen accept connect connectto read write getattr getopt setopt shutdown };
+    class fd use;
+    class fifo_file { read write getattr };
+    class chr_file { read write getattr open };
+    class security check_context;
+}
+
+type terok_wayland_t, domain;
+role unconfined_r types terok_wayland_t;
+role system_r types terok_wayland_t;
+
+# Preserve no_new_privs and nosuid mounts rather than weakening the launcher.
+allow { unconfined_t container_runtime_t } self:process setexec;
+allow { unconfined_t container_runtime_t } terok_wayland_t:process { transition siginh rlimitinh signal sigkill signull getattr };
+allow { unconfined_t container_runtime_t } terok_wayland_t:process2 { nnp_transition nosuid_transition };
+allow terok_wayland_t { unconfined_t container_runtime_t }:process sigchld;
+allow terok_wayland_t self:process { fork sigchld signal getattr getsched setrlimit };
+
+# User-installed binaries keep their existing labels. Landlock selects the
+# exact executable; no executable-file creation is granted to this domain.
+allow { unconfined_t container_runtime_t } { bin_t home_bin_t usr_t user_home_t }:file { execute read getattr open };
+allow terok_wayland_t file_type:dir { search getattr };
+allow terok_wayland_t { bin_t home_bin_t usr_t user_home_t }:file { entrypoint execute execute_no_trans read getattr open map };
+allow terok_wayland_t { lib_t ld_so_t }:file { execute read getattr open map };
+allow terok_wayland_t { ld_so_cache_t etc_t }:file { read getattr open map };
+allow terok_wayland_t { bin_t home_bin_t usr_t user_home_t lib_t ld_so_t etc_t }:dir read;
+allow terok_wayland_t { bin_t home_bin_t usr_t user_home_t lib_t ld_so_t etc_t proc_t }:lnk_file { read getattr };
+
+# pipx environments under ~/.local/share use data_home_t. The trusted Python
+# wrapper needs their configuration, imports, symlinks and native libraries.
+# execute permits library mappings, not a program entrypoint. These type-wide
+# grants add no writes; the proxy's Landlock rules still exclude the pipx tree.
+allow terok_wayland_t data_home_t:dir { open read };
+allow terok_wayland_t data_home_t:lnk_file { read getattr };
+allow terok_wayland_t data_home_t:file { read getattr open map execute };
+
+allow terok_wayland_t proc_t:dir { search getattr };
+allow terok_wayland_t self:dir { search getattr };
+allow terok_wayland_t self:lnk_file { read getattr };
+allow terok_wayland_t self:file { read getattr open };
+
+# The trusted child verifies its domain again before the same-domain proxy
+# exec. Querying a context uses selinuxfs, but may not modify loaded policy.
+allow terok_wayland_t security_t:dir { search getattr };
+allow terok_wayland_t security_t:file { read write getattr open };
+allow terok_wayland_t security_t:security check_context;
+
+# Only the task's dedicated runtime directory is writable under Landlock.
+# Podman labels that directory container_file_t; upstream sockets retain
+# user_tmp_t. Nothing relabels the host compositor or its runtime directory.
+allow terok_wayland_t container_file_t:dir { create write setattr add_name remove_name };
+allow terok_wayland_t container_file_t:sock_file { create unlink write getattr setattr };
+allow terok_wayland_t user_tmp_t:sock_file { write getattr };
+allow terok_wayland_t self:unix_stream_socket { create bind listen accept connect read write getattr getopt setopt shutdown };
+allow terok_wayland_t unconfined_t:unix_stream_socket connectto;
+allow { container_t unconfined_t container_runtime_t } terok_wayland_t:unix_stream_socket connectto;
+
+# SCM_RIGHTS forwards existing SHM, keymap and render-buffer descriptors. The
+# descriptor owner and the inode both retain their labels across forwarding.
+# No pathname open/create permission is added for the container: receiving a
+# compositor's O_RDWR buffer must work even when the client only maps it read-only.
+# DMA-buf and DRM syncobj exports use private anonymous inodes; fd use covers
+# their forwarding without granting the proxy permission to open GPU devices.
+allow terok_wayland_t { unconfined_t container_runtime_t container_t }:fd use;
+allow terok_wayland_t { unconfined_t container_runtime_t }:fifo_file { read write getattr };
+allow terok_wayland_t self:fifo_file { read write getattr };
+allow terok_wayland_t { container_file_t user_tmp_t tmpfs_t }:file { read write append getattr map };
+allow terok_wayland_t { user_tmp_t tmpfs_t }:file { create open };
+allow terok_wayland_t null_device_t:chr_file { read write getattr open };
+allow container_t unconfined_t:fd use;
+allow container_t user_tmp_t:file { read write getattr map };
+
+# New kernels label memfds with their creator's domain and a separate class.
+# Older policies omit this class and use the tmpfs file permissions above.
+optional {
+    require {
+        class memfd_file { create read write getattr open map };
+    }
+    allow terok_wayland_t self:memfd_file { create read write getattr open map };
+    allow terok_wayland_t { unconfined_t container_runtime_t container_t }:memfd_file { read write getattr open map };
+    allow container_t unconfined_t:memfd_file { read write getattr map };
+}
+

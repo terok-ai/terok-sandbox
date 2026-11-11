@@ -30,6 +30,11 @@ CONTAINER_RUNTIME_DIR = "/run/terok"
 CONTAINER_VAULT_SOCKET = f"{CONTAINER_RUNTIME_DIR}/vault/vault.sock"
 CONTAINER_SSH_SIGNER_SOCKET = f"{CONTAINER_RUNTIME_DIR}/signer/ssh-agent.sock"
 CONTAINER_GATE_SOCKET = f"{CONTAINER_RUNTIME_DIR}/gate/gate-server.sock"
+WAYLAND_RUNTIME_SUBDIR = "wayland"
+WAYLAND_SOCKET_NAME = "wayland.sock"
+CONTAINER_WAYLAND_DIR = "/run/terok-wayland"
+CONTAINER_WAYLAND_SOCKET = f"{CONTAINER_WAYLAND_DIR}/{WAYLAND_SOCKET_NAME}"
+CONTAINER_USER_RUNTIME_DIR = "/run/terok-user"
 
 # Container-side path where bridge resources are bind-mounted (runtime
 # pattern) or `COPY`ed into the image (build-time pattern).  The host
@@ -61,6 +66,8 @@ _MANAGED_VOLUME_TARGETS = frozenset(
     {
         CONTAINER_BRIDGES_DIR,
         CONTAINER_RUNTIME_DIR,
+        CONTAINER_WAYLAND_DIR,
+        CONTAINER_USER_RUNTIME_DIR,
         CONTAINER_VAULT_SOCKET,
         CONTAINER_SSH_SIGNER_SOCKET,
         CONTAINER_GATE_SOCKET,
@@ -118,7 +125,13 @@ def reject_managed_volumes(podman_args: list[str]) -> None:
         # Block exact matches plus any path under ``CONTAINER_RUNTIME_DIR``
         # — sandbox owns that whole subtree, so a deeper user mount would
         # still hide a freshly-bound supervisor socket.
-        if target in _MANAGED_VOLUME_TARGETS or target.startswith(f"{CONTAINER_RUNTIME_DIR}/"):
+        if target in _MANAGED_VOLUME_TARGETS or target.startswith(
+            (
+                f"{CONTAINER_RUNTIME_DIR}/",
+                f"{CONTAINER_WAYLAND_DIR}/",
+                f"{CONTAINER_USER_RUNTIME_DIR}/",
+            )
+        ):
             conflicts.add(target)
     if conflicts:
         raise SystemExit(

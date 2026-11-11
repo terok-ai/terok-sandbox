@@ -37,11 +37,14 @@ import json
 import logging
 import os
 import stat
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .. import wayland
+from ..podman_args import WAYLAND_RUNTIME_SUBDIR, WAYLAND_SOCKET_NAME
 from ..vault.context import BrokerContext
+from ..wayland import WaylandMode, WaylandSession
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
@@ -52,8 +55,7 @@ _logger = logging.getLogger("terok-supervisor")
 
 #: Every supervisor service, in launch order: verdict before clearance
 #: (the hub connects to it), gate before vault (the container clones
-#: through the gate first), vault and signer last (the secret-holders come
-#: up once their consumers are waiting).  The runner table in
+#: through the gate first), then vault, signer, and optional Wayland. The runner table in
 #: [`children`][terok_sandbox.supervisor.children] keys on these names and
 #: takes its launch order from them.
 #:
@@ -61,7 +63,7 @@ _logger = logging.getLogger("terok-supervisor")
 #: wired, because every reader of that decision — the parent supervisor,
 #: the post-start check, the doctor — needs the vocabulary without
 #: needing the runners.
-SERVICE_NAMES: tuple[str, ...] = ("verdict", "clearance", "gate", "vault", "signer")
+SERVICE_NAMES: tuple[str, ...] = ("verdict", "clearance", "gate", "vault", "signer", "wayland")
 
 #: The clearance arm: the hub that puts a refusal to the operator and the
 #: verdict server that applies the answer.  ``services.clearance: off``
@@ -100,9 +102,8 @@ class SidecarConfig:
     stop/start cycles — its ports and tokens must keep matching the
     container's immutable env — and is removed at real teardown by
     [`remove_container_state`][terok_sandbox.launch.remove_container_state].
-    Between those two points only ``clearance`` may change: a restart
-    rewrites it from current config
-    ([`refresh_clearance`][terok_sandbox.supervisor.sidecar.refresh_clearance]).
+    Restarts refresh ``clearance`` from current config and the selected
+    Wayland session endpoint without changing the saved mount policy.
     """
 
     broker_context: BrokerContext
@@ -171,6 +172,9 @@ class SidecarConfig:
     _resolved_passphrase: str | None = field(default=None, repr=False, compare=False)
     """Ephemeral in-memory passphrase; never present in sidecar JSON."""
 
+    wayland: WaylandSession = field(default_factory=WaylandSession)
+    """Optional desktop wiring, refreshed from the invoking session on every start."""
+
 
 @dataclass(frozen=True)
 class SupervisorPaths:
@@ -207,6 +211,11 @@ class SupervisorPaths:
     verdict_socket: Path
     control_socket: Path
     log_path: Path
+
+    @property
+    def wayland_socket(self) -> Path:
+        """The proxy's listener, independent of the other services' transport."""
+        return self.container_runtime_dir / WAYLAND_RUNTIME_SUBDIR / WAYLAND_SOCKET_NAME
 
     @classmethod
     def for_container(
@@ -277,7 +286,7 @@ class SupervisorPaths:
 def wired_services(cfg: SidecarConfig) -> tuple[str, ...]:
     """The services *cfg* wires, in launch order.
 
-    Two parts of the set are conditional:
+    Three parts of the set are conditional:
 
     * the gate — a sidecar without a mirror path and a token has no repo
       to serve;
@@ -288,6 +297,8 @@ def wired_services(cfg: SidecarConfig) -> tuple[str, ...]:
       is asked about them, and no verdict path is left that could widen the
       firewall.  (``mute`` keeps both: the hub runs, it just starts with
       the container muted.)
+    * Wayland — included only when the task requested a proxy and its host
+      binary and desktop endpoint were resolved for this start.
 
     The parent launches no child for a service left out, and the doctor's
     children check expects none.  Vault and signer run for every container.
@@ -297,6 +308,8 @@ def wired_services(cfg: SidecarConfig) -> tuple[str, ...]:
         unwired.add("gate")
     if cfg.clearance == "off":
         unwired |= _CLEARANCE_ARM
+    if not cfg.wayland.proxied:
+        unwired.add("wayland")
     return tuple(name for name in SERVICE_NAMES if name not in unwired)
 
 
@@ -363,6 +376,7 @@ def _build_config(raw: dict, sidecar_path: Path) -> SidecarConfig:
         dossier_path=_optional_absolute_path(raw, "dossier_path", sidecar_path),
         allow_debugger=_optional_bool(raw, "allow_debugger"),
         clearance=_lenient_clearance(raw, sidecar_path),
+        wayland=WaylandSession.from_payload(raw.get("wayland")),
     )
 
 
@@ -624,6 +638,48 @@ def refresh_clearance(sidecar_path: Path, clearance: ClearanceMode) -> None:
     with _own_sidecar(sidecar_path) as (payload, identity):
         payload["clearance"] = clearance
         _replace_sidecar(sidecar_path, payload, identity)
+
+
+def record_wayland(sidecar_path: Path, session: WaylandSession) -> None:
+    """Record desktop wiring only after its creation-time mounts were prepared."""
+    with _own_sidecar(sidecar_path) as (payload, identity):
+        payload["wayland"] = session.payload()
+        _replace_sidecar(sidecar_path, payload, identity)
+
+
+def refresh_wayland(sidecar_path: Path) -> WaylandSession:
+    """Capture the current desktop without changing a container's saved mount policy.
+
+    A restart keeps creation-time policy and refreshes only session endpoints.
+    Podman cannot retarget a saved direct bind mount or process domain. A
+    missing or changed source requires recreation instead of guessing another
+    compositor; the creation-time domain choice remains unchanged.
+    """
+    with _own_sidecar(sidecar_path) as (payload, identity):
+        previous = WaylandSession.from_payload(payload.get("wayland"))
+        if previous.mode == WaylandMode.NONE and previous.error:
+            raise WaylandRecreationRequired(
+                f"Wayland recreation required: cannot verify saved desktop access: {previous.error}"
+            )
+        selected = previous.mode
+        session = replace(
+            wayland.resolve_session(selected, unavailable=previous.disabled_reason),
+            direct_selinux=previous.direct_selinux,
+        )
+        if selected == WaylandMode.DIRECT and not previous.disabled_reason:
+            if session.upstream is None or session.upstream != previous.upstream:
+                raise WaylandRecreationRequired(
+                    "wl-direct recreation required: the saved compositor socket is missing "
+                    "or the current session selects another socket"
+                )
+        if selected != WaylandMode.NONE:
+            payload["wayland"] = session.payload()
+            _replace_sidecar(sidecar_path, payload, identity)
+        return session
+
+
+class WaylandRecreationRequired(RuntimeError):
+    """A saved socket bind or process domain cannot change without recreation."""
 
 
 @contextlib.contextmanager

@@ -217,6 +217,10 @@ _LAZY: dict[str, str] = {
     "Sharing": "sandbox:Sharing",
     "ShieldSetupError": "sandbox:ShieldSetupError",
     "VolumeSpec": "sandbox:VolumeSpec",
+    "BindMountSpec": "sandbox:BindMountSpec",
+    "SocketSpec": "sandbox:SocketSpec",
+    "WaylandMode": "wayland:WaylandMode",
+    "WaylandRecreationRequired": "supervisor.sidecar:WaylandRecreationRequired",
     # Owned setup readiness
     "check_setup": "setup:check_setup",
     # Vault markers + SSH + credential store
@@ -426,10 +430,12 @@ if TYPE_CHECKING:
     from .sandbox import (
         GRANTABLE_CAPS,
         READY_MARKER,
+        BindMountSpec,
         LifecycleHooks,
         RunSpec,
         Sandbox,
         Sharing,
+        SocketSpec,
         VolumeSpec,
     )
     from .setup import check_setup
@@ -439,6 +445,7 @@ if TYPE_CHECKING:
         verify_supervision,
         warn_unsupervised,
     )
+    from .supervisor.sidecar import WaylandRecreationRequired
     from .vault.daemon import CODEX_SHARED_OAUTH_MARKER, PHANTOM_CREDENTIALS_MARKER
     from .vault.ssh.keypair import ensure_infra_keypair, public_line_of
     from .vault.ssh.manager import SSHInitResult, SSHManager
@@ -461,6 +468,7 @@ if TYPE_CHECKING:
         is_available as systemd_creds_available,
     )
     from .vault.store.tiers import PassphraseTier
+    from .wayland import WaylandMode
 
 
 __all__ = [
@@ -523,6 +531,10 @@ __all__ = [
     "ShieldSetupError",
     "TcpSSHTransport",
     "VolumeSpec",
+    "BindMountSpec",
+    "SocketSpec",
+    "WaylandMode",
+    "WaylandRecreationRequired",
     "check_gpu_available",
     "detect_gpu_vendors",
     "gpu_device_addresses",

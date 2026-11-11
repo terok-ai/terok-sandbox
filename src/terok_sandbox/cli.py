@@ -63,12 +63,13 @@ def main(argv: list[str] | None = None) -> None:
 
     from terok_util import SetupRequiredError, configure
 
-    # One-time unified logging: routes every getLogger(__name__) to journald
-    # (when present) or stderr — the non-supervisor CLI paths had no handler.
-    configure(identifier="terok-sandbox")
-
     if argv is None:
         argv = sys.argv[1:]
+
+    # The confined Wayland wrapper configures its log pipe in its handler;
+    # only its parent may contact journald.
+    if argv[:2] != ["supervise-child", "wayland"]:
+        configure(identifier="terok-sandbox")
 
     # The ``run`` subcommand uses ``--`` to separate sandbox args from
     # the trailing podman invocation.  Split before argparse to avoid

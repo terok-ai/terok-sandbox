@@ -31,7 +31,7 @@ import shlex
 import subprocess  # nosec B404 - runs the bundled, audited installer via sudo
 import sys
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from terok_util import find_host_tool, require_host_tool, require_no_downgrade, setup_lock
@@ -47,10 +47,17 @@ from ._util._apparmor import (
 )
 from ._util._selinux import (
     SELINUX_MODULE_NAME,
+    SELINUX_WAYLAND_DIRECT_MODULE_NAME,
+    SELINUX_WAYLAND_MODULE_NAME,
     SelinuxStatus,
     check_status as _check_selinux,
     install_script_path as _selinux_install_script,
+    is_selinux_enabled,
+    is_wayland_direct_policy_installed,
+    is_wayland_policy_installed,
     policy_source_path as _policy_source_path,
+    wayland_direct_policy_source_path as _wayland_direct_policy_source_path,
+    wayland_policy_source_path as _wayland_policy_source_path,
 )
 
 if TYPE_CHECKING:
@@ -66,7 +73,7 @@ _SELINUX_STATUS_LINES = {
     SelinuxStatus.POLICY_OUTDATED: f"The loaded {SELINUX_MODULE_NAME} policy is outdated.",
     SelinuxStatus.LIBSELINUX_MISSING: "libselinux is not loadable; the policy state is unknown.",
     SelinuxStatus.NOT_APPLICABLE_TCP_MODE: (
-        "Services run in TCP mode. No SELinux policy is needed on this host."
+        "Services run in TCP mode. No service-socket policy is needed for this transport."
     ),
     SelinuxStatus.NOT_APPLICABLE_PERMISSIVE: (
         "SELinux is disabled or permissive. No policy is needed on this host."
@@ -89,6 +96,8 @@ def handle_setup_component(
     component: str | None,
     *,
     show_only: bool = False,
+    with_wayland: bool = False,
+    with_wayland_direct: bool = False,
     cfg: SandboxConfig | None = None,
 ) -> int:
     """Run the interactive installer for one hardening component.
@@ -96,12 +105,28 @@ def handle_setup_component(
     The whole ``setup <component>`` contract lives here, so every
     frontend is one routing line: a missing or unknown component name is
     answered from here too, spelled with the caller's own invocation.
+
+    Args:
+        with_wayland: Include the separate proxy policy with the SELinux
+            component. Does not remove that policy when omitted.
+        with_wayland_direct: Independently include the direct-access container
+            policy. Does not enable the proxy policy or change existing tasks.
     """
     from .config import SandboxConfig
 
+    for flag, selected in (
+        ("--with-wayland", with_wayland),
+        ("--with-wayland-direct", with_wayland_direct),
+    ):
+        if selected and component != "selinux":
+            raise SystemExit(f"{flag} requires 'setup selinux'")
     with nullcontext() if show_only else setup_lock():
         if component == "selinux":
             comp = _selinux_component(cfg or SandboxConfig())
+            if with_wayland:
+                comp = _with_wayland_policy(comp)
+            if with_wayland_direct:
+                comp = _with_wayland_policy(comp, direct=True)
         elif component == "apparmor":
             comp = _apparmor_component()
         else:
@@ -165,6 +190,46 @@ def _selinux_component(cfg: SandboxConfig) -> _Component:
         source=_policy_source_path().read_text(),
         script_args=(str(_selinux_install_script()),),
         action_needed=status.action_needed,
+    )
+
+
+def _with_wayland_policy(comp: _Component, *, direct: bool = False) -> _Component:
+    """Add one explicitly selected desktop policy without enabling the other."""
+    module, source, installed, flag = (
+        (
+            SELINUX_WAYLAND_DIRECT_MODULE_NAME,
+            _wayland_direct_policy_source_path(),
+            is_wayland_direct_policy_installed(),
+            "--with-wayland-direct",
+        )
+        if direct
+        else (
+            SELINUX_WAYLAND_MODULE_NAME,
+            _wayland_policy_source_path(),
+            is_wayland_policy_installed(),
+            "--with-wayland",
+        )
+    )
+    state = "loaded" if installed else "not loaded"
+    return replace(
+        comp,
+        status_line=(
+            f"{comp.status_line}\nThe optional {module} policy is {state}."
+            " Wayland uses sockets even when other services use TCP."
+        ),
+        destination=(
+            f"{comp.destination}\nAlso loads {module}"
+            f" (undo: sudo semodule -r {module})."
+            + (
+                "\nDirect desktop access increases host attack surface without protocol filtering."
+                " Only newly created wl-direct tasks select this domain."
+                if direct
+                else ""
+            )
+        ),
+        source=comp.source + "\n" + source.read_text(),
+        script_args=(*comp.script_args, flag),
+        action_needed=comp.action_needed or (is_selinux_enabled() and not installed),
     )
 
 

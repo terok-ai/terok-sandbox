@@ -13,12 +13,14 @@ CLI directly; Phase 3 will factor that through the runtime as well.
 from __future__ import annotations
 
 import io
+import logging
 import shlex
+import stat
 import subprocess  # nosec B404 - container exec for ready-marker probing - container exec for ready-marker probing
 import sys
 import tarfile
 import warnings
-from dataclasses import InitVar, dataclass, field
+from dataclasses import InitVar, dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import TYPE_CHECKING
@@ -28,10 +30,12 @@ from terok_util import (
     podman_userns_args,
     require_host_tool,
     require_setup,
+    sanitize_log_text,
 )
 
 from ._util import warn_user
 from .config import SandboxConfig
+from .podman_args import WAYLAND_RUNTIME_SUBDIR
 from .runtime import ContainerRuntime, PodmanRuntime
 from .runtime.gpu import GpuSelector, check_gpu_error, gpu_run_args
 from .runtime.podman import (
@@ -42,6 +46,7 @@ from .runtime.podman import (
 from .runtime.seccomp import seccomp_args
 from .runtime.storage_diagnostics import storage_permission_diagnostics
 from .setup import check_setup
+from .wayland import WaylandMode, WaylandSession
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -161,6 +166,9 @@ class LifecycleHooks:
     post_stop: Callable[[], None] | None = None
     """Fired after the container exits (caller responsibility)."""
 
+    warning: Callable[[str], None] | None = None
+    """Observe rendered startup warnings for later presentation; failures are nonfatal."""
+
 
 #: In-container loopback port the gate socat bridge listens on (matches
 #: ``TCP-LISTEN:9418`` in ``ensure-bridges.sh``).  The bridge forwards it to
@@ -193,7 +201,18 @@ _SHARING_TO_RELABEL: dict[str, str] = {
 
 
 @dataclass(frozen=True)
-class VolumeSpec:
+class BindMountSpec:
+    """A host path exposed at one absolute container path."""
+
+    host_path: Path
+    """Absolute host-side path."""
+
+    container_path: str
+    """Absolute destination inside the container."""
+
+
+@dataclass(frozen=True)
+class VolumeSpec(BindMountSpec):
     """Typed description of a host↔container directory binding.
 
     Replaces raw volume strings (``"host:container:z"``) with structured data
@@ -206,12 +225,6 @@ class VolumeSpec:
     directory is injected (private) or skipped (shared config that the
     vault replaces).
     """
-
-    host_path: Path
-    """Absolute host-side path to mount or copy in."""
-
-    container_path: str
-    """Absolute path inside the container (e.g. ``"/workspace"``)."""
 
     sharing: str = Sharing.SHARED
     """Sharing semantics: [`Sharing.PRIVATE`][terok_sandbox.sandbox.Sharing.PRIVATE] or [`Sharing.SHARED`][terok_sandbox.sandbox.Sharing.SHARED]."""
@@ -245,6 +258,25 @@ class VolumeSpec:
         return f"{self.host_path}:{self.container_path}:{opts}"
 
 
+@dataclass(frozen=True)
+class SocketSpec(BindMountSpec):
+    """An existing Unix socket, never relabelled or copied into sealed tasks.
+
+    Read-only protects the inode, not the protocol available through it.
+    Directory mounts carrying sockets bound later remain VolumeSpec objects.
+    """
+
+    def to_mount_arg(self) -> str:
+        """Validate an existing socket and render a label-preserving read-only bind."""
+        if not self.host_path.is_absolute() or not Path(self.container_path).is_absolute():
+            raise ValueError("socket bind paths must be absolute")
+        if any(c in f"{self.host_path}{self.container_path}" for c in ':,"\r\n\0'):
+            raise ValueError("socket bind path contains mount-option delimiters")
+        if not stat.S_ISSOCK(self.host_path.lstat().st_mode):
+            raise ValueError(f"not a Unix socket: {self.host_path}")
+        return f"type=bind,source={self.host_path},destination={self.container_path},readonly"
+
+
 @dataclass(frozen=True, kw_only=True)
 class RunSpec:
     """Everything needed for a single ``podman run`` invocation.
@@ -267,6 +299,12 @@ class RunSpec:
 
     volumes: tuple[VolumeSpec, ...]
     """Host↔container directory bindings (mounted or injected per *sealed*)."""
+
+    sockets: tuple[SocketSpec, ...] = ()
+    """Existing sockets mounted directly without changing host labels."""
+
+    wayland: WaylandMode = WaylandMode.NONE
+    """Optional desktop access; none by default, never an automatic raw fallback."""
 
     command: tuple[str, ...]
     """Command to execute inside the container."""
@@ -402,6 +440,7 @@ class RunSpec:
         Also folds the deprecated ``gpu_enabled`` bool into ``gpus``.
         """
         object.__setattr__(self, "annotations", MappingProxyType(dict(self.annotations)))
+        object.__setattr__(self, "wayland", WaylandMode(self.wayland))
         if gpu_enabled is not None:
             if self.gpus is not None:
                 raise ValueError(
@@ -714,7 +753,9 @@ class Sandbox:
     # unshielded-network integration produces podman-flavoured CLI args.  A
     # future krun backend will push this down into the runtime as well.
 
-    def _build_cmd(self, spec: RunSpec, verb: str = "run") -> list[str]:
+    def _build_cmd(
+        self, spec: RunSpec, verb: str = "run", *, direct_selinux: bool = False
+    ) -> list[str]:
         """Assemble the ``podman`` command line for *spec*.
 
         *verb* selects the podman sub-command — ``"run"`` (detached) or
@@ -745,6 +786,10 @@ class Sandbox:
 
         if not spec.unrestricted:
             cmd += ["--security-opt", "no-new-privileges"]
+        if direct_selinux:
+            from ._util._selinux import SELINUX_WAYLAND_DIRECT_TYPE
+
+            cmd += ["--security-opt", f"label=type:{SELINUX_WAYLAND_DIRECT_TYPE}"]
 
         perf = "perfmon" in caps
         if self._cfg.aslr_control or perf:
@@ -803,6 +848,16 @@ class Sandbox:
             if spec.sealed and not vol.live:
                 continue
             cmd += ["-v", vol.to_mount_arg()]
+
+        if spec.sockets and spec.sealed:
+            raise ValueError("existing host sockets are not supported in sealed isolation")
+        for sock in spec.sockets:
+            cmd += ["--mount", sock.to_mount_arg()]
+
+        if spec.wayland != WaylandMode.NONE:
+            from .wayland import WAYLAND_ENV_UNSET
+
+            cmd += [arg for name in WAYLAND_ENV_UNSET for arg in ("--unsetenv", name)]
 
         for k, v in spec.env.items():
             cmd += ["-e", f"{k}={v}"]
@@ -892,7 +947,8 @@ class Sandbox:
             self.start(spec.container_name, hooks=hooks)
             return
 
-        cmd = self._build_cmd(spec, verb="run")
+        spec, direct_selinux = self._prepare_wayland(spec, hooks=hooks)
+        cmd = self._build_cmd(spec, verb="run", direct_selinux=direct_selinux)
         print("$", shlex.join(redact_env_args(cmd)))
 
         if hooks and hooks.pre_start:
@@ -904,6 +960,7 @@ class Sandbox:
             hooks.post_start()
 
         self._verify_supervision(spec.container_name)
+        self._verify_wayland(spec.container_name, hooks=hooks)
 
     def create(self, spec: RunSpec, *, hooks: LifecycleHooks | None = None) -> str:
         """Create a container without starting it.
@@ -913,7 +970,8 @@ class Sandbox:
         via [`copy_to`][terok_sandbox.sandbox.Sandbox.copy_to] before being started with [`start`][terok_sandbox.sandbox.Sandbox.start].
         """
         require_setup(check_setup(self._cfg, live=True))
-        cmd = self._build_cmd(spec, verb="create")
+        spec, direct_selinux = self._prepare_wayland(spec, hooks=hooks)
+        cmd = self._build_cmd(spec, verb="create", direct_selinux=direct_selinux)
         print("$", shlex.join(redact_env_args(cmd)))
 
         if hooks and hooks.pre_start:
@@ -941,12 +999,195 @@ class Sandbox:
         """
         require_setup(check_setup(self._cfg, live=True))
         self._cfg.ensure_container_runtime_dir(container_name)
+        self._refresh_wayland(container_name, hooks=hooks)
         handle = self._runtime.container(container_name)
         self._warn_if_outdated(container_name, handle)
         handle.start()
         if hooks and hooks.post_start:
             hooks.post_start()
         self._verify_supervision(container_name)
+        self._verify_wayland(container_name, hooks=hooks)
+
+    def _prepare_wayland(
+        self, spec: RunSpec, *, hooks: LifecycleHooks | None = None
+    ) -> tuple[RunSpec, bool]:
+        """Materialise optional desktop wiring before recording the saved mount grant."""
+        from ._util._selinux import is_selinux_enabled, is_wayland_direct_policy_installed
+        from .supervisor.sidecar import record_wayland
+        from .wayland import WaylandSession, resolve_session, warn_desktop_access, warn_wayland
+
+        if spec.wayland == WaylandMode.NONE:
+            return spec, False
+        observer = hooks.warning if hooks else None
+        warn_desktop_access(spec.wayland, observer=observer)
+        unavailable = (
+            "not supported with sealed isolation or the krun runtime"
+            if spec.sealed or spec.runtime == "krun"
+            else None
+        )
+        session = resolve_session(spec.wayland, unavailable=unavailable)
+        prepared = spec
+        try:
+            if not session.disabled_reason:
+                prepared = self._mount_wayland(spec, session)
+            if session.mode == WaylandMode.DIRECT and prepared.sockets != spec.sockets:
+                session = replace(
+                    session,
+                    direct_selinux=is_selinux_enabled() and is_wayland_direct_policy_installed(),
+                )
+        except (OSError, ValueError) as exc:
+            prepared = spec
+            session = WaylandSession(spec.wayland, error=str(exc))
+        try:
+            record_wayland(self._cfg.sidecar_path(spec.container_name), session)
+        except (OSError, ValueError) as exc:
+            warn_wayland(spec.wayland, f"cannot record desktop wiring: {exc}", observer=observer)
+            return spec, False
+        if session.error:
+            warn_wayland(spec.wayland, session.error, observer=observer)
+        self._check_direct_wayland_policy(session, hooks=hooks)
+        return prepared, session.direct_selinux
+
+    def _mount_wayland(self, spec: RunSpec, session: WaylandSession) -> RunSpec:
+        """Expose the selected desktop endpoint and a private application runtime directory."""
+        from .podman_args import (
+            CONTAINER_USER_RUNTIME_DIR,
+            CONTAINER_WAYLAND_DIR,
+            CONTAINER_WAYLAND_SOCKET,
+        )
+        from .wayland import WAYLAND_ENV_UNSET
+
+        volumes, sockets = spec.volumes, spec.sockets
+        if session.mode == WaylandMode.MITM:
+            runtime_dir = (
+                self._cfg.ensure_container_runtime_dir(spec.container_name) / WAYLAND_RUNTIME_SUBDIR
+            )
+            runtime_dir.mkdir(mode=0o700, exist_ok=True)
+            volumes += (VolumeSpec(runtime_dir, CONTAINER_WAYLAND_DIR, read_only=True, live=True),)
+        elif session.upstream:
+            socket = SocketSpec(session.upstream, CONTAINER_WAYLAND_SOCKET)
+            socket.to_mount_arg()
+            sockets += (socket,)
+        else:
+            return spec
+        env = {key: value for key, value in spec.env.items() if key not in WAYLAND_ENV_UNSET}
+        # Let Podman resolve image USER/--user instead of assuming the image's dev UID.
+        runtime_mount = (
+            f"type=tmpfs,destination={CONTAINER_USER_RUNTIME_DIR},"
+            "tmpfs-mode=0700,U,nosuid,nodev,noexec,notmpcopyup"
+        )
+        return replace(
+            spec,
+            volumes=volumes,
+            sockets=sockets,
+            extra_args=(*spec.extra_args, "--mount", runtime_mount),
+            env={
+                **env,
+                "WAYLAND_DISPLAY": CONTAINER_WAYLAND_SOCKET,
+                "XDG_RUNTIME_DIR": CONTAINER_USER_RUNTIME_DIR,
+            },
+        )
+
+    def _refresh_wayland(self, container_name: str, *, hooks: LifecycleHooks | None = None) -> None:
+        """Refresh the invoking desktop for every restart, including after a host reboot."""
+        from .supervisor.sidecar import refresh_wayland
+        from .wayland import warn_desktop_access, warn_wayland
+
+        observer = hooks.warning if hooks else None
+        path = self._cfg.sidecar_path(container_name)
+        if not path.exists():
+            return
+        try:
+            session = refresh_wayland(path)
+            warn_desktop_access(session.mode, observer=observer)
+            self._check_direct_wayland_policy(session, hooks=hooks)
+            if session.mode == WaylandMode.MITM and not session.disabled_reason:
+                (
+                    self._cfg.ensure_container_runtime_dir(container_name) / WAYLAND_RUNTIME_SUBDIR
+                ).mkdir(mode=0o700, exist_ok=True)
+            if session.error:
+                warn_wayland(session.mode, session.error, observer=observer)
+        except (OSError, ValueError) as exc:
+            warn_wayland(
+                WaylandMode.MITM, f"could not refresh desktop session: {exc}", observer=observer
+            )
+
+    def _check_direct_wayland_policy(
+        self, session: WaylandSession, *, hooks: LifecycleHooks | None = None
+    ) -> None:
+        """Keep a container's creation-time domain; never retarget it on restart."""
+        from ._util._selinux import is_selinux_enabled, is_wayland_direct_policy_installed
+        from .supervisor.sidecar import WaylandRecreationRequired
+        from .wayland import emit_warning
+
+        if session.mode != WaylandMode.DIRECT or not is_selinux_enabled():
+            return
+        installed = is_wayland_direct_policy_installed()
+        if session.direct_selinux and not installed:
+            raise WaylandRecreationRequired(
+                "wl-direct recreation required: the container's SELinux policy was removed; "
+                "restore it with 'terok setup selinux --with-wayland-direct' or recreate the task"
+            )
+        if not session.direct_selinux and session.upstream and not session.error:
+            reason = (
+                "this task was created without the direct-access SELinux domain"
+                if installed
+                else "the optional direct-access SELinux policy is not installed"
+            )
+            emit_warning(
+                f"WARNING: Wayland (wl-direct): {reason}. The task keeps its normal SELinux "
+                "domain and GUI access may be denied. Run 'terok setup selinux "
+                "--with-wayland-direct' and recreate the task to enable that domain.",
+                observer=hooks.warning if hooks else None,
+            )
+
+    def _verify_wayland(self, container_name: str, *, hooks: LifecycleHooks | None = None) -> None:
+        """Probe the endpoint in the container's security domain; failure stays optional."""
+        from .supervisor.sidecar import load_sidecar
+        from .wayland import WAYLAND_PROBE, emit_warning, warn_wayland
+
+        observer = hooks.warning if hooks else None
+        path = self._cfg.sidecar_path(container_name)
+        if not path.exists():
+            return
+        sidecar = load_sidecar(path)
+        if sidecar is None or sidecar.wayland.mode == WaylandMode.NONE:
+            return
+        session = sidecar.wayland
+        if (
+            session.error
+            or session.disabled_reason
+            or not session.upstream
+            or (session.mode == WaylandMode.MITM and not session.proxied)
+        ):
+            return
+        try:
+            handle = self._runtime.container(container_name)
+            result = self._runtime.exec(handle, WAYLAND_PROBE, timeout=3)
+            if not result.ok:
+                detail = result.stderr.strip()
+                reason = (
+                    detail.splitlines()[-1] if detail else "container cannot reach its endpoint"
+                )
+                logging.getLogger(__name__).debug(
+                    "Wayland endpoint probe failed: %s", sanitize_log_text(detail, color=False)
+                )
+                log = self._cfg.state_dir / "logs" / f"{handle.id}.log"
+                if result.exit_code == 127:
+                    emit_warning(
+                        f"WARNING: unable to verify Wayland access (python3 unavailable): {reason}; task continues",
+                        observer=observer,
+                    )
+                else:
+                    warn_wayland(session.mode, reason, log=log, observer=observer)
+        except Exception as exc:  # noqa: BLE001 - optional diagnostics never fail container startup
+            detail = str(exc).strip()
+            reason = detail.splitlines()[-1] if detail else type(exc).__name__
+            if isinstance(exc, subprocess.TimeoutExpired):
+                reason = "timed out"
+            warn_wayland(
+                session.mode, f"container endpoint probe failed: {reason}", observer=observer
+            )
 
     def _warn_if_outdated(self, container_name: str, handle: Container) -> None:
         """Shout if the container predates the current ``/run/terok`` socket layout.

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,25 @@ def _prologue_of(script: Path) -> str:
     text = script.read_text()
     start = text.index("# Defence-in-depth")
     return text[start : text.index("\n}\n", start) + 3]
+
+
+def _tamper_verdict(target: Path, *, cwd: Path | None = None) -> str:
+    """Run the real installer guard without any privileged installer operations."""
+    guard = "\n".join(
+        [
+            _prologue_of(_apparmor.install_script_path()),
+            '_red=""; _reset=""',
+            '_reject_unsafe "$1" && echo ACCEPTED',
+        ]
+    )
+    result = subprocess.run(
+        ["bash", "-eu", "-c", guard, "-", str(target)],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    return result.stdout + result.stderr
 
 
 def _arrange(
@@ -153,22 +173,6 @@ def test_installers_reject_a_writable_ancestor(tmp_path: Path) -> None:
     left the sudo input swappable; ``/tmp``-style sticky dirs must not
     trip it, since the sticky bit is exactly that rename restriction.
     """
-    import subprocess
-
-    guard = "\n".join(
-        [
-            _prologue_of(_apparmor.install_script_path()),
-            '_red=""; _reset=""',
-            '_reject_unsafe "$1" && echo ACCEPTED',
-        ]
-    )
-
-    def _verdict(target: Path) -> str:
-        done = subprocess.run(
-            ["bash", "-c", guard, "-", str(target)], capture_output=True, text=True
-        )
-        return done.stdout + done.stderr
-
     nested = tmp_path / "parent" / "child"
     nested.mkdir(parents=True)
     target = nested / "install.sh"
@@ -178,13 +182,66 @@ def test_installers_reject_a_writable_ancestor(tmp_path: Path) -> None:
     for path in (tmp_path / "parent", nested):
         path.chmod(0o755)
     target.chmod(0o644)
-    assert "ACCEPTED" in _verdict(target)
+    assert "ACCEPTED" in _tamper_verdict(target)
 
     (tmp_path / "parent").chmod(0o777)
-    assert "Refusing to run" in _verdict(target)
+    assert "Refusing to run" in _tamper_verdict(target)
 
     (tmp_path / "parent").chmod(0o1777)  # sticky: only the owner may rename
-    assert "ACCEPTED" in _verdict(target)
+    assert "ACCEPTED" in _tamper_verdict(target)
+
+
+def test_installer_accepts_home_and_venv_directory_aliases(tmp_path: Path) -> None:
+    """Directory symlink modes do not reject an otherwise protected installation."""
+    home = tmp_path / "var" / "home"
+    library = home / "user" / "venv" / "lib"
+    library.mkdir(parents=True)
+    (tmp_path / "home").symlink_to(home, target_is_directory=True)
+    (library.parent / "lib64").symlink_to("lib", target_is_directory=True)
+    target = library / "install.sh"
+    target.write_text("#!/bin/bash\n")
+    alias = Path("home/user/venv/lib64/install.sh")
+    assert "ACCEPTED" in _tamper_verdict(tmp_path / alias)
+    assert "ACCEPTED" in _tamper_verdict(alias, cwd=tmp_path)
+
+
+@pytest.mark.parametrize("writable", ["lexical", "target", "intermediate"])
+@pytest.mark.parametrize("trailing_slash", [False, True])
+def test_installer_checks_every_directory_link_ancestry(
+    tmp_path: Path, writable: str, trailing_slash: bool
+) -> None:
+    """Neither final realpath nor lexical-only checks cover a multi-hop alias."""
+    lexical, target, intermediate = (
+        tmp_path / name for name in ("lexical", "target", "intermediate")
+    )
+    for directory in (lexical, target, intermediate):
+        directory.mkdir(mode=0o755)
+    library = target / "lib"
+    library.mkdir(mode=0o755)
+    (library / "install.sh").write_text("#!/bin/bash\n")
+    (intermediate / "redirect").symlink_to(target, target_is_directory=True)
+    link_target = str(intermediate / "redirect" / "lib") + ("/" if trailing_slash else "")
+    (lexical / "lib64").symlink_to(link_target, target_is_directory=True)
+    alias = lexical / "lib64" / "install.sh"
+    assert "ACCEPTED" in _tamper_verdict(alias)
+    (tmp_path / writable).chmod(0o777)
+    assert "Refusing to run" in _tamper_verdict(alias)
+
+
+@pytest.mark.parametrize("unsafe", ["symlink", "writable"])
+def test_installer_directory_alias_does_not_waive_file_checks(tmp_path: Path, unsafe: str) -> None:
+    """Accepting directory aliases does not permit a symlinked or writable input file."""
+    directory = tmp_path / "lib"
+    directory.mkdir()
+    (tmp_path / "lib64").symlink_to(directory, target_is_directory=True)
+    target = directory / "install.sh"
+    target.write_text("#!/bin/bash\n")
+    if unsafe == "symlink":
+        target.rename(directory / "real.sh")
+        target.symlink_to("real.sh")
+    else:
+        target.chmod(0o666)
+    assert "Refusing to run" in _tamper_verdict(tmp_path / "lib64" / target.name)
 
 
 def test_both_installers_share_one_tamper_prologue() -> None:
@@ -220,8 +277,6 @@ def test_render_addendum_matches_the_shell_substitution(tmp_path: Path, subdir: 
     running the script's own expansion over the shipped template, with
     roots exercising the patsub_replacement metacharacters.
     """
-    import subprocess
-
     root = tmp_path / subdir
     template = _apparmor.install_script_path().parent / "dnsmasq_addendum.template"
     substitution = '"${_content//@STATE_ROOT@/"$state_root"}"'

@@ -221,6 +221,44 @@ class TestHandleSetupComponent:
             handle_setup_component(None, show_only=True)
         assert "terok-sandbox setup <selinux|apparmor>" in str(exc_info.value.code)
 
+    @pytest.mark.parametrize("component", [None, "apparmor"])
+    @pytest.mark.parametrize("option", ["with_wayland", "with_wayland_direct"])
+    def test_wayland_is_only_a_selinux_option(self, component: str | None, option: str) -> None:
+        with pytest.raises(
+            SystemExit, match=f"--{option.replace('_', '-')} requires 'setup selinux'"
+        ):
+            handle_setup_component(component, **{option: True}, show_only=True)
+
+    @pytest.mark.parametrize("filtered,direct", [(True, False), (False, True), (True, True)])
+    def test_wayland_show_prints_both_sources_without_running_sudo(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        filtered: bool,
+        direct: bool,
+    ) -> None:
+        from terok_sandbox._util import _selinux
+
+        _stub_probes(monkeypatch)
+        monkeypatch.setattr(_setup_manual, "is_wayland_policy_installed", lambda: False)
+        monkeypatch.setattr(_setup_manual, "is_wayland_direct_policy_installed", lambda: False)
+        monkeypatch.setattr(_setup_manual, "is_selinux_enabled", lambda: True)
+        sudo = mock.Mock()
+        monkeypatch.setattr(_setup_manual, "_sudo_run", sudo)
+        assert (
+            handle_setup_component(
+                "selinux", with_wayland=filtered, with_wayland_direct=direct, show_only=True
+            )
+            == 0
+        )
+        sources = [_selinux.policy_source_path()]
+        if filtered:
+            sources.append(_selinux.wayland_policy_source_path())
+        if direct:
+            sources.append(_selinux.wayland_direct_policy_source_path())
+        assert capsys.readouterr().out == "\n".join(source.read_text() for source in sources)
+        sudo.assert_not_called()
+
     def test_message_follows_the_declared_invocation(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from terok_sandbox.operator_cli import SETUP_INVOCATION_ENV
 
@@ -325,6 +363,41 @@ class TestComponents:
         assert comp.source == policy_source_path().read_text()
         assert "module terok_socket" in comp.source
         assert "#" in comp.source, "the rationale comments are part of what the operator reviews"
+
+    @pytest.mark.parametrize("installed", [False, True])
+    @pytest.mark.parametrize("direct", [False, True])
+    def test_wayland_policy_is_independent_of_other_services_transport(
+        self, monkeypatch: pytest.MonkeyPatch, installed: bool, direct: bool
+    ) -> None:
+        from terok_sandbox._util import _selinux
+
+        monkeypatch.setattr(
+            _setup_manual,
+            "_check_selinux",
+            lambda **_: _selinux.SelinuxCheckResult(_selinux.SelinuxStatus.NOT_APPLICABLE_TCP_MODE),
+        )
+        probe = "is_wayland_direct_policy_installed" if direct else "is_wayland_policy_installed"
+        monkeypatch.setattr(_setup_manual, probe, lambda: installed)
+        monkeypatch.setattr(_setup_manual, "is_selinux_enabled", lambda: True)
+        comp = _setup_manual._with_wayland_policy(
+            _setup_manual._selinux_component(mock.MagicMock(services_mode="tcp")), direct=direct
+        )
+        flag = "--with-wayland-direct" if direct else "--with-wayland"
+        module = "terok_wayland_direct" if direct else "terok_wayland"
+        assert comp.action_needed is not installed
+        assert comp.script_args[-1] == flag
+        assert module in comp.destination
+        assert f"semodule -r {module}" in comp.destination
+
+    def test_default_selinux_setup_does_not_probe_wayland(self, monkeypatch):
+        _stub_probes(monkeypatch)
+        probe = mock.Mock(side_effect=AssertionError("optional feature queried by default"))
+        monkeypatch.setattr(_setup_manual, "is_wayland_policy_installed", probe)
+        monkeypatch.setattr(_setup_manual, "is_wayland_direct_policy_installed", probe)
+        comp = _setup_manual._selinux_component(mock.MagicMock(services_mode="socket"))
+        assert "--with-wayland" not in comp.script_args
+        assert "--with-wayland-direct" not in comp.script_args
+        probe.assert_not_called()
 
 
 @pytest.mark.parametrize("owner", ["terok-sandbox", "terok-shield"])

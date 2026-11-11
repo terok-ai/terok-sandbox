@@ -51,7 +51,21 @@ SELINUX_MODULE_NAME = "terok_socket"
 SELINUX_SOCKET_TYPE = f"{SELINUX_MODULE_NAME}_t"
 """Custom SELinux type applied to terok service sockets."""
 
+SELINUX_WAYLAND_MODULE_NAME = "terok_wayland"
+"""Optional policy for the host-side Wayland proxy, separate from service sockets."""
+
+SELINUX_WAYLAND_TYPE = f"{SELINUX_WAYLAND_MODULE_NAME}_t"
+"""Process domain that creates the proxy's kernel socket objects."""
+
+SELINUX_WAYLAND_DIRECT_MODULE_NAME = "terok_wayland_direct"
+"""Optional policy for tasks granted direct compositor access."""
+
+SELINUX_WAYLAND_DIRECT_TYPE = f"{SELINUX_WAYLAND_DIRECT_MODULE_NAME}_t"
+"""Container process domain with direct compositor connection permissions."""
+
 _SELINUX_CONTEXT = f"system_u:object_r:{SELINUX_SOCKET_TYPE}:s0"
+_WAYLAND_CONTEXT = f"system_u:object_r:{SELINUX_WAYLAND_TYPE}:s0"
+_WAYLAND_DIRECT_CONTEXT = f"system_u:object_r:{SELINUX_WAYLAND_DIRECT_TYPE}:s0"
 
 #: Source context used to probe whether the loaded policy carries the
 #: per-container supervisor rule.  The supervisor binds its sockets from
@@ -102,6 +116,58 @@ def is_policy_installed() -> bool:
     if lib is None:
         return False
     return lib.security_check_context(_SELINUX_CONTEXT.encode()) == 0
+
+
+def is_wayland_policy_installed() -> bool:
+    """Return whether the optional Wayland process domain is in the loaded policy."""
+    lib = _load_libselinux()
+    return lib is not None and lib.security_check_context(_WAYLAND_CONTEXT.encode()) == 0
+
+
+def is_wayland_direct_policy_installed() -> bool:
+    """Return whether the optional direct-access container domain is loaded."""
+    lib = _load_libselinux()
+    return lib is not None and lib.security_check_context(_WAYLAND_DIRECT_CONTEXT.encode()) == 0
+
+
+def prepare_wayland_exec_context() -> None:
+    """Select the installed Wayland domain before the trusted service wrapper exec.
+
+    Stock ``wl-mitm`` creates its own sockets after exec, which resets
+    ``setsockcreatecon``. A process-domain transition gives those sockets a
+    dedicated SID without modifying the binary or relabeling its installation.
+    The caller's SELinux user, role and range stay unchanged.
+
+    The wrapper enters this domain before arming its parent-death signal:
+    SELinux clears that signal on domain transitions. The stock proxy then
+    executes in the same domain and retains its own parent-death signal.
+
+    An absent optional module leaves the administrator's existing policy in
+    charge. Once installed, a failed query or transition is an error: callers
+    must stop this proxy rather than retry without confinement. Invoke only
+    in the single-threaded child immediately before exec.
+
+    Raises:
+        OSError: Active SELinux cannot select or validate the proxy domain.
+    """
+    if (lib := _wayland_policy_library()) is None:
+        return
+    user, role, _domain, level = _wayland_current_context(lib).split(":", 3)
+    context = f"{user}:{role}:{SELINUX_WAYLAND_TYPE}:{level}".encode()
+    if lib.security_check_context(context) != 0 or lib.setexeccon(context) != 0:
+        raise OSError(ctypes.get_errno(), "Cannot select the Wayland proxy's SELinux domain")
+
+
+def require_wayland_exec_context() -> None:
+    """Refuse a proxy exec outside the optional domain when that policy is installed.
+
+    The policy may be installed between wrapper startup and proxy launch.
+    Do not transition here: a same-domain exec must preserve the proxy's
+    parent-death signal. The next task restart can enter the new domain.
+    """
+    if (lib := _wayland_policy_library()) is not None:
+        if _wayland_current_context(lib).split(":", 3)[2] != SELINUX_WAYLAND_TYPE:
+            raise OSError("Wayland SELinux domain is not active; restart the task to enter it")
 
 
 def is_supervisor_socket_rule_loaded() -> bool | None:
@@ -176,6 +242,16 @@ def policy_source_path() -> Path:
     return Path(str(_resource_files("terok_sandbox.resources.selinux") / "terok_socket.te"))
 
 
+def wayland_policy_source_path() -> Path:
+    """Return the bundled source for the optional Wayland proxy policy."""
+    return Path(str(_resource_files("terok_sandbox.resources.selinux") / "terok_wayland.te"))
+
+
+def wayland_direct_policy_source_path() -> Path:
+    """Return the bundled source for the optional direct-access container policy."""
+    return Path(str(_resource_files("terok_sandbox.resources.selinux") / "terok_wayland_direct.te"))
+
+
 @lru_cache(maxsize=1)
 def install_script_path() -> Path:
     """Return the path to the bundled ``install_policy.sh`` installer.
@@ -228,6 +304,31 @@ def socket_selinux_context(
 # ---------- libselinux ctypes bindings ----------
 
 
+def _wayland_policy_library() -> ctypes.CDLL | None:
+    """Return a usable policy query handle, or None only when the optional policy is absent."""
+    if not is_selinux_enabled():
+        return None
+    lib = _load_libselinux()
+    if lib is None:
+        raise OSError("SELinux is active but libselinux is unavailable for the Wayland proxy")
+    if lib.security_check_context(_WAYLAND_CONTEXT.encode()) == 0:
+        return lib
+    if ctypes.get_errno() == errno.EINVAL:
+        return None
+    raise OSError(ctypes.get_errno(), "Cannot query the optional Wayland SELinux policy")
+
+
+def _wayland_current_context(lib: ctypes.CDLL) -> str:
+    """Read the launcher's context and release libselinux's allocation."""
+    current = ctypes.c_char_p()
+    if lib.getcon(ctypes.byref(current)) != 0 or not current.value:
+        raise OSError(ctypes.get_errno(), "Cannot read the Wayland launcher's SELinux context")
+    try:
+        return current.value.decode()
+    finally:
+        lib.freecon(current)
+
+
 @lru_cache(maxsize=1)
 def _load_libselinux() -> ctypes.CDLL | None:
     """Load ``libselinux.so.1`` and configure function prototypes (cached).
@@ -247,6 +348,10 @@ def _load_libselinux() -> ctypes.CDLL | None:
     lib.freecon.restype = None
     lib.security_check_context.argtypes = [ctypes.c_char_p]
     lib.security_check_context.restype = ctypes.c_int
+    lib.getcon.argtypes = [ctypes.POINTER(ctypes.c_char_p)]
+    lib.getcon.restype = ctypes.c_int
+    lib.setexeccon.argtypes = [ctypes.c_char_p]
+    lib.setexeccon.restype = ctypes.c_int
     try:
         lib.selinux_check_access.argtypes = [
             ctypes.c_char_p,

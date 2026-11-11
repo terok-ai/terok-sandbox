@@ -221,6 +221,14 @@ class TestBannerColour:
     def test_red_wraps_when_enabled(self, coloured: None) -> None:
         assert red("Setup failed.").startswith("\x1b[31m")
 
+    def test_red_can_use_another_streams_colour_gate(self, plain: None) -> None:
+        """Stderr output can use its own TTY decision rather than cached stdout state."""
+        assert red("WARNING:", enabled=True) == "\x1b[31mWARNING:\x1b[0m"
+
+    def test_red_can_disable_colour_for_redirected_stream(self, coloured: None) -> None:
+        """A coloured stdout does not make redirected stderr contain escapes."""
+        assert red("WARNING:", enabled=False) == "WARNING:"
+
     def test_yellow_passthrough_when_disabled(self, plain: None) -> None:
         assert yellow("Warning.") == "Warning."
 

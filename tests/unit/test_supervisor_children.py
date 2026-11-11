@@ -139,9 +139,9 @@ def _preset_stop() -> asyncio.Event:
     return event
 
 
-def test_service_names_are_the_five_children() -> None:
-    """The launch-ordered set is exactly the five services, secret-holders last."""
-    assert SERVICE_NAMES == ("verdict", "clearance", "gate", "vault", "signer")
+def test_service_names_include_optional_wayland() -> None:
+    """The supervisor retains the existing order and adds the optional desktop service."""
+    assert SERVICE_NAMES == ("verdict", "clearance", "gate", "vault", "signer", "wayland")
 
 
 def test_every_service_name_has_a_runner() -> None:

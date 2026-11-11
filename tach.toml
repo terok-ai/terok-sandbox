@@ -113,6 +113,7 @@ layer = "foundation"
 depends_on = [
     "terok_sandbox._stage",
     "terok_sandbox._util",
+    "terok_sandbox.wayland",
     "terok_sandbox.config",
     "terok_sandbox.paths",
     "terok_sandbox.supervisor.sidecar",
@@ -306,6 +307,11 @@ depends_on = [
     "terok_sandbox.config_schema",
 ]
 
+[[modules]]
+path = "terok_sandbox.wayland"
+layer = "foundation"
+depends_on = ["terok_sandbox._stage", "terok_sandbox.podman_args"]
+
 # Shield adapter (cross-package — terok_shield boundary)
 [[modules]]
 path = "terok_sandbox.integrations.shield"
@@ -493,6 +499,7 @@ depends_on = [
 path = "terok_sandbox.supervisor.children"
 layer = "core"
 depends_on = [
+    "terok_sandbox.supervisor.wayland",
     "terok_sandbox.supervisor.sidecar",
     "terok_sandbox.integrations.clearance",
     "terok_sandbox.vault.daemon.token_broker",
@@ -501,6 +508,11 @@ depends_on = [
     "terok_sandbox.gate.server",
     "terok_sandbox._util._selinux",
 ]
+
+[[modules]]
+path = "terok_sandbox.supervisor.wayland"
+layer = "core"
+depends_on = ["terok_sandbox.supervisor.sidecar"]
 
 # Child spawn mechanics (Direct + systemd-run scope) — stdlib only.
 [[modules]]
@@ -513,7 +525,7 @@ depends_on = []
 [[modules]]
 path = "terok_sandbox.supervisor.sidecar"
 layer = "foundation"
-depends_on = []
+depends_on = ["terok_sandbox.wayland", "terok_sandbox.podman_args"]
 
 # Post-start supervision check — reads the sidecar + polls the supervisor's
 # sockets so the launch path can shout when a container comes up unsupervised.

@@ -31,6 +31,8 @@ def _handle_sandbox_setup(
     *,
     component: str | None = None,
     show: bool = False,
+    with_wayland: bool = False,
+    with_wayland_direct: bool = False,
     no_shield: bool = False,
     no_vault: bool = False,
     echo_passphrase: bool = False,
@@ -55,6 +57,10 @@ def _handle_sandbox_setup(
     host-side gate install phase.
 
     Args:
+        with_wayland: With ``component="selinux"``, also install the optional
+            Wayland proxy policy. Invalid for the aggregate setup.
+        with_wayland_direct: With ``component="selinux"``, also install the
+            separate direct desktop-access policy. Invalid for the aggregate setup.
         no_shield: Skip the shield install phase.
         no_vault: Skip the credentials-DB encryption phase (per-container
             vault has no host-side install of its own; the flag controls
@@ -92,7 +98,7 @@ def _handle_sandbox_setup(
     if cfg is None:
         cfg = SandboxConfig()
 
-    if component is not None or show:
+    if component is not None or show or with_wayland or with_wayland_direct:
         # Only meaningful against a named component; without one, the flow
         # below answers the real problem ("--show needs a component").
         rejected = (
@@ -115,7 +121,13 @@ def _handle_sandbox_setup(
             )
         from .._setup_manual import handle_setup_component
 
-        return handle_setup_component(component, show_only=show, cfg=cfg)
+        return handle_setup_component(
+            component,
+            show_only=show,
+            with_wayland=with_wayland,
+            with_wayland_direct=with_wayland_direct,
+            cfg=cfg,
+        )
 
     # Fail-fast on an unknown / unsupported ``--passphrase-tier`` *before*
     # any host-mutating phase runs.  Without this check, a typo would let
@@ -293,6 +305,16 @@ SETUP_COMMANDS: tuple[CommandDef, ...] = (
                 name="--show",
                 action="store_true",
                 help="With a component: print the rules it would install, then exit",
+            ),
+            ArgDef(
+                name="--with-wayland",
+                action="store_true",
+                help="With setup selinux: also install the optional Wayland proxy policy",
+            ),
+            ArgDef(
+                name="--with-wayland-direct",
+                action="store_true",
+                help="With setup selinux: install the separate direct desktop-access policy",
             ),
             ArgDef(name="--no-shield", action="store_true", help="Skip shield install"),
             ArgDef(

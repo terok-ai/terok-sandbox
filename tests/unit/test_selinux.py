@@ -470,3 +470,139 @@ class TestCheckStatus:
         ):
             result = check_status(services_mode="socket")
         assert result.status is SelinuxStatus.OK
+
+
+class TestWaylandExecContext:
+    """An installed optional policy must never silently fall back to the caller domain."""
+
+    @pytest.fixture
+    def lib(self, monkeypatch: pytest.MonkeyPatch) -> unittest.mock.MagicMock:
+        """Expose an active policy with the workstation user's current context."""
+        lib = _mock_libselinux()
+        lib.security_check_context.return_value = 0
+        lib.setexeccon.return_value = 0
+
+        def getcon(pointer: ctypes.c_char_p) -> int:
+            pointer._obj.value = b"unconfined_u:unconfined_r:unconfined_t:s0-s0:c0.c1023"
+            return 0
+
+        lib.getcon.side_effect = getcon
+        monkeypatch.setattr(_selinux, "is_selinux_enabled", lambda: True)
+        monkeypatch.setattr(_selinux, "_load_libselinux", lambda: lib)
+        return lib
+
+    def test_retains_user_role_and_range(self, lib: unittest.mock.MagicMock) -> None:
+        _selinux.prepare_wayland_exec_context()
+        lib.setexeccon.assert_called_once_with(
+            b"unconfined_u:unconfined_r:terok_wayland_t:s0-s0:c0.c1023"
+        )
+        lib.freecon.assert_called_once()
+
+    def test_disabled_does_not_load_libselinux(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(_selinux, "is_selinux_enabled", lambda: False)
+        load = unittest.mock.Mock(side_effect=AssertionError("unexpected library lookup"))
+        monkeypatch.setattr(_selinux, "_load_libselinux", load)
+        _selinux.prepare_wayland_exec_context()
+        load.assert_not_called()
+
+    def test_absent_module_leaves_administrator_policy_in_charge(
+        self, lib: unittest.mock.MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        lib.security_check_context.return_value = -1
+        monkeypatch.setattr(ctypes, "get_errno", lambda: errno.EINVAL)
+        _selinux.prepare_wayland_exec_context()
+        lib.getcon.assert_not_called()
+        lib.setexeccon.assert_not_called()
+
+    def test_query_failure_is_not_mistaken_for_absent_policy(
+        self, lib: unittest.mock.MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        lib.security_check_context.return_value = -1
+        monkeypatch.setattr(ctypes, "get_errno", lambda: errno.EACCES)
+        with pytest.raises(OSError, match="Cannot query"):
+            _selinux.prepare_wayland_exec_context()
+        lib.setexeccon.assert_not_called()
+
+    def test_active_selinux_requires_query_library(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(_selinux, "is_selinux_enabled", lambda: True)
+        monkeypatch.setattr(_selinux, "_load_libselinux", lambda: None)
+        with pytest.raises(OSError, match="libselinux is unavailable"):
+            _selinux.prepare_wayland_exec_context()
+
+    def test_current_context_failure_stops_exec(self, lib: unittest.mock.MagicMock) -> None:
+        lib.getcon.side_effect = None
+        lib.getcon.return_value = -1
+        with pytest.raises(OSError, match="Cannot read"):
+            _selinux.prepare_wayland_exec_context()
+        lib.setexeccon.assert_not_called()
+
+    def test_invalid_target_role_stops_exec(self, lib: unittest.mock.MagicMock) -> None:
+        lib.security_check_context.side_effect = [0, -1]
+        with pytest.raises(OSError, match="Cannot select"):
+            _selinux.prepare_wayland_exec_context()
+        lib.setexeccon.assert_not_called()
+
+    def test_setexeccon_failure_stops_exec(self, lib: unittest.mock.MagicMock) -> None:
+        lib.setexeccon.return_value = -1
+        with pytest.raises(OSError, match="Cannot select"):
+            _selinux.prepare_wayland_exec_context()
+        lib.setexeccon.assert_called_once()
+
+    def test_proxy_rejects_late_policy_install_without_transition(
+        self, lib: unittest.mock.MagicMock
+    ) -> None:
+        with pytest.raises(OSError, match="restart the task"):
+            _selinux.require_wayland_exec_context()
+        lib.setexeccon.assert_not_called()
+
+    def test_proxy_preserves_its_existing_domain(self, lib: unittest.mock.MagicMock) -> None:
+        def getcon(pointer: ctypes.c_char_p) -> int:
+            pointer._obj.value = b"unconfined_u:unconfined_r:terok_wayland_t:s0"
+            return 0
+
+        lib.getcon.side_effect = getcon
+        _selinux.require_wayland_exec_context()
+        lib.setexeccon.assert_not_called()
+
+    def test_proxy_accepts_absent_policy(
+        self, lib: unittest.mock.MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        lib.security_check_context.return_value = -1
+        monkeypatch.setattr(ctypes, "get_errno", lambda: errno.EINVAL)
+        _selinux.require_wayland_exec_context()
+        lib.getcon.assert_not_called()
+
+
+def test_wayland_policy_is_separate_and_queryable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The optional process domain is not the mandatory service-socket type."""
+    lib = _mock_libselinux()
+    lib.security_check_context.return_value = 0
+    monkeypatch.setattr(_selinux, "_load_libselinux", lambda: lib)
+    assert _selinux.is_wayland_policy_installed()
+    lib.security_check_context.assert_called_once_with(b"system_u:object_r:terok_wayland_t:s0")
+    assert "module terok_wayland" in _selinux.wayland_policy_source_path().read_text()
+
+
+@pytest.mark.parametrize("installed", [True, False])
+def test_direct_wayland_domain_has_its_own_policy_query(
+    monkeypatch: pytest.MonkeyPatch, installed: bool
+) -> None:
+    """Direct-access grants do not follow installation of the filtered proxy policy."""
+    lib = _mock_libselinux()
+    lib.security_check_context.return_value = 0 if installed else -1
+    monkeypatch.setattr(_selinux, "_load_libselinux", lambda: lib)
+    assert _selinux.is_wayland_direct_policy_installed() is installed
+    lib.security_check_context.assert_called_once_with(
+        b"system_u:object_r:terok_wayland_direct_t:s0"
+    )
+    source = _selinux.wayland_direct_policy_source_path()
+    assert source.name == "terok_wayland_direct.te"
+    assert "policy_module(terok_wayland_direct," in source.read_text()
+
+
+def test_direct_wayland_policy_is_absent_without_libselinux(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unavailable query library never authorizes an unknown container process label."""
+    monkeypatch.setattr(_selinux, "_load_libselinux", lambda: None)
+    assert not _selinux.is_wayland_direct_policy_installed()

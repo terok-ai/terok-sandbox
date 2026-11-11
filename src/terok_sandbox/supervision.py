@@ -139,8 +139,7 @@ class SupervisionStatus:
             f"warning: container {self.container_name!r} started but these supervisor "
             "services never bound\n"
             f"{endpoints}\n"
-            "warning:   what they serve is dead in this container — the vault routes every\n"
-            "warning:   provider token, the signer holds the git keys, the gate serves the repo\n"
+            "warning:   the container continues; the listed services are unavailable\n"
             f"warning:   {self._where_to_look()}"
         )
 
@@ -258,6 +257,8 @@ def _expected_endpoints(
             endpoints.append(ServiceEndpoint(service, socket=socket_path))
         elif port is not None:
             endpoints.append(ServiceEndpoint(service, port=port))
+    if sidecar.wayland.proxied:
+        endpoints.append(ServiceEndpoint("wayland", socket=paths.wayland_socket))
     return tuple(endpoints)
 
 

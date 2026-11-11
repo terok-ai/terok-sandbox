@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 import terok_sandbox.doctor as _doctor
+from terok_sandbox import SandboxConfig, WaylandMode
 from terok_sandbox.doctor import (
     CheckVerdict,
     DoctorCheck,
@@ -23,6 +24,8 @@ from terok_sandbox.doctor import (
     make_kernel_keyring_quota_check,
     sandbox_doctor_checks,
 )
+from terok_sandbox.supervisor.sidecar import store_sidecar
+from terok_sandbox.wayland import WAYLAND_PROBE, WaylandSession
 
 
 class _FakeKeyUsers:
@@ -383,6 +386,52 @@ class TestSandboxDoctorChecks:
         assert "Supervisor children" not in {
             c.label for c in sandbox_doctor_checks(container_id="cid123")
         }
+
+    @pytest.mark.parametrize("mode", [WaylandMode.MITM, WaylandMode.DIRECT])
+    @pytest.mark.parametrize(
+        ("error", "returncode", "severity", "detail"),
+        [
+            (None, 0, "ok", "endpoint is reachable"),
+            (None, 1, "warn", "Wayland endpoint check failed: Permission denied"),
+            ("desktop is unavailable", 0, "warn", "unavailable: desktop is unavailable"),
+        ],
+    )
+    def test_wayland_check_reports_optional_desktop_health(
+        self,
+        tmp_path: Path,
+        mode: WaylandMode,
+        error: str | None,
+        returncode: int,
+        severity: str,
+        detail: str,
+    ) -> None:
+        """Both modes report saved failures or probe results without failing required services."""
+        cfg = SandboxConfig()
+        path = cfg.sidecar_path("demo")
+        path.parent.mkdir(parents=True)
+        store_sidecar(
+            path,
+            {
+                "container_name": "demo",
+                "broker_context": {"scope": "proj", "subject": "task", "credential_set": "default"},
+                "ipc_mode": "socket",
+                "db_path": str(tmp_path / "vault.db"),
+                "runtime_dir": str(cfg.runtime_dir),
+                "wayland": WaylandSession(mode, error=error).payload(),
+            },
+        )
+
+        check = next(
+            check
+            for check in sandbox_doctor_checks(container_name="demo")
+            if check.label == f"Wayland ({mode})"
+        )
+        assert check.category == "bridge"
+        assert check.probe_cmd == WAYLAND_PROBE
+        assert check.host_side is bool(error)
+        verdict = check.evaluate(returncode, "", "  Permission denied\n")
+        assert verdict.severity == severity
+        assert detail in verdict.detail
 
     def test_recovery_acknowledged_not_in_per_task_bundle(self) -> None:
         """The recovery check is host-only — terok's sickbay loops over tasks

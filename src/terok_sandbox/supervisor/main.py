@@ -12,7 +12,7 @@ itself, rebuilds its one service from the sidecar, and runs it until the
 parent signals stop — so a bug in the desktop notifier can no longer
 touch the address space that holds the vault's session key.
 
-The five children, in launch order:
+The children, in launch order:
 
 * ``verdict`` — [`VerdictServer`][terok_clearance.VerdictServer], the
   varlink helper that execs ``terok-shield allow|deny``.
@@ -23,6 +23,7 @@ The five children, in launch order:
 * ``vault`` — [`VaultProxy`][terok_sandbox.vault.daemon.token_broker.VaultProxy].
 * ``signer`` — the token-gated SSH-agent
   ([`start_ssh_signer`][terok_sandbox.vault.ssh.signer.start_ssh_signer]).
+* ``wayland`` — optional stock wl-mitm with a restricted compositor policy.
 
 The parent awaits ``podman wait <container_id>``; when the container
 exits (or every child dies first) it terminates the children in reverse
@@ -44,7 +45,7 @@ from typing import TYPE_CHECKING
 from terok_util import require_host_tool
 
 from .children import _install_signal_handlers
-from .launcher import launch_child
+from .launcher import finish_output, launch_child
 from .sidecar import SupervisorPaths, load_sidecar, wired_services
 
 if TYPE_CHECKING:
@@ -237,6 +238,8 @@ async def _terminate_children(handles: list[ChildHandle]) -> None:
     except asyncio.CancelledError:
         await _kill_children(live)
         raise
+    finally:
+        await asyncio.gather(*(finish_output(handle.output) for handle in handles))
 
 
 async def _kill_children(handles: list[ChildHandle]) -> None:

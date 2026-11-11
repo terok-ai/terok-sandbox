@@ -220,9 +220,9 @@ def bold(text: str) -> str:
     return _color(text, "1")
 
 
-def red(text: str) -> str:
-    """Return *text* wrapped in ANSI red for failure banners when colour is on."""
-    return _color(text, "31")
+def red(text: str, *, enabled: bool | None = None) -> str:
+    """Return red text; *enabled* overrides the stdout colour gate for other streams."""
+    return _color(text, "31", enabled=enabled)
 
 
 def yellow(text: str) -> str:
@@ -265,9 +265,9 @@ def _render_marker(marker: Marker) -> str:
     return _color(marker.value, code) if code else marker.value
 
 
-def _color(text: str, code: str | None) -> str:
+def _color(text: str, code: str | None, *, enabled: bool | None = None) -> str:
     """Wrap *text* in ANSI SGR *code* when colour is on; passthrough otherwise."""
-    if not _COLOUR_ON or code is None:
+    if not (_COLOUR_ON if enabled is None else enabled) or code is None:
         return text
     return f"\x1b[{code}m{text}\x1b[0m"
 

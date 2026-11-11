@@ -1,0 +1,75 @@
+# SPDX-FileCopyrightText: 2026 Jiri Vyskocil
+# SPDX-License-Identifier: Apache-2.0
+
+policy_module(terok_wayland_direct, 1.1)
+
+# Optional desktop access for explicitly selected wl-direct containers.
+# Fedora's container interfaces retain normal confinement and per-container
+# MCS separation. Nothing changes container_t or the host compositor label.
+# The launcher selects this type only for wl-direct; existing containers
+# must be recreated to change their process type.
+#
+# SELinux cannot identify one compositor among same-label host sockets.
+# The exact socket mount and container namespaces limit reachable endpoints.
+# Direct access exposes every protocol the compositor offers, without a filter.
+#
+# Install: sudo bash install_policy.sh --with-wayland-direct
+# Remove:  sudo semodule -r terok_wayland_direct
+
+gen_require(`
+    attribute container_net_domain, container_user_domain;
+    type container_file_t, container_var_run_t, proc_t, terok_socket_t, unconfined_t, user_tmp_t;
+')
+
+container_domain_template(terok_wayland_direct, container)
+typeattribute terok_wayland_direct_t container_net_domain, container_user_domain;
+
+# Fedora splits the ordinary container baseline between container-selinux
+# and the legacy virt interfaces, including execution of host-mounted init.
+virt_sandbox_net_domain(terok_wayland_direct_t)
+corenet_unconfined(terok_wayland_direct_t)
+kernel_read_system_state(terok_wayland_direct_t)
+logging_send_syslog_msg(terok_wayland_direct_t)
+
+optional_policy(`
+    virt_default_capabilities(terok_wayland_direct_t)
+')
+
+# These stock grants name container_t rather than a shared attribute.
+dev_mounton_sysfs(terok_wayland_direct_t)
+kernel_read_messages(terok_wayland_direct_t)
+allow terok_wayland_direct_t proc_t:filesystem remount;
+allow terok_wayland_direct_t container_var_run_t:dir { list_dir_perms mounton };
+
+tunable_policy(`virt_sandbox_use_sys_admin',`
+    allow terok_wayland_direct_t self:capability sys_admin;
+    allow terok_wayland_direct_t self:cap_userns sys_admin;
+')
+
+tunable_policy(`virt_sandbox_use_audit',`
+    logging_send_audit_msgs(terok_wayland_direct_t)
+')
+
+# Preserve the host's existing GPU policy without enabling it or adding devices.
+tunable_policy(`container_use_xserver_devices',`
+    dev_getattr_xserver_misc_dev(terok_wayland_direct_t)
+    dev_rw_xserver_misc(terok_wayland_direct_t)
+')
+
+# Existing service-socket grants name container_t, not its sibling domains.
+allow terok_wayland_direct_t terok_socket_t:unix_stream_socket connectto;
+
+allow terok_wayland_direct_t user_tmp_t:sock_file { write getattr };
+allow terok_wayland_direct_t unconfined_t:unix_stream_socket connectto;
+
+# Receiving an existing compositor buffer is not permission to open host
+# files by pathname. Stock container policy supplies inherited tmpfs access.
+allow terok_wayland_direct_t unconfined_t:fd use;
+allow terok_wayland_direct_t user_tmp_t:file { read write getattr map };
+
+optional_policy(`
+    gen_require(`
+        class memfd_file { read write getattr map };
+    ')
+    allow terok_wayland_direct_t unconfined_t:memfd_file { read write getattr map };
+')

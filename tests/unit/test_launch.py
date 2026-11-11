@@ -55,6 +55,7 @@ from terok_sandbox.launch import (
 from terok_sandbox.podman_args import (
     CONTAINER_GATE_SOCKET,
     CONTAINER_SSH_SIGNER_SOCKET,
+    CONTAINER_USER_RUNTIME_DIR,
     CONTAINER_VAULT_SOCKET,
     reject_managed_flags,
     reject_managed_volumes,
@@ -1382,10 +1383,15 @@ class TestEdgeCases:
         reject_managed_volumes(["-v"])
 
     def test_reject_managed_volumes_blocks_runtime_dir_and_subpaths(self) -> None:
-        """Mounts over ``CONTAINER_RUNTIME_DIR`` (or any descendant) are rejected."""
+        """Mounts over managed runtime directories or their descendants are rejected."""
         from terok_sandbox.config import CONTAINER_RUNTIME_DIR
 
-        for target in (CONTAINER_RUNTIME_DIR, f"{CONTAINER_RUNTIME_DIR}/anything"):
+        for target in (
+            CONTAINER_RUNTIME_DIR,
+            f"{CONTAINER_RUNTIME_DIR}/anything",
+            CONTAINER_USER_RUNTIME_DIR,
+            f"{CONTAINER_USER_RUNTIME_DIR}/anything",
+        ):
             with pytest.raises(SystemExit, match="managed by terok-sandbox"):
                 reject_managed_volumes(["-v", f"/tmp/x:{target}"])
 
