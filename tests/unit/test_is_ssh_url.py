@@ -25,6 +25,8 @@ from terok_sandbox.gate.mirror import is_ssh_url
         "github.com:org/repo.git",  # scp-style without a user part
         "ssh://git@github.com/sliwowitz/terok.git",
         "SSH://user@host/repo.git",  # case-insensitive scheme
+        "git+ssh://git@github.com/org/repo.git",  # git's scheme aliases ride the same transport
+        "ssh+git://git@github.com/org/repo.git",
     ],
 )
 def test_recognized_as_ssh(url: str) -> None:

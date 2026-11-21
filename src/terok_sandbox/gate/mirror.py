@@ -1451,12 +1451,17 @@ _SCP_SSH_RE = re.compile(r"^(?:[^@/\s:]+@)?[^:/\s]{2,}:.+")
 def is_ssh_url(url: str | None) -> bool:
     """Return ``True`` for SSH-scheme git URLs.
 
-    Accepts the two forms git itself accepts:
+    Accepts every form git itself drives over SSH:
 
-    - ``ssh://[user@]host[:port]/path`` — explicit URL scheme.
+    - ``ssh://[user@]host[:port]/path`` — explicit URL scheme, and its
+      ``git+ssh://`` and ``ssh+git://`` aliases.
     - ``[user@]host:path`` — scp-style shorthand.  The user part is
       optional (``git@github.com:foo.git``, ``deploy@host:repo.git``,
       bare ``github.com:foo.git``).
+
+    The gate decides on this answer whether git runs with the operator's
+    ambient SSH identities or the ephemeral signer, so every SSH spelling
+    has to land on the restricted side.
 
     Shared with terok-main: both the gate's env builder and callers that
     branch on "does this project use SSH?" (e.g. deploy-key prompts,
@@ -1466,7 +1471,7 @@ def is_ssh_url(url: str | None) -> bool:
         return False
     candidate = url.strip()
     lowered = candidate.lower()
-    if lowered.startswith("ssh://"):
+    if lowered.startswith(("ssh://", "git+ssh://", "ssh+git://")):
         return True
     if "://" in candidate:
         return False
